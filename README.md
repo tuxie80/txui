@@ -27,6 +27,8 @@
 - **Server tuner** — MySQLTuner-style health score with guided fixes, per engine (MySQL, PostgreSQL, ClickHouse, Redis, SQLite).
 - **Query Store (SQL Server)** — plan history, regressions ranked by time wasted, side-by-side plans, one-click plan forcing.
 - **EXPLAIN, visualized** — plan tree plus SQL Quality reports: lint, type audit, integer ceilings, guarded EXPLAIN ANALYZE.
+- **GIS data on a real map** — MySQL spatial and PostGIS geometries decoded client-side (no `ST_AsGeoJSON` round trip, works on old servers too). The 📈 Graphics tab appears on **any result with rows, on every engine**: plot coordinates on a map with time-scrubbed track playback, or chart the result. The basemap is drawn locally by default — online tiles are a disclosed opt-in, because tile requests leak where your data is.
+- **Dolphie replay recordings** — open a Dolphie `daemon.db` (SQLite) and TxUI recognizes it: not four opaque tables but a MySQL server as a time series — per-second processlist, global status, metadata locks, variable changes, ZSTD-dictionary decoded, read-only, with a Raw↔Replay toggle.
 - **Schema tooling** — interactive ER diagram, schema/instance comparison with migration-script generation.
 - **Data generator** — 76 generators with real distributions and chart-ready presets; server-side INSERT…SELECT up to a billion rows.
 - **Fleet operations** — multi-server execution, immutable audit log, saved queries, query history.
