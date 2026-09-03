@@ -7,12 +7,31 @@
 ![Rust](https://img.shields.io/badge/Rust-1.97.1-orange?logo=rust&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)
 
-Fast, DBA-focused desktop database GUI — **Tauri 2 + Rust + React 19**.
-MySQL / MariaDB / Percona · PostgreSQL · Redis · ClickHouse · SQLite · DuckDB · MongoDB · SQL Server · Parquet.
+<!-- ══════════════════════════════════════════════════════════════════
+     YOUR INTRO HERE — replace the quote below (and delete this comment)
+     with your own words. This is the first thing visitors read.
+     ══════════════════════════════════════════════════════════════════ -->
+> _…intro coming soon — the author's own words will live here…_
 
-Starts in under a second, shows you the processlist: virtualized 1M-row grid,
-schema-aware SQL editor, processlist + kill, replication, EXPLAIN plans, server
-tuner, schema compare, data generator, audit log.
+![TxUI — SQL editor with a live result grid](docs/shots/05-editor-results.png)
+
+## What it is
+
+- **A fast, DBA-focused desktop database GUI** — Tauri 2 + Rust + React 19; native-speed core, ~40 MB bundle, ~100 MB idle RAM, cold start under a second.
+- **Nine engines, one app** — MySQL / MariaDB / Percona, PostgreSQL, Redis, ClickHouse, SQLite, DuckDB, MongoDB, SQL Server, and Parquet files.
+- **FastGrid** — one grid virtualized on both axes for every tabular surface; 60 fps at 1M rows, selection-aware copy/export in 6 formats.
+- **A real SQL editor** — CodeMirror 6 with schema-aware, alias-aware completion that quotes what it inserts, hover docs, signature help, live squiggles (unknown column, JOIN without ON, WHERE-less write…).
+- **Statement-at-caret execution** — multi-statement scripts with per-line timing, run-to-cursor, and drafts that survive a restart.
+- **Processlist + kill** — live processlist with a long-query watchdog that detects, tracks and explains runaway queries; lock chains and a deadlock wait-for graph.
+- **The DBA layer** — replication dashboard, server variables & status, interval monitor with sparklines, curated sys / performance_schema / pg_stat views.
+- **Server tuner** — MySQLTuner-style health score with guided fixes, per engine (MySQL, PostgreSQL, ClickHouse, Redis, SQLite).
+- **Query Store (SQL Server)** — plan history, regressions ranked by time wasted, side-by-side plans, one-click plan forcing.
+- **EXPLAIN, visualized** — plan tree plus SQL Quality reports: lint, type audit, integer ceilings, guarded EXPLAIN ANALYZE.
+- **Schema tooling** — interactive ER diagram, schema/instance comparison with migration-script generation.
+- **Data generator** — 76 generators with real distributions and chart-ready presets; server-side INSERT…SELECT up to a billion rows.
+- **Fleet operations** — multi-server execution, immutable audit log, saved queries, query history.
+- **Safety by default** — prod environment tags with row-count confirmations, server-side write guards, read-only enforced at the driver level, SSH tunnels, optional encrypted vault.
+- **Same app on all three desktops** — native File · Edit · View · Tools · Help everywhere, SQLite compiled into the binary so a `.db` behaves identically everywhere.
 
 ## Develop
 
@@ -32,8 +51,8 @@ cd src-tauri && cargo test --lib        # backend unit tests
 
 ## Release builds
 
-- **CI** (`.github/workflows/release.yml`): push a `v*.*.*` tag → builds macOS
-  (universal), Linux (AppImage/deb) and Windows (NSIS/MSI), drafts a GitHub Release.
+- **CI** (Actions → release): push a `v*.*.*` tag → macOS (universal), Linux
+  (AppImage/deb) and Windows (NSIS/MSI), drafted as a GitHub Release.
 - **Local**: `crossbuild/build_linux.sh` here, `build_macos.sh` on the Mac,
   `build_windows.sh` cross-builds Windows from either.
 
