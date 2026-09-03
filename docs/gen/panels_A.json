@@ -1,0 +1,189 @@
+{
+ "panels": {
+  "processes": {
+   "summary": "A live process/session list rendered as a sortable grid with auto-refresh and one-click kill. On MySQL it shows SHOW FULL PROCESSLIST, on PostgreSQL pg_stat_activity; long-running rows are tinted (yellow at or above the threshold, red at twice it). A DBA uses it to spot and stop a runaway or blocking statement without hand-writing KILL.",
+   "howToOpen": "Plugins menu -> Monitor -> Processes (also on the native Tools menu)",
+   "keyActions": [
+    "Filter rows across all cells",
+    "Set the auto-refresh interval (1/2/3/5/10/30s)",
+    "Pause/Resume and manual Refresh",
+    "Set the long-query threshold and toggle 'only long' / sort longest-first",
+    "Select a row and 'Kill query' (KILL QUERY / pg_cancel_backend) or 'Kill connection' (KILL / pg_terminate_backend)",
+    "Copy/Export the current grid"
+   ],
+   "engines": "MySQL, PostgreSQL, Redis and ClickHouse (the processList capability). Kill uses MySQL/PG semantics; killing another backend needs SUPER/CONNECTION_ADMIN (MySQL) or pg_signal_backend (PostgreSQL) or the button is disabled with the missing-privilege tip.",
+   "caveats": "Requires a live connection. Interactive kill can be turned off in Settings -> Safety, which makes the panel a read-only monitor. Killing others is privilege-gated and shown greyed when blocked."
+  },
+  "replication": {
+   "summary": "A replication dashboard that polls replication_status every 5s. On MySQL it renders multi-source SHOW REPLICA STATUS as one summary row per channel (IO/SQL thread, seconds behind, source) with an inline expand for positions/GTIDs/filters/errors, and puts any stopped channel plus its error text front and center. On PostgreSQL it also offers logical-replication DDL helpers. A DBA uses it to see at a glance whether replication is healthy and why it stalled.",
+   "howToOpen": "Plugins menu -> Monitor -> Replication (also on the native Tools menu)",
+   "keyActions": [
+    "View per-channel health summary; click a channel row to expand full detail",
+    "Toggle 'all fields' for the complete field dump",
+    "Pause/Resume the 5s poll and manual Refresh",
+    "PostgreSQL only: generate CREATE/DROP publication, CREATE logical/drop replication slot, and CREATE/REFRESH/DROP subscription SQL (emitted into the editor for review, never run)"
+   ],
+   "engines": "MySQL and PostgreSQL (the sqlDba capability). Monitoring works on both; the logical-replication action buttons appear only on PostgreSQL.",
+   "caveats": "Requires a live connection. The PG action buttons only generate SQL into the editor; they do not execute. Read-only monitoring otherwise."
+  },
+  "dbaviews": {
+   "summary": "A curated catalog of read-only DBA lookups (MySQL sys / performance_schema, PostgreSQL pg_stat_*, ClickHouse system.*, Redis INFO/CLIENT/etc.) chosen from a categorized list on the left and shown in a grid on the right. It diagnoses empty results honestly: it detects when a performance_schema consumer or ClickHouse query_log is disabled and shows copyable fix SQL instead of a misleading blank. A DBA uses it to run known health queries without writing them.",
+   "howToOpen": "Plugins menu -> Server -> DBA views (also on the native Tools menu)",
+   "keyActions": [
+    "Pick a view from the categorized list (demanding views carry a warning badge; privilege-blocked ones are locked with the missing grant named)",
+    "Set a row limit (100/1000/10000/unlimited)",
+    "Optional auto-refresh (Off/5s/10s/30s)",
+    "Cancel or hard-Kill a slow view query",
+    "Copy/Export the grid",
+    "MySQL 'Scheduled events' view: emit scheduler on/off and per-event ENABLE/DISABLE SQL into the editor (review-only)"
+   ],
+   "engines": "All engines that ship a view set: MySQL/MariaDB/Percona, PostgreSQL, ClickHouse and Redis each have curated views (the panel itself has no engine gate).",
+   "caveats": "Requires a live connection. The available view set depends on engine and server flavour; some views need a monitoring role/extension and are shown blocked. The event-management actions only generate SQL."
+  },
+  "tuner": {
+   "summary": "A read-only server health analyzer that produces a 0-100 health score with Performance/Security/Resilience sub-scores, an end-of-life banner, and findings grouped by category with guided fixes. It has per-engine rule sets (MySQL family scored MySQLTuner-style, PostgreSQL, and Redis). Fixes are never executed here; they are only copied or inserted into the editor for review.",
+   "howToOpen": "Plugins menu -> Server -> Tuner (labelled 'Server tuner'; also on the native Tools menu)",
+   "keyActions": [
+    "Run analysis / Re-analyze",
+    "Filter All vs Problems (advice+warnings+critical)",
+    "Expand a finding for detail and recommendation",
+    "Copy a guided fix, 'Copy all', or insert the fix script into the editor (never run)",
+    "Export the report as Markdown"
+   ],
+   "engines": "Gated to the tuner capability (MySQL, PostgreSQL, Redis, ClickHouse, SQLite). The panel has explicit rule sets and copy for MySQL family, PostgreSQL and Redis; on engines the backend does not yet support, tuner_analyze returns a 'not supported yet' notice.",
+   "caveats": "Requires a live connection. Reads status/variables only (safe on prod). Which engines actually return a report depends on the backend tuner_analyze support, which cannot be verified without a live server."
+  },
+  "routines": {
+   "summary": "An editor for stored procedures, functions, triggers and events. It lists routines in the current schema, loads one via SHOW CREATE / catalog reconstruction, and edits its metadata, parameters and body, always showing the exact DROP+CREATE that will run before it runs. A DBA uses it to safely change routines; on MySQL, where there is no CREATE OR REPLACE and DDL auto-commits, the backend keeps the original and restores it if a save fails.",
+   "howToOpen": "Plugins menu -> Schema -> Routines (also on the native Tools menu); can also be opened on a specific routine from the schema tree",
+   "keyActions": [
+    "Filter and pick a routine, or create a new procedure/function/trigger/event with the + buttons",
+    "Edit name, returns/params, trigger timing/events/table/level/when/function (PG), event schedule",
+    "Show DDL / Copy DDL; Revert; Create/Save",
+    "Execute... builds a CALL/SELECT from a typed form (inserted into the editor, not run)",
+    "PostgreSQL procedures/functions: step-through Debug"
+   ],
+   "engines": "MySQL and PostgreSQL (the sqlDba capability). PostgreSQL has no scheduled events (the + event button is hidden) and its triggers use the function-calling form.",
+   "caveats": "Requires a live connection. Read-only on prod-tagged and read-only connections (editing disabled with a banner). Debug executes the routine body (rolled back) so it is blocked on prod/read-only."
+  },
+  "txshell": {
+   "summary": "A SQL command line inside the app with a structured transcript: a bare line is SQL and runs, results render as real sortable/exportable grids, and lines can be piped through stages to sinks. It adds psql-style backslash commands, variables, OS command escapes, file sources, and fan-out across matching connections. A DBA uses it as a fast keyboard-driven console that can also export, insert into another server, and script setups.",
+   "howToOpen": "Plugins menu -> SQL -> TxShell (also on the native Tools menu)",
+   "keyActions": [
+    "Run SQL directly; pipe rows with |> to stages and sinks (grid, chart, to <format>, save/append <file>, insert into <table> [@dest])",
+    "Meta commands: \\help, \\clear, \\vars, \\unset, \\history, \\timing, \\l, \\dt, \\dv, \\df, \\d, \\source <file>, \\edit, plus psql catalog metas",
+    "$name = value variables; !line runs your OS shell; @pattern SQL fans out read-only across matching connections",
+    "from <file> loads a CSV/TSV/JSON file as a result set; Tab-complete, up/down history, Shift-Enter for newline, Clear"
+   ],
+   "engines": "All SQL engines (the sql capability: MySQL, PostgreSQL, ClickHouse, SQLite, Parquet). Not Redis.",
+   "caveats": "Requires live connection(s). All statements are audited (with redaction). Fan-out refuses writes and confirms wide/prod matches; cross-server insert requires the destination session to be open and confirms on prod. \\source stops at the first failing statement."
+  },
+  "find": {
+   "summary": "One panel for the three scopes of 'find', switched by a tab strip: Usages finds where a table or column is referenced inside the database itself (view definitions, routine and trigger bodies, events, constraints, indexes, generated-column/default expressions, plus open script buffers; matches ranked certain/likely/possible, catalog reads only, so prod-safe); In database searches every table in the current schema for a value, streaming hits smallest-table-first and saying what it skipped; In files searches a folder of .sql scripts on the local filesystem, grouped by file, opening a hit at its line. A DBA reaches for it before a DROP COLUMN or rename, during an incident to trace a value, or to find which migration script touches an object.",
+   "howToOpen": "Plugins menu -> Schema & Data -> Find (also on the native Tools menu), then the Usages / In database / In files tabs. Open buffers are passed to the Usages scope so unsaved scripts are searched too; a programmatic open can preselect the scope.",
+   "keyActions": [
+    "Switch scope with the Usages / In database / In files tabs; a scope the engine cannot serve is greyed with the reason on hover",
+    "Usages: pick a schema, table, and optionally a column; Find; filter by confidence (everything / likely and certain / certain only)",
+    "In database: type a value; choose match mode (contains/exact/starts with), case sensitivity, numbers & dates opt-in, rows-per-table cap; Search / Stop; open a hit's table in the data browser",
+    "In files: choose a folder (defaults to the current file's directory), enter text, set extensions and case sensitivity; click a hit to open the file at that line"
+   ],
+   "engines": "In files works on every engine, including offline - it never touches the server. Usages and In database need the findUsages / dbSearch capabilities (MySQL, PostgreSQL, SQL Server); on other engines those two tabs are greyed with the reason, never hidden.",
+   "caveats": "Usages and In database require a live connection but are read-only. Usages only sees this schema on this server - not application code, other schemas, or other servers. In database cannot search binary columns and numbers/dates are opt-in; the skipped count is shown so absence is not wrongly concluded. In files results can be capped and are flagged 'partial' when truncated."
+  },
+  "colprofile": {
+   "summary": "Profiles what is actually in each column of a table - row/null/distinct counts, selectivity, min/max/avg and length ranges - in a single scan, sampling large tables (with the sample size stated on screen). Distinct from Analyze, which reports the optimizer's beliefs; this reports the data. A DBA uses it to understand an unfamiliar table before writing queries or migrations.",
+   "howToOpen": "Plugins menu -> Data -> Column profile (also on the native Tools menu)",
+   "keyActions": [
+    "Pick a schema and table, then Profile",
+    "'Read all rows' to switch from a sample to a full scan",
+    "Per-column 'top' shows the most common values in a modal",
+    "Reads a row estimate first so huge tables are sampled rather than scanned blind"
+   ],
+   "engines": "MySQL and PostgreSQL (the sqlDba capability); non-postgres engines are treated as MySQL.",
+   "caveats": "Requires a live connection. Sampled figures are labelled as such (distinct counts in particular run low on a sample); a banner warns when numbers come from a sample."
+  },
+  "sequences": {
+   "summary": "An editor for sequence objects: create, alter every property in place, restart the position, and drop. It never drops-and-recreates (which would silently reset the position) and shows the exact ALTER/CREATE statements before running. A DBA uses it to inspect and adjust a sequence without hand-writing the SELECT-then-ALTER dance.",
+   "howToOpen": "Plugins menu -> Schema -> Sequences (also on the native Tools menu); can be opened on a specific sequence from the schema tree",
+   "keyActions": [
+    "Pick a schema and sequence, or New",
+    "Edit name, type (PG), start/increment/min/max/cache and cycle",
+    "See current position; Restart to a typed value (with a warning)",
+    "Copy the generated SQL, Apply/Create, or Drop"
+   ],
+   "engines": "PostgreSQL and MariaDB (the panel resolves the engine itself). Gated to the sqlDba capability (MySQL/PostgreSQL); on plain MySQL it shows a message that MySQL has no sequence object (AUTO_INCREMENT is the nearest equivalent).",
+   "caveats": "Requires a live connection. Applies changes directly via execute_query (not just a preview). MariaDB stores a maximum one lower than given, so values are re-read after apply."
+  },
+  "types": {
+   "summary": "An editor for PostgreSQL composite types, enums and domains, with per-kind sub-forms (attributes, enum values, domain base type / NOT NULL / default / checks). It shows the exact CREATE/ALTER statements before running and makes one PostgreSQL limitation explicit: an enum value cannot be dropped, so removing one yields a commented non-executable marker plus a warning. A DBA uses it to manage user-defined types without hand-writing CREATE/ALTER TYPE.",
+   "howToOpen": "Plugins menu -> Schema -> Types (also on the native Tools menu); can be opened on a specific type from the schema tree",
+   "keyActions": [
+    "Pick a schema and type, or start a new composite / enum / domain",
+    "Edit attributes/values/checks; see the type signature",
+    "Copy the SQL or Insert into editor; Apply/Create (runnable changes only); Drop"
+   ],
+   "engines": "PostgreSQL only. On other engines it shows a message that composite types/enums/domains are PostgreSQL objects.",
+   "caveats": "Requires a live connection. Apply runs the DDL directly. Enum value removal is deliberately non-executable (commented) with a warning; renames become ALTER ... RENAME and additions ALTER ... ADD."
+  },
+  "views": {
+   "summary": "An editor for views and materialized views: create, replace (via CREATE OR REPLACE or drop-and-recreate), refresh, and drop, editing the SELECT body in a full SQL editor. Existing definitions are read back through the same get_ddl the schema tree uses, and the exact statements are shown before running. A DBA uses it to edit a view without hand-writing CREATE OR REPLACE VIEW.",
+   "howToOpen": "Plugins menu -> Schema -> Views (also on the native Tools menu); can be opened on a specific view from the schema tree",
+   "keyActions": [
+    "Pick a schema and view, or + View / + Matview",
+    "Edit the SELECT body; PG matview: 'Populate now (WITH DATA)'; ClickHouse matview: choose TO target table or inline ENGINE/ORDER BY/PARTITION BY/POPULATE",
+    "PostgreSQL matview: Refresh (optionally CONCURRENTLY)",
+    "Copy SQL / Insert into editor / Apply/Create / Drop"
+   ],
+   "engines": "All SQL engines (the sql capability: MySQL, PostgreSQL, ClickHouse, SQLite). Materialized views are editable on PostgreSQL and ClickHouse; only PostgreSQL's is refreshed in place. Redis/Parquet show a message that there are no views to edit.",
+   "caveats": "Requires a live connection. Apply runs the DDL directly. ClickHouse materialized-view storage clauses are best-effort parsed back on load."
+  },
+  "dictionary": {
+   "summary": "An editor for ClickHouse dictionaries (in-memory key/value tables loaded from a source on a lifetime): create, replace and drop. It provides form fields for attributes, primary key, source (ClickHouse/HTTP/FILE/CUSTOM), layout (FLAT/HASHED/COMPLEX_KEY_HASHED/CACHE) and lifetime, plus a raw-SQL mode for exotic definitions, always showing the statement before running. A DBA uses it to manage dictionaries without hand-writing CREATE DICTIONARY.",
+   "howToOpen": "Plugins menu -> Schema -> Dictionary (also on the native Tools menu); can be opened on a specific dictionary from the schema tree",
+   "keyActions": [
+    "Pick a schema and dictionary, or + Dictionary",
+    "Edit attributes, primary key, source fields, layout and lifetime; or toggle 'Edit as raw SQL' for the whole CREATE DICTIONARY",
+    "Copy SQL / Insert into editor / Apply/Create / Drop"
+   ],
+   "engines": "ClickHouse only. On other engines it shows a message that a dictionary is a ClickHouse object.",
+   "caveats": "Requires a live connection. Apply runs the DDL directly. A dictionary needs a name, at least one attribute and a primary key to be buildable; non-standard sources are passed through as free text via CUSTOM."
+  },
+  "designer": {
+   "summary": "A visual table designer that edits a draft (never the database directly) and shows the implied change set - each entry labelled with its cost and what it can destroy - alongside the SQL that would run. It handles columns (including generated columns), indexes (including MySQL INVISIBLE), primary keys, storage engine, and partitions. A DBA uses it to create or alter a table's structure with the risk of each change made explicit before Apply.",
+   "howToOpen": "Plugins menu -> Schema -> Table designer (also on the native Tools menu); can be opened on an existing table from the schema tree",
+   "keyActions": [
+    "Design a new table or edit an existing one (name, MySQL storage engine, MariaDB system-versioning / OR REPLACE)",
+    "Add/edit/remove columns (type, nullable, default, generated expr + STORED/VIRTUAL, PK) and secondary indexes (unique, invisible)",
+    "MySQL partitions: add / drop / reorganize RANGE partitions; PostgreSQL declarative partitions: create / attach / detach",
+    "Review the labelled change set and SQL; Copy to editor; Apply (typed confirm word required for destructive changes or prod)"
+   ],
+   "engines": "MySQL/MariaDB and PostgreSQL in practice (engine resolves to postgres or mysql; the menu has no engine gate and the designer is expected to refuse gracefully on engines it cannot serve).",
+   "caveats": "Requires a live connection. Apply runs statements one at a time (drops last) and goes through server-side production guards; destructive DDL on a prod connection needs the connection unlocked plus the typed word PRODUCTION. On non-SQL/embedded engines the catalog reads would not work; not verifiable without a live server."
+  },
+  "compare": {
+   "summary": "One panel for the four modes of 'compare', switched by a tab strip. Schema diffs two instances or two schemas on one instance - every object type, only-left/only-right/different/identical with property details, side-by-side DDL diff on click, a .md report and a reviewed-only migration script in both directions (session-independent: it opens its own connections from the saved list, and is the same view the top bar's Compare icon opens). Data compares the row contents of one table against another, on this connection or across open sessions, and generates a reviewed INSERT/UPDATE/DELETE reconcile script. Results compares two already-open result grids to answer 'did my rewrite return the same rows' - read-only, no target, no danger. Scripts diffs two SQL scripts side by side in a live merge view and never touches the server.",
+   "howToOpen": "Plugins menu -> Schema & Data -> Compare (also on the native Tools menu), then the Schema / Data / Results / Scripts tabs. The top bar's Compare icon opens the Schema mode directly as an app-level utility view; a programmatic open can preselect the mode.",
+   "keyActions": [
+    "Switch mode with the Schema / Data / Results / Scripts tabs; a mode the engine cannot serve is greyed with the reason on hover",
+    "Schema: pick left and right connection + schema (same engine both sides); Compare; click an entry for its DDL diff; export the report or a reviewed migration script",
+    "Data: choose source and target connection/schema/table, pick the key columns; Compare; toggle Insert/Update/Delete (delete off by default); copy the script or Apply after the typed confirm word",
+    "Results: pick Result A and Result B from the open result tabs, choose the match columns; Compare",
+    "Scripts: Load left/right from a file or paste in place; Swap flips the two sides"
+   ],
+   "engines": "Schema compares saved MySQL / PostgreSQL connections (both sides the same engine) regardless of the session in front of you. Data needs the dataCompare capability (MySQL, PostgreSQL, SQL Server); on other engines that tab is greyed with the reason, never hidden. Results and Scripts work on every engine, including offline.",
+   "caveats": "Schema and Data require live connections; Results needs two tabs currently holding results. Data refuses to compare past MAX_COMPARE_ROWS (a truncated read would propose deleting everything past the cap), and Apply writes directly to the target - deletes are called out as irreversible. Results is purely a report. Scripts is local text diffing only; it does not execute or validate SQL."
+  },
+  "pglisten": {
+   "summary": "Watches a PostgreSQL LISTEN/NOTIFY channel in real time using a dedicated backend connection that streams notifications over a Tauri channel - something a request/response query window cannot do. It keeps the most recent notifications (up to 500) in memory as a live view. A DBA uses it to observe application notifications or prove a NOTIFY round trip.",
+   "howToOpen": "Plugins menu -> Monitor -> Listen / Notify (also on the native Tools menu)",
+   "keyActions": [
+    "Enter one or more channel names and press Listen; Stop to release the connection",
+    "See connection state (idle/connecting/live/closed)",
+    "While live, send a test NOTIFY payload to the first channel to prove the round trip",
+    "Clear the received list"
+   ],
+   "engines": "PostgreSQL only. On other engines it says LISTEN/NOTIFY is a PostgreSQL feature.",
+   "caveats": "Requires a live PostgreSQL connection. The listener holds a dedicated (non-pooled) connection and is stopped on Stop and on unmount to avoid a leak. Only the most recent 500 notifications are kept - it is a live view, not a log."
+  }
+ }
+}

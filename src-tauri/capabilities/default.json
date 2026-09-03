@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions, plus core:window:allow-show — the window is created hidden (tauri.conf.json \"visible\": false) and the frontend reveals it once painted, which core:default does NOT allow. Without it show() rejects and the app is only ever revealed by the 5 s wedged-app fallback in lib.rs.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "dialog:default",
+    "notification:default"
+  ]
+}

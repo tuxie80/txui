@@ -1,0 +1,2865 @@
+{
+  "version": "0.65.0",
+  "engines": [
+    "mysql",
+    "postgres",
+    "redis",
+    "clickhouse",
+    "sqlite",
+    "parquet",
+    "duckdb",
+    "mongodb",
+    "sqlserver"
+  ],
+  "capabilityKeys": [
+    "sql",
+    "transactions",
+    "databaseSelect",
+    "processList",
+    "serverInfo",
+    "sqlDba",
+    "lockWaits",
+    "sequences",
+    "longQueryWatch",
+    "replication",
+    "columnProfile",
+    "dbSearch",
+    "findUsages",
+    "dataCompare",
+    "documenter",
+    "routines",
+    "userAdmin",
+    "fleet",
+    "playground",
+    "namespaceDdl",
+    "stmtStats",
+    "queryStore",
+    "maintenance",
+    "tuner",
+    "erDiagram",
+    "dataGen",
+    "csvImport",
+    "sqlQuality",
+    "sqlVariables",
+    "writes",
+    "tableDesigner",
+    "statementTimeout"
+  ],
+  "capabilityMatrix": {
+    "mysql": {
+      "sql": true,
+      "transactions": true,
+      "databaseSelect": true,
+      "processList": true,
+      "serverInfo": true,
+      "sqlDba": true,
+      "lockWaits": true,
+      "sequences": true,
+      "longQueryWatch": true,
+      "replication": true,
+      "columnProfile": true,
+      "dbSearch": true,
+      "findUsages": true,
+      "dataCompare": true,
+      "documenter": true,
+      "routines": true,
+      "userAdmin": true,
+      "fleet": true,
+      "playground": true,
+      "namespaceDdl": true,
+      "stmtStats": true,
+      "queryStore": false,
+      "maintenance": true,
+      "tuner": true,
+      "erDiagram": true,
+      "dataGen": true,
+      "csvImport": true,
+      "sqlQuality": true,
+      "sqlVariables": true,
+      "writes": true,
+      "tableDesigner": true,
+      "statementTimeout": true
+    },
+    "postgres": {
+      "sql": true,
+      "transactions": true,
+      "databaseSelect": true,
+      "processList": true,
+      "serverInfo": true,
+      "sqlDba": true,
+      "lockWaits": true,
+      "sequences": true,
+      "longQueryWatch": true,
+      "replication": true,
+      "columnProfile": true,
+      "dbSearch": true,
+      "findUsages": true,
+      "dataCompare": true,
+      "documenter": true,
+      "routines": true,
+      "userAdmin": true,
+      "fleet": true,
+      "playground": true,
+      "namespaceDdl": true,
+      "stmtStats": true,
+      "queryStore": false,
+      "maintenance": true,
+      "tuner": true,
+      "erDiagram": true,
+      "dataGen": true,
+      "csvImport": true,
+      "sqlQuality": true,
+      "sqlVariables": true,
+      "writes": true,
+      "tableDesigner": true,
+      "statementTimeout": true
+    },
+    "redis": {
+      "sql": false,
+      "transactions": false,
+      "databaseSelect": false,
+      "processList": true,
+      "serverInfo": true,
+      "sqlDba": false,
+      "lockWaits": false,
+      "sequences": false,
+      "longQueryWatch": false,
+      "replication": false,
+      "columnProfile": false,
+      "dbSearch": false,
+      "findUsages": false,
+      "dataCompare": false,
+      "documenter": false,
+      "routines": false,
+      "userAdmin": false,
+      "fleet": false,
+      "playground": false,
+      "namespaceDdl": false,
+      "stmtStats": false,
+      "queryStore": false,
+      "maintenance": false,
+      "tuner": true,
+      "erDiagram": false,
+      "dataGen": false,
+      "csvImport": false,
+      "sqlQuality": false,
+      "sqlVariables": false,
+      "writes": true,
+      "tableDesigner": false,
+      "statementTimeout": false
+    },
+    "clickhouse": {
+      "sql": true,
+      "transactions": false,
+      "databaseSelect": true,
+      "processList": true,
+      "serverInfo": true,
+      "sqlDba": false,
+      "lockWaits": false,
+      "sequences": false,
+      "longQueryWatch": false,
+      "replication": false,
+      "columnProfile": false,
+      "dbSearch": false,
+      "findUsages": false,
+      "dataCompare": false,
+      "documenter": false,
+      "routines": false,
+      "userAdmin": false,
+      "fleet": false,
+      "playground": false,
+      "namespaceDdl": false,
+      "stmtStats": false,
+      "queryStore": false,
+      "maintenance": false,
+      "tuner": true,
+      "erDiagram": false,
+      "dataGen": false,
+      "csvImport": false,
+      "sqlQuality": false,
+      "sqlVariables": true,
+      "writes": true,
+      "tableDesigner": true,
+      "statementTimeout": true
+    },
+    "sqlite": {
+      "sql": true,
+      "transactions": true,
+      "databaseSelect": true,
+      "processList": false,
+      "serverInfo": false,
+      "sqlDba": false,
+      "lockWaits": false,
+      "sequences": false,
+      "longQueryWatch": false,
+      "replication": false,
+      "columnProfile": false,
+      "dbSearch": false,
+      "findUsages": false,
+      "dataCompare": false,
+      "documenter": false,
+      "routines": false,
+      "userAdmin": false,
+      "fleet": false,
+      "playground": false,
+      "namespaceDdl": false,
+      "stmtStats": false,
+      "queryStore": false,
+      "maintenance": true,
+      "tuner": true,
+      "erDiagram": true,
+      "dataGen": false,
+      "csvImport": true,
+      "sqlQuality": true,
+      "sqlVariables": true,
+      "writes": true,
+      "tableDesigner": true,
+      "statementTimeout": false
+    },
+    "parquet": {
+      "sql": true,
+      "transactions": false,
+      "databaseSelect": true,
+      "processList": false,
+      "serverInfo": false,
+      "sqlDba": false,
+      "lockWaits": false,
+      "sequences": false,
+      "longQueryWatch": false,
+      "replication": false,
+      "columnProfile": false,
+      "dbSearch": false,
+      "findUsages": false,
+      "dataCompare": false,
+      "documenter": false,
+      "routines": false,
+      "userAdmin": false,
+      "fleet": false,
+      "playground": false,
+      "namespaceDdl": false,
+      "stmtStats": false,
+      "queryStore": false,
+      "maintenance": false,
+      "tuner": false,
+      "erDiagram": false,
+      "dataGen": false,
+      "csvImport": false,
+      "sqlQuality": false,
+      "sqlVariables": true,
+      "writes": false,
+      "tableDesigner": false,
+      "statementTimeout": false
+    },
+    "duckdb": {
+      "sql": true,
+      "transactions": true,
+      "databaseSelect": false,
+      "processList": false,
+      "serverInfo": true,
+      "sqlDba": false,
+      "lockWaits": false,
+      "sequences": false,
+      "longQueryWatch": false,
+      "replication": false,
+      "columnProfile": false,
+      "dbSearch": false,
+      "findUsages": false,
+      "dataCompare": false,
+      "documenter": false,
+      "routines": false,
+      "userAdmin": false,
+      "fleet": false,
+      "playground": false,
+      "namespaceDdl": false,
+      "stmtStats": false,
+      "queryStore": false,
+      "maintenance": false,
+      "tuner": false,
+      "erDiagram": false,
+      "dataGen": false,
+      "csvImport": false,
+      "sqlQuality": true,
+      "sqlVariables": true,
+      "writes": true,
+      "tableDesigner": false,
+      "statementTimeout": false
+    },
+    "mongodb": {
+      "sql": false,
+      "transactions": false,
+      "databaseSelect": false,
+      "processList": true,
+      "serverInfo": true,
+      "sqlDba": false,
+      "lockWaits": false,
+      "sequences": false,
+      "longQueryWatch": false,
+      "replication": false,
+      "columnProfile": false,
+      "dbSearch": false,
+      "findUsages": false,
+      "dataCompare": false,
+      "documenter": false,
+      "routines": false,
+      "userAdmin": false,
+      "fleet": false,
+      "playground": false,
+      "namespaceDdl": false,
+      "stmtStats": false,
+      "queryStore": false,
+      "maintenance": false,
+      "tuner": false,
+      "erDiagram": false,
+      "dataGen": false,
+      "csvImport": false,
+      "sqlQuality": false,
+      "sqlVariables": false,
+      "writes": false,
+      "tableDesigner": false,
+      "statementTimeout": false
+    },
+    "sqlserver": {
+      "sql": true,
+      "transactions": true,
+      "databaseSelect": false,
+      "processList": true,
+      "serverInfo": true,
+      "sqlDba": false,
+      "lockWaits": true,
+      "sequences": true,
+      "longQueryWatch": true,
+      "replication": false,
+      "columnProfile": true,
+      "dbSearch": true,
+      "findUsages": true,
+      "dataCompare": true,
+      "documenter": true,
+      "routines": true,
+      "userAdmin": true,
+      "fleet": true,
+      "playground": true,
+      "namespaceDdl": true,
+      "stmtStats": false,
+      "queryStore": true,
+      "maintenance": true,
+      "tuner": true,
+      "erDiagram": true,
+      "dataGen": true,
+      "csvImport": true,
+      "sqlQuality": true,
+      "sqlVariables": true,
+      "writes": true,
+      "tableDesigner": true,
+      "statementTimeout": false
+    }
+  },
+  "capabilityDocs": {
+    "sql": {
+      "summary": "Speaks SQL at all. Redis does not.",
+      "detail": []
+    },
+    "transactions": {
+      "summary": "BEGIN / COMMIT / ROLLBACK against a pinned connection.",
+      "detail": []
+    },
+    "databaseSelect": {
+      "summary": "A default database can be chosen for the editor (USE / search_path / a request parameter).",
+      "detail": []
+    },
+    "processList": {
+      "summary": "A server-side list of running work that can be inspected and killed.",
+      "detail": []
+    },
+    "serverInfo": {
+      "summary": "Server settings and status are readable.",
+      "detail": []
+    },
+    "sqlDba": {
+      "summary": "The catalog-driven DBA panels: tuner rule sets, replication topology, ANALYZE, locks, GRANTs, saved SQL, the playground, schema compare, the documenter, whole-schema value search.",
+      "detail": []
+    },
+    "lockWaits": {
+      "summary": "Blocking chains can be read: who waits on whom, for how long, on what.",
+      "detail": [
+        "Split out of `sqlDba` because that flag gates fifteen panels at once, and those panels are not one feature — they are fifteen, each needing its own catalog queries per engine. SQL Server can do blocking chains today (`sys.dm_os_waiting_tasks`) while it still cannot do, say, the documenter, so a single flag could only be wrong in one direction or the other: fifteen hidden panels, or fifteen broken ones.",
+        "This also gates the Locks & Deadlocks panel's deadlock tab (wait-for graph + incident history): the three engines that publish anything about deadlocks — SQL Server's system_health graph history, MySQL's latest detected deadlock, PostgreSQL's per-database counters — are exactly the three with blocking chains, so the old separate `deadlocks` flag could only ever echo this one and was folded into it.",
+        "Expect more of these as SQL Server gains the rest — see plan-sqlserver.md Phase 2. Each one is added when the panel behind it actually works."
+      ]
+    },
+    "sequences": {
+      "summary": "Sequences exist as objects that can be listed, created and altered.",
+      "detail": [
+        "Not `sqlDba`, for the same reason as `lockWaits`. Note this is *not* the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says \"ask\", and `SequencePanel` says \"MySQL has none\" when the flavour comes back plain."
+      ]
+    },
+    "longQueryWatch": {
+      "summary": "A watchdog can list running statements server-wide, with age, and kill one.",
+      "detail": [
+        "Distinct from `processList`, which is the raw list: this is the watcher that ages entries against a threshold and alerts. Needs a per-statement elapsed time and the statement text, which ClickHouse and the file engines do not offer in that shape."
+      ]
+    },
+    "replication": {
+      "summary": "A primary/replica topology this panel can draw: replicas that report a log position and a lag.",
+      "detail": [
+        "Split from `sqlDba` because SQL Server replicates but does **not** fit that shape — Always On availability groups are per-database, with a synchronisation state and a redo queue rather than a byte offset. That gap is registered in `utils/engineGaps.ts` and shown greyed with the reason instead of being silently absent."
+      ]
+    },
+    "columnProfile": {
+      "summary": "A column can be profiled: nulls, distinct counts, extremes, value lengths.",
+      "detail": [
+        "Needs only ordinary aggregates and a row-count estimate, so it is set for every engine with a real catalog and cheap row counts."
+      ]
+    },
+    "dbSearch": {
+      "summary": "Every table in a schema can be searched for a value.",
+      "detail": [
+        "Needs a catalog to enumerate columns and a LIKE with an escape clause — which all three SQL engines have, in three different spellings."
+      ]
+    },
+    "findUsages": {
+      "summary": "Where a table or column is referenced by the server's own SQL — views, routines, triggers, constraints, defaults, and whatever else the engine stores a definition for.",
+      "detail": [
+        "Needs a catalog that hands back the *text* of those definitions, which the three SQL engines do in three different ways (`SHOW CREATE`, `pg_get_*def`, `OBJECT_DEFINITION`)."
+      ]
+    },
+    "dataCompare": {
+      "summary": "Two tables can be compared row by row, across sessions, and a reconciliation script generated.",
+      "detail": [
+        "Both sides must be the SAME engine — the panel filters the session list on it — because the generated INSERT/UPDATE/DELETE is written in one dialect, and the value representations have to agree before a diff means anything."
+      ]
+    },
+    "documenter": {
+      "summary": "A schema can be documented: columns, types, keys, indexes, foreign keys, routines and whatever comments the engine stores.",
+      "detail": []
+    },
+    "routines": {
+      "summary": "Stored routines can be listed, read, edited and saved.",
+      "detail": [
+        "The write is the reason this is its own flag: the panel replaces a live procedure. MySQL has to DROP then CREATE and keeps the original in hand to restore; PostgreSQL and SQL Server replace in one statement (`CREATE OR REPLACE`, `CREATE OR ALTER`) and cannot leave a hole. An engine that cannot do one of those safely does not belong here."
+      ]
+    },
+    "userAdmin": {
+      "summary": "Accounts and their permissions can be listed and edited.",
+      "detail": [
+        "Editing means *generating* SQL for review — this panel never executes a write — but the engine still has to have a security model TxUI can read back and diff against, which is why it is not simply `sqlDba`."
+      ]
+    },
+    "fleet": {
+      "summary": "A label's servers can be compared with each other.",
+      "detail": [
+        "Needs three things the engine must actually have: a name/value settings catalogue, a listable index set, and a per-table statistics timestamp. Without the last one the panel's third tab is permanently empty, which is why this is not simply `sqlDba`."
+      ]
+    },
+    "playground": {
+      "summary": "A contention scenario can be manufactured on this server.",
+      "detail": [
+        "Needs N real, concurrent server sessions and a way to make them queue on a row — so an in-process engine cannot do it however much SQL it speaks, and an engine without row locks has nothing to demonstrate."
+      ]
+    },
+    "namespaceDdl": {
+      "summary": "Namespaces (schemas / databases) can be created and dropped from the tree.",
+      "detail": [
+        "Its own flag rather than `sqlDba` because the three engines that have them spell every part differently — `IF NOT EXISTS` does not exist on SQL Server, `CASCADE` is PostgreSQL's alone, and `CREATE SCHEMA` must lead its own batch in T-SQL. An engine here needs a real builder in `utils/schemaObjSql.ts`, not a generic one."
+      ]
+    },
+    "stmtStats": {
+      "summary": "Cumulative per-statement statistics can be snapshotted and diffed over time — \"which statements got slower between these two moments\".",
+      "detail": [
+        "Needs a server-side, cumulative statement digest keyed by a stable id. MySQL has `performance_schema.events_statements_summary_by_digest` (requires performance_schema, on by default), PostgreSQL has `pg_stat_statements` (an extension — the panel detects it and offers to enable it). SQL Server's Query Store is richer than a diff (plan history and forcing — see `queryStore`) and keeps its own panel, so it is deliberately not here."
+      ]
+    },
+    "queryStore": {
+      "summary": "The engine keeps a HISTORY of query plans, and can be told to use one.",
+      "detail": [
+        "Not \"has query statistics\" — MySQL's digests and PostgreSQL's `pg_stat_statements` both have those, and neither keeps a plan or can pin it. This flag means the two things that make a regression actionable: every plan a query has had, and `sp_query_store_force_plan`."
+      ]
+    },
+    "maintenance": {
+      "summary": "The Maintenance panel: table upkeep — CHECK / ANALYZE / OPTIMIZE / REPAIR, plus the invalid-objects scan — and, on SQLite, file upkeep (VACUUM, integrity checks, ANALYZE). ANALYZE is the one WRITE in the read-only DBA set: the panel pre-flights the server's read-only state before running it (`super_read_only`, `pg_is_in_recovery()`, `DATABASEPROPERTYEX(…, 'Updateability')`). Broader than `sqlDba`, which SQLite lacks.",
+      "detail": []
+    },
+    "tuner": {
+      "summary": "Configuration advice (the tuner).",
+      "detail": []
+    },
+    "erDiagram": {
+      "summary": "Foreign keys and a schema graph exist to draw.",
+      "detail": []
+    },
+    "dataGen": {
+      "summary": "Rows can be generated and inserted.",
+      "detail": []
+    },
+    "csvImport": {
+      "summary": "CSV can be loaded into a table.",
+      "detail": []
+    },
+    "sqlQuality": {
+      "summary": "The SQL quality audit (EXPLAIN + statistics + index advice).",
+      "detail": []
+    },
+    "sqlVariables": {
+      "summary": "Statements can be parameterised with `:name` variables before running.",
+      "detail": []
+    },
+    "writes": {
+      "summary": "Anything can be written at all.",
+      "detail": []
+    },
+    "tableDesigner": {
+      "summary": "The table designer can serve this engine — it has CREATE/ALTER TABLE DDL the designer models. True for the four SQL engines that own real tables; Redis has no tables and Parquet has nothing to write to.",
+      "detail": []
+    },
+    "statementTimeout": {
+      "summary": "A server-side ceiling on a single statement can be set.",
+      "detail": [
+        "True does not mean it covers writes — on MySQL it does not. See `DEFAULT_STATEMENT_TIMEOUT_SECS` in the backend."
+      ]
+    }
+  },
+  "engineLabels": {
+    "mysql": "MySQL",
+    "postgres": "PostgreSQL",
+    "redis": "Redis",
+    "clickhouse": "ClickHouse",
+    "sqlite": "SQLite",
+    "parquet": "Parquet",
+    "duckdb": "DuckDB",
+    "mongodb": "MongoDB",
+    "sqlserver": "SQL Server"
+  },
+  "panels": [
+    {
+      "id": "processes",
+      "label": "Processes",
+      "menuLabel": "Processes",
+      "group": "Activity",
+      "tip": "Processes (processlist + kill)",
+      "when": "processList",
+      "inMenu": true
+    },
+    {
+      "id": "replication",
+      "label": "Replication",
+      "menuLabel": "Replication",
+      "group": "Activity",
+      "tip": "Replication status",
+      "when": "replication",
+      "inMenu": true
+    },
+    {
+      "id": "dbaviews",
+      "label": "DBA views",
+      "menuLabel": "DBA views",
+      "group": "Server",
+      "tip": "DBA views (sys / performance_schema / pg_stat)",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "tuner",
+      "label": "Tuner",
+      "menuLabel": "Server tuner",
+      "group": "Server",
+      "tip": "Server tuner — health score & guided fixes (read-only)",
+      "when": "tuner",
+      "inMenu": true
+    },
+    {
+      "id": "routines",
+      "label": "Routines",
+      "menuLabel": "Routines",
+      "group": "Schema",
+      "tip": "Routines — edit procedures, functions, triggers and events",
+      "when": "routines",
+      "inMenu": true
+    },
+    {
+      "id": "txshell",
+      "label": "TxShell",
+      "menuLabel": "TxShell",
+      "group": "SQL",
+      "tip": "TxShell — SQL command line (\\help for commands)",
+      "when": "sql",
+      "inMenu": true
+    },
+    {
+      "id": "find",
+      "label": "Find",
+      "menuLabel": "Find",
+      "group": "Find & Compare",
+      "tip": "Find — what references a table or column, a value in every table, or text in .sql files",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "colprofile",
+      "label": "Column profile",
+      "menuLabel": "Column profile",
+      "group": "Data",
+      "tip": "Column profile — what is actually in each column",
+      "when": "columnProfile",
+      "inMenu": true
+    },
+    {
+      "id": "sequences",
+      "label": "Sequences",
+      "menuLabel": "Sequences",
+      "group": "Schema",
+      "tip": "Sequences — create, alter, restart",
+      "when": "sequences",
+      "inMenu": true
+    },
+    {
+      "id": "types",
+      "label": "Types",
+      "menuLabel": "Types",
+      "group": "Schema",
+      "tip": "Types — composite types, enums and domains",
+      "when": "postgres",
+      "inMenu": true
+    },
+    {
+      "id": "views",
+      "label": "Views",
+      "menuLabel": "Views",
+      "group": "Schema",
+      "tip": "Views — create, replace, refresh, drop",
+      "when": "sql",
+      "inMenu": true
+    },
+    {
+      "id": "dictionary",
+      "label": "Dictionary",
+      "menuLabel": "Dictionary",
+      "group": "Schema",
+      "tip": "Dictionary — create, replace, drop ClickHouse dictionaries",
+      "when": "clickhouse",
+      "inMenu": true
+    },
+    {
+      "id": "designer",
+      "label": "Table designer",
+      "menuLabel": "Table designer",
+      "group": "Schema",
+      "tip": "Table designer — create or alter a table’s structure",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "compare",
+      "label": "Compare",
+      "menuLabel": "Compare",
+      "group": "Find & Compare",
+      "tip": "Compare — schemas or instances, table rows, result sets, or SQL scripts",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "pglisten",
+      "label": "Listen / Notify",
+      "menuLabel": "Listen / Notify",
+      "group": "Activity",
+      "tip": "Listen / Notify — watch a PostgreSQL channel",
+      "when": "postgres",
+      "inMenu": true
+    },
+    {
+      "id": "stmtstats",
+      "label": "Statement statistics",
+      "menuLabel": "Statement statistics",
+      "group": "Insights",
+      "tip": "Statement statistics — snapshot and diff cumulative statement digests over time",
+      "when": "stmtStats",
+      "inMenu": true
+    },
+    {
+      "id": "binlog",
+      "label": "Binary logs",
+      "menuLabel": "Binary logs",
+      "group": "Insights",
+      "tip": "Binary log events viewer + PITR helper",
+      "when": "mysql",
+      "inMenu": true
+    },
+    {
+      "id": "slowlog",
+      "label": "Slow-log analyzer",
+      "menuLabel": "Slow-log analyzer",
+      "group": "Insights",
+      "tip": "Slow-query-log analyzer (pt-query-digest style)",
+      "when": "mysql",
+      "inMenu": true
+    },
+    {
+      "id": "maintenance",
+      "label": "Maintenance",
+      "menuLabel": "Maintenance",
+      "group": "Server",
+      "tip": "Maintenance — table upkeep (SQL) or file upkeep (SQLite)",
+      "when": "maintenance",
+      "inMenu": true
+    },
+    {
+      "id": "vacuum",
+      "label": "Vacuum & Bloat",
+      "menuLabel": "Vacuum & Bloat",
+      "group": "Server",
+      "tip": "Vacuum & Bloat — running vacuums, autovacuum backlog, bloat, wraparound, and the fix",
+      "when": "postgres",
+      "inMenu": true
+    },
+    {
+      "id": "documenter",
+      "label": "Documenter",
+      "menuLabel": "Documenter",
+      "group": "Schema",
+      "tip": "Documenter — commit-ready schema documentation",
+      "when": "documenter",
+      "inMenu": true
+    },
+    {
+      "id": "fleet",
+      "label": "Fleet",
+      "menuLabel": "Fleet",
+      "group": "Server",
+      "tip": "Fleet — checks across every server sharing a label",
+      "when": "fleet",
+      "inMenu": true
+    },
+    {
+      "id": "erdiagram",
+      "label": "ER diagram",
+      "menuLabel": "ER diagram",
+      "group": "Schema",
+      "tip": "ER diagram (visual schema)",
+      "when": "erDiagram",
+      "inMenu": true
+    },
+    {
+      "id": "datagen",
+      "label": "Data generator",
+      "menuLabel": "Data generator",
+      "group": "Data",
+      "tip": "Data generator (objects + rows)",
+      "when": "dataGen",
+      "inMenu": true
+    },
+    {
+      "id": "csvimport",
+      "label": "CSV import",
+      "menuLabel": "CSV import",
+      "group": "Data",
+      "tip": "CSV import",
+      "when": "csvImport",
+      "inMenu": true
+    },
+    {
+      "id": "playground",
+      "label": "Playground",
+      "menuLabel": "Playground",
+      "group": "Activity",
+      "tip": "Playground — generate a scenario (spawn mess: threads, locks, rogue queries)",
+      "when": "playground",
+      "inMenu": true
+    },
+    {
+      "id": "quality",
+      "label": "SQL Quality",
+      "menuLabel": "SQL Quality",
+      "group": "SQL",
+      "tip": "SQL Quality — deep query analysis",
+      "when": "sqlQuality",
+      "inMenu": true
+    },
+    {
+      "id": "serverinfo",
+      "label": "Server",
+      "menuLabel": "Server variables & status",
+      "group": "Server",
+      "tip": "Server variables & status",
+      "when": "serverInfo",
+      "inMenu": true
+    },
+    {
+      "id": "watch",
+      "label": "Watch",
+      "menuLabel": "Watch",
+      "group": "Activity",
+      "tip": "Watch — interval metrics, a statement's live phase + progress, or a wait-event profile",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "locks",
+      "label": "Locks & Deadlocks",
+      "menuLabel": "Locks & Deadlocks",
+      "group": "Activity",
+      "tip": "Locks & Deadlocks — blocking chains, deadlock graph & incident history",
+      "when": "lockWaits",
+      "inMenu": true
+    },
+    {
+      "id": "querystore",
+      "label": "Query Store",
+      "menuLabel": "Query Store",
+      "group": "Insights",
+      "tip": "Query Store — plan regressions and plan forcing (SQL Server)",
+      "when": "queryStore",
+      "inMenu": true
+    },
+    {
+      "id": "users",
+      "label": "Users",
+      "menuLabel": "Users & grants",
+      "group": "Server",
+      "tip": "Users & grants (changes generate SQL for review)",
+      "when": "userAdmin",
+      "inMenu": true
+    },
+    {
+      "id": "saved",
+      "label": "Saved",
+      "menuLabel": "Saved queries",
+      "group": "SQL",
+      "tip": "Saved queries",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "history",
+      "label": "History",
+      "menuLabel": "Query history",
+      "group": "Insights",
+      "tip": "Query history",
+      "when": null,
+      "inMenu": true
+    }
+  ],
+  "commands": [
+    {
+      "id": "editor.run",
+      "label": "Run statement / selection",
+      "category": "Run",
+      "keys": "Mod-Enter",
+      "shortcut": {
+        "mac": "⌘↵",
+        "win": "Ctrl+Enter"
+      }
+    },
+    {
+      "id": "editor.runAll",
+      "label": "Run entire script",
+      "category": "Run",
+      "keys": "Mod-Shift-Enter",
+      "shortcut": {
+        "mac": "⌘⇧↵",
+        "win": "Ctrl+Shift+Enter"
+      }
+    },
+    {
+      "id": "editor.runToCursor",
+      "label": "Run to cursor",
+      "category": "Run",
+      "keys": "Mod-Alt-Enter",
+      "shortcut": {
+        "mac": "⌘⌥↵",
+        "win": "Ctrl+Alt+Enter"
+      }
+    },
+    {
+      "id": "editor.runAllNoResults",
+      "label": "Run entire script (no result tabs)",
+      "category": "Run",
+      "keys": "F9",
+      "shortcut": {
+        "mac": "F9",
+        "win": "F9"
+      }
+    },
+    {
+      "id": "editor.explain",
+      "label": "Explain statement",
+      "category": "Run",
+      "keys": "Mod-e",
+      "shortcut": {
+        "mac": "⌘E",
+        "win": "Ctrl+E"
+      }
+    },
+    {
+      "id": "editor.goToObject",
+      "label": "Go to table under cursor",
+      "category": "Navigate",
+      "keys": "F12",
+      "shortcut": {
+        "mac": "F12",
+        "win": "F12"
+      }
+    },
+    {
+      "id": "editor.peekObject",
+      "label": "Quick definition (peek DDL)",
+      "category": "Navigate",
+      "keys": "Mod-y",
+      "shortcut": {
+        "mac": "⌘Y",
+        "win": "Ctrl+Y"
+      }
+    },
+    {
+      "id": "editor.revealObject",
+      "label": "Reveal in database tree",
+      "category": "Navigate",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.aiGenerate",
+      "label": "AI: generate SQL…",
+      "category": "Run",
+      "keys": "Mod-i",
+      "shortcut": {
+        "mac": "⌘I",
+        "win": "Ctrl+I"
+      }
+    },
+    {
+      "id": "editor.aiExplain",
+      "label": "AI: explain statement",
+      "category": "Run",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.optimizerTrace",
+      "label": "Optimizer trace (MySQL)",
+      "category": "Run",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.prevStatement",
+      "label": "Go to previous statement",
+      "category": "Navigate",
+      "keys": "Mod-Alt-ArrowUp",
+      "shortcut": {
+        "mac": "⌘⌥↑",
+        "win": "Ctrl+Alt+↑"
+      }
+    },
+    {
+      "id": "editor.nextStatement",
+      "label": "Go to next statement",
+      "category": "Navigate",
+      "keys": "Mod-Alt-ArrowDown",
+      "shortcut": {
+        "mac": "⌘⌥↓",
+        "win": "Ctrl+Alt+↓"
+      }
+    },
+    {
+      "id": "editor.gotoLine",
+      "label": "Go to line…",
+      "category": "Navigate",
+      "keys": "Mod-g",
+      "shortcut": {
+        "mac": "⌘G",
+        "win": "Ctrl+G"
+      }
+    },
+    {
+      "id": "editor.matchingBracket",
+      "label": "Jump to matching bracket",
+      "category": "Navigate",
+      "keys": "Mod-Shift-\\",
+      "shortcut": {
+        "mac": "⌘⇧\\",
+        "win": "Ctrl+Shift+\\"
+      }
+    },
+    {
+      "id": "editor.nextTodo",
+      "label": "Jump to next TODO / FIXME",
+      "category": "Navigate",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.prevTodo",
+      "label": "Jump to previous TODO / FIXME",
+      "category": "Navigate",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.replace",
+      "label": "Find and replace…",
+      "category": "Search",
+      "keys": "Mod-Alt-f",
+      "shortcut": {
+        "mac": "⌘⌥F",
+        "win": "Ctrl+Alt+F"
+      }
+    },
+    {
+      "id": "editor.format",
+      "label": "Format SQL (whole document)",
+      "category": "Format",
+      "keys": "Mod-Shift-f",
+      "shortcut": {
+        "mac": "⌘⇧F",
+        "win": "Ctrl+Shift+F"
+      }
+    },
+    {
+      "id": "editor.beautify",
+      "label": "Beautify statement / selection",
+      "category": "Format",
+      "keys": "Shift-Alt-f",
+      "shortcut": {
+        "mac": "⌥⇧F",
+        "win": "Alt+Shift+F"
+      }
+    },
+    {
+      "id": "editor.expandStar",
+      "label": "Expand * to column list",
+      "category": "Format",
+      "keys": "Mod-Shift-8",
+      "shortcut": {
+        "mac": "⌘⇧8",
+        "win": "Ctrl+Shift+8"
+      }
+    },
+    {
+      "id": "editor.renameAlias",
+      "label": "Rename symbol (table / column / alias / CTE)",
+      "category": "Format",
+      "keys": "Shift-F6",
+      "shortcut": {
+        "mac": "⇧F6",
+        "win": "Shift+F6"
+      }
+    },
+    {
+      "id": "editor.wrapInSubquery",
+      "label": "Wrap in subquery (SELECT * FROM …)",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.extractCte",
+      "label": "Extract selection to CTE",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.selectToInsert",
+      "label": "Transform SELECT → INSERT INTO … SELECT",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.selectToCreateTable",
+      "label": "Transform SELECT → CREATE TABLE AS",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.selectToCreateView",
+      "label": "Transform SELECT → CREATE VIEW AS",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.selectToDelete",
+      "label": "Transform SELECT → DELETE (same WHERE)",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.selectToUpdate",
+      "label": "Transform SELECT → UPDATE skeleton",
+      "category": "Format",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.selectNextOccurrence",
+      "label": "Add next occurrence to selection",
+      "category": "Selection",
+      "keys": "Mod-d",
+      "shortcut": {
+        "mac": "⌘D",
+        "win": "Ctrl+D"
+      }
+    },
+    {
+      "id": "editor.selectAllOccurrences",
+      "label": "Select all occurrences of selection",
+      "category": "Selection",
+      "keys": "Mod-Shift-l",
+      "shortcut": {
+        "mac": "⌘⇧L",
+        "win": "Ctrl+Shift+L"
+      }
+    },
+    {
+      "id": "editor.splitSelectionIntoLines",
+      "label": "Split selection into lines (cursor per line)",
+      "category": "Selection",
+      "keys": "Shift-Alt-i",
+      "shortcut": {
+        "mac": "⌥⇧I",
+        "win": "Alt+Shift+I"
+      }
+    },
+    {
+      "id": "editor.expandSelection",
+      "label": "Expand selection (word → string → parens → statement)",
+      "category": "Selection",
+      "keys": "Mod-Alt-ArrowRight",
+      "shortcut": {
+        "mac": "⌘⌥→",
+        "win": "Ctrl+Alt+→"
+      }
+    },
+    {
+      "id": "editor.shrinkSelection",
+      "label": "Shrink selection (retrace last expansion)",
+      "category": "Selection",
+      "keys": "Mod-Alt-ArrowLeft",
+      "shortcut": {
+        "mac": "⌘⌥←",
+        "win": "Ctrl+Alt+←"
+      }
+    },
+    {
+      "id": "editor.toggleComment",
+      "label": "Toggle line comment",
+      "category": "Edit",
+      "keys": "Mod-/",
+      "shortcut": {
+        "mac": "⌘/",
+        "win": "Ctrl+/"
+      }
+    },
+    {
+      "id": "editor.indentMore",
+      "label": "Indent more",
+      "category": "Edit",
+      "keys": "Mod-]",
+      "shortcut": {
+        "mac": "⌘]",
+        "win": "Ctrl+]"
+      }
+    },
+    {
+      "id": "editor.indentLess",
+      "label": "Indent less",
+      "category": "Edit",
+      "keys": "Mod-[",
+      "shortcut": {
+        "mac": "⌘[",
+        "win": "Ctrl+["
+      }
+    },
+    {
+      "id": "editor.lowerCase",
+      "label": "Convert to lowercase",
+      "category": "Edit",
+      "keys": "Mod-u",
+      "shortcut": {
+        "mac": "⌘U",
+        "win": "Ctrl+U"
+      }
+    },
+    {
+      "id": "editor.upperCase",
+      "label": "Convert to UPPERCASE",
+      "category": "Edit",
+      "keys": "Mod-Shift-u",
+      "shortcut": {
+        "mac": "⌘⇧U",
+        "win": "Ctrl+Shift+U"
+      }
+    },
+    {
+      "id": "editor.pasteHistory",
+      "label": "Paste from history…",
+      "category": "Edit",
+      "keys": "Mod-Shift-v",
+      "shortcut": {
+        "mac": "⌘⇧V",
+        "win": "Ctrl+Shift+V"
+      }
+    },
+    {
+      "id": "editor.quickFix",
+      "label": "Apply quick fix",
+      "category": "Edit",
+      "keys": "Mod-.",
+      "shortcut": {
+        "mac": "⌘.",
+        "win": "Ctrl+."
+      }
+    },
+    {
+      "id": "editor.completeStatement",
+      "label": "Complete current statement",
+      "category": "Edit",
+      "keys": "Mod-Alt-;",
+      "shortcut": {
+        "mac": "⌘⌥;",
+        "win": "Ctrl+Alt+;"
+      }
+    },
+    {
+      "id": "editor.moveLineUp",
+      "label": "Move line up",
+      "category": "Lines",
+      "keys": "Alt-ArrowUp",
+      "shortcut": {
+        "mac": "⌥↑",
+        "win": "Alt+↑"
+      }
+    },
+    {
+      "id": "editor.moveLineDown",
+      "label": "Move line down",
+      "category": "Lines",
+      "keys": "Alt-ArrowDown",
+      "shortcut": {
+        "mac": "⌥↓",
+        "win": "Alt+↓"
+      }
+    },
+    {
+      "id": "editor.copyLineUp",
+      "label": "Duplicate line up",
+      "category": "Lines",
+      "keys": "Shift-Alt-ArrowUp",
+      "shortcut": {
+        "mac": "⌥⇧↑",
+        "win": "Alt+Shift+↑"
+      }
+    },
+    {
+      "id": "editor.copyLineDown",
+      "label": "Duplicate line down",
+      "category": "Lines",
+      "keys": "Shift-Alt-ArrowDown",
+      "shortcut": {
+        "mac": "⌥⇧↓",
+        "win": "Alt+Shift+↓"
+      }
+    },
+    {
+      "id": "editor.deleteLine",
+      "label": "Delete line",
+      "category": "Lines",
+      "keys": "Shift-Mod-k",
+      "shortcut": {
+        "mac": "⌘⇧K",
+        "win": "Ctrl+Shift+K"
+      }
+    },
+    {
+      "id": "editor.joinLines",
+      "label": "Join lines",
+      "category": "Lines",
+      "keys": "Mod-j",
+      "shortcut": {
+        "mac": "⌘J",
+        "win": "Ctrl+J"
+      }
+    },
+    {
+      "id": "editor.sortLinesAsc",
+      "label": "Sort lines A→Z",
+      "category": "Lines",
+      "keys": "Mod-Alt-s",
+      "shortcut": {
+        "mac": "⌘⌥S",
+        "win": "Ctrl+Alt+S"
+      }
+    },
+    {
+      "id": "editor.sortLinesDesc",
+      "label": "Sort lines Z→A",
+      "category": "Lines",
+      "keys": "Mod-Alt-Shift-s",
+      "shortcut": {
+        "mac": "⌘⌥⇧S",
+        "win": "Ctrl+Alt+Shift+S"
+      }
+    },
+    {
+      "id": "editor.sortLinesNumeric",
+      "label": "Sort lines numerically",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.dedupeLines",
+      "label": "Remove duplicate lines",
+      "category": "Lines",
+      "keys": "Mod-Alt-u",
+      "shortcut": {
+        "mac": "⌘⌥U",
+        "win": "Ctrl+Alt+U"
+      }
+    },
+    {
+      "id": "editor.keepDuplicates",
+      "label": "Keep only duplicated lines",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.removeBlankLines",
+      "label": "Remove blank lines",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.trimTrailing",
+      "label": "Trim trailing whitespace",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.reverseLines",
+      "label": "Reverse line order",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.shuffleLines",
+      "label": "Shuffle lines",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.indentToTabs",
+      "label": "Convert indentation to tabs",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.indentToSpaces",
+      "label": "Convert indentation to spaces",
+      "category": "Lines",
+      "keys": null,
+      "shortcut": null
+    },
+    {
+      "id": "editor.insertNumberSequence",
+      "label": "Insert number sequence",
+      "category": "Lines",
+      "keys": "Mod-Alt-n",
+      "shortcut": {
+        "mac": "⌘⌥N",
+        "win": "Ctrl+Alt+N"
+      }
+    },
+    {
+      "id": "editor.bookmarkToggle",
+      "label": "Toggle bookmark",
+      "category": "Bookmarks",
+      "keys": "Mod-F2",
+      "shortcut": {
+        "mac": "⌘F2",
+        "win": "Ctrl+F2"
+      }
+    },
+    {
+      "id": "editor.bookmarkNext",
+      "label": "Next bookmark",
+      "category": "Bookmarks",
+      "keys": "F2",
+      "shortcut": {
+        "mac": "F2",
+        "win": "F2"
+      }
+    },
+    {
+      "id": "editor.bookmarkPrev",
+      "label": "Previous bookmark",
+      "category": "Bookmarks",
+      "keys": "Shift-F2",
+      "shortcut": {
+        "mac": "⇧F2",
+        "win": "Shift+F2"
+      }
+    },
+    {
+      "id": "editor.macroRecordToggle",
+      "label": "Record macro (toggle)",
+      "category": "Macro",
+      "keys": "Mod-Shift-m",
+      "shortcut": {
+        "mac": "⌘⇧M",
+        "win": "Ctrl+Shift+M"
+      }
+    },
+    {
+      "id": "editor.macroPlay",
+      "label": "Play last macro",
+      "category": "Macro",
+      "keys": "Mod-Shift-,",
+      "shortcut": {
+        "mac": "⌘⇧,",
+        "win": "Ctrl+Shift+,"
+      }
+    },
+    {
+      "id": "editor.wordWrap",
+      "label": "Toggle word wrap",
+      "category": "View",
+      "keys": "Alt-z",
+      "shortcut": {
+        "mac": "⌥Z",
+        "win": "Alt+Z"
+      }
+    },
+    {
+      "id": "editor.zenMode",
+      "label": "Toggle zen mode",
+      "category": "View",
+      "keys": "Mod-Alt-0",
+      "shortcut": {
+        "mac": "⌘⌥0",
+        "win": "Ctrl+Alt+0"
+      }
+    },
+    {
+      "id": "editor.zoomIn",
+      "label": "Zoom in",
+      "category": "View",
+      "keys": "Mod-=",
+      "shortcut": {
+        "mac": "⌘=",
+        "win": "Ctrl+="
+      }
+    },
+    {
+      "id": "editor.zoomOut",
+      "label": "Zoom out",
+      "category": "View",
+      "keys": "Mod--",
+      "shortcut": {
+        "mac": "⌘-",
+        "win": "Ctrl+-"
+      }
+    },
+    {
+      "id": "editor.zoomReset",
+      "label": "Reset zoom",
+      "category": "View",
+      "keys": "Mod-0",
+      "shortcut": {
+        "mac": "⌘0",
+        "win": "Ctrl+0"
+      }
+    }
+  ],
+  "prefs": [
+    {
+      "name": "showCreateOnBrowse",
+      "key": "dbgui.showCreateOnBrowse",
+      "default": false
+    },
+    {
+      "name": "defaultLimit",
+      "key": "dbgui.defaultLimit",
+      "default": 1000
+    },
+    {
+      "name": "editorWrap",
+      "key": "dbgui:editor-wrap",
+      "default": false
+    },
+    {
+      "name": "copyHeaders",
+      "key": "dbgui.copyHeaders",
+      "default": true
+    },
+    {
+      "name": "mapTilesAck",
+      "key": "dbgui.mapTilesAck",
+      "default": false
+    },
+    {
+      "name": "editorKeywordCase",
+      "key": "dbgui.editorKeywordCase",
+      "default": "upper"
+    },
+    {
+      "name": "editorMinimap",
+      "key": "dbgui.editorMinimap",
+      "default": true
+    },
+    {
+      "name": "editorChangeBars",
+      "key": "dbgui.editorChangeBars",
+      "default": false
+    },
+    {
+      "name": "editorHints",
+      "key": "dbgui.editorHints",
+      "default": true
+    },
+    {
+      "name": "editorAutoFormat",
+      "key": "dbgui.editorAutoFormat",
+      "default": "off"
+    },
+    {
+      "name": "writeConfirm",
+      "key": "dbgui.writeConfirm",
+      "default": "destructive"
+    },
+    {
+      "name": "appFontSize",
+      "key": "dbgui.appFontSize",
+      "default": 13
+    },
+    {
+      "name": "exportEol",
+      "key": "dbgui.exportEol",
+      "default": "platform"
+    },
+    {
+      "name": "qualityDetail",
+      "key": "dbgui.qualityDetail",
+      "default": "standard"
+    },
+    {
+      "name": "qualityFloor",
+      "key": "dbgui.qualityFloor",
+      "default": "info"
+    },
+    {
+      "name": "qualityShowPassed",
+      "key": "dbgui.qualityShowPassed",
+      "default": false
+    },
+    {
+      "name": "serverLog",
+      "key": "dbgui.serverLog",
+      "default": false
+    },
+    {
+      "name": "queryWarnings",
+      "key": "dbgui.queryWarnings",
+      "default": true
+    },
+    {
+      "name": "prodRowCap",
+      "key": "dbgui.prodRowCap",
+      "default": 10000
+    },
+    {
+      "name": "connectTimeoutSecs",
+      "key": "dbgui.connectTimeoutSecs",
+      "default": 5
+    },
+    {
+      "name": "editorInvisibles",
+      "key": "dbgui.editorInvisibles",
+      "default": false
+    },
+    {
+      "name": "editorZoom",
+      "key": "dbgui.editorZoom",
+      "default": 100
+    },
+    {
+      "name": "editorRulers",
+      "key": "dbgui.editorRulers",
+      "default": [
+        80,
+        120
+      ]
+    },
+    {
+      "name": "queryTimeoutSecs",
+      "key": "dbgui.queryTimeoutSecs",
+      "default": 0
+    },
+    {
+      "name": "beepOnLongQuery",
+      "key": "dbgui.beepOnLongQuery",
+      "default": true
+    },
+    {
+      "name": "notifyOnLongQuery",
+      "key": "dbgui.notifyOnLongQuery",
+      "default": true
+    },
+    {
+      "name": "longQueryBeepSecs",
+      "key": "dbgui.longQueryBeepSecs",
+      "default": 60
+    },
+    {
+      "name": "autoExplainSecs",
+      "key": "dbgui.autoExplainSecs",
+      "default": 5
+    },
+    {
+      "name": "sqlDelimiter",
+      "key": "dbgui.sqlDelimiter",
+      "default": ";"
+    },
+    {
+      "name": "scriptErrorMode",
+      "key": "dbgui.scriptErrorMode",
+      "default": "ask"
+    },
+    {
+      "name": "interactiveKill",
+      "key": "dbgui.interactiveKill",
+      "default": true
+    },
+    {
+      "name": "erMoveMode",
+      "key": "dbgui.erMoveMode",
+      "default": false
+    },
+    {
+      "name": "aiProvider",
+      "key": "dbgui.aiProvider",
+      "default": "anthropic"
+    },
+    {
+      "name": "aiBaseUrl",
+      "key": "dbgui.aiBaseUrl",
+      "default": "https://api.anthropic.com"
+    },
+    {
+      "name": "aiModel",
+      "key": "dbgui.aiModel",
+      "default": "claude-sonnet-4-5"
+    },
+    {
+      "name": "keepAlive",
+      "key": "dbgui.keepAlive",
+      "default": true
+    }
+  ],
+  "dbaViews": {
+    "total": 234,
+    "byEngine": {
+      "sqlite": [
+        {
+          "id": "sq-space",
+          "label": "Space usage",
+          "category": "Storage"
+        },
+        {
+          "id": "sq-tables",
+          "label": "Table sizes",
+          "category": "Storage"
+        },
+        {
+          "id": "sq-index-space",
+          "label": "Index vs table space",
+          "category": "Storage"
+        },
+        {
+          "id": "sq-objects",
+          "label": "Objects",
+          "category": "Schema"
+        },
+        {
+          "id": "sq-columns",
+          "label": "All columns",
+          "category": "Schema"
+        },
+        {
+          "id": "sq-index-cols",
+          "label": "Index columns",
+          "category": "Schema"
+        },
+        {
+          "id": "sq-fks",
+          "label": "Foreign keys",
+          "category": "Schema"
+        },
+        {
+          "id": "sq-unindexed-fks",
+          "label": "Foreign keys without an index",
+          "category": "Schema"
+        },
+        {
+          "id": "sq-no-pk",
+          "label": "Tables without a PRIMARY KEY",
+          "category": "Schema"
+        },
+        {
+          "id": "sq-integrity",
+          "label": "Integrity check",
+          "category": "Integrity"
+        },
+        {
+          "id": "sq-fk-check",
+          "label": "Foreign key violations",
+          "category": "Integrity"
+        },
+        {
+          "id": "sq-analyze",
+          "label": "Planner statistics (ANALYZE)",
+          "category": "Integrity"
+        },
+        {
+          "id": "sq-settings",
+          "label": "Settings",
+          "category": "Config"
+        },
+        {
+          "id": "sq-version",
+          "label": "Library version",
+          "category": "Config"
+        },
+        {
+          "id": "sq-compile",
+          "label": "Compile options",
+          "category": "Config"
+        }
+      ],
+      "parquet": [
+        {
+          "id": "pq-file",
+          "label": "File info",
+          "category": "File"
+        },
+        {
+          "id": "pq-schema",
+          "label": "Schema",
+          "category": "File"
+        },
+        {
+          "id": "pq-keyvalue",
+          "label": "Key/value metadata",
+          "category": "File"
+        },
+        {
+          "id": "pq-rowgroups",
+          "label": "Row groups",
+          "category": "Storage"
+        },
+        {
+          "id": "pq-columnchunks",
+          "label": "Column chunks",
+          "category": "Storage"
+        },
+        {
+          "id": "pq-stats",
+          "label": "Column totals",
+          "category": "Storage"
+        },
+        {
+          "id": "pq-codecs",
+          "label": "Codecs",
+          "category": "Storage"
+        },
+        {
+          "id": "pq-skew",
+          "label": "Size skew across row groups",
+          "category": "Storage"
+        },
+        {
+          "id": "pq-pages",
+          "label": "Pages",
+          "category": "Storage"
+        },
+        {
+          "id": "pq-encodings",
+          "label": "Encodings & dictionary",
+          "category": "Encoding"
+        },
+        {
+          "id": "pq-bloom",
+          "label": "Bloom filters",
+          "category": "Encoding"
+        },
+        {
+          "id": "pq-sorting",
+          "label": "Sort order",
+          "category": "Encoding"
+        },
+        {
+          "id": "pq-nulls",
+          "label": "Null density",
+          "category": "Data shape"
+        },
+        {
+          "id": "pq-cardinality",
+          "label": "Cardinality",
+          "category": "Data shape"
+        },
+        {
+          "id": "pq-health",
+          "label": "File health",
+          "category": "Health"
+        }
+      ],
+      "duckdb": [
+        {
+          "id": "dd-dbs",
+          "label": "Attached databases",
+          "category": "Config"
+        },
+        {
+          "id": "dd-version",
+          "label": "Version & context",
+          "category": "Config"
+        },
+        {
+          "id": "dd-settings",
+          "label": "Settings",
+          "category": "Config"
+        },
+        {
+          "id": "dd-extensions",
+          "label": "Extensions",
+          "category": "Config"
+        },
+        {
+          "id": "dd-tables",
+          "label": "Tables",
+          "category": "Schema"
+        },
+        {
+          "id": "dd-views",
+          "label": "Views",
+          "category": "Schema"
+        },
+        {
+          "id": "dd-columns",
+          "label": "All columns",
+          "category": "Schema"
+        },
+        {
+          "id": "dd-indexes",
+          "label": "Indexes",
+          "category": "Schema"
+        },
+        {
+          "id": "dd-constraints",
+          "label": "Constraints",
+          "category": "Schema"
+        },
+        {
+          "id": "dd-macros",
+          "label": "Macros",
+          "category": "Schema"
+        },
+        {
+          "id": "dd-sequences",
+          "label": "Sequences",
+          "category": "Schema"
+        }
+      ],
+      "mysql": [
+        {
+          "id": "setup-check",
+          "label": "Setup check",
+          "category": "Setup"
+        },
+        {
+          "id": "rt-current",
+          "label": "Statements in flight",
+          "category": "Realtime"
+        },
+        {
+          "id": "rt-session",
+          "label": "Session overview (sys.session)",
+          "category": "Realtime"
+        },
+        {
+          "id": "rt-95th",
+          "label": "95th-percentile statements",
+          "category": "Realtime"
+        },
+        {
+          "id": "rt-analysis",
+          "label": "Statement analysis (digests)",
+          "category": "Realtime"
+        },
+        {
+          "id": "rt-io-waits",
+          "label": "IO waits by event",
+          "category": "Realtime"
+        },
+        {
+          "id": "rt-memory",
+          "label": "Memory by event",
+          "category": "Realtime"
+        },
+        {
+          "id": "stmt-latency",
+          "label": "Top statements by latency",
+          "category": "Queries"
+        },
+        {
+          "id": "stmt-fullscan",
+          "label": "Statements with full table scans",
+          "category": "Queries"
+        },
+        {
+          "id": "stmt-temp",
+          "label": "Statements using temp tables",
+          "category": "Queries"
+        },
+        {
+          "id": "stmt-errors",
+          "label": "Statements with errors / warnings",
+          "category": "Queries"
+        },
+        {
+          "id": "stmt-sorting",
+          "label": "Statements with sorting",
+          "category": "Queries"
+        },
+        {
+          "id": "idx-unused",
+          "label": "Unused indexes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "idx-redundant",
+          "label": "Redundant indexes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "tbl-sizes",
+          "label": "Table sizes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "auto-inc",
+          "label": "Auto-increment usage",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "tbl-stats",
+          "label": "Table IO statistics",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "tbl-fullscan",
+          "label": "Tables with full scans",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "lock-check",
+          "label": "Lock instrumentation status",
+          "category": "Locks"
+        },
+        {
+          "id": "lock-waits",
+          "label": "InnoDB lock waits",
+          "category": "Locks"
+        },
+        {
+          "id": "data-locks",
+          "label": "Current data locks",
+          "category": "Locks"
+        },
+        {
+          "id": "data-locks-maria",
+          "label": "Current data locks",
+          "category": "Locks"
+        },
+        {
+          "id": "mdl-waits",
+          "label": "Metadata lock waits",
+          "category": "Locks"
+        },
+        {
+          "id": "trx-active",
+          "label": "Active transactions",
+          "category": "Locks"
+        },
+        {
+          "id": "my-partitions",
+          "label": "Partitions",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "my-binlogs",
+          "label": "Binary logs",
+          "category": "Replication"
+        },
+        {
+          "id": "my-binlog-config",
+          "label": "Binary log settings & position",
+          "category": "Replication"
+        },
+        {
+          "id": "my-binlog-config-maria",
+          "label": "Binary log settings & position",
+          "category": "Replication"
+        },
+        {
+          "id": "my-events",
+          "label": "Scheduled events",
+          "category": "Maintenance"
+        },
+        {
+          "id": "repl-status",
+          "label": "Replication channels & workers",
+          "category": "Replication"
+        },
+        {
+          "id": "repl-status-maria",
+          "label": "Replica status",
+          "category": "Replication"
+        },
+        {
+          "id": "mem-host",
+          "label": "Memory by host",
+          "category": "Resources"
+        },
+        {
+          "id": "user-summary",
+          "label": "User summary",
+          "category": "Resources"
+        },
+        {
+          "id": "host-summary",
+          "label": "Host summary",
+          "category": "Resources"
+        },
+        {
+          "id": "io-files",
+          "label": "IO by file",
+          "category": "Resources"
+        },
+        {
+          "id": "bp-schema",
+          "label": "Buffer pool by schema",
+          "category": "Resources"
+        },
+        {
+          "id": "host-stmt",
+          "label": "Host summary by statement type",
+          "category": "Resources"
+        },
+        {
+          "id": "user-stmt",
+          "label": "User summary by statement type",
+          "category": "Resources"
+        }
+      ],
+      "postgres": [
+        {
+          "id": "pgss-top",
+          "label": "Top statements (pg_stat_statements)",
+          "category": "Queries"
+        },
+        {
+          "id": "pg-long-tx",
+          "label": "Long-running transactions",
+          "category": "Queries"
+        },
+        {
+          "id": "pg-conn-state",
+          "label": "Connections by state",
+          "category": "Queries"
+        },
+        {
+          "id": "pg-functions",
+          "label": "Function statistics",
+          "category": "Queries"
+        },
+        {
+          "id": "pg-sizes",
+          "label": "Table sizes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-idx-unused",
+          "label": "Unused indexes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-seqscan",
+          "label": "Sequential scan hotspots",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-cache",
+          "label": "Cache hit ratio per table",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-locks",
+          "label": "Lock waits",
+          "category": "Locks"
+        },
+        {
+          "id": "pg-block-tree",
+          "label": "Blocking tree (pairs)",
+          "category": "Locks"
+        },
+        {
+          "id": "pg-replication",
+          "label": "Replication (pg_stat_replication)",
+          "category": "Replication"
+        },
+        {
+          "id": "pg-slots",
+          "label": "Replication slots",
+          "category": "Replication"
+        },
+        {
+          "id": "pg-bgwriter",
+          "label": "Bgwriter / checkpoints",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-wal",
+          "label": "WAL statistics",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-settings",
+          "label": "Non-default settings",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-dead",
+          "label": "Dead tuples (bloat candidates)",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-bloat-tables",
+          "label": "Table bloat (estimate)",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-autovac-due",
+          "label": "Autovacuum backlog vs threshold",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-freeze-age",
+          "label": "Freeze age per table",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-wraparound",
+          "label": "Transaction ID wraparound",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-freeze-blockers",
+          "label": "What is holding back freezing",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-progress-vacuum",
+          "label": "Vacuum in progress",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-progress-other",
+          "label": "Index builds, cluster, copy in progress",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-toast",
+          "label": "TOAST pressure",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-idx-duplicate",
+          "label": "Duplicate / redundant indexes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-idx-invalid",
+          "label": "Invalid and unready indexes",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-fk-unindexed",
+          "label": "Foreign keys with no index",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-idx-vs-table",
+          "label": "Indexes larger than their table",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-idx-write-cost",
+          "label": "Write-heavy tables by index count",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pgss-io",
+          "label": "Top statements by I/O",
+          "category": "Queries"
+        },
+        {
+          "id": "pgss-temp",
+          "label": "Statements spilling to disk",
+          "category": "Queries"
+        },
+        {
+          "id": "pgss-variance",
+          "label": "Statements that are sometimes fine",
+          "category": "Queries"
+        },
+        {
+          "id": "pgss-wal",
+          "label": "Statements by WAL generated",
+          "category": "Queries"
+        },
+        {
+          "id": "pg-stat-io",
+          "label": "I/O by backend type (PG 16+)",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-checkpointer",
+          "label": "Checkpoints (PG 17+)",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-temp-spill",
+          "label": "Temp files and conflicts per database",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-conn-headroom",
+          "label": "Connection headroom",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-slot-risk",
+          "label": "Replication slot risk",
+          "category": "Replication"
+        },
+        {
+          "id": "pg-subscriptions",
+          "label": "Logical replication subscriptions",
+          "category": "Replication"
+        },
+        {
+          "id": "pg-archiver",
+          "label": "WAL archiver health",
+          "category": "Replication"
+        },
+        {
+          "id": "pg-rls-gap",
+          "label": "RLS enabled with no policy",
+          "category": "Security"
+        },
+        {
+          "id": "pg-secdef-path",
+          "label": "SECURITY DEFINER with a mutable search_path",
+          "category": "Security"
+        },
+        {
+          "id": "pg-not-valid",
+          "label": "NOT VALID constraints",
+          "category": "Security"
+        },
+        {
+          "id": "pg-role-expiry",
+          "label": "Roles, superusers and expiry",
+          "category": "Security"
+        },
+        {
+          "id": "pg-stats-skew",
+          "label": "Column statistics worth doubting",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-never-analyzed",
+          "label": "Tables the planner is guessing about",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-extensions",
+          "label": "Extensions installed and available",
+          "category": "Server & config"
+        },
+        {
+          "id": "pg-partitions",
+          "label": "Partitions and the default partition",
+          "category": "Indexes & schema"
+        },
+        {
+          "id": "pg-vacuum",
+          "label": "Vacuum / analyze history",
+          "category": "Maintenance"
+        },
+        {
+          "id": "pg-postgis-version",
+          "label": "PostGIS version & extensions",
+          "category": "Spatial"
+        },
+        {
+          "id": "pg-geometry-columns",
+          "label": "Geometry columns",
+          "category": "Spatial"
+        },
+        {
+          "id": "pg-geography-columns",
+          "label": "Geography columns",
+          "category": "Spatial"
+        },
+        {
+          "id": "pg-spatial-index",
+          "label": "Spatial index coverage (missing GiST)",
+          "category": "Spatial"
+        },
+        {
+          "id": "pg-mixed-srid",
+          "label": "Mixed-SRID tables",
+          "category": "Spatial"
+        },
+        {
+          "id": "pg-invalid-geom",
+          "label": "Invalid-geometry check (per column)",
+          "category": "Spatial"
+        }
+      ],
+      "redis": [
+        {
+          "id": "r-clients",
+          "label": "Connected clients",
+          "category": "Realtime"
+        },
+        {
+          "id": "r-slowlog",
+          "label": "Slow commands",
+          "category": "Realtime"
+        },
+        {
+          "id": "r-slowlog-len",
+          "label": "Slowlog length",
+          "category": "Realtime"
+        },
+        {
+          "id": "r-commandstats",
+          "label": "Command call stats",
+          "category": "Realtime"
+        },
+        {
+          "id": "r-latencystats",
+          "label": "Latency percentiles",
+          "category": "Realtime"
+        },
+        {
+          "id": "r-memory",
+          "label": "Memory breakdown",
+          "category": "Memory"
+        },
+        {
+          "id": "r-memory-doctor",
+          "label": "Memory doctor",
+          "category": "Memory"
+        },
+        {
+          "id": "r-info-memory",
+          "label": "Memory info",
+          "category": "Memory"
+        },
+        {
+          "id": "r-keyspace",
+          "label": "Keyspace summary",
+          "category": "Keyspace"
+        },
+        {
+          "id": "r-dbsize",
+          "label": "Key count (current db)",
+          "category": "Keyspace"
+        },
+        {
+          "id": "r-stats",
+          "label": "Hit rate & evictions",
+          "category": "Keyspace"
+        },
+        {
+          "id": "r-persistence",
+          "label": "Persistence",
+          "category": "Resilience"
+        },
+        {
+          "id": "r-replication",
+          "label": "Replication",
+          "category": "Resilience"
+        },
+        {
+          "id": "r-role",
+          "label": "Role",
+          "category": "Resilience"
+        },
+        {
+          "id": "r-config-mem",
+          "label": "Memory config",
+          "category": "Config"
+        },
+        {
+          "id": "r-config-persist",
+          "label": "Persistence config",
+          "category": "Config"
+        },
+        {
+          "id": "r-config-limits",
+          "label": "Limits & timeouts",
+          "category": "Config"
+        },
+        {
+          "id": "r-config-all",
+          "label": "All settings",
+          "category": "Config"
+        },
+        {
+          "id": "r-info-server",
+          "label": "Server info",
+          "category": "Server"
+        },
+        {
+          "id": "r-info-clients",
+          "label": "Client summary",
+          "category": "Server"
+        },
+        {
+          "id": "r-acl",
+          "label": "ACL users",
+          "category": "Server"
+        },
+        {
+          "id": "r-modules",
+          "label": "Loaded modules",
+          "category": "Server"
+        }
+      ],
+      "clickhouse": [
+        {
+          "id": "ch-overview",
+          "label": "Table overview",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-partitions",
+          "label": "Partitions",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-ttl",
+          "label": "TTL policies",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-ttl-debt",
+          "label": "TTL debt (overdue parts)",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-lowcard",
+          "label": "LowCardinality candidates",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-storage",
+          "label": "Storage policies",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-keys",
+          "label": "Key columns",
+          "category": "Schema"
+        },
+        {
+          "id": "ch-projections",
+          "label": "Projections",
+          "category": "Schema"
+        },
+        {
+          "id": "ch-clusters",
+          "label": "Clusters",
+          "category": "Replication"
+        },
+        {
+          "id": "ch-repl-queue",
+          "label": "Replication queue",
+          "category": "Replication"
+        },
+        {
+          "id": "ch-dist-queue",
+          "label": "Distributed queue",
+          "category": "Replication"
+        },
+        {
+          "id": "ch-db-replicas",
+          "label": "Replicated databases",
+          "category": "Replication"
+        },
+        {
+          "id": "ch-zookeeper",
+          "label": "Keeper / ZooKeeper",
+          "category": "Replication"
+        },
+        {
+          "id": "ch-part-log",
+          "label": "Recent part events",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-moves",
+          "label": "Part moves in flight",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-async-inserts",
+          "label": "Async insert buffer",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-view-refreshes",
+          "label": "Refreshable views",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-dropped",
+          "label": "Dropped tables pending",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-warnings",
+          "label": "Server warnings",
+          "category": "Server"
+        },
+        {
+          "id": "ch-errors-total",
+          "label": "Error counters",
+          "category": "Server"
+        },
+        {
+          "id": "ch-text-log",
+          "label": "Server log (warn+)",
+          "category": "Server"
+        },
+        {
+          "id": "ch-mt-settings",
+          "label": "Non-default MergeTree settings",
+          "category": "Server"
+        },
+        {
+          "id": "ch-user-processes",
+          "label": "Memory by user",
+          "category": "Server"
+        },
+        {
+          "id": "ch-grants",
+          "label": "Grants",
+          "category": "Security"
+        },
+        {
+          "id": "ch-row-policies",
+          "label": "Row policies",
+          "category": "Security"
+        },
+        {
+          "id": "ch-quotas",
+          "label": "Quota usage",
+          "category": "Security"
+        },
+        {
+          "id": "ch-tables",
+          "label": "Disk usage (measured)",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-columns",
+          "label": "Column compression",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-parts",
+          "label": "Parts per partition",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-part-detail",
+          "label": "Largest individual parts",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-detached",
+          "label": "Detached parts",
+          "category": "Storage"
+        },
+        {
+          "id": "ch-skip-idx",
+          "label": "Data-skipping indices",
+          "category": "Schema"
+        },
+        {
+          "id": "ch-dicts",
+          "label": "Dictionaries",
+          "category": "Schema"
+        },
+        {
+          "id": "ch-dict-load",
+          "label": "Dictionary load status",
+          "category": "Schema"
+        },
+        {
+          "id": "ch-views",
+          "label": "Views & materialized views",
+          "category": "Schema"
+        },
+        {
+          "id": "ch-processes",
+          "label": "Running queries",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-merges",
+          "label": "Merges & mutations in flight",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-mutations",
+          "label": "Mutations",
+          "category": "Activity"
+        },
+        {
+          "id": "ch-slow",
+          "label": "Slowest queries (24h)",
+          "category": "Query log"
+        },
+        {
+          "id": "ch-patterns",
+          "label": "Query patterns (by shape)",
+          "category": "Query log"
+        },
+        {
+          "id": "ch-heavy",
+          "label": "Heaviest by rows read (24h)",
+          "category": "Query log"
+        },
+        {
+          "id": "ch-errors",
+          "label": "Failed queries (24h)",
+          "category": "Query log"
+        },
+        {
+          "id": "ch-metrics",
+          "label": "Current metrics",
+          "category": "Server"
+        },
+        {
+          "id": "ch-async",
+          "label": "Asynchronous metrics",
+          "category": "Server"
+        },
+        {
+          "id": "ch-events",
+          "label": "Cumulative events",
+          "category": "Server"
+        },
+        {
+          "id": "ch-settings",
+          "label": "Changed settings",
+          "category": "Server"
+        },
+        {
+          "id": "ch-disks",
+          "label": "Disks",
+          "category": "Server"
+        },
+        {
+          "id": "ch-replicas",
+          "label": "Replicated tables",
+          "category": "Replication"
+        },
+        {
+          "id": "ch-users",
+          "label": "Users",
+          "category": "Security"
+        }
+      ],
+      "sqlserver": [
+        {
+          "id": "ms-processes",
+          "label": "Sessions & requests",
+          "category": "Sessions"
+        },
+        {
+          "id": "ms-blocking",
+          "label": "Blocking chains",
+          "category": "Sessions"
+        },
+        {
+          "id": "ms-digests",
+          "label": "Heaviest statements (by CPU)",
+          "category": "Workload"
+        },
+        {
+          "id": "ms-fragmentation",
+          "label": "Index fragmentation",
+          "category": "Indexes"
+        },
+        {
+          "id": "ms-unused-indexes",
+          "label": "Unused indexes",
+          "category": "Indexes"
+        },
+        {
+          "id": "ms-qs-state",
+          "label": "Query Store state",
+          "category": "Query Store"
+        },
+        {
+          "id": "ms-qs-regressed",
+          "label": "Regressed queries",
+          "category": "Query Store"
+        },
+        {
+          "id": "ms-qs-top",
+          "label": "Top queries by total time",
+          "category": "Query Store"
+        },
+        {
+          "id": "ms-plan-cache",
+          "label": "Plan cache — heaviest",
+          "category": "Workload"
+        },
+        {
+          "id": "ms-adhoc-bloat",
+          "label": "Ad-hoc plan bloat",
+          "category": "Workload"
+        },
+        {
+          "id": "ms-waits",
+          "label": "Wait statistics",
+          "category": "Waits"
+        },
+        {
+          "id": "ms-missing-idx",
+          "label": "Missing indexes",
+          "category": "Indexes"
+        },
+        {
+          "id": "ms-idx-usage",
+          "label": "Index usage vs write cost",
+          "category": "Indexes"
+        },
+        {
+          "id": "ms-dup-idx",
+          "label": "Duplicate & overlapping indexes",
+          "category": "Indexes"
+        },
+        {
+          "id": "ms-heaps",
+          "label": "Heaps",
+          "category": "Indexes"
+        },
+        {
+          "id": "ms-db-files",
+          "label": "Database files & autogrowth",
+          "category": "Storage"
+        },
+        {
+          "id": "ms-vlf",
+          "label": "Log VLF count",
+          "category": "Storage"
+        },
+        {
+          "id": "ms-tempdb",
+          "label": "tempdb usage",
+          "category": "Storage"
+        },
+        {
+          "id": "ms-table-space",
+          "label": "Table sizes",
+          "category": "Storage"
+        },
+        {
+          "id": "ms-backups",
+          "label": "Last backup per database",
+          "category": "Health"
+        },
+        {
+          "id": "ms-db-state",
+          "label": "Database settings",
+          "category": "Health"
+        },
+        {
+          "id": "ms-agent-jobs",
+          "label": "Agent job failures",
+          "category": "Health"
+        },
+        {
+          "id": "ms-stats-stale",
+          "label": "Stale statistics",
+          "category": "Health"
+        },
+        {
+          "id": "ms-memory",
+          "label": "Memory",
+          "category": "Health"
+        },
+        {
+          "id": "ms-logins",
+          "label": "Server logins",
+          "category": "Security"
+        },
+        {
+          "id": "ms-db-principals",
+          "label": "Database users & roles",
+          "category": "Security"
+        },
+        {
+          "id": "ms-permissions",
+          "label": "Explicit permissions",
+          "category": "Security"
+        },
+        {
+          "id": "ms-config-nondefault",
+          "label": "Non-default configuration",
+          "category": "Config"
+        },
+        {
+          "id": "ms-server-info",
+          "label": "Server & host",
+          "category": "Config"
+        }
+      ]
+    }
+  },
+  "counts": {
+    "panels": 34,
+    "commands": 70,
+    "engines": 9,
+    "capabilities": 32,
+    "prefs": 36,
+    "dbaViews": 234
+  }
+}

@@ -1,0 +1,214 @@
+{
+  "prefs": {
+    "showCreateOnBrowse": {
+      "label": "Insert SHOW CREATE output into the editor when browsing a table/view",
+      "section": "Editor (Editor & browsing)",
+      "description": "When you browse a table or view, inserts its SHOW CREATE (DDL) output into the SQL editor.",
+      "values": "checkbox: on or off",
+      "default": "false"
+    },
+    "defaultLimit": {
+      "label": "Default row limit",
+      "section": "Editor (Editor & browsing)",
+      "description": "Default row cap applied to SELECTs that have no LIMIT of their own; applies to newly opened sessions and can be overridden live per session from the status bar.",
+      "values": "one of 100, 1000, 10000, or 0 (No limit)",
+      "default": "1000"
+    },
+    "editorWrap": {
+      "label": "Word-wrap the SQL editor by default",
+      "section": "Editor (Editor & browsing)",
+      "description": "Turns on word-wrap in the SQL editor for newly opened editors; can be toggled live per editor via the word-wrap shortcut or View menu.",
+      "values": "checkbox: on or off",
+      "default": "false"
+    },
+    "copyHeaders": {
+      "label": "Include column headers when copying cells",
+      "section": "Editor (Editor & browsing)",
+      "description": "Includes the column header row when copying cells from a result grid; can also be toggled with a shortcut.",
+      "values": "checkbox: on or off",
+      "default": "true"
+    },
+    "editorKeywordCase": {
+      "label": "SQL keyword case",
+      "section": "Editor (Editor & browsing)",
+      "description": "Controls the case that autocompletion inserts for SQL keywords (SELECT vs select); formatting itself follows the active formatting profile.",
+      "values": "'upper' (SELECT) or 'lower' (select)",
+      "default": "upper"
+    },
+    "editorMinimap": {
+      "label": "Editor minimap",
+      "section": "Editor (Editor & browsing)",
+      "description": "Shows the code minimap (line-density map with viewport and search markers) beside the SQL editor; toggles live.",
+      "values": "checkbox: on or off",
+      "default": "true"
+    },
+    "editorAutoFormat": {
+      "label": "Auto-format SQL",
+      "section": "Editor (Editor & browsing)",
+      "description": "Controls when the built-in beautifier auto-formats SQL in the editor: never, when a semicolon completes a statement, or after pasting SQL. Strings, quoted identifiers and comments are never touched.",
+      "values": "'off', 'semicolon', or 'paste'",
+      "default": "off"
+    },
+    "writeConfirm": {
+      "label": "Confirm writes",
+      "section": "Editor (Editor & browsing)",
+      "description": "Controls when the write-confirmation window (showing the statement and affected-row count) appears before running a write.",
+      "values": "'destructive' (UPDATE/DELETE always, others on prod), 'always' (every write), or 'prod' (only on prod, or a write with no WHERE)",
+      "default": "destructive"
+    },
+    "appFontSize": {
+      "label": "Font size (app-wide; the grid has its own Aa popover)",
+      "section": "Appearance",
+      "description": "App-wide base font size in pixels; the result grid has its own separate font controls in its Aa popover.",
+      "values": "integer px, clamped to the 10-20 range (FONT_SIZE_MIN-FONT_SIZE_MAX)",
+      "default": "13"
+    },
+    "exportEol": {
+      "label": "Line endings in exported files",
+      "section": "Editor (Editor & browsing)",
+      "description": "Line endings written into exported text files (not the clipboard, which is left untouched).",
+      "values": "'platform' (CRLF on Windows, LF elsewhere), 'lf' (\\n), or 'crlf' (\\r\\n)",
+      "default": "platform"
+    },
+    "qualityDetail": {
+      "label": "(not surfaced in SettingsModal)",
+      "section": "Not shown in Settings UI (set elsewhere, e.g. the SQL Quality report view)",
+      "description": "How verbose a SQL Quality report is; the same findings can be rendered at five depths, applying to both the screen and exports.",
+      "values": "'oneline', 'summary', 'standard', 'deep', or 'forensic'",
+      "default": "standard"
+    },
+    "qualityFloor": {
+      "label": "(not surfaced in SettingsModal)",
+      "section": "Not shown in Settings UI (set elsewhere, e.g. the SQL Quality report view)",
+      "description": "The minimum severity a quality report renders; findings less severe than this floor are hidden ('info' shows everything).",
+      "values": "'info', 'yellow', 'orange', or 'red'",
+      "default": "info"
+    },
+    "qualityShowPassed": {
+      "label": "(not surfaced in SettingsModal)",
+      "section": "Not shown in Settings UI (set elsewhere, e.g. the SQL Quality report view)",
+      "description": "Shows the quality checks that passed, at any detail level.",
+      "values": "checkbox: on or off",
+      "default": "false"
+    },
+    "serverLog": {
+      "label": "Write a per-connection server activity log",
+      "section": "Logging",
+      "description": "Mirrors session logs to each connection's log_dir (set in the connection editor); applies to newly opened sessions, appending to <dir>/<connection>.log.",
+      "values": "checkbox: on or off",
+      "default": "false"
+    },
+    "queryWarnings": {
+      "label": "Fetch server warnings",
+      "section": "Logging",
+      "description": "Fetches MySQL server warnings (SHOW WARNINGS) after write-family statements, at the cost of an extra roundtrip on writes.",
+      "values": "checkbox: on or off",
+      "default": "true"
+    },
+    "prodRowCap": {
+      "label": "Prod row cap",
+      "section": "Safety",
+      "description": "Soft row cap that replaces the default LIMIT on prod sessions; the status-bar override still wins, and 0 turns it off.",
+      "values": "one of 1000, 10000, 100000, or 0 (Off)",
+      "default": "10000"
+    },
+    "connectTimeoutSecs": {
+      "label": "Connect timeout",
+      "section": "Connections",
+      "description": "How long to wait, in seconds, for a server to answer before giving up; a connection's own Advanced connect timeout still overrides it. Pushed to the backend so it applies to connections without their own timeout.",
+      "values": "integer seconds; stepper ranges 1 to 300",
+      "default": "5"
+    },
+    "editorInvisibles": {
+      "label": "(not surfaced in SettingsModal)",
+      "section": "Not shown in Settings UI (toggled elsewhere, e.g. an editor View control)",
+      "description": "Renders whitespace (spaces, tabs and trailing whitespace) in the editor, like Notepad++'s Show Symbol.",
+      "values": "checkbox: on or off",
+      "default": "false"
+    },
+    "editorZoom": {
+      "label": "(not surfaced in SettingsModal)",
+      "section": "Not shown in Settings UI (adjusted via editor zoom commands)",
+      "description": "Per-editor font zoom in percent, independent of the app-wide font size.",
+      "values": "integer percent (100 = no zoom)",
+      "default": "100"
+    },
+    "editorRulers": {
+      "label": "(not surfaced in SettingsModal)",
+      "section": "Not shown in Settings UI (set elsewhere)",
+      "description": "Vertical right-margin guides drawn at the given character columns (like VS Code's editor.rulers); an empty list turns them off.",
+      "values": "comma-separated list of positive column numbers; empty list = off",
+      "default": "80,120"
+    },
+    "queryTimeoutSecs": {
+      "label": "Query timeout",
+      "section": "Connections",
+      "description": "Client-side deadline, in seconds, that kills a query running longer than this; a connection's own Advanced query timeout still wins, and 0 means no deadline. Enforced client-side (issues the same KILL as the Stop button) so it covers writes too, unlike MySQL's max_execution_time.",
+      "values": "integer seconds; 0 = off; stepper ranges 0 to 3600 in steps of 15",
+      "default": "0"
+    },
+    "beepOnLongQuery": {
+      "label": "Beep when a long-running query finishes",
+      "section": "Editor (Editor & browsing)",
+      "description": "Plays a sound when a query that ran at least the long-query threshold finishes (rising on success, falling on failure), so you can tell what happened from another window.",
+      "values": "checkbox: on or off",
+      "default": "true"
+    },
+    "longQueryBeepSecs": {
+      "label": "Long-running query is",
+      "section": "Editor (Editor & browsing)",
+      "description": "How long a query must run, in seconds, before its completion is worth a beep; queries faster than this never beep.",
+      "values": "integer seconds; stepper ranges 1 to 3600 in steps of 5",
+      "default": "60"
+    },
+    "sqlDelimiter": {
+      "label": "Statement delimiter",
+      "section": "Editor (Editor & browsing)",
+      "description": "The statement terminator used to split a script into statements; almost always ';'. A MySQL DELIMITER directive inside the script still overrides it from that line on, and leaving it empty resets it to ';'.",
+      "values": "free text (e.g. ';', '/', 'GO'); empty resets to ';'",
+      "default": ";"
+    },
+    "scriptErrorMode": {
+      "label": "On a failed statement",
+      "section": "Safety",
+      "description": "What happens when a statement fails partway through a multi-statement run: prompt (ignore, ignore all, or stop) or abort the run outright marking the rest skipped.",
+      "values": "'ask' or 'stop'",
+      "default": "ask"
+    },
+    "interactiveKill": {
+      "label": "Interactive kill",
+      "section": "Safety",
+      "description": "Offers one-click kill controls (kill query / kill connection) on the process list; turn it off to make the process list a read-only monitor.",
+      "values": "checkbox: on or off",
+      "default": "true"
+    },
+    "aiProvider": {
+      "label": "Provider",
+      "section": "AI (AI assistant)",
+      "description": "Which AI backend the editor's generate-SQL, explain and Fix-with-AI actions use.",
+      "values": "'anthropic' (Messages API) or 'openai' (OpenAI-compatible /chat/completions)",
+      "default": "anthropic"
+    },
+    "aiBaseUrl": {
+      "label": "Endpoint base URL",
+      "section": "AI (AI assistant)",
+      "description": "Base URL of the AI endpoint the API key is sent to.",
+      "values": "free-text URL (e.g. https://api.anthropic.com or https://api.openai.com/v1)",
+      "default": "https://api.anthropic.com"
+    },
+    "aiModel": {
+      "label": "Model",
+      "section": "AI (AI assistant)",
+      "description": "The model name requested from the AI provider.",
+      "values": "free-text model id (e.g. claude-sonnet-4-5 or gpt-4o)",
+      "default": "claude-sonnet-4-5"
+    },
+    "keepAlive": {
+      "label": "Keep connections alive",
+      "section": "Connections",
+      "description": "Pings open sessions periodically and again on window focus, so a pool dropped during sleep or a VPN blip is re-established before your next query hits a dead socket.",
+      "values": "checkbox: on or off",
+      "default": "true"
+    }
+  }
+}

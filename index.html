@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" spellcheck="false" autocorrect="off" autocapitalize="off">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TxUI</title>
+    <!-- The icon is a tiny static file; warm it immediately so the splash
+         paints it on the first frame, not a beat later. -->
+    <link rel="preload" as="image" href="/txui-icon.png" />
+    <style>
+      /* Splash — painted by the FIRST frame, before any JS or CSS bundle
+         arrives. The dark background is the app's default --bg so the webview
+         never flashes white. Deliberately minimal: the app icon alone,
+         centred, one gentle fade-in — no scale, no stagger, nothing that can
+         read as a blink. The app crossfades in underneath only after it has
+         actually painted (see main.tsx), and the splash stays up a minimum
+         time so a fast machine never produces a flash-in/flash-out. The
+         fades are .2s and the floor 150ms (main.tsx): measured, the app has
+         painted at ~70ms, so the old 600ms floor + .45s fade was a full
+         second of waiting on a startup that was already done. */
+      html, body { background: #1a1a1f; margin: 0; height: 100%; }
+      #txui-splash {
+        position: fixed; inset: 0; z-index: 9999;
+        display: flex; align-items: center; justify-content: center;
+        background: #1a1a1f;
+        opacity: 1; transition: opacity .2s ease;
+      }
+      #txui-splash img {
+        width: 128px; height: 128px;
+        animation: txui-splash-in .4s ease-out both;
+      }
+      @keyframes txui-splash-in {
+        from { opacity: 0; }
+        to   { opacity: 1; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #txui-splash img { animation: none; }
+      }
+      /* main.tsx flips this once React has painted its first real frame. */
+      body.txui-ready #txui-splash { opacity: 0; pointer-events: none; }
+      /* The app itself crossfades in underneath, so the swap is a fade, not
+         a cut — and it stays invisible until that moment, so a half-built
+         UI can never show through. */
+      body:not(.txui-ready) #root { opacity: 0; }
+      #root { transition: opacity .2s ease; }
+      body.txui-ready #root { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <div id="txui-splash" aria-hidden="true">
+      <img src="/txui-icon.png" alt="" />
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      /* Hard fallback: a wedged app (HMR, a crash before mount) must never
+         trap the user on the logo — reveal whatever is there after 5 s. The
+         hidden WINDOW itself has the same 5 s net in Rust (lib.rs setup), so
+         even a totally dead webview cannot leave a windowless process. */
+      setTimeout(function () {
+        if (!document.body.classList.contains('txui-ready')) {
+          document.body.classList.add('txui-ready');
+        }
+      }, 5000);
+    </script>
+  </body>
+</html>

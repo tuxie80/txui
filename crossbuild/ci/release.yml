@@ -1,0 +1,125 @@
+# Canonical copy: crossbuild/ci/release.yml
+# Installed at .github/workflows/release.yml — keep the two identical.
+#
+# Release pipeline: all three platforms, every tag, no local machine needed.
+#   git tag v0.58.0 && git push --tags   →  draft GitHub Release with:
+#   macOS universal .dmg/.app · Linux AppImage + .deb · Windows NSIS + MSI
+#
+# Also runs manually (Actions → Release → Run workflow) — artifacts are then
+# uploaded as workflow artifacts instead of a release, for testing the pipe.
+#
+# Why ubuntu-22.04 for Linux: the AppImage/deb inherit the build machine's
+# glibc floor. 22.04 (glibc 2.35) keeps the artifacts runnable on every live
+# distro. Bumping the runner image is a product decision (see
+# crossbuild/README.md, "glibc floor").
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create GitHub Release and upload assets
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS universal binary (ARM + Intel in one bundle)
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+
+          # Linux x86-64 — AppImage + .deb (glibc floor: 2.35)
+          - platform: ubuntu-22.04
+            args: ''
+            rust-targets: ''
+
+          # Windows x86-64 — NSIS installer + MSI (MSI needs real Windows)
+          - platform: windows-latest
+            args: ''
+            rust-targets: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Node ────────────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # ── Rust ────────────────────────────────────────────────────────
+      # rust-toolchain.toml in the repo pins the actual compiler (1.97.1);
+      # rustup auto-installs it on first use. The `stable` here is only a
+      # bootstrap so rustup exists.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-all-crates: true
+
+      # ── Linux system deps ────────────────────────────────────────────
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      # ── Frontend deps ────────────────────────────────────────────────
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # ── Build + publish ─────────────────────────────────────────────
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # macOS code signing + notarization (optional — remove if not signing)
+          # APPLE_CERTIFICATE: base64-encoded .p12 certificate
+          # APPLE_CERTIFICATE_PASSWORD: .p12 password
+          # APPLE_SIGNING_IDENTITY: "Developer ID Application: Your Name (TEAMID)"
+          # APPLE_ID: your@appleid.com
+          # APPLE_PASSWORD: app-specific password from appleid.apple.com
+          # APPLE_TEAM_ID: your 10-char team ID
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+        with:
+          # tagName/releaseName only apply on tag pushes; on manual runs the
+          # action just builds and the upload step below captures artifacts.
+          tagName: ${{ github.ref_name }}
+          releaseName: 'TxUI ${{ github.ref_name }}'
+          releaseBody: |
+            See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+          releaseDraft: true      # review before publishing
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # Manual (non-tag) runs: expose the bundles as workflow artifacts.
+      - name: Upload artifacts (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: txui-${{ matrix.platform }}
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/universal-apple-darwin/release/bundle/**

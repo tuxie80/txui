@@ -1,0 +1,371 @@
+[
+  {
+    "name": "01-shell",
+    "ok": true,
+    "note": "connection sidebar + welcome",
+    "errs": []
+  },
+  {
+    "name": "02-settings",
+    "ok": true,
+    "note": "Settings modal (default tab)",
+    "errs": []
+  },
+  {
+    "name": "02-settings-editor",
+    "ok": true,
+    "note": "Settings → Editor",
+    "errs": []
+  },
+  {
+    "name": "02-settings-connections",
+    "ok": true,
+    "note": "Settings → Connections",
+    "errs": []
+  },
+  {
+    "name": "02-settings-ai",
+    "ok": true,
+    "note": "Settings → AI",
+    "errs": []
+  },
+  {
+    "name": "02-settings-safety",
+    "ok": true,
+    "note": "Settings → Safety",
+    "errs": []
+  },
+  {
+    "name": "02-settings-logging",
+    "ok": true,
+    "note": "Settings → Logging",
+    "errs": []
+  },
+  {
+    "name": "02-settings-security",
+    "ok": true,
+    "note": "Settings → Security",
+    "errs": []
+  },
+  {
+    "name": "02-settings-tabs",
+    "ok": true,
+    "note": "tabs found: 8, captured: 6"
+  },
+  {
+    "name": "03-command-palette",
+    "ok": true,
+    "note": "Cmd+K command palette",
+    "errs": []
+  },
+  {
+    "name": "04-workspace",
+    "ok": true,
+    "note": "editor workspace after connect",
+    "errs": []
+  },
+  {
+    "name": "05-editor-results",
+    "ok": true,
+    "note": "SQL + result grid (with autocomplete)",
+    "errs": []
+  },
+  {
+    "name": "05b-editor-annotated",
+    "ok": true,
+    "note": "editor annotated",
+    "errs": []
+  },
+  {
+    "name": "06-menu-monitor",
+    "ok": true,
+    "note": "Plugins menu: Monitor",
+    "errs": []
+  },
+  {
+    "name": "panel-processes",
+    "ok": true,
+    "note": "Processes (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-locks",
+    "ok": true,
+    "note": "Locks (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-deadlocks",
+    "ok": true,
+    "note": "Deadlocks (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-long-running-query",
+    "ok": true,
+    "note": "Long-running query (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-monitor",
+    "ok": true,
+    "note": "Monitor (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-replication",
+    "ok": true,
+    "note": "Replication (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-digest-history",
+    "ok": true,
+    "note": "Digest history (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-binary-logs",
+    "ok": true,
+    "note": "Binary logs (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-slow-log-analyzer",
+    "ok": true,
+    "note": "Slow-log analyzer (mysql)",
+    "errs": []
+  },
+  {
+    "name": "06-menu-server",
+    "ok": true,
+    "note": "Plugins menu: Server",
+    "errs": []
+  },
+  {
+    "name": "panel-server-variables-status",
+    "ok": true,
+    "note": "Server variables & status (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-dba-views",
+    "ok": true,
+    "note": "DBA views (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-server-tuner",
+    "ok": true,
+    "note": "Server tuner (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-users-grants",
+    "ok": true,
+    "note": "Users & grants (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-analyze-table",
+    "ok": true,
+    "note": "Analyze table (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-maintenance",
+    "ok": true,
+    "note": "Maintenance (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-fleet",
+    "ok": true,
+    "note": "Fleet (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-playground",
+    "ok": true,
+    "note": "Playground (mysql)",
+    "errs": []
+  },
+  {
+    "name": "06-menu-schema",
+    "ok": true,
+    "note": "Plugins menu: Schema",
+    "errs": []
+  },
+  {
+    "name": "panel-er-diagram",
+    "ok": true,
+    "note": "ER diagram (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-table-designer",
+    "ok": true,
+    "note": "Table designer (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-routines",
+    "ok": true,
+    "note": "Routines (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-views",
+    "ok": true,
+    "note": "Views (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-sequences",
+    "ok": true,
+    "note": "Sequences (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-find-usages",
+    "ok": true,
+    "note": "Find usages (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-documenter",
+    "ok": true,
+    "note": "Documenter (mysql)",
+    "errs": []
+  },
+  {
+    "name": "06-menu-data",
+    "ok": true,
+    "note": "Plugins menu: Data",
+    "errs": []
+  },
+  {
+    "name": "panel-data-generator",
+    "ok": true,
+    "note": "Data generator (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-csv-import",
+    "ok": true,
+    "note": "CSV import (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-find-in-database",
+    "ok": true,
+    "note": "Find in database (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-column-profile",
+    "ok": true,
+    "note": "Column profile (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-data-compare",
+    "ok": true,
+    "note": "Data compare (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-result-diff",
+    "ok": true,
+    "note": "Result diff (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-find-in-files",
+    "ok": true,
+    "note": "Find in files (mysql)",
+    "errs": []
+  },
+  {
+    "name": "06-menu-sql",
+    "ok": true,
+    "note": "Plugins menu: SQL",
+    "errs": []
+  },
+  {
+    "name": "panel-txshell",
+    "ok": true,
+    "note": "TxShell (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-sql-quality",
+    "ok": true,
+    "note": "SQL Quality (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-compare-sql",
+    "ok": true,
+    "note": "Compare SQL (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-saved-queries",
+    "ok": true,
+    "note": "Saved queries (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-query-history",
+    "ok": true,
+    "note": "Query history (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-wait-events",
+    "ok": true,
+    "note": "Wait events (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-statement-history",
+    "ok": true,
+    "note": "Statement history (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-listen-notify",
+    "ok": true,
+    "note": "Listen / Notify (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-vacuum-bloat",
+    "ok": true,
+    "note": "Vacuum & Bloat (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-types",
+    "ok": true,
+    "note": "Types (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-dictionary",
+    "ok": true,
+    "note": "Dictionary (clickhouse)",
+    "errs": []
+  },
+  {
+    "name": "connect-redis",
+    "ok": false,
+    "note": "connect failed"
+  },
+  {
+    "name": "_panel-coverage",
+    "ok": true,
+    "note": "panels captured: 42 — analyze-table, binary-logs, column-profile, compare-sql, csv-import, data-compare, data-generator, dba-views, deadlocks, dictionary, digest-history, documenter, er-diagram, find-in-database, find-in-files, find-usages, fleet, listen-notify, locks, long-running-query, maintenance, monitor, playground, processes, query-history, replication, result-diff, routines, saved-queries, sequences, server-tuner, server-variables-status, slow-log-analyzer, sql-quality, statement-history, table-designer, txshell, types, users-grants, vacuum-bloat, views, wait-events"
+  }
+]

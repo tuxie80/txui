@@ -1,0 +1,8 @@
+Icons: Noto Emoji — © Google Inc.
+License: Apache License 2.0
+Source: https://github.com/googlefonts/noto-emoji
+Full text: https://www.apache.org/licenses/LICENSE-2.0
+
+Apache-2.0 permits commercial use, modification, and redistribution.
+No attribution is legally required, but a NOTICE credit is appreciated.
+These PNGs were rasterized (160x160, transparent) from the upstream SVGs.

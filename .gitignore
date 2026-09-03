@@ -1,0 +1,35 @@
+# Build outputs and dependencies
+node_modules/
+dist/
+src-tauri/target/
+
+# Local databases / working data — never publish (names indicate production
+# GCP SQL data; the sample files are consumed by opt-in live tests only)
+*.db
+*.db-wal
+*.db-shm
+*.parquet
+*.tsv
+daemon.db
+
+# Previous-release artifacts kept locally
+0.60.0/
+0.65.0/
+
+# Large loose images not embedded anywhere (txui.png is the icon source for
+# dev/make_icon.py — regenerable input, still too big to publish)
+txui.png
+scr.jpg
+ex1.png
+penguin.png
+database.png
+
+# Internal documentation — design docs, plans, audits and notes stay local,
+# they are not part of the repository. The one exception is the GitHub front
+# page (root README.md).
+*.md
+!/README.md
+
+# OS / editor noise
+.DS_Store
+src-tauri/binaries/

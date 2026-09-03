@@ -1,0 +1,17 @@
+<deadlock><victim-list><victimProcess id="processe80724ca8"/></victim-list><process-list><process id="processe80724ca8" taskpriority="0" logused="240" waitresource="KEY: 5:72057594047037440 (8194443284a0)" waittime="1023" ownerId="75933" transactionname="user_transaction" lasttranstarted="2026-08-28T19:18:29.813" XDES="0xe91100470" lockMode="X" schedulerid="7" kpid="720" status="suspended" spid="74" sbid="0" ecid="0" priority="0" trancount="2" lastbatchstarted="2026-08-28T19:18:29.813" lastbatchcompleted="2026-08-28T19:18:29.813" lastattention="1900-01-01T00:00:00.813" clientapp="SQLCMD" hostname="sql2022" hostpid="3257" loginname="sa" isolationlevel="read committed (2)" xactid="75933" currentdb="5" currentdbname="txui_demo" lockTimeout="4294967295" clientoption1="671088672" clientoption2="128056"><executionStack><frame procname="adhoc" line="5" stmtstart="38" stmtend="138" sqlhandle="0x02000000310fe12e282fb124c0c50631e0a94d6fbc7929080000000000000000000000000000000000000000">
+unknown    </frame><frame procname="adhoc" line="5" stmtstart="216" stmtend="298" sqlhandle="0x02000000c971e30b99c134eaf48a20f2214d3fad7169735d0000000000000000000000000000000000000000">
+unknown    </frame></executionStack><inputbuf>
+SET QUOTED_IDENTIFIER ON;
+BEGIN TRAN;
+UPDATE dbo.dl_b SET v = v + 1 WHERE id = 1;
+WAITFOR DELAY '00:00:04';
+UPDATE dbo.dl_a SET v = v + 1 WHERE id = 1;
+COMMIT;   </inputbuf></process><process id="processe80423848" taskpriority="0" logused="240" waitresource="KEY: 5:72057594047102976 (8194443284a0)" waittime="2047" ownerId="75919" transactionname="user_transaction" lasttranstarted="2026-08-28T19:18:28.783" XDES="0xe92e1c470" lockMode="X" schedulerid="4" kpid="1000" status="suspended" spid="72" sbid="0" ecid="0" priority="0" trancount="2" lastbatchstarted="2026-08-28T19:18:28.773" lastbatchcompleted="2026-08-28T19:18:28.773" lastattention="1900-01-01T00:00:00.773" clientapp="SQLCMD" hostname="sql2022" hostpid="3247" loginname="sa" isolationlevel="read committed (2)" xactid="75919" currentdb="5" currentdbname="txui_demo" lockTimeout="4294967295" clientoption1="671088672" clientoption2="128056"><executionStack><frame procname="adhoc" line="5" stmtstart="38" stmtend="138" sqlhandle="0x020000002a28180440510e357cbfa2efbb7a4184060c36780000000000000000000000000000000000000000">
+unknown    </frame><frame procname="adhoc" line="5" stmtstart="216" stmtend="298" sqlhandle="0x02000000378b38020877e5c5fb075d06a027a7a565f0cd930000000000000000000000000000000000000000">
+unknown    </frame></executionStack><inputbuf>
+SET QUOTED_IDENTIFIER ON;
+BEGIN TRAN;
+UPDATE dbo.dl_a SET v = v + 1 WHERE id = 1;
+WAITFOR DELAY '00:00:04';
+UPDATE dbo.dl_b SET v = v + 1 WHERE id = 1;
+COMMIT;   </inputbuf></process></process-list><resource-list><keylock hobtid="72057594047037440" dbid="5" objectname="txui_demo.dbo.dl_a" indexname="PK__dl_a__3213E83FFED614BB" id="locke9a033180" mode="X" associatedObjectId="72057594047037440"><owner-list><owner id="processe80423848" mode="X"/></owner-list><waiter-list><waiter id="processe80724ca8" mode="X" requestType="wait"/></waiter-list></keylock><keylock hobtid="72057594047102976" dbid="5" objectname="txui_demo.dbo.dl_b" indexname="PK__dl_b__3213E83F9C7FC0C3" id="locke9c3b6c00" mode="X" associatedObjectId="72057594047102976"><owner-list><owner id="processe80724ca8" mode="X"/></owner-list><waiter-list><waiter id="processe80423848" mode="X" requestType="wait"/></waiter-list></keylock></resource-list></deadlock>

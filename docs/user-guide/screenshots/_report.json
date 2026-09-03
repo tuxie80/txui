@@ -1,0 +1,102 @@
+[
+  {
+    "name": "00-first-run",
+    "ok": true,
+    "note": "first launch, no connections yet: the welcome screen lists the five first steps"
+  },
+  {
+    "name": "01-welcome",
+    "ok": true,
+    "note": "start screen: sidebar + welcome prompt"
+  },
+  {
+    "name": "03-sidebar",
+    "ok": true,
+    "note": "sidebar: folders, engine icons, connection rows"
+  },
+  {
+    "name": "08-command-palette",
+    "ok": true,
+    "note": "command palette (⌘K) with a fuzzy query typed"
+  },
+  {
+    "name": "09-settings",
+    "ok": true,
+    "note": "Settings dialog"
+  },
+  {
+    "name": "02-add-connection",
+    "ok": true,
+    "note": "New connection form: engine, host/port, colour, environment, read-only"
+  },
+  {
+    "name": "04-session",
+    "ok": true,
+    "note": "connected session: explorer, query tab, session log"
+  },
+  {
+    "name": "10-mysql-session",
+    "ok": true,
+    "note": "MySQL session with the object explorer expanded"
+  },
+  {
+    "name": "05-query-editor",
+    "ok": true,
+    "note": "SQL editor: dialect-aware highlighting, run and transaction controls"
+  },
+  {
+    "name": "06-result-grid",
+    "ok": true,
+    "note": "result grid: many columns and rows"
+  },
+  {
+    "name": "11-mysql-processlist",
+    "ok": true,
+    "note": "Processlist with rows and the kill / lock-chain controls"
+  },
+  {
+    "name": "13-mysql-tuner",
+    "ok": true,
+    "note": "Tuner report: score and findings"
+  },
+  {
+    "name": "12-mysql-explain",
+    "ok": true,
+    "note": "EXPLAIN visualization of a join"
+  },
+  {
+    "name": "07-data-browser",
+    "ok": true,
+    "note": "read-only data browser on a table"
+  },
+  {
+    "name": "20-pg-session",
+    "ok": true,
+    "note": "PostgreSQL session: tables, partitions, matviews, sequences"
+  },
+  {
+    "name": "21-pg-activity",
+    "ok": true,
+    "note": "pg_stat_activity — Wait events panel"
+  },
+  {
+    "name": "30-redis-browser",
+    "ok": true,
+    "note": "Redis key browser: key list + value viewer"
+  },
+  {
+    "name": "40-clickhouse-session",
+    "ok": true,
+    "note": "ClickHouse session: databases, tables, materialized views"
+  },
+  {
+    "name": "50-sqlite-session",
+    "ok": true,
+    "note": "SQLite session: the file is the connection"
+  },
+  {
+    "name": "51-parquet",
+    "ok": true,
+    "note": "Parquet inspector: schema and file metadata"
+  }
+]

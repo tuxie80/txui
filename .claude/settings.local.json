@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(cargo tauri:*)",
+      "Bash(cargo check:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo search:*)",
+      "Bash(cargo doc:*)",
+      "Bash(npx tsc:*)",
+      "Bash(grep -r MySqlSslMode ~/.cargo/registry/src/**/sqlx*)",
+      "Bash(npx --no tauri --version)",
+      "mcp__datadog__search_datadog_logs",
+      "mcp__datadog__search_datadog_events",
+      "mcp__datadog__search_datadog_metrics",
+      "mcp__datadog__get_datadog_metric",
+      "mcp__datadog__search_datadog_monitors",
+      "mcp__datadog__analyze_datadog_logs",
+      "mcp__datadog__get_datadog_metric_context",
+      "mcp__plugin_claude-mem_mcp-search__search",
+      "Bash(npx eslint *)",
+      "Bash(python3 -c \"import json;p=json.load\\(open\\('package.json'\\)\\);print\\(p['scripts']\\);print\\([d for d in p['dependencies']]\\)\")",
+      "Workflow(code-review)",
+      "Bash(open /Users/j/ai/dbgui/src-tauri/target/release/bundle/macos/TxUI.app)",
+      "Bash(node -e \"console.log\\(JSON.stringify\\(require\\('./package.json'\\).scripts,null,2\\)\\)\")",
+      "Read(//dev/**)",
+      "Bash(awk NR>=1600 && NR<=1625 *)"
+    ]
+  }
+}

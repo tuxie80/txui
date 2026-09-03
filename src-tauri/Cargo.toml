@@ -1,0 +1,242 @@
+[package]
+name = "app"
+version = "0.65.0"
+# One bin now (the mssql-spike probe was retired once the live tests covered it)
+default-run = "TxUI"
+description = "TxUI — fast native database GUI"
+authors = ["Tuxie"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.94"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Explicit bin targets. The binary is named for the product, not "app".
+#
+# `mainBinaryName` in tauri.conf.json renames it inside the .app bundle, which
+# covers a release build. It does NOT cover `cargo tauri dev`, which runs the
+# raw cargo binary — and macOS labels a bare process by its executable name, so
+# the Dock and the menu bar both read "app" for the whole development session.
+[[bin]]
+name = "TxUI"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+tauri                = { version = "2.10.3", features = ["image-png"] }
+tauri-plugin-log     = "2"
+tauri-plugin-dialog  = "2"
+tauri-plugin-notification = "2"
+
+# Async runtime
+# Enumerated instead of "full" (WP-15 15.3): the app uses the multi-thread
+# runtime, async fs/net/process/io/time/sync and the attribute macros — the
+# rest of "full" (signal handling, parking_lot, …) was dead compile time.
+tokio            = { version = "1", features = [
+    "rt-multi-thread", "macros", "fs", "net", "process", "io-util", "time", "sync",
+] }
+futures-util     = "0.3"
+chrono           = "0.4"
+rust_decimal     = "1"
+csv              = "1"
+
+# Serialization
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+
+# DB drivers
+sqlx             = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    # `macros` looks unused (no query!/query_as!/query_scalar! anywhere) but
+    # is LOAD-BEARING: Executor::describe — the Column Map's type source
+    # (commands/quality.rs) — is gated behind it (WP-15 15.3, probed).
+    "macros",
+    # Verify TLS against the OS trust store, not a root list baked into the
+    # binary. Plain `tls-rustls` resolves to `tls-rustls-ring-webpki`, whose
+    # roots are the Mozilla set compiled in at build time — so a server behind
+    # a corporate or internal CA that macOS already trusts still failed
+    # `verify_ca` / `verify_full` unless the user hand-fed a PEM path, while
+    # DBeaver (finding it in the JVM/system store) just connected.
+    # Trade-off taken deliberately: a bare container with no ca-certificates
+    # package would have no roots at all where webpki would have had Mozilla's.
+    # That is not a case a desktop app hits, and a custom CA path still
+    # overrides regardless.
+    "tls-rustls-ring-native-roots",
+    "mysql",
+    # caching_sha2_password / sha256_password FULL auth over a plaintext
+    # socket. MySQL 8's default plugin answers a cold auth cache by handing
+    # the client an RSA public key to encrypt the password with; without this
+    # feature sqlx refuses that exchange ("RSA auth backend disabled") and the
+    # first connect after a server restart or FLUSH PRIVILEGES fails, while a
+    # warm cache (fast auth) had worked fine — a confusing intermittent.
+    # This is the analogue of Connector/J's `allowPublicKeyRetrieval=true`.
+    # TLS still sidesteps it entirely; SSL mode Require remains the safer
+    # answer, since the key exchange is unauthenticated on the first contact.
+    "mysql-rsa",
+    "postgres",
+    "sqlite",
+    "json",
+    "chrono",
+    "rust_decimal",
+    "uuid",
+] }
+redis            = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+
+# MongoDB driver (plan-dba-focus.md WS4: connect + tree + find editor + JSON
+# grid; read-only by design — see db/mongodb.rs). 3.8 is the line whose MSRV
+# (1.88) fits the pinned toolchain (1.97.1). mongodb 3.x needs a bson line
+# chosen explicitly: `bson-2` is the bson 2.x crate, re-exported as
+# `mongodb::bson` — no separate dependency entry needed. Tokio-native;
+# `rustls-tls` only, matching the house TLS stance (no openssl-tls).
+# KNOWN LIMITATION (WP-12 12.3): `rustls-tls` compiles in `webpki-roots` (the
+# Mozilla list baked at build time) — the mongodb 3.x driver exposes no way to
+# hand it runtime roots, so it cannot share the native-roots stance the sqlx
+# comment above establishes (~300 KB duplicate root store, and a server behind
+# a corporate CA fails verification out of the box). Mitigation: the
+# connection's CA-path field is wired to the URI's `tlsCAFile` (db/mongodb.rs).
+# Re-check on each driver upgrade whether a native-roots feature has appeared.
+mongodb          = { version = "3.8", default-features = false, features = ["rustls-tls", "bson-2", "compat-3-3-0"] }
+
+# SQL Server (TDS) driver — spike phase (plan-dba-focus.md WS1 Phase 1.0).
+# `default-features = false` drops the default `native-tls` + `winauth`: the
+# house TLS stance is rustls everywhere, and `winauth` (Windows SSPI) is a
+# cfg-gated auth nicety we are not committing to in the spike.
+#   tds73        — TDS 7.3+: date/time/datetime2/datetimeoffset decode
+#                  (SQL Server 2008+, i.e. everything worth supporting)
+#   rustls       — tokio-rustls + rustls-native-certs: verifies against the OS
+#                  trust store, the same stance as sqlx's
+#                  `tls-rustls-ring-native-roots` and reqwest's
+#                  `rustls-tls-native-roots` above.
+#   chrono       — FromSql for chrono datetime types (house datetime type)
+#   rust_decimal — FromSql for Decimal: exact DECIMAL decode, never f64
+# Not enabled yet: `sql-browser-tokio` (UDP-1434 named-instance resolution —
+# add when connection config learns `instance\name` handling).
+#
+# KNOWN COST (WP-15 15.2): tiberius 0.12 pins rustls 0.21 + tokio-rustls 0.24
+# + rustls-native-certs 0.6 — a SECOND TLS stack (~1 MB+ duplicate crypto,
+# divergent TLS behavior) beside the rustls 0.23 line sqlx/mongodb/reqwest
+# share. Checked 2026-08-28: 0.12.3 (2024-07) is still the newest release, so
+# no upstream fix exists to take, and vendoring a hand-rolled TLS patch is
+# off the table. Re-check this on every tiberius upgrade; when a rustls-0.23
+# release (or a maintained fork) appears, take it and delete this note.
+tiberius         = { version = "0.12.3", default-features = false, features = [
+    "tds73",
+    "rustls",
+    "chrono",
+    "rust_decimal",
+] }
+tokio-util       = { version = "0.7", features = ["compat"] } # tiberius speaks futures-traits; tokio streams go through Compat
+
+# DuckDB engine (in-process OLAP). `bundled` compiles DuckDB's C++ from source —
+# the first build is slow (~20-40 min), and this is the one dependency that
+# makes the binary meaningfully larger.
+#
+# duckdb-rs versions after the bundled engine: `1.10505.x` bundles DuckDB
+# v1.5.x. The tilde requirement lets duckdb-rs PATCH releases flow (Rust-side
+# fixes) while pinning the bundled engine line — bumping `1.10505` to
+# `1.10506`+ is a deliberate act that moves the DuckDB version every file is
+# read with, on every platform, so it is done by hand. (See the duckdb-rs
+# README's versioning section.)
+duckdb           = { version = "~1.10505.0", features = ["bundled"] }
+
+# Secrets: encrypted-at-rest file (src/secretstore.rs) — see AGENTS.md; the OS
+# keychain was dropped as unreliable for unsigned desktop builds.
+
+# Logging
+log              = "0.4"
+
+# Unique IDs
+uuid             = { version = "1", features = ["v4", "serde"] }
+
+# Error handling
+thiserror        = "2"
+anyhow           = "1"
+hex              = "0.4"
+
+# ZSTD with dictionary support — decoding Dolphie replay recordings
+# (daemon.db). The `parquet` crate pulls zstd transitively but does not expose
+# the dictionary-decompression API, so it is a direct dependency here.
+zstd             = "0.13"
+
+# Reading a .sql file that is not UTF-8.
+#
+# A dump written by a Windows tool is very often CP1250 or Latin-1, and
+# `read_to_string` turns one into an error or mojibake with no way for the user
+# to say otherwise. `encoding_rs` is the WHATWG encoding set (the one browsers
+# implement) and `chardetng` is Firefox's detector — between them, "open this
+# file as CP1250" and "guess" are both answerable.
+encoding_rs      = "0.8"
+chardetng        = "0.1"
+# Recursive walk for Find in Files. Already in the tree transitively.
+walkdir          = "2"
+
+# Reading .xlsx / .xls / .ods for import. The *writer* in src/utils/xlsx.ts is
+# hand-rolled and dependency-free because writing a STORE-only ZIP is easy;
+# reading is not — real workbooks are DEFLATE-compressed and use a shared
+# string table, so this is a job for a library rather than another hand roll.
+calamine         = "0.26"
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+base64 = "0.22.1"
+aes-gcm = "0.10.3"
+sha2 = "0.10.9"
+
+# Local process metrics (status bar: app RAM/CPU)
+# Only process RAM/CPU (commands/metrics.rs) and the hostname
+# (secretstore/plain.rs) are read — the "system" feature covers both
+# (System::host_name is gated behind it); everything else (disks, networks,
+# components, users) was dead weight (WP-15 15.3).
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+
+# Tuner EOL lookups (endoflife.date) — rustls only, matching the DB drivers
+# Tuner EOL lookups (endoflife.date) — rustls + bundled webpki roots, matching
+# the DB drivers' TLS stance. Pinned to 0.12 on purpose: tauri pulls reqwest
+# 0.13, but 0.13 dropped the plain `rustls-tls` feature (its `rustls` feature
+# forces aws-lc-rs + platform verifier), so the two coexist in the lockfile.
+# `rustls-tls-native-roots`, not `rustls-tls`: reqwest carries the ClickHouse
+# HTTPS transport, so it needs the same OS trust store the sqlx engines use
+# (see the sqlx feature list above). Left on webpki roots it would keep
+# rejecting internal CAs for ClickHouse alone — the same bug, one engine over.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
+# Pinned to the SAME major line the bundled DuckDB uses (WP-15 15.1): two
+# arrow stacks (54 + 58) doubled several MB of columnar kernels and the
+# lto/codegen-units=1 compile time.
+parquet = { version = "58", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "lz4", "flate2", "flate2-rust_backened"] }
+arrow-array = "58"
+arrow-schema = "58"
+arrow-cast = "58"
+argon2 = "0.5.3"
+zeroize = "1.8.2"
+rand = "0.9.5"
+
+# Data-parallel decode of replay recordings (src/db/replay.rs) — one worker per
+# core turns a ~1-minute serial ingest into a couple of seconds.
+rayon = "1.10"
+jsonwebtoken = { version = "9.3.1", default-features = false, features = ["use_pem"] }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true
+panic         = "abort"
+
+# Debug builds (`cargo tauri dev`) run the replay decode too. Compiling the hot
+# codec/parse crates optimized — while the app itself stays -O0 for fast
+# rebuilds — is the difference between a 1-minute and a few-second ingest in dev.
+[profile.dev.package.serde_json]
+opt-level = 3
+[profile.dev.package.zstd]
+opt-level = 3
+[profile.dev.package.zstd-safe]
+opt-level = 3
+[profile.dev.package.zstd-sys]
+opt-level = 3
+[profile.dev.package.rayon]
+opt-level = 3
+[profile.dev.package.rayon-core]
+opt-level = 3

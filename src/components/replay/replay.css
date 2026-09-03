@@ -1,0 +1,242 @@
+/* Dolphie Replay workspace. Theme-aware via txui's CSS custom properties. */
+
+.rp-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+.rp-center { align-items: center; justify-content: center; }
+
+/* ── loading / error ── */
+.rp-loading { width: min(460px, 80%); text-align: center; }
+.rp-loading-title { font-size: 1.05rem; margin-bottom: 12px; }
+.rp-loading-sub { margin-top: 8px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.rp-loading-hint { margin-top: 6px; font-size: 0.8rem; color: var(--text-dim); opacity: 0.8; }
+.rp-bar { height: 8px; background: var(--hover); border-radius: 4px; overflow: hidden; }
+.rp-bar-fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
+.rp-error { max-width: 560px; }
+.rp-error pre { white-space: pre-wrap; background: var(--hover); padding: 10px; border-radius: var(--radius); color: var(--red); }
+
+/* ── header ── */
+.rp-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.rp-head-id, .rp-head-range { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rp-badge {
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 0.7rem;
+  padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;
+}
+.rp-host { font-weight: 600; }
+.rp-dim { color: var(--text-dim); font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-count { color: var(--text-dim); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+
+/* ── NOW bar: the current timestamp, big and always on top of every panel ── */
+.rp-nowbar {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 5px 14px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  flex: 0 0 auto;
+}
+.rp-now-label {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em; color: var(--accent);
+}
+.rp-now-time {
+  font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono); color: var(--text); line-height: 1.1;
+}
+.rp-now-pos { font-size: 0.82rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.rp-now-playing { margin-left: auto; font-size: 0.82rem; font-weight: 700; color: var(--green); font-variant-numeric: tabular-nums; }
+
+/* ── context chart ── */
+.rp-context { flex: 0 0 auto; padding: 2px 8px; border-bottom: 1px solid var(--border); }
+
+/* ── nav ── */
+.rp-nav { display: flex; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--border); flex: 0 0 auto; overflow-x: auto; }
+.rp-tab {
+  background: transparent; border: none; color: var(--text-dim);
+  padding: 5px 12px; font-size: 0.85rem; cursor: pointer; border-radius: 6px 6px 0 0;
+  border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.rp-tab:hover { color: var(--text); background: var(--hover); }
+.rp-tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.rp-tab-off { opacity: 0.4; cursor: not-allowed; text-decoration: line-through; }
+
+/* ── content ── */
+.rp-content { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
+.rp-panel-body { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.rp-graphs { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+
+/* ── tiles ── */
+.rp-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.rp-tile { background: var(--hover); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+.rp-tile-label { font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.rp-tile-value { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.rp-tile-sub { font-size: 0.75rem; color: var(--text-dim); }
+.rp-tile-ok { border-left: 3px solid var(--green); }
+.rp-tile-warn { border-left: 3px solid var(--yellow); }
+.rp-tile-bad { border-left: 3px solid var(--red); }
+
+/* ── charts ── */
+.rp-chart { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 6px; }
+.rp-chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 2px 4px; }
+.rp-chart-title { font-size: 0.82rem; color: var(--text); font-weight: 700; }
+.rp-chart-ts { font-size: 0.76rem; color: var(--text-dim); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+/* Value readout at the cursor — bigger and clearer than the old legend. */
+/* A fixed grid so items line up in columns under each other across every chart,
+   and — crucially — the row count depends only on the container width, never on
+   the values. That's what stops the DML legend (8 metrics) from reflowing and
+   "jumping" as numbers change width each second. */
+.rp-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 1px 14px; padding: 5px 4px 2px; align-content: start; }
+.rp-values-compact { padding: 3px 4px; gap: 1px 12px; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+.rp-value-item { display: flex; align-items: center; gap: 5px; font-size: 0.8rem; min-width: 0; }
+.rp-value-item i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: 0 0 auto; }
+.rp-value-label { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-value-num { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; font-family: var(--font-mono); margin-left: auto; padding-left: 6px; flex: 0 0 auto; }
+
+/* ── tables ── */
+.rp-toolbar { display: flex; align-items: center; gap: 10px; padding: 4px 0 8px; flex: 0 0 auto; flex-wrap: wrap; }
+.rp-input { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 4px 8px; min-width: 220px; }
+.rp-check { font-size: 0.82rem; color: var(--text-dim); display: inline-flex; gap: 4px; align-items: center; }
+.rp-table-wrap { overflow: auto; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius); }
+.rp-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.84rem; }
+.rp-table th, .rp-table td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--border-soft, var(--border)); white-space: nowrap; }
+.rp-table thead th { position: sticky; top: 0; background: var(--hover); z-index: 1; font-size: 0.74rem; color: var(--text-dim); text-transform: uppercase; }
+.rp-table tbody tr:hover { background: var(--hover); }
+.rp-num { text-align: right; font-variant-numeric: tabular-nums; }
+.rp-query { max-width: 520px; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); cursor: pointer; }
+.rp-query:hover { color: var(--accent); }
+/* Long, non-clickable text cell (e.g. lock's blocking query) — readable and
+   truncated with the full value on hover, so the table never breaks layout. */
+.rp-wide { max-width: 640px; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
+.rp-row-long { background: color-mix(in srgb, var(--yellow) 12%, transparent); }
+.rp-kv th { color: var(--text-dim); font-weight: 500; width: 320px; vertical-align: top; }
+.rp-kv td { font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+.rp-empty { color: var(--text-dim); padding: 16px; text-align: center; }
+
+/* variables split */
+.rp-split { flex-direction: row; gap: 12px; }
+.rp-split-main { flex: 2; display: flex; flex-direction: column; min-width: 0; }
+.rp-split-side { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.rp-side-title { font-size: 0.8rem; font-weight: 600; color: var(--text-dim); padding: 4px 0; }
+
+/* ── scrubber ── */
+.rp-scrubber { display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-top: 1px solid var(--border); flex: 0 0 auto; background: var(--hover); }
+.rp-transport { display: flex; align-items: center; gap: 3px; }
+.rp-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 5px; width: 30px; height: 26px; cursor: pointer; font-size: 0.85rem; }
+.rp-btn:hover:not(:disabled) { border-color: var(--accent); }
+.rp-btn:disabled { opacity: 0.35; cursor: default; }
+.rp-btn-play { background: var(--accent); color: #fff; border-color: var(--accent); width: 34px; }
+.rp-speed { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 5px; height: 26px; margin-left: 6px; }
+/* Scrubber slider: two-tone track (played vs remaining) + a prominent knob —
+   the "dragging button" the user asked for, not a solid-blue bar. */
+.rp-range {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+.rp-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right,
+    var(--accent) 0%, var(--accent) var(--rp-pct, 0%),
+    var(--border) var(--rp-pct, 0%), var(--border) 100%);
+}
+.rp-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 17px; height: 17px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transition: transform 0.08s ease;
+}
+.rp-range:hover::-webkit-slider-thumb, .rp-range:active::-webkit-slider-thumb { transform: scale(1.18); }
+.rp-range:focus { outline: none; }
+.rp-range:focus::-webkit-slider-thumb { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.rp-clock { display: flex; flex-direction: column; align-items: flex-end; min-width: 180px; }
+.rp-clock-ts { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 0.98rem; }
+.rp-clock-pos { font-size: 0.74rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.rp-btn2 { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 4px 10px; cursor: pointer; font-size: 0.8rem; }
+.rp-btn2:hover { border-color: var(--accent); }
+.rp-anom { display: inline-flex; align-items: center; gap: 6px; padding: 0 4px; }
+.rp-anom .rp-count { color: var(--red); }
+.rp-anom .rp-btn2 { padding: 2px 6px; }
+
+/* ── chooser (ask before opening) ── */
+.rp-chooser { width: min(560px, 88%); background: var(--hover); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; }
+.rp-chooser-badge { display: inline-block; background: var(--accent); color: #fff; font-weight: 700; font-size: 0.72rem; padding: 3px 9px; border-radius: 4px; letter-spacing: 0.04em; }
+.rp-chooser-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+.rp-chooser-q { margin: 16px 0 12px; font-size: 0.95rem; }
+.rp-chooser-actions { display: flex; gap: 12px; }
+.rp-choice { flex: 1; display: flex; flex-direction: column; gap: 4px; text-align: left; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; cursor: pointer; color: var(--text); }
+.rp-choice:hover { border-color: var(--accent); }
+.rp-choice-primary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.rp-choice-title { font-weight: 600; font-size: 0.92rem; }
+.rp-choice-sub { font-size: 0.78rem; color: var(--text-dim); }
+.rp-chooser-hint { margin-top: 12px; font-size: 0.78rem; color: var(--text-dim); }
+
+/* floating "open Replay" affordance shown when a recording is opened raw */
+.rp-reopen-btn { position: absolute; top: 8px; right: 12px; z-index: 5; background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: 5px 12px; font-size: 0.8rem; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.25); }
+.rp-reopen-btn:hover { filter: brightness(1.08); }
+
+/* ── dashboard strip: KPI tiles as a persistent header under the graph ── */
+/* Compact dashboard strip: all headline metrics (threads + InnoDB) in one
+   dense, small-font board that wraps to fill the width — a couple of tidy rows,
+   not a scroll-off-screen single line. */
+.rp-dashboard-strip { flex: 0 0 auto; border-bottom: 1px solid var(--border); padding: 4px 6px; overflow: hidden; }
+/* A uniform grid so tiles line up in columns; each tile is exactly one line of
+   label + one line of value, both clipped (never wrapping to 2 lines). */
+/* One row: the inline grid-template-columns (one col per tile) sets the count;
+   these keep each cell tight so ~19 tiles fit on a single line. */
+.rp-tiles-compact { display: grid; gap: 3px; }
+.rp-tiles-compact .rp-tile { min-width: 0; padding: 2px 5px; border-left-width: 2px; }
+.rp-tiles-compact .rp-tile-label,
+.rp-tiles-compact .rp-tile-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-tiles-compact .rp-tile-value { font-size: 0.82rem; font-weight: 700; margin-top: 0; line-height: 1.2; }
+.rp-tiles-compact .rp-tile-label { font-size: 0.54rem; letter-spacing: 0.01em; }
+.rp-tiles-compact .rp-tile-sub { display: none; }
+
+/* ── merged processlist + metadata-locks tab ── */
+.rp-activity { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 8px; }
+.rp-activity-section { display: flex; flex-direction: column; min-height: 0; }
+.rp-activity-section:first-child { flex: 2 1 0; }
+.rp-activity-locks { flex: 1 1 0; }
+.rp-section-title { font-size: 0.74rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 0 4px; flex: 0 0 auto; }
+
+/* ── full-query viewer ── */
+.rp-qv-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 60; }
+.rp-qv { width: min(820px, 88vw); max-height: 80vh; display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
+.rp-qv-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 0.82rem; color: var(--text-dim); }
+.rp-qv-actions { display: flex; gap: 6px; }
+.rp-qv-body { margin: 0; padding: 12px; overflow: auto; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+
+/* Flexbox min-width:auto bug — a wide table must NOT widen the whole workspace
+   (which pushed the bottom scrubber + NOW time off-screen on Processlist /
+   Variables). Letting these flex items shrink below content width fixes it. */
+.rp-root, .rp-content, .rp-panel-body, .rp-activity, .rp-activity-section,
+.rp-split, .rp-split-main, .rp-split-side, .rp-chart, .rp-graphs, .rp-scrubber { min-width: 0; }
+
+/* Thread ↔ lock visual link: hovering a row in either table tints the matching
+   thread's rows in both, so you can see which thread holds/waits which lock. */
+.rp-thread-hl > td { background: color-mix(in srgb, var(--accent) 28%, transparent) !important; }
+.rp-strong { font-weight: 700; color: var(--text); }
+.rp-hint { font-weight: 400; color: var(--accent); text-transform: none; letter-spacing: 0; }
+
+/* server identity chips in the header */
+.rp-role { font-size: 0.62rem; font-weight: 800; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 4px; }
+.rp-role-rw { background: color-mix(in srgb, var(--green) 22%, transparent); color: var(--green); }
+.rp-role-ro { background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow); }
+.rp-uuid { font-family: var(--font-mono); cursor: help; }

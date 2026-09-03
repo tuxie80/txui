@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the generated Info.plist by Tauri, and it WINS over the values
+  derived from tauri.conf.json.
+
+  That is why the product was called "Txdb" everywhere macOS shows a name —
+  the Dock, the menu bar, Finder's Get Info — for every release after the
+  rename, no matter what `productName` said. Both keys have to be right here
+  as well, or this file quietly overrides the config.
+
+  CFBundleName is the short name (menu bar, ≤15 chars); CFBundleDisplayName is
+  what Finder and the Dock show.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>TxUI</string>
+  <key>CFBundleDisplayName</key>
+  <string>TxUI</string>
+</dict>
+</plist>

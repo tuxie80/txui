@@ -1,0 +1,1936 @@
+{
+  "_generated_by": "dev/gen_sync_vectors.mjs",
+  "_asserted_by": "src-tauri/tests/sync_conformance.rs",
+  "version": [
+    {
+      "raw": "8.0.46",
+      "major": 8,
+      "minor": 0,
+      "patch": 46,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "8.4.10",
+      "major": 8,
+      "minor": 4,
+      "patch": 10,
+      "isMariaDb": false,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW BINARY LOG STATUS",
+      "resetBinlog": "RESET BINARY LOGS AND GTIDS"
+    },
+    {
+      "raw": "8.4.0",
+      "major": 8,
+      "minor": 4,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW BINARY LOG STATUS",
+      "resetBinlog": "RESET BINARY LOGS AND GTIDS"
+    },
+    {
+      "raw": "8.3.0",
+      "major": 8,
+      "minor": 3,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "8.2.0",
+      "major": 8,
+      "minor": 2,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "7.9.9",
+      "major": 7,
+      "minor": 9,
+      "patch": 9,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "9.5.0",
+      "major": 9,
+      "minor": 5,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW BINARY LOG STATUS",
+      "resetBinlog": "RESET BINARY LOGS AND GTIDS"
+    },
+    {
+      "raw": "8.10.0",
+      "major": 8,
+      "minor": 10,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW BINARY LOG STATUS",
+      "resetBinlog": "RESET BINARY LOGS AND GTIDS"
+    },
+    {
+      "raw": "8.0.46-0ubuntu0.22.04.1",
+      "major": 8,
+      "minor": 0,
+      "patch": 46,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "10.11.6-MariaDB",
+      "major": 10,
+      "minor": 11,
+      "patch": 6,
+      "isMariaDb": true,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "11.4.2-MariaDB",
+      "major": 11,
+      "minor": 4,
+      "patch": 2,
+      "isMariaDb": true,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "8.4",
+      "major": 8,
+      "minor": 4,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": true,
+      "binlogStatus": "SHOW BINARY LOG STATUS",
+      "resetBinlog": "RESET BINARY LOGS AND GTIDS"
+    },
+    {
+      "raw": "unknown",
+      "major": 0,
+      "minor": 0,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    },
+    {
+      "raw": "",
+      "major": 0,
+      "minor": 0,
+      "patch": 0,
+      "isMariaDb": false,
+      "atLeast_8_4": false,
+      "binlogStatus": "SHOW MASTER STATUS",
+      "resetBinlog": "RESET MASTER"
+    }
+  ],
+  "gtid": [
+    {
+      "mode": "ON",
+      "availability": "complete",
+      "canSeed": true,
+      "capability": "GTID set captured — the target can follow with SOURCE_AUTO_POSITION = 1."
+    },
+    {
+      "mode": "OFF",
+      "availability": "off",
+      "canSeed": false,
+      "capability": "gtid_mode is OFF — no GTIDs exist. Seeding uses binary-log coordinates with SOURCE_AUTO_POSITION = 0."
+    },
+    {
+      "mode": "ON_PERMISSIVE",
+      "availability": "partial",
+      "canSeed": false,
+      "capability": "gtid_mode is ON_PERMISSIVE — a mid-migration state where the GTID set is INCOMPLETE. Seeding by GTID would silently skip or replay transactions; use the binary-log coordinates instead."
+    },
+    {
+      "mode": "OFF_PERMISSIVE",
+      "availability": "partial",
+      "canSeed": false,
+      "capability": "gtid_mode is OFF_PERMISSIVE — a mid-migration state where the GTID set is INCOMPLETE. Seeding by GTID would silently skip or replay transactions; use the binary-log coordinates instead."
+    },
+    {
+      "mode": "  on  ",
+      "availability": "complete",
+      "canSeed": true,
+      "capability": "GTID set captured — the target can follow with SOURCE_AUTO_POSITION = 1."
+    },
+    {
+      "mode": "Off_Permissive",
+      "availability": "partial",
+      "canSeed": false,
+      "capability": "gtid_mode is Off_Permissive — a mid-migration state where the GTID set is INCOMPLETE. Seeding by GTID would silently skip or replay transactions; use the binary-log coordinates instead."
+    },
+    {
+      "mode": "",
+      "availability": "unknown",
+      "canSeed": false,
+      "capability": "gtid_mode could not be read — seeding capability is unknown and must not be assumed."
+    },
+    {
+      "mode": null,
+      "availability": "unknown",
+      "canSeed": false,
+      "capability": "gtid_mode could not be read — seeding capability is unknown and must not be assumed."
+    }
+  ],
+  "changeSource": [
+    {
+      "pos": {
+        "gtidExecuted": "uuid:1-500",
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3306,
+        "user": "repl"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'db-source',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'repl',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "uuid:1-500",
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3307,
+        "user": "repl"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'db-source',\n  SOURCE_PORT = 3307,\n  SOURCE_USER = 'repl',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "uuid:1-500",
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "h",
+        "user": "u"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'h',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'u',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "uuid:1-500",
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "it's",
+        "port": 3306,
+        "user": "o'brien"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'it''s',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'o''brien',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": "binlog.000043",
+        "logPos": 67337257
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3306,
+        "user": "repl"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'db-source',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'repl',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_LOG_FILE = 'binlog.000043',\n  SOURCE_LOG_POS = 67337257;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": "binlog.000043",
+        "logPos": 67337257
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3307,
+        "user": "repl"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'db-source',\n  SOURCE_PORT = 3307,\n  SOURCE_USER = 'repl',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_LOG_FILE = 'binlog.000043',\n  SOURCE_LOG_POS = 67337257;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": "binlog.000043",
+        "logPos": 67337257
+      },
+      "conn": {
+        "host": "h",
+        "user": "u"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'h',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'u',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_LOG_FILE = 'binlog.000043',\n  SOURCE_LOG_POS = 67337257;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": "binlog.000043",
+        "logPos": 67337257
+      },
+      "conn": {
+        "host": "it's",
+        "port": 3306,
+        "user": "o'brien"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'it''s',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'o''brien',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_LOG_FILE = 'binlog.000043',\n  SOURCE_LOG_POS = 67337257;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "g:1",
+        "logFile": "binlog.1",
+        "logPos": 4
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3306,
+        "user": "repl"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'db-source',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'repl',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "g:1",
+        "logFile": "binlog.1",
+        "logPos": 4
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3307,
+        "user": "repl"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'db-source',\n  SOURCE_PORT = 3307,\n  SOURCE_USER = 'repl',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "g:1",
+        "logFile": "binlog.1",
+        "logPos": 4
+      },
+      "conn": {
+        "host": "h",
+        "user": "u"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'h',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'u',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": "g:1",
+        "logFile": "binlog.1",
+        "logPos": 4
+      },
+      "conn": {
+        "host": "it's",
+        "port": 3306,
+        "user": "o'brien"
+      },
+      "sql": "CHANGE REPLICATION SOURCE TO\n  SOURCE_HOST = 'it''s',\n  SOURCE_PORT = 3306,\n  SOURCE_USER = 'o''brien',\n  SOURCE_PASSWORD = '<password>',\n  SOURCE_AUTO_POSITION = 1;"
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3306,
+        "user": "repl"
+      },
+      "sql": "-- No replication position was captured; this copy cannot seed a replica."
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "db-source",
+        "port": 3307,
+        "user": "repl"
+      },
+      "sql": "-- No replication position was captured; this copy cannot seed a replica."
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "h",
+        "user": "u"
+      },
+      "sql": "-- No replication position was captured; this copy cannot seed a replica."
+    },
+    {
+      "pos": {
+        "gtidExecuted": null,
+        "logFile": null,
+        "logPos": null
+      },
+      "conn": {
+        "host": "it's",
+        "port": 3306,
+        "user": "o'brien"
+      },
+      "sql": "-- No replication position was captured; this copy cannot seed a replica."
+    }
+  ],
+  "ddl": [
+    {
+      "from": "3306",
+      "schema": "lock_test",
+      "table": "accounts",
+      "ddl": "CREATE TABLE `accounts` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) DEFAULT NULL,\n  `balance` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `idx_name` (`name`)\n) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `accounts` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) DEFAULT NULL,\n  `balance` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "index",
+          "name": "idx_name",
+          "text": "KEY `idx_name` (`name`)"
+        }
+      ],
+      "autoIncrement": 6,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "name",
+        "balance"
+      ],
+      "loadColumnList": "`id`, `name`, `balance`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `lock_test`.`accounts`\n  ADD KEY `idx_name` (`name`)",
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": "ALTER TABLE `lock_test`.`accounts` AUTO_INCREMENT = 6"
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "lock_test",
+      "table": "products",
+      "ddl": "CREATE TABLE `products` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) DEFAULT NULL,\n  `price` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `products` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) DEFAULT NULL,\n  `price` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [],
+      "autoIncrement": 4,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "name",
+        "price"
+      ],
+      "loadColumnList": "`id`, `name`, `price`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": "ALTER TABLE `lock_test`.`products` AUTO_INCREMENT = 4"
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "lock_test",
+      "table": "orders",
+      "ddl": "CREATE TABLE `orders` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `account_id` int DEFAULT NULL,\n  `amount` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `account_id` (`account_id`),\n  CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `orders` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `account_id` int DEFAULT NULL,\n  `amount` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "index",
+          "name": "account_id",
+          "text": "KEY `account_id` (`account_id`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "orders_ibfk_1",
+          "text": "CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`)"
+        }
+      ],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "account_id",
+        "amount"
+      ],
+      "loadColumnList": "`id`, `account_id`, `amount`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `lock_test`.`orders`\n  ADD KEY `account_id` (`account_id`)",
+        "foreignKeySql": "ALTER TABLE `lock_test`.`orders`\n  ADD CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`)",
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "hr_demo",
+      "table": "departments",
+      "ddl": "CREATE TABLE `departments` (\n  `id` int NOT NULL,\n  `name` varchar(100) NOT NULL,\n  `city` varchar(100) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `departments` (\n  `id` int NOT NULL,\n  `name` varchar(100) NOT NULL,\n  `city` varchar(100) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "name",
+        "city"
+      ],
+      "loadColumnList": "`id`, `name`, `city`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "hr_demo",
+      "table": "employees",
+      "ddl": "CREATE TABLE `employees` (\n  `id` bigint NOT NULL,\n  `first_name` varchar(100) NOT NULL,\n  `last_name` varchar(100) NOT NULL,\n  `email` varchar(255) NOT NULL,\n  `department_id` int NOT NULL,\n  `title` varchar(60) NOT NULL,\n  `hired_at` date NOT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `email` (`email`),\n  KEY `ix_employees_0` (`department_id`),\n  KEY `ix_employees_1` (`hired_at`),\n  CONSTRAINT `employees_ibfk_1` FOREIGN KEY (`department_id`) REFERENCES `departments` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `employees` (\n  `id` bigint NOT NULL,\n  `first_name` varchar(100) NOT NULL,\n  `last_name` varchar(100) NOT NULL,\n  `email` varchar(255) NOT NULL,\n  `department_id` int NOT NULL,\n  `title` varchar(60) NOT NULL,\n  `hired_at` date NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "unique",
+          "name": "email",
+          "text": "UNIQUE KEY `email` (`email`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_employees_0",
+          "text": "KEY `ix_employees_0` (`department_id`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_employees_1",
+          "text": "KEY `ix_employees_1` (`hired_at`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "employees_ibfk_1",
+          "text": "CONSTRAINT `employees_ibfk_1` FOREIGN KEY (`department_id`) REFERENCES `departments` (`id`)"
+        }
+      ],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "first_name",
+        "last_name",
+        "email",
+        "department_id",
+        "title",
+        "hired_at"
+      ],
+      "loadColumnList": "`id`, `first_name`, `last_name`, `email`, `department_id`, `title`, `hired_at`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `hr_demo`.`employees`\n  ADD UNIQUE KEY `email` (`email`),\n  ADD KEY `ix_employees_0` (`department_id`),\n  ADD KEY `ix_employees_1` (`hired_at`)",
+        "foreignKeySql": "ALTER TABLE `hr_demo`.`employees`\n  ADD CONSTRAINT `employees_ibfk_1` FOREIGN KEY (`department_id`) REFERENCES `departments` (`id`)",
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "hr_demo",
+      "table": "salaries",
+      "ddl": "CREATE TABLE `salaries` (\n  `id` bigint NOT NULL,\n  `employee_id` bigint NOT NULL,\n  `amount` decimal(10,2) NOT NULL,\n  `valid_from` date NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_salaries_0` (`employee_id`,`valid_from`),\n  CONSTRAINT `salaries_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `salaries` (\n  `id` bigint NOT NULL,\n  `employee_id` bigint NOT NULL,\n  `amount` decimal(10,2) NOT NULL,\n  `valid_from` date NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "index",
+          "name": "ix_salaries_0",
+          "text": "KEY `ix_salaries_0` (`employee_id`,`valid_from`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "salaries_ibfk_1",
+          "text": "CONSTRAINT `salaries_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)"
+        }
+      ],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "employee_id",
+        "amount",
+        "valid_from"
+      ],
+      "loadColumnList": "`id`, `employee_id`, `amount`, `valid_from`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `hr_demo`.`salaries`\n  ADD KEY `ix_salaries_0` (`employee_id`,`valid_from`)",
+        "foreignKeySql": "ALTER TABLE `hr_demo`.`salaries`\n  ADD CONSTRAINT `salaries_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)",
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "hr_demo",
+      "table": "assignments",
+      "ddl": "CREATE TABLE `assignments` (\n  `id` bigint NOT NULL,\n  `employee_id` bigint NOT NULL,\n  `project` varchar(120) NOT NULL,\n  `role` varchar(40) NOT NULL,\n  `started_at` date NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `ix_assignments_0` (`employee_id`),\n  CONSTRAINT `assignments_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `assignments` (\n  `id` bigint NOT NULL,\n  `employee_id` bigint NOT NULL,\n  `project` varchar(120) NOT NULL,\n  `role` varchar(40) NOT NULL,\n  `started_at` date NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "index",
+          "name": "ix_assignments_0",
+          "text": "KEY `ix_assignments_0` (`employee_id`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "assignments_ibfk_1",
+          "text": "CONSTRAINT `assignments_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)"
+        }
+      ],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "employee_id",
+        "project",
+        "role",
+        "started_at"
+      ],
+      "loadColumnList": "`id`, `employee_id`, `project`, `role`, `started_at`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `hr_demo`.`assignments`\n  ADD KEY `ix_assignments_0` (`employee_id`)",
+        "foreignKeySql": "ALTER TABLE `hr_demo`.`assignments`\n  ADD CONSTRAINT `assignments_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)",
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "txui_playground",
+      "table": "txui_playground",
+      "ddl": "CREATE TABLE `txui_playground` (\n  `id` int NOT NULL,\n  `n` bigint NOT NULL DEFAULT '0',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `txui_playground` (\n  `id` int NOT NULL,\n  `n` bigint NOT NULL DEFAULT '0',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "n"
+      ],
+      "loadColumnList": "`id`, `n`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "txui_sync_src",
+      "table": "customer",
+      "ddl": "CREATE TABLE `customer` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `code` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq_code` (`code`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `customer` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `code` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "unique",
+          "name": "uq_code",
+          "text": "UNIQUE KEY `uq_code` (`code`)"
+        }
+      ],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "code"
+      ],
+      "loadColumnList": "`id`, `code`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `txui_sync_src`.`customer`\n  ADD UNIQUE KEY `uq_code` (`code`)",
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "txui_sync_src",
+      "table": "invoice",
+      "ddl": "CREATE TABLE `invoice` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  `customer_id` int NOT NULL,\n  `email` varchar(120) NOT NULL,\n  `notes` text,\n  `amount` decimal(12,4) NOT NULL DEFAULT '0.0000',\n  `ratio` double DEFAULT NULL,\n  `issued_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `meta` json DEFAULT NULL,\n  `flags` bit(8) DEFAULT NULL,\n  `state` enum('draft','sent','paid') NOT NULL DEFAULT 'draft',\n  `doubled` decimal(14,4) GENERATED ALWAYS AS ((`amount` * 2)) STORED,\n  `lower_email` varchar(120) GENERATED ALWAYS AS (lower(`email`)) VIRTUAL,\n  PRIMARY KEY (`id`,`customer_id`),\n  UNIQUE KEY `uq_email` (`email`),\n  KEY `ix_customer` (`customer_id`),\n  KEY `ix_amount` (`amount`,`issued_at`),\n  FULLTEXT KEY `ft_notes` (`notes`),\n  CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,\n  CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))\n) ENGINE=InnoDB AUTO_INCREMENT=4711 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC COMMENT='sync fixture'",
+      "createSql": "CREATE TABLE `invoice` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  `customer_id` int NOT NULL,\n  `email` varchar(120) NOT NULL,\n  `notes` text,\n  `amount` decimal(12,4) NOT NULL DEFAULT '0.0000',\n  `ratio` double DEFAULT NULL,\n  `issued_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `meta` json DEFAULT NULL,\n  `flags` bit(8) DEFAULT NULL,\n  `state` enum('draft','sent','paid') NOT NULL DEFAULT 'draft',\n  `doubled` decimal(14,4) GENERATED ALWAYS AS ((`amount` * 2)) STORED,\n  `lower_email` varchar(120) GENERATED ALWAYS AS (lower(`email`)) VIRTUAL,\n  PRIMARY KEY (`id`,`customer_id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC COMMENT='sync fixture'",
+      "deferred": [
+        {
+          "kind": "unique",
+          "name": "uq_email",
+          "text": "UNIQUE KEY `uq_email` (`email`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_customer",
+          "text": "KEY `ix_customer` (`customer_id`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_amount",
+          "text": "KEY `ix_amount` (`amount`,`issued_at`)"
+        },
+        {
+          "kind": "fulltext",
+          "name": "ft_notes",
+          "text": "FULLTEXT KEY `ft_notes` (`notes`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "fk_customer",
+          "text": "CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE"
+        },
+        {
+          "kind": "check",
+          "name": "ck_amount",
+          "text": "CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))"
+        }
+      ],
+      "autoIncrement": 4711,
+      "generatedColumns": [
+        "doubled",
+        "lower_email"
+      ],
+      "loadColumns": [
+        "id",
+        "customer_id",
+        "email",
+        "notes",
+        "amount",
+        "ratio",
+        "issued_at",
+        "meta",
+        "flags",
+        "state"
+      ],
+      "loadColumnList": "`id`, `customer_id`, `email`, `notes`, `amount`, `ratio`, `issued_at`, `meta`, `flags`, `state`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `txui_sync_src`.`invoice`\n  ADD UNIQUE KEY `uq_email` (`email`),\n  ADD KEY `ix_customer` (`customer_id`),\n  ADD KEY `ix_amount` (`amount`,`issued_at`);\nALTER TABLE `txui_sync_src`.`invoice` ADD FULLTEXT KEY `ft_notes` (`notes`)",
+        "foreignKeySql": "ALTER TABLE `txui_sync_src`.`invoice`\n  ADD CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE",
+        "checkSql": "ALTER TABLE `txui_sync_src`.`invoice`\n  ADD CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))",
+        "autoIncrementSql": "ALTER TABLE `txui_sync_src`.`invoice` AUTO_INCREMENT = 4711"
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "txui_types",
+      "table": "torture",
+      "ddl": "CREATE TABLE `torture` (\n  `id` int NOT NULL,\n  `label` varchar(80) DEFAULT NULL,\n  `t_text` text,\n  `t_blob` blob,\n  `t_varbin` varbinary(255) DEFAULT NULL,\n  `t_bin` binary(8) DEFAULT NULL,\n  `t_ts` timestamp NULL DEFAULT NULL,\n  `t_dt` datetime(6) DEFAULT NULL,\n  `t_date` date DEFAULT NULL,\n  `t_time` time(6) DEFAULT NULL,\n  `t_dec` decimal(30,10) DEFAULT NULL,\n  `t_bit` bit(16) DEFAULT NULL,\n  `t_json` json DEFAULT NULL,\n  `t_enum` enum('a','b') DEFAULT NULL,\n  `t_set` set('x','y','z') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `torture` (\n  `id` int NOT NULL,\n  `label` varchar(80) DEFAULT NULL,\n  `t_text` text,\n  `t_blob` blob,\n  `t_varbin` varbinary(255) DEFAULT NULL,\n  `t_bin` binary(8) DEFAULT NULL,\n  `t_ts` timestamp NULL DEFAULT NULL,\n  `t_dt` datetime(6) DEFAULT NULL,\n  `t_date` date DEFAULT NULL,\n  `t_time` time(6) DEFAULT NULL,\n  `t_dec` decimal(30,10) DEFAULT NULL,\n  `t_bit` bit(16) DEFAULT NULL,\n  `t_json` json DEFAULT NULL,\n  `t_enum` enum('a','b') DEFAULT NULL,\n  `t_set` set('x','y','z') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "label",
+        "t_text",
+        "t_blob",
+        "t_varbin",
+        "t_bin",
+        "t_ts",
+        "t_dt",
+        "t_date",
+        "t_time",
+        "t_dec",
+        "t_bit",
+        "t_json",
+        "t_enum",
+        "t_set"
+      ],
+      "loadColumnList": "`id`, `label`, `t_text`, `t_blob`, `t_varbin`, `t_bin`, `t_ts`, `t_dt`, `t_date`, `t_time`, `t_dec`, `t_bit`, `t_json`, `t_enum`, `t_set`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "txui_nopk",
+      "table": "heap",
+      "ddl": "CREATE TABLE `heap` (\n  `a` int DEFAULT NULL,\n  `b` varchar(10) DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `heap` (\n  `a` int DEFAULT NULL,\n  `b` varchar(10) DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "a",
+        "b"
+      ],
+      "loadColumnList": "`a`, `b`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3306",
+      "schema": "txui_nopk",
+      "table": "uniq_only",
+      "ddl": "CREATE TABLE `uniq_only` (\n  `a` int NOT NULL,\n  `b` varchar(10) DEFAULT NULL,\n  UNIQUE KEY `uq_a` (`a`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `uniq_only` (\n  `a` int NOT NULL,\n  `b` varchar(10) DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "unique",
+          "name": "uq_a",
+          "text": "UNIQUE KEY `uq_a` (`a`)"
+        }
+      ],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "a",
+        "b"
+      ],
+      "loadColumnList": "`a`, `b`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `txui_nopk`.`uniq_only`\n  ADD UNIQUE KEY `uq_a` (`a`)",
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "3307",
+      "schema": "txui_sync_tgt",
+      "table": "customer",
+      "ddl": "CREATE TABLE `customer` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `code` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq_code` (`code`)\n) ENGINE=InnoDB AUTO_INCREMENT=512 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `customer` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  `code` varchar(20) NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [
+        {
+          "kind": "unique",
+          "name": "uq_code",
+          "text": "UNIQUE KEY `uq_code` (`code`)"
+        }
+      ],
+      "autoIncrement": 512,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "code"
+      ],
+      "loadColumnList": "`id`, `code`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `txui_sync_tgt`.`customer`\n  ADD UNIQUE KEY `uq_code` (`code`)",
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": "ALTER TABLE `txui_sync_tgt`.`customer` AUTO_INCREMENT = 512"
+      }
+    },
+    {
+      "from": "3307",
+      "schema": "txui_sync_tgt",
+      "table": "invoice",
+      "ddl": "CREATE TABLE `invoice` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  `customer_id` int NOT NULL,\n  `email` varchar(120) NOT NULL,\n  `notes` text,\n  `amount` decimal(12,4) NOT NULL DEFAULT '0.0000',\n  `ratio` double DEFAULT NULL,\n  `issued_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `meta` json DEFAULT NULL,\n  `flags` bit(8) DEFAULT NULL,\n  `state` enum('draft','sent','paid') NOT NULL DEFAULT 'draft',\n  `doubled` decimal(14,4) GENERATED ALWAYS AS ((`amount` * 2)) STORED,\n  `lower_email` varchar(120) GENERATED ALWAYS AS (lower(`email`)) VIRTUAL,\n  PRIMARY KEY (`id`,`customer_id`),\n  UNIQUE KEY `uq_email` (`email`),\n  KEY `ix_customer` (`customer_id`),\n  KEY `ix_amount` (`amount`,`issued_at`),\n  FULLTEXT KEY `ft_notes` (`notes`),\n  CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,\n  CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))\n) ENGINE=InnoDB AUTO_INCREMENT=37478 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC COMMENT='sync fixture'",
+      "createSql": "CREATE TABLE `invoice` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  `customer_id` int NOT NULL,\n  `email` varchar(120) NOT NULL,\n  `notes` text,\n  `amount` decimal(12,4) NOT NULL DEFAULT '0.0000',\n  `ratio` double DEFAULT NULL,\n  `issued_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `meta` json DEFAULT NULL,\n  `flags` bit(8) DEFAULT NULL,\n  `state` enum('draft','sent','paid') NOT NULL DEFAULT 'draft',\n  `doubled` decimal(14,4) GENERATED ALWAYS AS ((`amount` * 2)) STORED,\n  `lower_email` varchar(120) GENERATED ALWAYS AS (lower(`email`)) VIRTUAL,\n  PRIMARY KEY (`id`,`customer_id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC COMMENT='sync fixture'",
+      "deferred": [
+        {
+          "kind": "unique",
+          "name": "uq_email",
+          "text": "UNIQUE KEY `uq_email` (`email`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_customer",
+          "text": "KEY `ix_customer` (`customer_id`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_amount",
+          "text": "KEY `ix_amount` (`amount`,`issued_at`)"
+        },
+        {
+          "kind": "fulltext",
+          "name": "ft_notes",
+          "text": "FULLTEXT KEY `ft_notes` (`notes`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "fk_customer",
+          "text": "CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE"
+        },
+        {
+          "kind": "check",
+          "name": "ck_amount",
+          "text": "CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))"
+        }
+      ],
+      "autoIncrement": 37478,
+      "generatedColumns": [
+        "doubled",
+        "lower_email"
+      ],
+      "loadColumns": [
+        "id",
+        "customer_id",
+        "email",
+        "notes",
+        "amount",
+        "ratio",
+        "issued_at",
+        "meta",
+        "flags",
+        "state"
+      ],
+      "loadColumnList": "`id`, `customer_id`, `email`, `notes`, `amount`, `ratio`, `issued_at`, `meta`, `flags`, `state`",
+      "rebuild": {
+        "indexSql": "ALTER TABLE `txui_sync_tgt`.`invoice`\n  ADD UNIQUE KEY `uq_email` (`email`),\n  ADD KEY `ix_customer` (`customer_id`),\n  ADD KEY `ix_amount` (`amount`,`issued_at`);\nALTER TABLE `txui_sync_tgt`.`invoice` ADD FULLTEXT KEY `ft_notes` (`notes`)",
+        "foreignKeySql": "ALTER TABLE `txui_sync_tgt`.`invoice`\n  ADD CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE",
+        "checkSql": "ALTER TABLE `txui_sync_tgt`.`invoice`\n  ADD CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))",
+        "autoIncrementSql": "ALTER TABLE `txui_sync_tgt`.`invoice` AUTO_INCREMENT = 37478"
+      }
+    },
+    {
+      "from": "3307",
+      "schema": "txui_types_tgt",
+      "table": "torture",
+      "ddl": "CREATE TABLE `torture` (\n  `id` int NOT NULL,\n  `label` varchar(80) DEFAULT NULL,\n  `t_text` text,\n  `t_blob` blob,\n  `t_varbin` varbinary(255) DEFAULT NULL,\n  `t_bin` binary(8) DEFAULT NULL,\n  `t_ts` timestamp NULL DEFAULT NULL,\n  `t_dt` datetime(6) DEFAULT NULL,\n  `t_date` date DEFAULT NULL,\n  `t_time` time(6) DEFAULT NULL,\n  `t_dec` decimal(30,10) DEFAULT NULL,\n  `t_bit` bit(16) DEFAULT NULL,\n  `t_json` json DEFAULT NULL,\n  `t_enum` enum('a','b') DEFAULT NULL,\n  `t_set` set('x','y','z') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "createSql": "CREATE TABLE `torture` (\n  `id` int NOT NULL,\n  `label` varchar(80) DEFAULT NULL,\n  `t_text` text,\n  `t_blob` blob,\n  `t_varbin` varbinary(255) DEFAULT NULL,\n  `t_bin` binary(8) DEFAULT NULL,\n  `t_ts` timestamp NULL DEFAULT NULL,\n  `t_dt` datetime(6) DEFAULT NULL,\n  `t_date` date DEFAULT NULL,\n  `t_time` time(6) DEFAULT NULL,\n  `t_dec` decimal(30,10) DEFAULT NULL,\n  `t_bit` bit(16) DEFAULT NULL,\n  `t_json` json DEFAULT NULL,\n  `t_enum` enum('a','b') DEFAULT NULL,\n  `t_set` set('x','y','z') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id",
+        "label",
+        "t_text",
+        "t_blob",
+        "t_varbin",
+        "t_bin",
+        "t_ts",
+        "t_dt",
+        "t_date",
+        "t_time",
+        "t_dec",
+        "t_bit",
+        "t_json",
+        "t_enum",
+        "t_set"
+      ],
+      "loadColumnList": "`id`, `label`, `t_text`, `t_blob`, `t_varbin`, `t_bin`, `t_ts`, `t_dt`, `t_date`, `t_time`, `t_dec`, `t_bit`, `t_json`, `t_enum`, `t_set`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "fixture",
+      "schema": "db",
+      "table": "commented",
+      "ddl": "CREATE TABLE `commented` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB COMMENT='reset AUTO_INCREMENT=5 nightly'",
+      "createSql": "CREATE TABLE `commented` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB COMMENT='reset AUTO_INCREMENT=5 nightly'",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id"
+      ],
+      "loadColumnList": "`id`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    },
+    {
+      "from": "fixture",
+      "schema": "db",
+      "table": "weird",
+      "ddl": "CREATE TABLE `weird` (\n  `we,ird` int DEFAULT NULL,\n  `s` varchar(10) DEFAULT 'a,b',\n  `keyword` int DEFAULT NULL,\n  PRIMARY KEY (`we,ird`)\n) ENGINE=InnoDB AUTO_INCREMENT=7",
+      "createSql": "CREATE TABLE `weird` (\n  `we,ird` int DEFAULT NULL,\n  `s` varchar(10) DEFAULT 'a,b',\n  `keyword` int DEFAULT NULL,\n  PRIMARY KEY (`we,ird`)\n) ENGINE=InnoDB",
+      "deferred": [],
+      "autoIncrement": 7,
+      "generatedColumns": [],
+      "loadColumns": [
+        "we,ird",
+        "s",
+        "keyword"
+      ],
+      "loadColumnList": "`we,ird`, `s`, `keyword`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": "ALTER TABLE `db`.`weird` AUTO_INCREMENT = 7"
+      }
+    },
+    {
+      "from": "fixture",
+      "schema": "db",
+      "table": "nothing",
+      "ddl": "CREATE TABLE `nothing` (\n  `id` int NOT NULL\n) ENGINE=InnoDB",
+      "createSql": "CREATE TABLE `nothing` (\n  `id` int NOT NULL\n) ENGINE=InnoDB",
+      "deferred": [],
+      "autoIncrement": null,
+      "generatedColumns": [],
+      "loadColumns": [
+        "id"
+      ],
+      "loadColumnList": "`id`",
+      "rebuild": {
+        "indexSql": null,
+        "foreignKeySql": null,
+        "checkSql": null,
+        "autoIncrementSql": null
+      }
+    }
+  ],
+  "ddlParts": [
+    {
+      "clauses": [
+        "`id` int NOT NULL AUTO_INCREMENT",
+        "`name` varchar(100) DEFAULT NULL",
+        "`balance` decimal(10,2) DEFAULT NULL",
+        "PRIMARY KEY (`id`)",
+        "KEY `idx_name` (`name`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "index",
+          "name": "idx_name",
+          "text": "KEY `idx_name` (`name`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "name",
+        "balance",
+        null,
+        null
+      ],
+      "lifted": {
+        "value": 6,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL AUTO_INCREMENT",
+        "`name` varchar(100) DEFAULT NULL",
+        "`price` decimal(10,2) DEFAULT NULL",
+        "PRIMARY KEY (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "name",
+        "price",
+        null
+      ],
+      "lifted": {
+        "value": 4,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL AUTO_INCREMENT",
+        "`account_id` int DEFAULT NULL",
+        "`amount` decimal(10,2) DEFAULT NULL",
+        "PRIMARY KEY (`id`)",
+        "KEY `account_id` (`account_id`)",
+        "CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "index",
+          "name": "account_id",
+          "text": "KEY `account_id` (`account_id`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "orders_ibfk_1",
+          "text": "CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "account_id",
+        "amount",
+        null,
+        null,
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL",
+        "`name` varchar(100) NOT NULL",
+        "`city` varchar(100) NOT NULL",
+        "PRIMARY KEY (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "name",
+        "city",
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` bigint NOT NULL",
+        "`first_name` varchar(100) NOT NULL",
+        "`last_name` varchar(100) NOT NULL",
+        "`email` varchar(255) NOT NULL",
+        "`department_id` int NOT NULL",
+        "`title` varchar(60) NOT NULL",
+        "`hired_at` date NOT NULL",
+        "PRIMARY KEY (`id`)",
+        "UNIQUE KEY `email` (`email`)",
+        "KEY `ix_employees_0` (`department_id`)",
+        "KEY `ix_employees_1` (`hired_at`)",
+        "CONSTRAINT `employees_ibfk_1` FOREIGN KEY (`department_id`) REFERENCES `departments` (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "unique",
+          "name": "email",
+          "text": "UNIQUE KEY `email` (`email`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_employees_0",
+          "text": "KEY `ix_employees_0` (`department_id`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_employees_1",
+          "text": "KEY `ix_employees_1` (`hired_at`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "employees_ibfk_1",
+          "text": "CONSTRAINT `employees_ibfk_1` FOREIGN KEY (`department_id`) REFERENCES `departments` (`id`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "first_name",
+        "last_name",
+        "email",
+        "department_id",
+        "title",
+        "hired_at",
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` bigint NOT NULL",
+        "`employee_id` bigint NOT NULL",
+        "`amount` decimal(10,2) NOT NULL",
+        "`valid_from` date NOT NULL",
+        "PRIMARY KEY (`id`)",
+        "KEY `ix_salaries_0` (`employee_id`,`valid_from`)",
+        "CONSTRAINT `salaries_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "index",
+          "name": "ix_salaries_0",
+          "text": "KEY `ix_salaries_0` (`employee_id`,`valid_from`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "salaries_ibfk_1",
+          "text": "CONSTRAINT `salaries_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "employee_id",
+        "amount",
+        "valid_from",
+        null,
+        null,
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` bigint NOT NULL",
+        "`employee_id` bigint NOT NULL",
+        "`project` varchar(120) NOT NULL",
+        "`role` varchar(40) NOT NULL",
+        "`started_at` date NOT NULL",
+        "PRIMARY KEY (`id`)",
+        "KEY `ix_assignments_0` (`employee_id`)",
+        "CONSTRAINT `assignments_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "index",
+          "name": "ix_assignments_0",
+          "text": "KEY `ix_assignments_0` (`employee_id`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "assignments_ibfk_1",
+          "text": "CONSTRAINT `assignments_ibfk_1` FOREIGN KEY (`employee_id`) REFERENCES `employees` (`id`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "employee_id",
+        "project",
+        "role",
+        "started_at",
+        null,
+        null,
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL",
+        "`n` bigint NOT NULL DEFAULT '0'",
+        "PRIMARY KEY (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "n",
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL AUTO_INCREMENT",
+        "`code` varchar(20) NOT NULL",
+        "PRIMARY KEY (`id`)",
+        "UNIQUE KEY `uq_code` (`code`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        {
+          "kind": "unique",
+          "name": "uq_code",
+          "text": "UNIQUE KEY `uq_code` (`code`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "code",
+        null,
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` bigint NOT NULL AUTO_INCREMENT",
+        "`customer_id` int NOT NULL",
+        "`email` varchar(120) NOT NULL",
+        "`notes` text",
+        "`amount` decimal(12,4) NOT NULL DEFAULT '0.0000'",
+        "`ratio` double DEFAULT NULL",
+        "`issued_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "`meta` json DEFAULT NULL",
+        "`flags` bit(8) DEFAULT NULL",
+        "`state` enum('draft','sent','paid') NOT NULL DEFAULT 'draft'",
+        "`doubled` decimal(14,4) GENERATED ALWAYS AS ((`amount` * 2)) STORED",
+        "`lower_email` varchar(120) GENERATED ALWAYS AS (lower(`email`)) VIRTUAL",
+        "PRIMARY KEY (`id`,`customer_id`)",
+        "UNIQUE KEY `uq_email` (`email`)",
+        "KEY `ix_customer` (`customer_id`)",
+        "KEY `ix_amount` (`amount`,`issued_at`)",
+        "FULLTEXT KEY `ft_notes` (`notes`)",
+        "CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE",
+        "CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "unique",
+          "name": "uq_email",
+          "text": "UNIQUE KEY `uq_email` (`email`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_customer",
+          "text": "KEY `ix_customer` (`customer_id`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_amount",
+          "text": "KEY `ix_amount` (`amount`,`issued_at`)"
+        },
+        {
+          "kind": "fulltext",
+          "name": "ft_notes",
+          "text": "FULLTEXT KEY `ft_notes` (`notes`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "fk_customer",
+          "text": "CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE"
+        },
+        {
+          "kind": "check",
+          "name": "ck_amount",
+          "text": "CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "doubled",
+        "lower_email",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "customer_id",
+        "email",
+        "notes",
+        "amount",
+        "ratio",
+        "issued_at",
+        "meta",
+        "flags",
+        "state",
+        "doubled",
+        "lower_email",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "lifted": {
+        "value": 4711,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC COMMENT='sync fixture'"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL",
+        "`label` varchar(80) DEFAULT NULL",
+        "`t_text` text",
+        "`t_blob` blob",
+        "`t_varbin` varbinary(255) DEFAULT NULL",
+        "`t_bin` binary(8) DEFAULT NULL",
+        "`t_ts` timestamp NULL DEFAULT NULL",
+        "`t_dt` datetime(6) DEFAULT NULL",
+        "`t_date` date DEFAULT NULL",
+        "`t_time` time(6) DEFAULT NULL",
+        "`t_dec` decimal(30,10) DEFAULT NULL",
+        "`t_bit` bit(16) DEFAULT NULL",
+        "`t_json` json DEFAULT NULL",
+        "`t_enum` enum('a','b') DEFAULT NULL",
+        "`t_set` set('x','y','z') DEFAULT NULL",
+        "PRIMARY KEY (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "label",
+        "t_text",
+        "t_blob",
+        "t_varbin",
+        "t_bin",
+        "t_ts",
+        "t_dt",
+        "t_date",
+        "t_time",
+        "t_dec",
+        "t_bit",
+        "t_json",
+        "t_enum",
+        "t_set",
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`a` int DEFAULT NULL",
+        "`b` varchar(10) DEFAULT NULL"
+      ],
+      "classified": [
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null
+      ],
+      "columns": [
+        "a",
+        "b"
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`a` int NOT NULL",
+        "`b` varchar(10) DEFAULT NULL",
+        "UNIQUE KEY `uq_a` (`a`)"
+      ],
+      "classified": [
+        null,
+        null,
+        {
+          "kind": "unique",
+          "name": "uq_a",
+          "text": "UNIQUE KEY `uq_a` (`a`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "a",
+        "b",
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL AUTO_INCREMENT",
+        "`code` varchar(20) NOT NULL",
+        "PRIMARY KEY (`id`)",
+        "UNIQUE KEY `uq_code` (`code`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        {
+          "kind": "unique",
+          "name": "uq_code",
+          "text": "UNIQUE KEY `uq_code` (`code`)"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "code",
+        null,
+        null
+      ],
+      "lifted": {
+        "value": 512,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` bigint NOT NULL AUTO_INCREMENT",
+        "`customer_id` int NOT NULL",
+        "`email` varchar(120) NOT NULL",
+        "`notes` text",
+        "`amount` decimal(12,4) NOT NULL DEFAULT '0.0000'",
+        "`ratio` double DEFAULT NULL",
+        "`issued_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "`meta` json DEFAULT NULL",
+        "`flags` bit(8) DEFAULT NULL",
+        "`state` enum('draft','sent','paid') NOT NULL DEFAULT 'draft'",
+        "`doubled` decimal(14,4) GENERATED ALWAYS AS ((`amount` * 2)) STORED",
+        "`lower_email` varchar(120) GENERATED ALWAYS AS (lower(`email`)) VIRTUAL",
+        "PRIMARY KEY (`id`,`customer_id`)",
+        "UNIQUE KEY `uq_email` (`email`)",
+        "KEY `ix_customer` (`customer_id`)",
+        "KEY `ix_amount` (`amount`,`issued_at`)",
+        "FULLTEXT KEY `ft_notes` (`notes`)",
+        "CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE",
+        "CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        {
+          "kind": "unique",
+          "name": "uq_email",
+          "text": "UNIQUE KEY `uq_email` (`email`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_customer",
+          "text": "KEY `ix_customer` (`customer_id`)"
+        },
+        {
+          "kind": "index",
+          "name": "ix_amount",
+          "text": "KEY `ix_amount` (`amount`,`issued_at`)"
+        },
+        {
+          "kind": "fulltext",
+          "name": "ft_notes",
+          "text": "FULLTEXT KEY `ft_notes` (`notes`)"
+        },
+        {
+          "kind": "foreign-key",
+          "name": "fk_customer",
+          "text": "CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE"
+        },
+        {
+          "kind": "check",
+          "name": "ck_amount",
+          "text": "CONSTRAINT `ck_amount` CHECK ((`amount` >= 0))"
+        }
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "doubled",
+        "lower_email",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "customer_id",
+        "email",
+        "notes",
+        "amount",
+        "ratio",
+        "issued_at",
+        "meta",
+        "flags",
+        "state",
+        "doubled",
+        "lower_email",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "lifted": {
+        "value": 37478,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC COMMENT='sync fixture'"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL",
+        "`label` varchar(80) DEFAULT NULL",
+        "`t_text` text",
+        "`t_blob` blob",
+        "`t_varbin` varbinary(255) DEFAULT NULL",
+        "`t_bin` binary(8) DEFAULT NULL",
+        "`t_ts` timestamp NULL DEFAULT NULL",
+        "`t_dt` datetime(6) DEFAULT NULL",
+        "`t_date` date DEFAULT NULL",
+        "`t_time` time(6) DEFAULT NULL",
+        "`t_dec` decimal(30,10) DEFAULT NULL",
+        "`t_bit` bit(16) DEFAULT NULL",
+        "`t_json` json DEFAULT NULL",
+        "`t_enum` enum('a','b') DEFAULT NULL",
+        "`t_set` set('x','y','z') DEFAULT NULL",
+        "PRIMARY KEY (`id`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        "label",
+        "t_text",
+        "t_blob",
+        "t_varbin",
+        "t_bin",
+        "t_ts",
+        "t_dt",
+        "t_date",
+        "t_time",
+        "t_dec",
+        "t_bit",
+        "t_json",
+        "t_enum",
+        "t_set",
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL",
+        "PRIMARY KEY (`id`)"
+      ],
+      "classified": [
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null
+      ],
+      "columns": [
+        "id",
+        null
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB COMMENT='reset AUTO_INCREMENT=5 nightly'"
+      }
+    },
+    {
+      "clauses": [
+        "`we,ird` int DEFAULT NULL",
+        "`s` varchar(10) DEFAULT 'a,b'",
+        "`keyword` int DEFAULT NULL",
+        "PRIMARY KEY (`we,ird`)"
+      ],
+      "classified": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "generated": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "columns": [
+        "we,ird",
+        "s",
+        "keyword",
+        null
+      ],
+      "lifted": {
+        "value": 7,
+        "rest": " ENGINE=InnoDB"
+      }
+    },
+    {
+      "clauses": [
+        "`id` int NOT NULL"
+      ],
+      "classified": [
+        null
+      ],
+      "generated": [
+        null
+      ],
+      "columns": [
+        "id"
+      ],
+      "lifted": {
+        "value": null,
+        "rest": " ENGINE=InnoDB"
+      }
+    }
+  ],
+  "constants": {
+    "replicaStatus": "SHOW REPLICA STATUS",
+    "resetReplica": "RESET REPLICA"
+  }
+}
