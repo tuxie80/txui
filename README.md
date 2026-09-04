@@ -7,11 +7,25 @@
 ![Rust](https://img.shields.io/badge/Rust-1.97.1-orange?logo=rust&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)
 
-<!-- ══════════════════════════════════════════════════════════════════
-     YOUR INTRO HERE — replace the quote below (and delete this comment)
-     with your own words. This is the first thing visitors read.
-     ══════════════════════════════════════════════════════════════════ -->
-> _…intro coming soon — the author's own words will live here…_
+> **[No AI used for this text]**
+>
+> TxUI is the embodiment of a long-standing wish: to have a first-choice UI for my needs — at work, at home, anytime.
+>
+> The last few years have opened the floodgates to AI slop, half-baked AI projects, and dead ends. I'm trying to counter that by drawing on my own experience — verifying, cross-referencing, testing, and staying genuinely cautious about outcomes.
+>
+> It offers a smooth, fast querying experience, with excellent navigation inside the editor and advanced functionality throughout.
+>
+> Plugins for common tasks add something new — a "special open" for Dolphie files, map/graph views for geo-data, pivot tables, and more.
+>
+> The UI is built for high-privilege users, covering everything an admin or DevOps engineer needs to do within the database space.
+>
+> This is a hobby project — a one-man show, fueled by enthusiasm and no shortage of tokens to spare.
+>
+> I genuinely believe this version is perfectly usable as-is, right now (September 2026), and can only grow from here.
+>
+> -Tuxie-
+>
+> P.S. About the name — Tx is short for Tuxie, and also short for (database) transaction ;-)
 
 ![TxUI — SQL editor with a live result grid](docs/shots/05-editor-results.png)
 
