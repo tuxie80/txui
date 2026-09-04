@@ -19,7 +19,8 @@
  *
  * So the default background is drawn locally — a **graticule and a scale
  * bar** — enough to answer "how big is this" and "which way is north", which
- * is what a track needs. The tile basemaps (CARTO / OSM / Esri) exist but are
+ * is what a track needs. The tile basemaps (Wikimedia-OSM / OSM / Esri) exist
+ * but are
  * gated: the first time a user selects one, a dialog names the host and says
  * plainly that the viewport's coordinates leave the machine; only after that
  * one-time acknowledgment (persisted as `dbgui.mapTilesAck`) do tiles load,
@@ -75,22 +76,79 @@ const TRACK_COLORS = [
  * Free, no-API-key basemaps. Muted styles first, because a light or dark
  * low-contrast basemap is what lets the track read cleanly — the bright default
  * OSM street map is offered but not the default.
+ *
+ * Light/Dark used to be CARTO tiles, but CARTO started requiring an API key
+ * and now stamps "API KEY REQUIRED" across every tile served without one.
+ * Light is now Wikimedia's OSM rendering — keyless and muted. Dark is the same
+ * tile with its lightness inverted client-side (`invertTile`); there is no
+ * credible key-free dark raster endpoint left to point at instead.
  */
 type BaseMapId = 'light' | 'dark' | 'osm' | 'satellite' | 'none';
 const BASEMAPS: Record<BaseMapId, {
-  label: string; dark: boolean; attr: string;
+  label: string; dark: boolean; attr: string; invert?: boolean;
   url: ((z: number, x: number, y: number) => string) | null;
 }> = {
-  light: { label: 'Light', dark: false, attr: '© OpenStreetMap © CARTO',
-    url: (z, x, y) => `https://a.basemaps.cartocdn.com/light_all/${z}/${x}/${y}.png` },
-  dark: { label: 'Dark', dark: true, attr: '© OpenStreetMap © CARTO',
-    url: (z, x, y) => `https://a.basemaps.cartocdn.com/dark_all/${z}/${x}/${y}.png` },
-  osm: { label: 'Street', dark: false, attr: '© OpenStreetMap',
+  light: { label: 'Light', dark: false, attr: '© OpenStreetMap contributors · Wikimedia',
+    url: (z, x, y) => `https://maps.wikimedia.org/osm-intl/${z}/${x}/${y}.png` },
+  dark: { label: 'Dark', dark: true, invert: true, attr: '© OpenStreetMap contributors · Wikimedia',
+    url: (z, x, y) => `https://maps.wikimedia.org/osm-intl/${z}/${x}/${y}.png` },
+  osm: { label: 'Street', dark: false, attr: '© OpenStreetMap contributors',
     url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png` },
   satellite: { label: 'Satellite', dark: true, attr: '© Esri',
     url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}` },
   none: { label: 'Grid only', dark: false, attr: '', url: null },
 };
+
+/**
+ * Turn a light tile into a dark one: invert each pixel's lightness in HSL
+ * space, so water stays blue and labels stay legible. Runs once per tile at
+ * load; the processed canvas replaces the source image in the tile cache.
+ * Returns null when pixel access is denied (tainted canvas) — the caller then
+ * keeps the original tile, which the opacity slider can still dim.
+ */
+function invertTile(img: HTMLImageElement): HTMLCanvasElement | null {
+  try {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, c.width, c.height);
+    const px = data.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const r = px[i] / 255, g = px[i + 1] / 255, b = px[i + 2] / 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      const l2 = (1 - (mx + mn) / 2) * 0.85;   // inverted lightness, slightly darker
+      if (mx === mn) {
+        px[i] = px[i + 1] = px[i + 2] = l2 * 255;
+        continue;
+      }
+      const d = mx - mn;
+      const l = (mx + mn) / 2;
+      const s = l < 0.5 ? d / (mx + mn) : d / (2 - mx - mn);
+      let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+      h /= 6;
+      if (h < 0) h += 1;
+      const q = l2 < 0.5 ? l2 * (1 + s) : l2 + s - l2 * s;
+      const p = 2 * l2 - q;
+      const hue = (t: number) => {
+        t = ((t % 1) + 1) % 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+      };
+      px[i] = hue(h + 1 / 3) * 255;
+      px[i + 1] = hue(h) * 255;
+      px[i + 2] = hue(h - 1 / 3) * 255;
+    }
+    ctx.putImageData(data, 0, 0);
+    return c;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * How many geometries are drawn.
@@ -296,7 +354,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     setBasemap(id);
   }, [tilesAck, setTilesAck]);
 
-  const tileCache = useRef<Map<string, HTMLImageElement>>(new Map());
+  const tileCache = useRef<Map<string, HTMLImageElement | HTMLCanvasElement>>(new Map());
   const [tileTick, setTileTick] = useState(0);
   // Decoded 256px tiles are big; unbounded caching across a long pan/zoom
   // session costs hundreds of MB. LRU via Map insertion order: re-insert on
@@ -309,7 +367,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
       if (!key.startsWith(`${basemap}/`)) cache.delete(key);
     }
   }, [basemap]);
-  const getTile = useCallback((z: number, x: number, y: number): HTMLImageElement | null => {
+  const getTile = useCallback((z: number, x: number, y: number): HTMLImageElement | HTMLCanvasElement | null => {
     const src = BASEMAPS[basemap].url;
     if (!src) return null;
     const key = `${basemap}/${z}/${x}/${y}`;
@@ -317,10 +375,20 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     const have = cache.get(key);
     if (have) {
       cache.delete(key); cache.set(key, have);   // refresh LRU position
+      if (have instanceof HTMLCanvasElement) return have;
       return have.complete && have.naturalWidth > 0 ? have : null;
     }
     const img = new Image();
-    img.onload = () => setTileTick(t => t + 1);
+    // CORS-clean loads so an inverted (Dark) tile can be pixel-processed
+    // without tainting the canvas. Both tile hosts send ACAO:*.
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (BASEMAPS[basemap].invert) {
+        const inv = invertTile(img);
+        if (inv) cache.set(key, inv);
+      }
+      setTileTick(t => t + 1);
+    };
     img.onerror = () => {};
     img.src = src(z, x, y);
     cache.set(key, img);
