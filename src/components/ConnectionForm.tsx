@@ -1,5 +1,5 @@
 import { errorDisplay } from '../utils/appError';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ConnectionsStore } from '../store/connections';
 import type { ConnectionConfig, Engine, SslMode } from '../types';
 import { invoke } from '@tauri-apps/api/core';
@@ -38,6 +38,19 @@ interface Props {
   onSave: (config: ConnectionConfig, password: string, sshPassword: string) => Promise<void>;
   onCancel: () => void;
 }
+
+/**
+ * Form sections, one tab per concern. The old everything-visible two-column
+ * layout squeezed Advanced's three-across rows into half the card and they
+ * poked out past its right edge; tabs give every section the full width.
+ */
+type CFTab = 'connection' | 'options' | 'security' | 'advanced';
+const CF_TABS: ReadonlyArray<{ id: CFTab; label: string }> = [
+  { id: 'connection', label: 'Connection' },
+  { id: 'options',    label: 'Options' },
+  { id: 'security',   label: 'SSH / SSL' },
+  { id: 'advanced',   label: 'Advanced' },
+];
 
 export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Props) {
   const [engine,   setEngine]   = useState<Engine>(initial?.engine ?? 'mysql');
@@ -106,8 +119,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [useIamAuth,  setUseIamAuth]  = useState(initial?.use_iam_auth ?? false);
   const [iamKeyPath,  setIamKeyPath]  = useState(initial?.iam_key_path ?? '');
 
-  // Advanced (connection tuning / pool)
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  // Advanced (connection tuning / pool) — lives on the Advanced tab now.
+  const [tab, setTab] = useState<CFTab>('connection');
   const [connectTimeout, setConnectTimeout] = useState(initial?.connect_timeout_secs?.toString() ?? '');
   const [queryTimeout, setQueryTimeout] = useState(initial?.query_timeout_secs?.toString() ?? '');
   const [applicationName, setApplicationName] = useState(initial?.application_name ?? '');
@@ -167,9 +180,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
         const rows = prev.filter(r => !(r.k in p.extraParams));
         return [...rows, ...extra.map(([k, v]) => ({ k, v }))];
       });
-      setShowAdvanced(true);
+      setTab('advanced');
     }
-    if (p.connectTimeoutSecs != null || p.applicationName || p.socketPath) setShowAdvanced(true);
+    if (p.connectTimeoutSecs != null || p.applicationName || p.socketPath) setTab('advanced');
     if (!name.trim()) setName(`${p.user || 'db'}@${p.host ?? p.socketPath ?? 'localhost'}`);
     setUrlWarnings(p.warnings);
     setError(null);
@@ -285,7 +298,10 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       // Advanced
       connect_timeout_secs: toNum(connectTimeout),
       query_timeout_secs:   toNum(queryTimeout),
-      application_name:     applicationName.trim() || null,
+      // Only PostgreSQL carries this (startup `application_name`); MySQL's
+      // `program_name` equivalent is frozen into the handshake and sqlx gives
+      // us no way to send it — don't store a value no server will ever see.
+      application_name:     engine === 'postgres' ? (applicationName.trim() || null) : null,
       extra_params:         extraParams,
       socket_path:          socketPath.trim() || null,
       init_sql:             initSql.trim() || null,
@@ -337,9 +353,51 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const isFile   = engine === 'sqlite' || engine === 'parquet' || engine === 'duckdb';
   const engineDefaults = ENGINE_DEFAULTS[engine];
 
+  // The card is draggable by its title bar, so it can be parked aside while
+  // credentials are copied out of whatever password manager sits behind it.
+  const [drag, setDrag] = useState({ x: 0, y: 0 });
+  const dragStart = useRef<{ px: number; py: number; x: number; y: number } | null>(null);
+  function onTitleDown(e: React.PointerEvent<HTMLElement>) {
+    dragStart.current = { px: e.clientX, py: e.clientY, x: drag.x, y: drag.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onTitleMove(e: React.PointerEvent<HTMLElement>) {
+    const s = dragStart.current;
+    if (!s) return;
+    setDrag({ x: s.x + e.clientX - s.px, y: s.y + e.clientY - s.py });
+  }
+  function onTitleUp() { dragStart.current = null; }
+
+  // A dot on the Advanced tab is the only way to see — without opening it —
+  // that an edited connection carries non-default tuning.
+  const advancedInUse = !!(connectTimeout || queryTimeout || applicationName
+    || socketPath || charset || collation || timeZone || initSql || logDir
+    || enableCleartext || poolMax || poolAcquire || poolIdle || stmtTimeout
+    || chMaxMemory || chMaxRows || extraRows.some(r => r.k.trim()));
+
   return (
-    <div className="conn-form">
-      <h2>{initial?.id ? 'Edit connection' : 'New connection'}</h2>
+    <div className="conn-form"
+         style={drag.x || drag.y ? { transform: `translate(${drag.x}px, ${drag.y}px)` } : undefined}>
+      <h2 className="cf-title" title="Drag to move"
+          onPointerDown={onTitleDown} onPointerMove={onTitleMove}
+          onPointerUp={onTitleUp} onPointerCancel={onTitleUp}>
+        {initial?.id ? 'Edit connection' : 'New connection'}
+      </h2>
+
+      <div className="settings-tabs cf-tabs" role="tablist">
+        {CF_TABS.map(t => (
+          <button key={t.id} type="button" role="tab" aria-selected={tab === t.id}
+                  className={`settings-tab${tab === t.id ? ' active' : ''}`}
+                  onClick={() => setTab(t.id)}>
+            {t.label}
+            {t.id === 'advanced' && tab !== 'advanced' && advancedInUse && (
+              <span className="cf-tab-dot" title="Advanced settings in use" />
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'connection' && (<>
 
       {!initial?.id && (
         <label>Paste connection URL (optional)
@@ -356,8 +414,6 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
         </p>
       )}
 
-      <div className="cf-cols">
-      <div className="cf-col">
       <div className="cf-grid">
         <div className="cf-row">
           <label>Engine</label>
@@ -506,9 +562,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           </label>
         </div>
       )}
-      </div>{/* /cf-col — core credentials */}
+      </>)}
 
-      <div className="cf-col">
+      {tab === 'options' && (<>
       <div className={`cf-ro${readOnly ? ' cf-ro-on' : ''}`}>
         <label className="form-check cf-ro-toggle"
                title="Every statement is write-checked in the UI and again in the backend; import, datagen, dump/restore and kill are blocked">
@@ -535,29 +591,6 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           </div>
         )}
       </div>
-
-      {engine === 'clickhouse' && (
-        <div className="cf-block">
-          <label>Memory &amp; row ceilings{' '}
-            <span className="form-hint">(blank / 0 = no limit)</span>
-            <div className="form-row">
-              <input type="number" min={0} value={chMaxMemory} disabled={readOnly}
-                     onChange={e => setChMaxMemory(e.target.value)}
-                     placeholder="max_memory_usage (bytes)" style={{ flex: 1 }} />
-              <input type="number" min={0} value={chMaxRows} disabled={readOnly}
-                     onChange={e => setChMaxRows(e.target.value)}
-                     placeholder="max_rows_to_read (rows)" style={{ flex: 1 }} />
-            </div>
-            <p className="form-hint">
-              {readOnly
-                ? <>Turn off READ-ONLY to set these — <code>readonly=1</code> makes the
-                  server reject them.</>
-                : <>Per-query RAM (bytes) and rows-scanned ceilings, sent with every
-                  request — the stop against an OOM.</>}
-            </p>
-          </label>
-        </div>
-      )}
 
       {(engine === 'mysql' || engine === 'postgres') && (
         <div className="cf-block">
@@ -615,6 +648,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
         <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
           placeholder="shown as a sidebar tooltip · searchable" style={{ resize: 'vertical', fontFamily: 'inherit' }} />
       </label>
+      </>)}
+
+      {tab === 'security' && (<>
 
       {/* ── SSH tunnel ──────────────────────────────────────────── */}
       {/* Shown for every engine. It was hidden for Redis, but the tunnel was
@@ -769,14 +805,32 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           )}
         </div>
 
-      {/* ── Advanced ────────────────────────────────────────────── */}
-      <div className="form-section">
-        <label className="form-section-toggle" onClick={() => setShowAdvanced(v => !v)}>
-          <span style={{ cursor: 'pointer' }}>{showAdvanced ? '▾' : '▸'} Advanced</span>
-        </label>
+      </>)}
 
-        {showAdvanced && (
+      {tab === 'advanced' && (
           <div className="form-subsection">
+            {engine === 'clickhouse' && (
+              <div className="cf-block">
+                <label>Memory &amp; row ceilings{' '}
+                  <span className="form-hint">(blank / 0 = no limit)</span>
+                  <div className="form-row">
+                    <input type="number" min={0} value={chMaxMemory} disabled={readOnly}
+                           onChange={e => setChMaxMemory(e.target.value)}
+                           placeholder="max_memory_usage (bytes)" style={{ flex: 1 }} />
+                    <input type="number" min={0} value={chMaxRows} disabled={readOnly}
+                           onChange={e => setChMaxRows(e.target.value)}
+                           placeholder="max_rows_to_read (rows)" style={{ flex: 1 }} />
+                  </div>
+                  <p className="form-hint">
+                    {readOnly
+                      ? <>Turn off READ-ONLY to set these — <code>readonly=1</code> makes the
+                        server reject them.</>
+                      : <>Per-query RAM (bytes) and rows-scanned ceilings, sent with every
+                        request — the stop against an OOM.</>}
+                  </p>
+                </label>
+              </div>
+            )}
             <div className="form-row">
               <label style={{ flex: 1 }}>Connect timeout (s)
                 <input type="number" min={0} value={connectTimeout} onChange={e => setConnectTimeout(e.target.value)} placeholder="default" />
@@ -796,15 +850,16 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
                   the startup `application_name` and shows in
                   pg_stat_activity. MySQL's equivalent is the `program_name`
                   connection attribute, which is frozen into the handshake and
-                  which sqlx gives us no way to send — so rather than accept a
-                  value the server will never see, the field says so. */}
-              <label style={{ flex: 1 }} title={engine === 'postgres' ? undefined
-                : 'PostgreSQL only — other engines have no equivalent TxUI can set'}>
-                Application name{' '}
-                {engine !== 'postgres' && <span className="form-hint">(PostgreSQL only)</span>}
-                <input value={applicationName} onChange={e => setApplicationName(e.target.value)}
-                       disabled={engine !== 'postgres'} placeholder="TxUI" />
-              </label>
+                  which sqlx gives us no way to send — so for every other
+                  engine the field is not shown at all, rather than accepting
+                  a value the server will never see. */}
+              {engine === 'postgres' && (
+                <label style={{ flex: 1 }}>
+                  Application name
+                  <input value={applicationName} onChange={e => setApplicationName(e.target.value)}
+                         placeholder="TxUI" />
+                </label>
+              )}
             </div>
             {/* Windows has no Unix domain sockets — MySQL there uses a named
                 pipe and PostgreSQL is TCP-only. The field is greyed rather
@@ -922,10 +977,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
               </label>
             )}
           </div>
-        )}
-      </div>
-      </div>{/* /cf-col — options */}
-      </div>{/* /cf-cols */}
+      )}
 
       {error && <p className="error">{error}</p>}
       {initial?.id && (

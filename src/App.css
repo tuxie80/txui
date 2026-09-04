@@ -455,11 +455,23 @@ body.zen .status-bar {
 }
 .conn-form h2 { margin: 0 0 4px; font-size: calc(15px * var(--font-scale, 1)); }
 
-/* Two columns: core credentials on the left, options (read-only, autocommit,
-   SSH, IAM, SSL, Advanced…) on the right. One column when narrow. */
-.cf-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 18px; align-items: start; }
-.cf-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-@media (max-width: 760px) { .cf-cols { grid-template-columns: 1fr; } }
+/* The title bar doubles as a drag handle — the card can be parked aside while
+   credentials are copied out of whatever window sits behind it. */
+.conn-form h2.cf-title { cursor: grab; user-select: none; touch-action: none; }
+.conn-form h2.cf-title:active { cursor: grabbing; }
+
+/* Sections sit on tabs (Connection / Options / SSH·SSL / Advanced) — the old
+   two-column sprawl pushed Advanced's three-across rows past the card edge. */
+.conn-form .cf-tabs { padding: 0; margin: 0 0 4px; }
+.cf-tab-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); margin-left: 6px; vertical-align: 1px;
+}
+/* Flex rows must be allowed to shrink below an input's intrinsic width, or a
+   row of three pokes out past the card's right edge. */
+.conn-form .form-row > * { min-width: 0; }
+.conn-form .form-row input,
+.conn-form .form-row select { min-width: 0; }
 .conn-form .form-section { margin-top: 0; padding: 8px 10px; }
 .conn-form .form-subsection { margin-top: 8px; }
 .conn-form .cf-ro, .conn-form .cf-prod-warn { margin-top: 0; }

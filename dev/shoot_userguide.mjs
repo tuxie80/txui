@@ -405,7 +405,7 @@ try {
     await page.keyboard.press('Enter');
     await page.waitForTimeout(1200);
     await crop(page, '02-add-connection', '.conn-form',
-      'New connection form: engine, host/port, colour, environment, read-only', {
+      'New connection form, Connection tab: engine, host/port, colour, environment', {
         pad: 10,
         marks: [
           { sel: '.cf-engine', label: 'Engine', pad: 3 },
