@@ -25,10 +25,8 @@ penguin.png
 database.png
 
 # Internal documentation — design docs, plans, audits and notes stay local,
-# they are not part of the repository. The one exception is the GitHub front
-# page (root README.md).
+# they are not part of the repository.
 *.md
-!/README.md
 
 # OS / editor noise
 .DS_Store
