@@ -1,9 +1,11 @@
 /**
  * The changelog, in the app.
  *
- * `CHANGELOG.md` is imported with Vite's `?raw`, so this is the real file
- * rather than a copy kept in sync by hand — a "What's New" that quietly stops
- * matching the release it ships with is worse than no such window.
+ * `CHANGELOG.md` is bundled with Vite's `?raw` — but optionally: the file is
+ * gitignored (kept out of the public source), so a clean checkout has nothing
+ * to bundle. It is loaded through a glob for that reason: the glob matches
+ * nothing when the file is absent (instead of failing the build) and the
+ * window falls back to a short "not bundled" note.
  *
  * Only the released sections are shown, and `## [Unreleased]` is dropped: it
  * describes work that is not in the binary the reader is holding.
@@ -13,8 +15,11 @@
  * dependency and a bundle-size cost for a window most users open once.
  */
 import { useEffect, useMemo, useRef } from 'react';
-import changelog from '../../CHANGELOG.md?raw';
 import { parseChangelog } from '../utils/changelog';
+
+const changelog = Object.values(
+  import.meta.glob<string>('../../CHANGELOG.md', { eager: true, query: '?raw', import: 'default' }),
+)[0] ?? '';
 
 /** Headings, bullets, bold and code — the four things the changelog uses. */
 function renderLine(line: string, key: string) {
@@ -57,7 +62,9 @@ export function WhatsNewModal({ onClose }: { onClose: () => void }) {
           <button className="modal-close" onClick={onClose}>×</button>
         </div>
         <div className="wn-body">
-          {releases.map(r => (
+          {releases.length === 0 ? (
+            <p className="wn-p">Release notes are not bundled with this build.</p>
+          ) : releases.map(r => (
             <section className="wn-release" key={r.version}>
               <h3 className="wn-version">
                 {r.version}

@@ -109,7 +109,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'TxUI ${{ github.ref_name }}'
           releaseBody: |
-            See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+            Desktop installers for macOS, Linux and Windows.
           releaseDraft: true      # review before publishing
           prerelease: false
           args: ${{ matrix.args }}
