@@ -32,7 +32,7 @@ jobs:
           # macOS universal binary (ARM + Intel in one bundle)
           - platform: macos-latest
             args: '--target universal-apple-darwin'
-            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin x86_64-apple-darwin'
 
           # Linux x86-64 — AppImage + .deb (glibc floor: 2.35)
           - platform: ubuntu-22.04
