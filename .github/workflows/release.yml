@@ -63,6 +63,16 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
+      # The `targets` above land on the bootstrap `stable` toolchain, but
+      # rust-toolchain.toml overrides the actual build to the pinned compiler
+      # (1.97.1) — so the extra targets must be installed there too. Only the
+      # macOS universal build needs a second architecture.
+      - name: Install pinned-toolchain targets (macOS universal)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          channel=$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --target aarch64-apple-darwin --target x86_64-apple-darwin --profile minimal
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
