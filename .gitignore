@@ -27,6 +27,8 @@ database.png
 # Internal documentation — design docs, plans, audits and notes stay local,
 # they are not part of the repository.
 *.md
+# ...except the README, which describes the project and must ship with it.
+!README.md
 
 # OS / editor noise
 .DS_Store
