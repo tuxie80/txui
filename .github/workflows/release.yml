@@ -94,6 +94,33 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # ── Release notes: pull the matching section out of CHANGELOG ───
+      # On a tag push the version is vX.Y.Z → the "## [X.Y.Z]" section; on a
+      # manual run (no tag) it falls back to the "## [Unreleased]" section.
+      # The result lands in RELEASE_BODY and becomes the GitHub Release body.
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          out=/tmp/txui-release-notes.md
+          for pat in "## [$ver]" "## [Unreleased]"; do
+            awk -v pat="$pat" '
+              /^## \[/ {
+                if (found) exit
+                found = (index($0, pat) == 1)
+                next
+              }
+              found
+            ' CHANGELOG.md > "$out"
+            [ -s "$out" ] && break
+          done
+          [ -s "$out" ] || printf 'See CHANGELOG.md for details.\n' > "$out"
+          {
+            echo 'RELEASE_BODY<<TXUI_NOTES_EOF'
+            cat "$out"
+            echo 'TXUI_NOTES_EOF'
+          } >> "$GITHUB_ENV"
+
       # ── Build + publish ─────────────────────────────────────────────
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -115,8 +142,7 @@ jobs:
           # action just builds and the upload step below captures artifacts.
           tagName: ${{ github.ref_name }}
           releaseName: 'TxUI ${{ github.ref_name }}'
-          releaseBody: |
-            Desktop installers for macOS, Linux and Windows.
+          releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: true      # review before publishing
           prerelease: false
           args: ${{ matrix.args }}
