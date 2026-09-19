@@ -18,7 +18,7 @@
 ![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white "Tested: 8.0 (8.0.29 fixture)")
 ![Parquet](https://img.shields.io/badge/Parquet-50ABF1?logo=apacheparquet&logoColor=white "File-format level - any parquet file")
 
-**[No AI used for this text]**
+**Intro with no AI bloat**
 
 TxUI is something I've wanted for a long time: a go-to UI that actually fits how I work — at the office, at home, whenever.
 
