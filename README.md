@@ -6,23 +6,34 @@
 ![Tauri](https://img.shields.io/badge/Tauri-2-ffc131?logo=tauri&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-1.97.1-orange?logo=rust&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white "Tested: 8.0.46, 8.4.10 (also 8.0.29, 8.0.43-google)")
+![MariaDB](https://img.shields.io/badge/MariaDB-003545?logo=mariadb&logoColor=white "Tested: 10.6.27, 10.11.18, 11.4.12, 11.8.8")
+![Percona](https://img.shields.io/badge/Percona-F3701F "MySQL 8.0 drop-in - no separate fixture")
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white "Tested: 14.23, 16.10 (md5), 17.10, 18.4 (TLS) + streaming standby")
+![SQL Server](https://img.shields.io/badge/SQL%20Server-CC2927 "Tested: 2022 - 26 live tests")
+![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white "Tested: 8.10.0")
+![ClickHouse](https://img.shields.io/badge/ClickHouse-E0A300?logo=clickhouse&logoColor=white "Tested: 26.7.2.59, 26.8")
+![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white "Bundled 3.51.3 - reads any 3.x file")
+![DuckDB](https://img.shields.io/badge/DuckDB-E5C100?logo=duckdb&logoColor=white "Bundled duckdb-rs (compiled in, pinned)")
+![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white "Tested: 8.0 (8.0.29 fixture)")
+![Parquet](https://img.shields.io/badge/Parquet-50ABF1?logo=apacheparquet&logoColor=white "File-format level - any parquet file")
 
-> **[No AI used for this text]**
->
-> TxUI is fast database UI relying on native rust drivers, supporting MySQL/MariaDB/Percona, PostgreSQL, SQLServer, Redis, ClickHouse and Mongo. 
->
-> TxUI is the embodiment of a long-standing wish: to have a first-choice UI for my needs — at work, at home, anytime.
->
-> The last few years have opened the floodgates to AI slop, half-baked AI projects, and dead ends. I'm trying to counter that by drawing on my own experience — verifying, cross-referencing, testing, and staying genuinely cautious about outcomes. It offers a smooth, fast querying experience, with excellent navigation inside the editor and advanced functionality throughout. Plugins for common tasks add something new — a "special open" for Dolphie files, map/graph views for geo-data, pivot tables, and more.
->
-> The UI is built for high-privilege users, covering everything an admin or DevOps engineer needs to do within the database space.
-> This is a hobby project — a one-man show, fueled by enthusiasm and no shortage of tokens to spare.
->
-> I genuinely believe this version is perfectly usable as-is, right now (September 2026), and can only grow from here.
->
-> -Tuxie-
->
-> P.S. About the name — Tx is short for Tuxie, and also short for (database) transaction ;-)
+**[No AI used for this text]**
+
+TxUI is something I've wanted for a long time: a go-to UI that actually fits how I work — at the office, at home, whenever.
+
+The last few years have opened the floodgates to AI slop, half-finished projects, and dead ends. I'm trying to push back against that by leaning on my own experience — verifying things, cross-referencing, testing, and staying genuinely skeptical about what comes out the other end. The result is a fast, smooth querying experience with really good navigation inside the editor and plenty of advanced functionality under the hood. There are plugins for the everyday stuff too, plus a few things you won't find elsewhere: a "special open" for Dolphie files, map and graph views for geo-data, pivot tables, and more. AI models used along the way: Kimi, Claude, DeepSeek, and others.
+
+The UI is built with high-privilege users in mind, so it covers pretty much everything an admin or DevOps engineer needs to do in the database space.
+
+This is a hobby project — a one-man show, running on enthusiasm and no shortage of tokens.
+
+Honestly, I think this version is perfectly usable as it stands right now (September 2026), and it can only get better from here. I'd love to hear your feedback, bug reports, and feature requests!
+
+The name comes from my nickname — Tx is short for Tuxie, and also short for (database) transaction ;-)
+
+Tuxie
+
 
 ![TxUI — SQL editor with a live result grid](docs/shots/05-editor-results.png)
 
@@ -46,6 +57,21 @@
 - **Safety by default** — prod environment tags with row-count confirmations, server-side write guards, read-only enforced at the driver level, SSH tunnels, optional encrypted vault.
 - **Same app on all three desktops** — native File · Edit · View · Tools · Help everywhere, SQLite compiled into the binary so a `.db` behaves identically everywhere.
 
+## Tested versions
+
+| Engine | Versions tested live |
+| --- | --- |
+| MySQL / Percona | 8.0.46, 8.4.10 (earlier: 8.0.29, 8.0.43-google, Cloud SQL MySQL 8.0) |
+| MariaDB | 10.6.27, 10.11.18, 11.4.12, 11.8.8 |
+| PostgreSQL | 14.23, 16.10 (md5 auth), 17.10, 18.4 (TLS) + 18.4 streaming standby |
+| Redis | 8.10.0 |
+| ClickHouse | 26.7.2.59, 26.8 |
+| SQLite | 3.51.3 (bundled; reads any 3.x file) |
+| DuckDB | bundled duckdb-rs (compiled in, pinned) |
+| MongoDB | 8.0 (8.0.29 fixture) |
+| SQL Server | 2022 (26 live tests) |
+| Parquet | file-format level (any parquet file) |
+
 ## Develop
 
 ```bash
@@ -64,8 +90,23 @@ cd src-tauri && cargo test --lib        # backend unit tests
 
 ## Release builds
 
-- **Mac build info**: I'm not an Apple developer, not keen to pay $99 per year. 
-- .
+- **Mac build info**: I'm not an Apple developer, not keen to pay $99 per year -> the
+  macOS app is ad-hoc signed and not notarized, so Gatekeeper refuses to open
+  it the first time. Two ways past it:
+
+  - **Right-click way** (no terminal, once per copy): in Finder,
+    **Control-click** (or right-click) `TxUI.app` → **Open** → confirm **Open**
+    in the dialog. Gatekeeper remembers this for that copy of the app.
+
+  - **CLI way** (strips the quarantine flag): copy the app to `/Applications`,
+    then run:
+
+    ```bash
+    xattr -cr /Applications/TxUI.app
+    ```
+
+    That removes the `com.apple.quarantine` attribute the download stamped on
+    it, so it launches like any other app.
 - **CI** (Actions → release): push a `v*.*.*` tag → macOS (universal), Linux
   (AppImage/deb) and Windows (NSIS/MSI), drafted as a GitHub Release.
 - **Local**: `crossbuild/build_linux.sh` here, `build_macos.sh` on the Mac,
