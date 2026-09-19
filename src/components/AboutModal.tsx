@@ -37,7 +37,7 @@ export function AboutModal({ onClose }: Props) {
           native Rust core built for speed.
         </p>
         <div className="about-meta">
-          <span>Author: <b>Txe</b></span>
+          <span>Author: <b>Tuxie</b></span>
           <span>Built with Tauri · Rust · React</span>
         </div>
         <button className="primary" onClick={onClose}>Close</button>

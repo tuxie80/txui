@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxUI Help · v0.65.0</title>
+<title>TxUI Help · v1.0.0</title>
 <style>/* TxUI Help — dark-first, light-aware, red accent. */
 :root{
   --accent:#ff2d2d; --accent-dim:rgba(255,45,45,.14); --accent-brd:rgba(255,45,45,.4);
@@ -213,7 +213,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </head>
 <body class="show-mac">
 <header class="topbar">
-  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v0.65.0</span></div>
+  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.0.0</span></div>
   <div class="top-actions">
     <input id="globalSearch" class="global-search" placeholder="Search the docs…" oninput="globalSearch(this.value)" autocomplete="off">
     <div class="seg" id="osToggle">
@@ -226,13 +226,13 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="layout">
   <nav class="sidenav">
     <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
-    <div class="nav-foot">Generated from source<br>at v0.65.0 · macOS screenshots</div>
+    <div class="nav-foot">Generated from source<br>at v1.0.0 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
     
 <section id="overview" class="doc-section">
-  <h1>TxUI <span class="ver">v0.65.0</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 34 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 0.65.0.</p>
+  <h1>TxUI <span class="ver">v1.0.0</span></h1>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 34 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.0.0.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
     <div class="card"><div class="big">34</div><div>tool panels</div></div>
@@ -248,7 +248,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="engines" class="doc-section">
   <h1>Engine support matrix</h1>
-  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v0.65.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
+  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.0.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
   <div class="toolbar">
     <input id="engFilter" class="filter" placeholder="Filter capabilities…" oninput="filterTable('engFilter','engTable')">
   </div>
@@ -911,7 +911,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="shortcuts" class="doc-section">
   <h1>Keyboard shortcuts</h1>
-  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v0.65.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
+  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.0.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
   <div class="toolbar"><input id="scFilter" class="filter" placeholder="Filter shortcuts by action or key…" oninput="filterTable('scFilter','scTable')"></div>
   <table class="ref" id="scTable">
     <thead><tr><th>Command</th><th>Category</th><th>Shortcut</th><th>What it does</th></tr></thead>
@@ -1981,7 +1981,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v0.65.0 · 34 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version.</footer>
+    <footer class="foot">TxUI v1.0.0 · 34 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version.</footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

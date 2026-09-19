@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TxUI",
-  "version": "0.65.0",
+  "version": "1.0.0",
   "identifier": "com.dbgui.app",
   "build": {
     "frontendDist": "../dist",

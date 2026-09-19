@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.65.0"
+version = "1.0.0"
 # One bin now (the mssql-spike probe was retired once the live tests covered it)
 default-run = "TxUI"
 description = "TxUI — fast native database GUI"
