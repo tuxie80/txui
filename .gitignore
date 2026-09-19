@@ -29,6 +29,9 @@ database.png
 *.md
 # ...except the README, which describes the project and must ship with it.
 !README.md
+# ...and the small two-version CHANGELOG.md (GitHub release notes are
+# auto-extracted from it). CHANGELOG_FULL.md keeps the full history, local.
+!CHANGELOG.md
 
 # OS / editor noise
 .DS_Store
