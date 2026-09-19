@@ -9,16 +9,13 @@
 
 > **[No AI used for this text]**
 >
+> TxUI is fast database UI relying on native rust drivers, supporting MySQL/MariaDB/Percona, PostgreSQL, SQLServer, Redis, ClickHouse and Mongo. 
+>
 > TxUI is the embodiment of a long-standing wish: to have a first-choice UI for my needs — at work, at home, anytime.
 >
-> The last few years have opened the floodgates to AI slop, half-baked AI projects, and dead ends. I'm trying to counter that by drawing on my own experience — verifying, cross-referencing, testing, and staying genuinely cautious about outcomes.
->
-> It offers a smooth, fast querying experience, with excellent navigation inside the editor and advanced functionality throughout.
->
-> Plugins for common tasks add something new — a "special open" for Dolphie files, map/graph views for geo-data, pivot tables, and more.
+> The last few years have opened the floodgates to AI slop, half-baked AI projects, and dead ends. I'm trying to counter that by drawing on my own experience — verifying, cross-referencing, testing, and staying genuinely cautious about outcomes. It offers a smooth, fast querying experience, with excellent navigation inside the editor and advanced functionality throughout. Plugins for common tasks add something new — a "special open" for Dolphie files, map/graph views for geo-data, pivot tables, and more.
 >
 > The UI is built for high-privilege users, covering everything an admin or DevOps engineer needs to do within the database space.
->
 > This is a hobby project — a one-man show, fueled by enthusiasm and no shortage of tokens to spare.
 >
 > I genuinely believe this version is perfectly usable as-is, right now (September 2026), and can only grow from here.
@@ -67,6 +64,8 @@ cd src-tauri && cargo test --lib        # backend unit tests
 
 ## Release builds
 
+- **Mac build info**: I'm not an Apple developer, not keen to pay $99 per year. 
+- .
 - **CI** (Actions → release): push a `v*.*.*` tag → macOS (universal), Linux
   (AppImage/deb) and Windows (NSIS/MSI), drafted as a GitHub Release.
 - **Local**: `crossbuild/build_linux.sh` here, `build_macos.sh` on the Mac,
