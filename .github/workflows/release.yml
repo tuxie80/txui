@@ -5,6 +5,9 @@
 #   git tag v0.58.0 && git push --tags   →  draft GitHub Release with:
 #   macOS universal .dmg/.app · Linux AppImage + .deb · Windows NSIS + MSI
 #
+# Re-pushing a tag whose release is already PUBLISHED skips the whole matrix
+# (guard job below) — an accidental re-tag must not rebuild the world.
+#
 # Also runs manually (Actions → Release → Run workflow) — artifacts are then
 # uploaded as workflow artifacts instead of a release, for testing the pipe.
 #
@@ -24,7 +27,35 @@ permissions:
   contents: write   # needed to create GitHub Release and upload assets
 
 jobs:
+  # Cheap pre-flight (~30 s, Linux): does this tag already have a PUBLISHED
+  # release? If yes, the matrix below is skipped entirely — re-pushing an old
+  # tag (history rewrite, tag fix) then costs seconds, not a 3-OS rebuild.
+  guard:
+    runs-on: ubuntu-22.04
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          state=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq 'if .draft then "draft" else "published" end' 2>/dev/null || echo none)
+          echo "existing release for $TAG: $state"
+          if [ "$state" = "published" ]; then
+            echo "::notice::Release $TAG already published — skipping matrix"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -47,12 +78,16 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ── Node ────────────────────────────────────────────────────────
-      - uses: actions/setup-node@v4
+      # v7 actions run natively on Node.js 24 (the runner default since
+      # 2026-06); the v4 majors were Node 20 actions, removed from runners
+      # on 2026-09-16. node-version 24 matches the app's dev toolchain
+      # (Node 25 locally) far better than the old 20.
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       # ── Rust ────────────────────────────────────────────────────────
@@ -150,7 +185,7 @@ jobs:
       # Manual (non-tag) runs: expose the bundles as workflow artifacts.
       - name: Upload artifacts (manual runs)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: txui-${{ matrix.platform }}
           path: |
