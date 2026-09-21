@@ -150,6 +150,26 @@ jobs:
             [ -s "$out" ] && break
           done
           [ -s "$out" ] || printf 'See CHANGELOG.md for details.\n' > "$out"
+          # Unwrap: the CHANGELOG is hard-wrapped at ~76 cols for terminals,
+          # but GitHub renders single newlines as <br> — join continuation
+          # lines so each note is one full-width line. Fence-aware: ```
+          # code blocks pass through untouched.
+          awk '
+            /^```/ { fence = !fence }
+            {
+              if (fence) { flush(); print; next }
+              if ($0 ~ /^[[:space:]]+[^[:space:]]/ && buf != "") {
+                line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                buf = buf " " line; next
+              }
+              flush()
+              if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+              if ($0 ~ /^- /) { buf = $0; next }
+              print
+            }
+            function flush() { if (buf != "") { print buf; buf = "" } }
+            END { flush() }
+          ' "$out" > "$out.unwrap" && mv "$out.unwrap" "$out"
           {
             echo 'RELEASE_BODY<<TXUI_NOTES_EOF'
             cat "$out"
