@@ -3,6 +3,21 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- **Version lives in exactly one place: `package.json`.** The six other
+  carriers (`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
+  `src-tauri/tauri.conf.json`, the `README.md` badge, the newest CHANGELOG
+  entry header, the AGENTS.md line) are written by `dev/sync_version.mjs` —
+  `npm run version:sync -- X.Y.Z` bumps everything in one command (including
+  renaming the changelog's `[Unreleased]` section with today's date and
+  regenerating `docs/inventory.json`), and a bare `npm run version:sync`
+  checks for drift. Enforcement: `tests/versionSync.test.ts` runs the same
+  assertions on every `npm test`, so a hand-edit or a forgotten sync fails
+  loudly instead of shipping quietly.
+
 ## [1.1.0] - 2026-10-12
 
 ### Added

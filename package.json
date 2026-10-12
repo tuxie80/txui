@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "test": "node --test tests/*.test.ts",
     "preview": "vite preview",
-    "sync:vectors": "node --experimental-strip-types dev/gen_sync_vectors.mjs"
+    "sync:vectors": "node --experimental-strip-types dev/gen_sync_vectors.mjs",
+    "version:sync": "node dev/sync_version.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.1",
