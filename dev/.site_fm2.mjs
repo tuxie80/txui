@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const EXE = process.env.TXUI_CHROMIUM ?? '/Users/j/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
+const browser = await chromium.launch({ executablePath: EXE });
+const m = await browser.newPage({ viewport: { width: 390, height: 9377 } });
+await m.goto('http://localhost:8901/', { waitUntil: 'networkidle' });
+await m.waitForTimeout(900);
+await m.screenshot({ path: 'dev/site-shots/full-mobile.png' });
+await m.close();
+await browser.close();
+console.log('ok');
