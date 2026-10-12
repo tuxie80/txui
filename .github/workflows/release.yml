@@ -211,3 +211,27 @@ jobs:
           path: |
             src-tauri/target/release/bundle/**
             src-tauri/target/universal-apple-darwin/release/bundle/**
+
+  # ── Checksums ──────────────────────────────────────────────────────────
+  # One sha256sums.txt over ALL platform bundles, uploaded to the release.
+  # The curl installer (site/install.sh) verifies every download against it —
+  # the checksums come from GitHub, so a compromised mirror of the install
+  # script cannot sneak a tampered binary past it. Runs after the matrix
+  # because a per-platform file would race/overwrite on the shared release.
+  checksums:
+    needs: release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Hash every release asset and upload sha256sums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d); cd "$work"
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern '*.dmg' --pattern '*.app.tar.gz' --pattern '*.AppImage' \
+            --pattern '*.deb' --pattern '*.rpm' --pattern '*.msi' --pattern '*.exe'
+          sha256sum * > sha256sums.txt
+          gh release upload "$GITHUB_REF_NAME" sha256sums.txt --clobber
+          cat sha256sums.txt

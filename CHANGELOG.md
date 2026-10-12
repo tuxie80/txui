@@ -5,6 +5,28 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- **One-line install: `curl -fsSL https://tuxie.eu/txui/install.sh | bash`.**
+  `site/install.sh` (deployed with the site) detects the platform, resolves
+  the latest release from the GitHub API (or takes a pinned version),
+  downloads the right bundle and **verifies it against the release's
+  `sha256sums.txt` — fetched from GitHub, not from the web host**, so a
+  tampered mirror cannot slip a bad binary past it. macOS: dmg → TxUI.app in
+  /Applications (~/Applications fallback) with the quarantine attribute
+  removed — no right-click → Open dance on the ad-hoc-signed build. Linux
+  x86-64: AppImage into ~/Applications plus a .desktop entry; `--deb`
+  installs via apt instead. End-to-end tested against the real 1.1.0 release.
+  The release workflow gains a trailing `checksums` job that publishes that
+  `sha256sums.txt` (both release.yml copies kept identical).
+- **Homebrew tap: `brew install --cask tuxie80/tap/txui`.** New repo
+  `tuxie80/homebrew-tap` with the cask (universal dmg, sha256-pinned,
+  Gatekeeper caveat documented); `brew upgrade` tracks future releases.
+  `dev/bump_tap.sh` updates the cask from a release's checksums file and is
+  now a step in the release checklist. The website gains an Install section
+  with both commands. Windows stays on the NSIS/MSI download from the
+  release page (a PowerShell `irm|iex` installer is the noted follow-up).
+
 ### Changed
 
 - **Version lives in exactly one place: `package.json`.** The seven other
