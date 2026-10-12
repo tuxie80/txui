@@ -489,9 +489,12 @@ pub enum LiveSession {
     /// HTTP is stateless, so this holds a configured client rather than a pool.
     Clickhouse(super::clickhouse::ChSession),
     Sqlite(sqlx::SqlitePool),
-    /// The file's metadata, read once at open. Parquet is immutable, so there
-    /// is no connection to keep and nothing can change underneath us.
-    Parquet(std::sync::Arc<super::parquet::ParquetFile>),
+    /// One opened file, or a whole directory of them as a partitioned dataset
+    /// (db/parquet.rs — the dataset also holds a read-only in-memory DuckDB
+    /// session for the row path). Footer metadata is read once at open;
+    /// Parquet is immutable, so there is no connection to keep and nothing
+    /// can change underneath us.
+    Parquet(std::sync::Arc<super::parquet::ParquetSource>),
     /// One blocking connection behind a mutex, plus its interrupt handle.
     Duckdb(std::sync::Arc<super::duckdb::DuckDbSession>),
     /// The client manages its own connection pool internally (Arc-cheap to
@@ -667,6 +670,19 @@ pub enum SchemaNode {
     /// (`ddl_command_start`, `sql_drop`, …); `enabled` is false when disabled.
     EventTrigger { name: String, schema: Option<String>, event: String,
                    enabled: bool },
+    /// PostgreSQL logical-replication subscription (database-global, listed at
+    /// the connection root beside the publications). `publications` are the
+    /// publication names it subscribes to; `enabled` is false when disabled.
+    /// The conninfo (`subconninfo`) is deliberately never read: it can embed a
+    /// password, and pg_subscription is superuser-only anyway, so a
+    /// non-superuser simply sees no Subscriptions group.
+    Subscription { name: String, schema: Option<String>, enabled: bool,
+                   publications: Vec<String> },
+    /// PostgreSQL extended statistics object (`CREATE STATISTICS`, PG 10+) —
+    /// per-schema, attached to `table`. `kinds` lists the enabled statistic
+    /// kinds ("ndistinct", "dependencies", "mcv", …).
+    StatisticExt { name: String, schema: Option<String>, table: String,
+                   kinds: Vec<String> },
     /// PostgreSQL tablespace (cluster-global). `location` is empty for the
     /// built-in `pg_default` / `pg_global`.
     Tablespace   { name: String, schema: Option<String>, owner: String,

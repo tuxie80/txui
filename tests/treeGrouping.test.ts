@@ -287,25 +287,60 @@ test('the new groups come after the objects they describe', () => {
 // ── PG cluster-global objects + foreign tables (new tree kinds) ─────────────
 
 test('cluster-global PG objects each land in their own group', () => {
-  // Publications, event triggers, tablespaces and foreign servers are listed
-  // at the connection root; foreign tables sit inside their schema.
+  // Publications, subscriptions, event triggers, tablespaces and foreign
+  // servers are listed at the connection root; foreign tables sit inside
+  // their schema.
   const { groups } = groupSchemaObjects([
     { kind: 'publication', name: 'pub_all', schema: null, all_tables: true, table_count: 0 },
+    { kind: 'subscription', name: 'sub_from_main', schema: null, enabled: true, publications: ['pub_all'] },
     { kind: 'event_trigger', name: 'et_audit', schema: null, event: 'ddl_command_start', enabled: true },
     { kind: 'tablespace', name: 'fast_ssd', schema: null, owner: 'postgres', location: '/mnt/ssd' },
     { kind: 'foreign_server', name: 'remote_pg', schema: null, fdw: 'postgres_fdw' },
   ]);
   const byKind = new Map(groups.map(g => [g.node.group, g]));
   assert.equal(byKind.get('publications')?.items.length, 1);
+  assert.equal(byKind.get('subscriptions')?.items.length, 1);
   assert.equal(byKind.get('event_triggers')?.items.length, 1);
   assert.equal(byKind.get('tablespaces')?.items.length, 1);
   assert.equal(byKind.get('foreign_servers')?.items.length, 1);
   assert.deepEqual(byKind.get('publications')?.node.name && [
     byKind.get('publications')?.node.name,
+    byKind.get('subscriptions')?.node.name,
     byKind.get('event_triggers')?.node.name,
     byKind.get('tablespaces')?.node.name,
     byKind.get('foreign_servers')?.node.name,
-  ], ['Publications', 'Event triggers', 'Tablespaces', 'Foreign servers']);
+  ], ['Publications', 'Subscriptions', 'Event triggers', 'Tablespaces', 'Foreign servers']);
+});
+
+test('subscriptions group right after publications — publisher before subscriber', () => {
+  const { groups } = groupSchemaObjects([
+    { kind: 'subscription', name: 's', schema: null, enabled: false, publications: ['p'] },
+    { kind: 'publication', name: 'p', schema: null, all_tables: false, table_count: 3 },
+  ]);
+  assert.deepEqual(groups.map(g => g.node.group), ['publications', 'subscriptions']);
+});
+
+test('extended statistics group inside the schema, after RLS policies', () => {
+  const { groups } = groupSchemaObjects([
+    { kind: 'table', name: 'orders', schema: 'public', row_count: null },
+    { kind: 'statistic_ext', name: 'orders_status_total', schema: 'public', table: 'orders', kinds: ['ndistinct', 'dependencies'] },
+    { kind: 'policy', name: 'p', schema: 'public', table: 'orders', command: 'SELECT' },
+    { kind: 'extension', name: 'e', schema: 'public', version: '1', default_version: null },
+  ]);
+  assert.deepEqual(groups.map(g => g.node.group), ['tables', 'policies', 'statistics', 'extensions']);
+  const stats = groups.find(g => g.node.group === 'statistics');
+  assert.equal(stats?.node.name, 'Extended statistics');
+  assert.deepEqual(stats?.items.map(i => i.name), ['orders_status_total']);
+});
+
+test('no statistics/subscription input → no such groups (old server / MySQL tolerance)', () => {
+  // A PG 9.x server or a MySQL connection returns none of these nodes, and
+  // empty groups are dropped — the tree must not grow hollow headings.
+  const { groups } = groupSchemaObjects([
+    { kind: 'table', name: 't', schema: 'public', row_count: null },
+    { kind: 'publication', name: 'p', schema: null, all_tables: true, table_count: 0 },
+  ]);
+  assert.deepEqual(groups.map(g => g.node.group), ['tables', 'publications']);
 });
 
 test('foreign tables group apart from ordinary tables', () => {

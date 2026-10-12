@@ -77,9 +77,9 @@
     "errs": []
   },
   {
-    "name": "06-menu-monitor",
+    "name": "06-menu-activity",
     "ok": true,
-    "note": "Plugins menu: Monitor",
+    "note": "Plugins menu: Activity",
     "errs": []
   },
   {
@@ -89,27 +89,15 @@
     "errs": []
   },
   {
-    "name": "panel-locks",
+    "name": "panel-locks-deadlocks",
     "ok": true,
-    "note": "Locks (mysql)",
+    "note": "Locks & Deadlocks (mysql)",
     "errs": []
   },
   {
-    "name": "panel-deadlocks",
+    "name": "panel-watch",
     "ok": true,
-    "note": "Deadlocks (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-long-running-query",
-    "ok": true,
-    "note": "Long-running query (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-monitor",
-    "ok": true,
-    "note": "Monitor (mysql)",
+    "note": "Watch (mysql)",
     "errs": []
   },
   {
@@ -119,9 +107,27 @@
     "errs": []
   },
   {
-    "name": "panel-digest-history",
+    "name": "panel-playground",
     "ok": true,
-    "note": "Digest history (mysql)",
+    "note": "Playground (mysql)",
+    "errs": []
+  },
+  {
+    "name": "06-menu-insights",
+    "ok": true,
+    "note": "Plugins menu: Insights",
+    "errs": []
+  },
+  {
+    "name": "panel-statement-statistics",
+    "ok": true,
+    "note": "Statement statistics (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-slow-log-analyzer",
+    "ok": true,
+    "note": "Slow-log analyzer (mysql)",
     "errs": []
   },
   {
@@ -131,9 +137,15 @@
     "errs": []
   },
   {
-    "name": "panel-slow-log-analyzer",
+    "name": "panel-query-history",
     "ok": true,
-    "note": "Slow-log analyzer (mysql)",
+    "note": "Query history (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-incident-timeline",
+    "ok": true,
+    "note": "Incident timeline (mysql)",
     "errs": []
   },
   {
@@ -167,12 +179,6 @@
     "errs": []
   },
   {
-    "name": "panel-analyze-table",
-    "ok": true,
-    "note": "Analyze table (mysql)",
-    "errs": []
-  },
-  {
     "name": "panel-maintenance",
     "ok": true,
     "note": "Maintenance (mysql)",
@@ -185,9 +191,9 @@
     "errs": []
   },
   {
-    "name": "panel-playground",
+    "name": "panel-galera-cluster",
     "ok": true,
-    "note": "Playground (mysql)",
+    "note": "Galera cluster (mysql)",
     "errs": []
   },
   {
@@ -221,18 +227,6 @@
     "errs": []
   },
   {
-    "name": "panel-sequences",
-    "ok": true,
-    "note": "Sequences (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-find-usages",
-    "ok": true,
-    "note": "Find usages (mysql)",
-    "errs": []
-  },
-  {
     "name": "panel-documenter",
     "ok": true,
     "note": "Documenter (mysql)",
@@ -257,81 +251,33 @@
     "errs": []
   },
   {
-    "name": "panel-find-in-database",
-    "ok": true,
-    "note": "Find in database (mysql)",
-    "errs": []
-  },
-  {
     "name": "panel-column-profile",
     "ok": true,
     "note": "Column profile (mysql)",
     "errs": []
   },
   {
-    "name": "panel-data-compare",
+    "name": "06-menu-find & compare",
     "ok": true,
-    "note": "Data compare (mysql)",
+    "note": "Plugins menu: Find & Compare",
     "errs": []
   },
   {
-    "name": "panel-result-diff",
+    "name": "panel-find",
     "ok": true,
-    "note": "Result diff (mysql)",
+    "note": "Find (mysql)",
     "errs": []
   },
   {
-    "name": "panel-find-in-files",
+    "name": "panel-compare",
     "ok": true,
-    "note": "Find in files (mysql)",
+    "note": "Compare (mysql)",
     "errs": []
   },
   {
     "name": "06-menu-sql",
     "ok": true,
     "note": "Plugins menu: SQL",
-    "errs": []
-  },
-  {
-    "name": "panel-txshell",
-    "ok": true,
-    "note": "TxShell (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-sql-quality",
-    "ok": true,
-    "note": "SQL Quality (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-compare-sql",
-    "ok": true,
-    "note": "Compare SQL (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-saved-queries",
-    "ok": true,
-    "note": "Saved queries (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-query-history",
-    "ok": true,
-    "note": "Query history (mysql)",
-    "errs": []
-  },
-  {
-    "name": "panel-wait-events",
-    "ok": true,
-    "note": "Wait events (postgres)",
-    "errs": []
-  },
-  {
-    "name": "panel-statement-history",
-    "ok": true,
-    "note": "Statement history (postgres)",
     "errs": []
   },
   {
@@ -347,9 +293,33 @@
     "errs": []
   },
   {
+    "name": "panel-sequences",
+    "ok": true,
+    "note": "Sequences (postgres)",
+    "errs": []
+  },
+  {
     "name": "panel-types",
     "ok": true,
     "note": "Types (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-txshell",
+    "ok": true,
+    "note": "TxShell (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-sql-quality",
+    "ok": true,
+    "note": "SQL Quality (postgres)",
+    "errs": []
+  },
+  {
+    "name": "panel-saved-queries",
+    "ok": true,
+    "note": "Saved queries (postgres)",
     "errs": []
   },
   {
@@ -366,6 +336,6 @@
   {
     "name": "_panel-coverage",
     "ok": true,
-    "note": "panels captured: 42 — analyze-table, binary-logs, column-profile, compare-sql, csv-import, data-compare, data-generator, dba-views, deadlocks, dictionary, digest-history, documenter, er-diagram, find-in-database, find-in-files, find-usages, fleet, listen-notify, locks, long-running-query, maintenance, monitor, playground, processes, query-history, replication, result-diff, routines, saved-queries, sequences, server-tuner, server-variables-status, slow-log-analyzer, sql-quality, statement-history, table-designer, txshell, types, users-grants, vacuum-bloat, views, wait-events"
+    "note": "panels captured: 35 — binary-logs, column-profile, compare, csv-import, data-generator, dba-views, dictionary, documenter, er-diagram, find, fleet, galera-cluster, incident-timeline, listen-notify, locks-deadlocks, maintenance, playground, processes, query-history, replication, routines, saved-queries, sequences, server-tuner, server-variables-status, slow-log-analyzer, sql-quality, statement-statistics, table-designer, txshell, types, users-grants, vacuum-bloat, views, watch"
   }
 ]

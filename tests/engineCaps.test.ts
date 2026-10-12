@@ -6,6 +6,10 @@
  * while the keyboard shortcut for the same panels tested only
  * `!redis && !clickhouse`, so on a Parquet session those panels were hidden
  * and still openable by shortcut.
+ *
+ * Update: ClickHouse's `sqlQuality` is now true — the panel gained its own
+ * CH pipeline and rulebook (utils/qualityRunCh.ts + utils/chQuality.ts), so
+ * the four capabilities no longer move as a block on every engine.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,8 +45,14 @@ test('Parquet cannot open the four panels its buttons already hid', () => {
 test('Redis and ClickHouse agree with their buttons too', () => {
   for (const c of ['erDiagram', 'dataGen', 'csvImport', 'sqlQuality'] as const) {
     assert.equal(can('redis', c), false, `redis.${c}`);
+  }
+  // ClickHouse still has no ER diagram (no FKs), generator or import (writes),
+  // but SQL Quality flipped to true with its own CH rulebook
+  // (utils/chQuality.ts) — see the clickhouse entry's comment in engineCaps.
+  for (const c of ['erDiagram', 'dataGen', 'csvImport'] as const) {
     assert.equal(can('clickhouse', c), false, `clickhouse.${c}`);
   }
+  assert.equal(can('clickhouse', 'sqlQuality'), true, 'clickhouse.sqlQuality');
 });
 
 // ── the claims the table makes about each engine ────────────────────────────

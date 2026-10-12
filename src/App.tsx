@@ -67,6 +67,7 @@ import { forgetPrivileges } from './store/sessionPrivileges';
 import { forgetFlavor } from './store/serverFlavors';
 import { clearSchemaScan } from './store/schemaScan';
 import { restoreRunLog } from './store/logStore';
+import { initGaleraWatches } from './store/galeraWatch';
 import { logAudit, isoNow } from './utils/audit';
 import { PALETTE } from './utils/palette';
 import { GridSettingsProvider } from './store/GridSettingsProvider';
@@ -246,6 +247,41 @@ export default function App() {
     window.addEventListener('dbgui:reveal-object', onReveal);
     return () => window.removeEventListener('dbgui:reveal-object', onReveal);
   }, [toggleTree]);
+  // Cross-connection drill-in (the Galera cluster panel's per-node Open, and
+  // its "✎ Open writer" with `newTab: true` for a fresh query tab on the
+  // recommended write target): connect to a SAVED connection by id, then land
+  // on its Replication panel — with `galera: true`, on the Galera tab of it.
+  // The panel/tab toggles ride a tick behind the session mount so the
+  // QueryTabs listeners exist.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const d = (e as CustomEvent<{ connectionId: string; galera?: boolean; newTab?: boolean }>).detail;
+      if (!d?.connectionId) return;
+      void (async () => {
+        try {
+          const list = await ConnectionsStore.list();
+          const c = list.find(x => x.id === d.connectionId);
+          if (!c) return;
+          const sessionId = await ConnectionsStore.open(c.id);
+          handleOpenSession({
+            connectionId: c.id, sessionId, connectionName: c.name, engine: c.engine,
+            environment: c.environment, readOnly: c.read_only, color: c.color, filePath: c.file_path,
+          });
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('dbgui:toggle-panel', { detail: { panel: 'replication' } }));
+            if (d.galera) window.dispatchEvent(new CustomEvent('dbgui:galera-tab'));
+            // The just-opened session is the active one; QueryTabs' onNewTab
+            // adds the fresh query tab to it (and activates it last).
+            if (d.newTab) window.dispatchEvent(new CustomEvent('dbgui:new-tab'));
+          }, 250);
+        } catch { /* the connect failure is logged by the normal paths */ }
+      })();
+    };
+    window.addEventListener('dbgui:open-connection', onOpen);
+    return () => window.removeEventListener('dbgui:open-connection', onOpen);
+    // Mount-only: handleOpenSession reads state through setState updaters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const insertTextRef = useRef<((text: string) => void) | null>(null);
   // Where the user was before opening a utility view — × restores it
   const [prevView, setPrevView] = useState<{ view: View; activeSessionId: string | null } | null>(null);
@@ -365,6 +401,9 @@ export default function App() {
   // incident and finding an empty list the next morning is the wrong end of
   // the day to lose it.
   useEffect(() => { restoreRunLog(); }, []);
+  // Background Galera cluster watches opted into earlier resume polling
+  // without any panel opening (store/galeraWatch; idempotent).
+  useEffect(() => { initGaleraWatches(); }, []);
 
   // Auto-connect connections flagged auto_connect, once at launch.
   const autoConnectedRef = useRef(false);

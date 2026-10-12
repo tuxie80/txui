@@ -63,6 +63,19 @@
    "engines": "MySQL and PostgreSQL only (gated to sqlDba); Redis connections are excluded from label membership. MySQL uses SHOW GLOBAL VARIABLES / information_schema.statistics / mysql.innodb_table_stats; PostgreSQL uses SHOW ALL / pg_indexes / pg_stat_user_tables.",
    "caveats": "Entirely read-only. Requires live connections to at least two reachable members of the label; fewer and it cannot compare. A member that cannot answer a given query is simply absent from that check rather than counted as 'everything missing'. Role detection falls back to 'unknown' for isolated servers."
   },
+  "cluster": {
+   "summary": "Galera cluster group view - ALL nodes of a MariaDB Galera Cluster / Percona XtraDB Cluster monitored at once, the multi-node companion of the per-session Galera dashboard (a tab of the Replication panel). One poll opens a short-lived session per selected node (concurrency-capped, 30s per-node timeout) via the galera_cluster_poll backend command, runs the two read-only probes SHOW GLOBAL STATUS/VARIABLES LIKE 'wsrep%', and closes it again. Per node it shows a card with a state badge (Synced/Donor/Joining/unreachable), cluster size as that node sees it, flow-control %, recv/send queues, write rates diffed between polls (commits/s, replicated/received bytes/s), an inline SST/IST transfer card and the gcache IST window. Across all nodes it computes the findings no single node can see (pure utils/galeraCluster.ts): split-brain (differing cluster state UUIDs, or two Primary components over disjoint memberships), cluster-size and membership disagreement, donor<->joiner SST pairing with elapsed time, unreachable nodes (the 1047 'not yet prepared' signature reported as 'likely mid-SST'), the slowest node, and nodes picked from different clusters.",
+   "howToOpen": "Session menu bar, Server group, 'Galera cluster' (also Tools > Server > Galera cluster). Renders as the GaleraClusterPanel tab; it polls SAVED connections, not the session it is open in - the current connection's folder-mates are pre-selected because the nodes of a cluster are usually already one folder.",
+   "keyActions": [
+    "Tick the cluster's nodes in the picker (grouped by folder; the current connection's folder is pre-selected)",
+    "Read the cluster-findings banner - split-brain CRIT is unmissable on top",
+    "Per node card: state badge, size-as-seen, FC%, queues, commits/s and bytes/s in/out, IST bar / SST transfer card, gcache window",
+    "Open (per node) - connect to that node and land on its own Galera tab",
+    "Pause/resume the 5s auto-poll; Refresh for a manual round"
+   ],
+   "engines": "MySQL-family with wsrep only (MariaDB Galera Cluster, Percona XtraDB Cluster); the picker lists MySQL-family connections only and the backend skips anything else with a note event.",
+   "caveats": "Read-only by construction (SHOW STATUS needs no grant, so there is no privilege gate). Polling sessions are ephemeral - opened and closed per poll round. Snapshots, rates and the SST elapsed clocks live in memory only and reset when the panel closes. A hidden tab polls nothing. Every cluster rule tolerates missing keys and dead nodes - a node that does not answer degrades the comparisons it would have joined, never the whole view."
+  },
   "csvimport": {
    "summary": "A three-step CSV import wizard: (1) File & target - pick a CSV/JSON/spreadsheet (delimiter and header auto-detected and re-detectable), importing into an existing table or creating a new one; (2) Columns - per-column mapping with skip toggles (existing: matched by name; new: editable name/type inferred from data); (3) Run - options plus live byte-based progress, run transactionally. Non-CSV files (JSON, xlsx/xls/ods, ndjson) are converted to a temporary CSV first and then follow the same path.",
    "howToOpen": "Session menu bar, Data group, 'CSV import'. Renders as the CsvImportPanel tab with sessionId, engine, environment, and readOnly.",
@@ -255,6 +268,18 @@
    ],
    "engines": "Metrics: all engines. Statement: MySQL, PostgreSQL and SQL Server (the longQueryWatch capability; the processlist-all privilege, else the mode greys with the reason). Wait profile: PostgreSQL only.",
    "caveats": "Requires a live connection. A watched statement keeps executing on the server even if the tab is hidden/closed (surfaced as a killable tab activity); a pinned thread is followed read-only and killing stays in Processes, where it is audited. MySQL DDL phases need performance_schema stage instruments enabled (off by default) - the panel says so once and gives the fix. PostgreSQL publishes progress for index builds and table rewrites only; SQL Server's percent_complete covers backup/restore/DBCC/index-reorganize, not CREATE INDEX. A hidden tab pauses polling."
+  },
+  "timeline": {
+   "summary": "Incident timeline for the current connection — one chronological, newest-first list answering 'what happened on this server between 14:00 and 14:30?'. Merges the local stores history.db already keeps: audit statements and connect/disconnect lifecycle, deadlock incidents, digest snapshots, multi-server runs and long-query captures. Rows are grouped by day with a kind badge, status colour and humanized duration; a density strip shows where in the window the action was. The backend normalizes the stores' mixed UTC/local timestamps to epoch ms, so rows sort correctly regardless of source.",
+   "howToOpen": "Session menu bar, Insights group, 'Incident timeline' (also Tools ▸ Insights ▸ Incident timeline). Renders as the IncidentTimelinePanel tab with the session.",
+   "keyActions": [
+    "Pick a from/to window (datetime-local, defaults to today) and Refresh — no polling",
+    "Toggle kind chips (stmt / session / deadlock / snapshot / fleet run / long query) to filter the list",
+    "Click a row to expand its detail (full SQL, error text, deadlock victim)",
+    "Copy a row's detail, or insert its statement into the editor"
+   ],
+   "engines": "All engines (no engine gate, no privilege gate). Everything shown is local data from history.db — nothing is read from the server.",
+   "caveats": "Deadlocks are recorded only while the Locks & Deadlocks panel is open. Every store is capped (50 deadlocks / 100 long queries / 100 snapshots per connection), so an empty window can mean retention, not a quiet server — the footer names the oldest retained event. Audit rows are keyed by connection name: renaming a connection orphans its older rows from this view."
   }
  }
 }

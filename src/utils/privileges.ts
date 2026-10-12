@@ -49,10 +49,13 @@ export type Capability =
   /** Read the aggregated statement workload (pg_stat_statements, P_S digests). */
   | 'statement-stats'
   /** Read other accounts and their grants (👤 Users). */
-  | 'user-admin';
+  | 'user-admin'
+  /** Change server-wide settings (SET GLOBAL / ALTER SYSTEM / sp_configure). */
+  | 'server-admin';
 
 export const CAPABILITIES: readonly Capability[] = [
   'processlist-all', 'kill-others', 'replication', 'stats-views', 'statement-stats', 'user-admin',
+  'server-admin',
 ];
 
 export type Grant = 'granted' | 'denied' | 'unknown';
@@ -73,6 +76,7 @@ const ALL_UNKNOWN: Privileges = {
   'stats-views': { state: 'unknown' },
   'statement-stats': { state: 'unknown' },
   'user-admin': { state: 'unknown' },
+  'server-admin': { state: 'unknown' },
 };
 
 /** Nothing is known — the probe has not run, failed, or the engine has no model. */
@@ -163,6 +167,10 @@ export function mysqlPrivileges(lines: readonly string[]): Privileges {
       'SELECT on performance_schema and sys'),
     'statement-stats': verdict(canSelect('performance_schema'), 'SELECT on performance_schema'),
     'user-admin': verdict(canSelect('mysql'), 'SELECT on the mysql schema'),
+    // SET GLOBAL needs SUPER on MariaDB; MySQL 8 split out
+    // SYSTEM_VARIABLES_ADMIN and both still work there.
+    'server-admin': verdict(has('SUPER', 'SYSTEM_VARIABLES_ADMIN'),
+      'SUPER (or SYSTEM_VARIABLES_ADMIN on MySQL 8)'),
   };
 }
 
@@ -234,6 +242,8 @@ export function pgPrivileges(p: PgProbe): Privileges {
     // pg_roles and pg_auth_members are world-readable; only rolpassword is
     // withheld, and nothing here reads it.
     'user-admin': { state: 'granted' },
+    // ALTER SYSTEM / cluster-wide SETs answer to the superuser alone.
+    'server-admin': verdict(p.is_super, 'superuser'),
   };
 }
 
@@ -269,6 +279,7 @@ export const MSSQL_PROBE = `SELECT
   CONVERT(int, HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW ANY DEFINITION'))  AS view_any_definition,
   CONVERT(int, HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY LOGIN'))      AS alter_any_login,
   CONVERT(int, HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'VIEW DATABASE STATE')) AS view_database_state,
+  CONVERT(int, HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER SETTINGS'))         AS alter_settings,
   CONVERT(int, IS_SRVROLEMEMBER('sysadmin'))                          AS sysadmin,
   CONVERT(int, IS_SRVROLEMEMBER('processadmin'))                      AS processadmin,
   CONVERT(int, IS_SRVROLEMEMBER('securityadmin'))                     AS securityadmin`;
@@ -279,6 +290,7 @@ export interface MssqlProbe {
   viewAnyDefinition: boolean;
   alterAnyLogin: boolean;
   viewDatabaseState: boolean;
+  alterSettings: boolean;
   sysadmin: boolean;
   processadmin: boolean;
   securityadmin: boolean;
@@ -307,6 +319,7 @@ export function mssqlProbeFromRow(
     viewAnyDefinition: at('view_any_definition'),
     alterAnyLogin: at('alter_any_login'),
     viewDatabaseState: at('view_database_state'),
+    alterSettings: at('alter_settings'),
     sysadmin: at('sysadmin'),
     processadmin: at('processadmin'),
     securityadmin: at('securityadmin'),
@@ -347,6 +360,10 @@ export function mssqlPrivileges(p: MssqlProbe): Privileges {
     'user-admin': all || p.securityadmin || p.viewAnyDefinition || p.alterAnyLogin
       ? yes
       : no('VIEW ANY DEFINITION (or the securityadmin server role)'),
+    // sp_configure and friends answer to ALTER SETTINGS.
+    'server-admin': all || p.alterSettings
+      ? yes
+      : no('ALTER SETTINGS (or the sysadmin server role)'),
   };
 }
 

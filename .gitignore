@@ -27,12 +27,18 @@ database.png
 # Internal documentation — design docs, plans, audits and notes stay local,
 # they are not part of the repository.
 *.md
-# ...except the README, which describes the project and must ship with it.
-!README.md
+# ...except the root README, which describes the project and must ship with it.
+!/README.md
 # ...and the small two-version CHANGELOG.md (GitHub release notes are
 # auto-extracted from it). CHANGELOG_FULL.md keeps the full history, local.
-!CHANGELOG.md
+!/CHANGELOG.md
 
 # OS / editor noise
 .DS_Store
 src-tauri/binaries/
+
+# Product website + demo video — deployed to tuxie.eu by hand (lftp), never
+# published to GitHub (no website material in this repo, per owner decision)
+site/
+docs/shots/demo/
+dev/record_demo.mjs

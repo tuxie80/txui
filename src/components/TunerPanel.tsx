@@ -155,7 +155,6 @@ export function TunerPanel({ sessionId, engine, environment, onClose }: Props) {
   const [report, setReport] = useState<TunerReport | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [unsupported, setUnsupported] = useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -164,16 +163,12 @@ export function TunerPanel({ sessionId, engine, environment, onClose }: Props) {
   const run = useCallback(async () => {
     setRunning(true);
     setError(null);
-    setUnsupported(null);
     setSavedPath(null);
     try {
       const r = await invoke<TunerReport>('tuner_analyze', { sessionId });
       setReport(r);
     } catch (e) {
-      const msg = errorDisplay(e);
-      // PG/Redis: the backend declines with a "not supported yet" message.
-      if (/not supported/i.test(msg)) setUnsupported(msg);
-      else setError(msg);
+      setError(errorDisplay(e));
     } finally {
       setRunning(false);
     }
@@ -254,11 +249,7 @@ export function TunerPanel({ sessionId, engine, environment, onClose }: Props) {
       {error && <div className="proc-error-bar">{error}</div>}
 
       <div className="tun-body">
-        {unsupported && (
-          <div className="mx-empty">ⓘ {unsupported}</div>
-        )}
-
-        {!unsupported && !report && !running && (
+        {!report && !running && (
           <div className="tun-start">
             <div className="tun-start-icon">💊</div>
             <div className="tun-start-text">

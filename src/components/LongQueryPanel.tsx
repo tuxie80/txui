@@ -370,13 +370,20 @@ export function LongQueryPanel({ session, pinnedThread, onUnpin, onClose }: Prop
             detail: `long query detected: ${n.age}s — ${who} — ${one}`,
             line: `long query detected: ${n.age}s — ${who} — ${one}`,
           });
+          // Persist the capture for the incident timeline — fire-and-forget:
+          // the watchdog must never wait on (or fail on) local storage.
+          void invoke('record_long_query_event', {
+            connectionId: session.connectionId, engine: session.engine,
+            dbUser: n.user, host: n.host, db: n.db,
+            ageSecs: Math.round(n.age), sql: n.sql,
+          }).catch(() => {});
         }
         if (newOnes.length > 0) {
           setFlash(true);
           setTimeout(() => setFlash(false), 1800);
         }
       } catch { /* best-effort polling */ }
-  }, [watchThreshold, session.sessionId, isMysql, isMssql, addLog]);
+  }, [watchThreshold, session.sessionId, session.connectionId, session.engine, isMysql, isMssql, addLog]);
   usePoll(pollWatch, Math.max(0.5, interval), { immediate: watchMode, paused: !watchMode });
 
   /** KILL QUERY / pg_cancel_backend via the one audited kill path. */

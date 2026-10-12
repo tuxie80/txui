@@ -87,6 +87,64 @@ pub struct ReplicaChannel {
     pub seconds_behind: Option<i64>,
 }
 
+/// The Galera (wsrep) view of the already-collected maps. Present only when
+/// the provider is loaded AND active: detection reads the `wsrep_on`
+/// VARIABLE — on MariaDB there is no STATUS row for it at all (verified live
+/// on 11.8), so a status-only probe would never detect a MariaDB node.
+/// The two base probes (`SHOW GLOBAL VARIABLES/STATUS`) already return every
+/// wsrep key, so no extra round-trip is needed; this struct holds what needs
+/// actual PARSING — the `wsrep_provider_options` "k=v; k=v; …" string, where
+/// gcache.size and the gcs.fc_* knobs live.
+#[derive(Debug, Clone, Default)]
+pub struct GaleraInfo {
+    /// wsrep_provider_options parsed into a lowercase-keyed map.
+    pub provider_options: HashMap<String, String>,
+    /// gcache.size in bytes, parsed out of provider_options ("64M", "1G", …).
+    pub gcache_size_bytes: Option<u64>,
+}
+
+/// Size literal → bytes: "64M", "1.5G", "128M", plain bytes, optional B
+/// suffix. None when the value is not a size literal.
+pub fn parse_size_bytes(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mult) = match v.chars().last() {
+        Some('B') | Some('b') => (&v[..v.len() - 1], 1u64),
+        _ => (v, 1),
+    };
+    let (num, mult) = match num.chars().last() {
+        Some('K') | Some('k') => (&num[..num.len() - 1], 1024 * mult),
+        Some('M') | Some('m') => (&num[..num.len() - 1], 1024u64.pow(2) * mult),
+        Some('G') | Some('g') => (&num[..num.len() - 1], 1024u64.pow(3) * mult),
+        Some('T') | Some('t') => (&num[..num.len() - 1], 1024u64.pow(4) * mult),
+        _ => (num, mult),
+    };
+    Some((num.trim().parse::<f64>().ok()? * mult as f64) as u64)
+}
+
+/// Parse wsrep_provider_options ("k=v; k=v; …") into a lowercase-keyed map.
+pub fn parse_provider_options(raw: &str) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    for part in raw.split(';') {
+        let Some(eq) = part.find('=') else { continue };
+        let k = part[..eq].trim().to_ascii_lowercase();
+        let v = part[eq + 1..].trim().to_string();
+        if !k.is_empty() { m.insert(k, v); }
+    }
+    m
+}
+
+/// Build the Galera view from the collected maps. None unless `wsrep_on` is
+/// ON — the checks module keys entirely off this, so a non-Galera server gets
+/// zero Galera findings.
+fn derive_galera(data: &TunerData) -> Option<GaleraInfo> {
+    if data.von("wsrep_on") != Some(true) {
+        return None;
+    }
+    let provider_options = data.v("wsrep_provider_options").map(parse_provider_options).unwrap_or_default();
+    let gcache_size_bytes = provider_options.get("gcache.size").and_then(|v| parse_size_bytes(v));
+    Some(GaleraInfo { provider_options, gcache_size_bytes })
+}
+
 #[derive(Debug, Clone)]
 pub struct TopStmt {
     pub digest: String,
@@ -134,6 +192,10 @@ pub struct TunerData {
     /// sys.schema_unused_indexes (never-read secondary indexes since server
     /// start). None = sys schema missing/unreadable → the check degrades.
     pub unused_indexes: Option<Vec<UnusedIndex>>,
+    /// Parsed Galera/wsrep view — Some only when wsrep_on is ON (the VARIABLE;
+    /// MariaDB has no STATUS row for it). All wsrep keys themselves stay in
+    /// `vars`/`status`; this holds what needed parsing.
+    pub galera: Option<GaleraInfo>,
 }
 
 impl TunerData {
@@ -235,6 +297,7 @@ pub async fn collect(pool: &sqlx::MySqlPool) -> anyhow::Result<TunerData> {
     data.top_statements = collect_top_statements(pool).await;
     collect_fragmentation(pool, &mut data).await;
     data.unused_indexes = collect_unused_indexes(pool).await;
+    data.galera = derive_galera(&data);
 
     Ok(data)
 }
@@ -528,14 +591,40 @@ mod tests {
     }
 
     #[test]
-    fn detects_cloud() {
-        let no_vars = HashMap::new();
-        assert_eq!(detect_cloud("Google Cloud SQL", &no_vars).as_deref(), Some("gcp-cloudsql"));
-        assert_eq!(detect_cloud("Microsoft Azure", &no_vars).as_deref(), Some("azure"));
-        assert_eq!(detect_cloud("MySQL Community Server - RDS", &no_vars).as_deref(), Some("aws-rds"));
-        assert_eq!(detect_cloud("Homebrew", &no_vars), None);
-        let mut aurora = HashMap::new();
-        aurora.insert("aurora_version".to_string(), "3.08.2".to_string());
-        assert_eq!(detect_cloud("MySQL Community Server - GPL", &aurora).as_deref(), Some("aws-aurora"));
+    fn parses_sizes() {
+        assert_eq!(parse_size_bytes("64M"), Some(64 * 1024 * 1024));
+        assert_eq!(parse_size_bytes("1G"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_size_bytes("128MB"), Some(128 * 1024 * 1024));
+        assert_eq!(parse_size_bytes("67108864"), Some(67108864));
+        assert_eq!(parse_size_bytes(" 512k "), Some(512 * 1024));
+        assert_eq!(parse_size_bytes("1.5G"), Some(1610612736));
+        assert_eq!(parse_size_bytes("auto"), None);
+        assert_eq!(parse_size_bytes(""), None);
+    }
+
+    #[test]
+    fn parses_provider_options() {
+        let m = parse_provider_options("gcache.size = 64M; gcs.fc_limit = 16; gcs.sync_donor = no; base_dir = /x/");
+        assert_eq!(m.get("gcache.size").map(String::as_str), Some("64M"));
+        assert_eq!(m.get("gcs.fc_limit").map(String::as_str), Some("16"));
+        assert_eq!(m.get("gcs.sync_donor").map(String::as_str), Some("no"));
+        assert_eq!(m.get("base_dir").map(String::as_str), Some("/x/"));
+        assert!(parse_provider_options("").is_empty());
+    }
+
+    #[test]
+    fn galera_detection_uses_the_variable_not_the_status() {
+        // MariaDB 11.8 has NO wsrep_on STATUS row — a status-only probe would
+        // never detect it. Detection must read the VARIABLES map.
+        let mut d = TunerData::default();
+        d.status.insert("wsrep_cluster_size".into(), "3".into());
+        assert!(derive_galera(&d).is_none(), "no wsrep_on variable → not Galera");
+        d.vars.insert("wsrep_on".into(), "OFF".into());
+        assert!(derive_galera(&d).is_none(), "provider loaded but OFF → not Galera");
+        d.vars.insert("wsrep_on".into(), "ON".into());
+        d.vars.insert("wsrep_provider_options".into(), "gcache.size = 64M; gcs.fc_limit = 16".into());
+        let g = derive_galera(&d).expect("wsrep_on=ON must detect");
+        assert_eq!(g.gcache_size_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(g.provider_options.get("gcs.fc_limit").map(String::as_str), Some("16"));
     }
 }

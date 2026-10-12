@@ -21,7 +21,7 @@
 //   node dev/shoot_userguide.mjs                                          # shell 2
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { mockFor, installMock } from './doc-fixtures.mjs';
+import { mockFor, installMock, galeraFixture, GALERA_CONNECTIONS } from './doc-fixtures.mjs';
 
 const EXE = process.env.TXUI_CHROMIUM
   ?? '/Users/j/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/'
@@ -468,10 +468,10 @@ try {
       // Target the kill buttons by their own text: `.toolbar-btn` nth(0) is
       // whichever toolbar button happens to render first anywhere on screen,
       // which was the sidebar's.
-      ['11-mysql-processlist', 'Monitor', 'Processes',
+      ['11-mysql-processlist', 'Activity', 'Processes',
         'Processlist with rows and the kill / lock-chain controls',
         [{ sel: 'button', text: 'Kill query', label: 'Kill', pad: 3 }]],
-      ['13-mysql-tuner', 'Server', 'Tuner', 'Tuner report: score and findings', null],
+      ['13-mysql-tuner', 'Server', 'Server tuner', 'Tuner report: score and findings', null],
     ]) {
       if (await openPanel(page, group, item)) {
         await primePanel(page);
@@ -522,7 +522,7 @@ try {
         { sel: '.schema-tree', label: 'Object explorer', pad: 2 },
       ]);
     for (const item of ['Wait events', 'Processes']) {
-      if (await openPanel(page, 'Monitor', item)) {
+      if (await openPanel(page, 'Activity', item)) {
         await primePanel(page);
         await full(page, '21-pg-activity', `pg_stat_activity — ${item} panel`);
         break;
@@ -584,6 +584,99 @@ try {
     await full(page, '51-parquet', 'Parquet inspector: schema and file metadata', [
       { sel: '.schema-tree', label: 'Columns and nested structs', pad: 2 },
     ]);
+    await page.close();
+  });
+
+  // ══ Galera — 52, 53, 54 ══════════════════════════════════════════════════
+  // wsrep fixtures (the __GALERA__ payload in dev/doc-fixtures.mjs): the
+  // per-session tab polls monitor_query, the cluster panel's
+  // galera_cluster_poll drives a Channel. Rates, write shares, the gcache
+  // window and the ✎ write target badge all need TWO poll ticks (5 s apart)
+  // to diff against, so every shot waits past the second tick before
+  // capturing. The sidebar holds only the 3-node txui-galera cluster.
+  const galeraPage = async (fixture) => {
+    const page = await browser.newPage({
+      viewport: { width: W, height: H }, deviceScaleFactor: 2,
+    });
+    await page.addInitScript(installMock, {
+      ...mockFor('mysql'),
+      list_connections: GALERA_CONNECTIONS,
+      __GALERA__: fixture,
+    });
+    page.on('pageerror', e => console.log(`    [pageerror] ${e.message}`));
+    await connect(page, 'galera1');
+    return page;
+  };
+
+  // 52 — the per-session ❖ Galera tab (Replication panel, second topology tab).
+  await section('52-galera-tab', async () => {
+    const page = await galeraPage(galeraFixture());
+    if (!(await openPanel(page, 'Activity', 'Replication'))) {
+      report.push({ name: '52-galera-tab', ok: false, note: 'Activity → Replication not found' });
+      console.log('  ✗ 52-galera-tab.png — Activity → Replication not found');
+      await page.close();
+      return;
+    }
+    await page.locator('.gal-tabs button', { hasText: '❖ Galera' }).first().click();
+    await page.waitForSelector('.gal-cards', { timeout: 8000 });
+    await page.waitForTimeout(11500);   // ≥2 poll ticks: sparklines + burn rate
+    await page.mouse.move(800, 850);    // off the tab bar — drop the hover tooltip
+    await page.waitForTimeout(400);
+    await full(page, '52-galera-tab',
+      'per-session ❖ Galera tab: status cards, sparklines, flow control', [
+        { sel: '.gal-spark-strip', label: 'Last ~5 minutes', pad: 4 },
+        { sel: '.gal-fc-big', label: 'Flow control', pad: 4 },
+      ]);
+    await page.close();
+  });
+
+  // 53 — the ❖ Galera cluster panel: 3 Synced nodes, badge, quorum, findings.
+  await section('53-galera-cluster', async () => {
+    const page = await galeraPage(galeraFixture());
+    if (!(await openPanel(page, 'Server', 'Galera cluster'))) {
+      report.push({ name: '53-galera-cluster', ok: false, note: 'Server → Galera cluster not found' });
+      console.log('  ✗ 53-galera-cluster.png — Server → Galera cluster not found');
+      await page.close();
+      return;
+    }
+    // The node picker opens expanded; close it so the shot is the node grid.
+    await page.locator('.gal-toolbar button', { hasText: 'Nodes' }).first().click()
+      .catch(() => {});
+    await page.waitForSelector('.galc-card', { timeout: 8000 });
+    await page.waitForTimeout(11500);   // ≥2 poll ticks: shares + ✎ badge
+    await page.mouse.move(800, 850);    // off the toolbar — drop any hover tooltip
+    await page.waitForTimeout(400);
+    await full(page, '53-galera-cluster',
+      '❖ Galera cluster panel: three Synced nodes, write-target badge, findings', [
+        { sel: '.galc-writer', label: '✎ write target', pad: 3 },
+        { sel: '.gal-findings', pad: 4 },
+      ]);
+    await page.close();
+  });
+
+  // 54 — a donor mid-SST: the transfer card with the SSH log-tail offer.
+  await section('54-galera-transfer', async () => {
+    const page = await galeraPage(galeraFixture({ donor: 'g2' }));
+    if (!(await openPanel(page, 'Server', 'Galera cluster'))) {
+      report.push({ name: '54-galera-transfer', ok: false, note: 'Server → Galera cluster not found' });
+      console.log('  ✗ 54-galera-transfer.png — Server → Galera cluster not found');
+      await page.close();
+      return;
+    }
+    await page.locator('.gal-toolbar button', { hasText: 'Nodes' }).first().click()
+      .catch(() => {});
+    await page.waitForSelector('.galc-card.galc-donor .gal-transfer', { timeout: 8000 });
+    await page.waitForTimeout(11500);   // ≥2 poll ticks, matching 53's settled view
+    await page.mouse.move(800, 850);
+    await page.waitForTimeout(400);
+    await crop(page, '54-galera-transfer', '.galc-card.galc-donor',
+      'donor node mid-SST: transfer card + the ⌁ Watch log offer', {
+        pad: 14,
+        marks: [
+          { sel: '.gal-transfer-title', pad: 3 },
+          { sel: 'button', text: '⌁ Watch log', label: 'SSH log tail', pad: 3 },
+        ],
+      });
     await page.close();
   });
 

@@ -16,7 +16,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PlanNode, ParsedPlan } from '../utils/planParse';
-import type { PlanCostModel, NodeCost, Severity } from '../utils/planCost';
+import type { PlanCostModel, NodeCost } from '../utils/planCost';
 import { formatWeight, formatRows } from '../utils/planCost';
 import { layoutGraph, layoutIcicle, DEFAULT_LAYOUT } from '../utils/planLayout';
 import type { LaidOutNode } from '../utils/planLayout';
@@ -40,8 +40,6 @@ const KIND_GLYPH: Record<string, string> = {
   'limit': '⊤', 'union': '⊍', 'subquery': '⊂', 'materialize': '▣', 'cte': '⊙',
   'result': '⏹', 'other': '◇',
 };
-
-const SEVERITY_ORDER: Severity[] = ['none', 'mild', 'warm', 'hot', 'critical'];
 
 /** Edge stroke width from its share of the rows — clamped so nothing vanishes. */
 function edgeWidth(weight: number): number {
@@ -484,4 +482,3 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (<><dt>{label}</dt><dd>{value}</dd></>);
 }
 
-export { SEVERITY_ORDER };

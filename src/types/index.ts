@@ -67,7 +67,9 @@ export interface ConnectionConfig {
   /** Unix socket path; overrides host/port when set */
   /** File-backed engines (SQLite, Parquet, DuckDB): the file this connection
    *  opens. Replaces host/port entirely — there is nothing to dial. DuckDB
-   *  also takes `:memory:` for a scratch database. */
+   *  also takes `:memory:` for a scratch database; Parquet also takes a
+   *  DIRECTORY, opened as one partitioned dataset (hive key=value folders
+   *  become columns). */
   file_path?: string | null;
   socket_path: string | null;
   /** Statements run once per new pooled connection */
@@ -171,6 +173,16 @@ export type SchemaNode =
   /** PostgreSQL event trigger (cluster-global). */
   | { kind: 'event_trigger'; name: string; schema: string | null; event: string;
       enabled: boolean }
+  /**
+   * PostgreSQL logical-replication subscription (database-global, at the root).
+   * `publications` are the publication names it subscribes to. The conninfo is
+   * never fetched — it can embed a password.
+   */
+  | { kind: 'subscription'; name: string; schema: string | null; enabled: boolean;
+      publications: string[] }
+  /** PostgreSQL extended statistics object (CREATE STATISTICS, PG 10+). */
+  | { kind: 'statistic_ext'; name: string; schema: string | null; table: string;
+      kinds: string[] }
   /** PostgreSQL tablespace (cluster-global). `location` is empty for built-ins. */
   | { kind: 'tablespace'; name: string; schema: string | null; owner: string;
       location: string }
@@ -192,8 +204,9 @@ export interface Session {
   readOnly?: boolean;
   /** user-picked connection colour — propagates to the session tab (DataGrip-style) */
   color?: string | null;
-  /** File-backed engines (SQLite/Parquet/DuckDB): the opened file. Used to
-   *  detect a Dolphie replay recording and route it to the Replay workspace. */
+  /** File-backed engines (SQLite/Parquet/DuckDB): the opened file (or, for a
+   *  Parquet dataset, the directory). Used to detect a Dolphie replay
+   *  recording and route it to the Replay workspace. */
   filePath?: string | null;
   /** Ephemeral in-memory DuckDB session opened without a saved connection
    *  (utils/scratch). Its connectionId is a one-off UUID, and nothing about

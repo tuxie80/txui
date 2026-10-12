@@ -18,6 +18,7 @@ pub mod ch_collectors;
 pub mod checks;
 pub mod collectors;
 pub mod eol;
+pub mod galera_checks;
 pub mod mssql_checks;
 pub mod mssql_collectors;
 pub mod pg_checks;
@@ -770,6 +771,94 @@ mod pg_standby_tests {
             println!("  :{port} in_recovery={:?}", r.rows[0][0]);
             p.close().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod galera_live_tests {
+    //! The Galera rule pack against the real 3-node MariaDB 11.8 cluster
+    //! (galera1 on 127.0.0.1:3341, root/root — dbctl manages the nodes).
+    //! What unit tests cannot prove: that the wsrep keys the checks read are
+    //! the keys a live server actually reports (no wsrep_on STATUS row on
+    //! MariaDB; wsrep_provider_options carrying gcache.size as "64M"; the
+    //! flow-control counters as scientific-notation floats).
+    //!
+    //!   cargo test --lib galera_tuner_live -- --ignored --nocapture
+    //!
+    //! Skipped when nothing is listening on 3341.
+
+    use crate::db::types::{ConnectionConfig, Engine, SslMode};
+
+    async fn pool() -> Option<sqlx::MySqlPool> {
+        let mut c = ConnectionConfig::new(Engine::Mysql, "galera1");
+        c.host = Some("127.0.0.1".into());
+        c.port = Some(3341);
+        c.user = Some("root".into());
+        c.ssl_mode = SslMode::Disable;
+        crate::db::mysql::open_pool(&c, Some("root".into()), None, 2).await.ok()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn galera_tuner_live_report() {
+        let Some(p) = pool().await else { println!("no galera1 on 3341 — skipping"); return };
+        let report = super::analyze(&p, &std::env::temp_dir()).await.expect("analyze");
+        let ids: Vec<&str> = report.findings.iter().map(|f| f.id.as_str()).collect();
+        let galera: Vec<_> = report.findings.iter().filter(|f| f.id.starts_with("galera.")).collect();
+
+        println!("\n=== Galera tuner on galera1 ({}) ===", report.server.version);
+        for f in &galera {
+            println!("  [{:8}] {:36} {}", f.severity, f.id, f.title);
+        }
+
+        // Detection happened via the VARIABLES probe (there is no STATUS row).
+        assert!(!galera.is_empty(), "no galera findings — detection broken: {ids:?}");
+        assert!(ids.contains(&"galera.cluster_size"), "cluster size finding missing: {ids:?}");
+        assert!(ids.contains(&"galera.gcache_window"), "gcache finding missing: {ids:?}");
+        assert!(ids.contains(&"galera.flow_control"), "flow-control finding missing: {ids:?}");
+        assert!(ids.contains(&"galera.sst_method"), "sst method finding missing: {ids:?}");
+        assert!(ids.contains(&"galera.provider_options_readonly"),
+                "MariaDB read-only note missing: {ids:?}");
+
+        // A healthy 3-node idle cluster must produce no galera WARN/CRIT noise.
+        // (Advice is the tuner doing its job: slave_threads=1 against a deps
+        // distance of ~3, a 43-minute gcache window at the observed average.)
+        for f in &galera {
+            assert!(matches!(f.severity.as_str(), "ok" | "info" | "advice"),
+                "false-positive noise on a healthy cluster: {f:?}");
+        }
+
+        // The gcache math on real numbers: 64 MiB against the observed average
+        // burn must produce a finite, stated window — and on MariaDB the fix
+        // is config-file-only (wsrep_provider_options is read-only over SQL).
+        let g = galera.iter().find(|f| f.id == "galera.gcache_window").unwrap();
+        println!("  gcache: {} — {}", g.title, g.detail);
+        assert!(g.detail.contains("64 MiB"), "gcache.size not parsed: {}", g.detail);
+        assert!(g.fix_sql.is_empty(), "MariaDB must not offer SET GLOBAL: {:?}", g.fix_sql);
+
+        // rsync must read as a tradeoff, not an error.
+        let sst = galera.iter().find(|f| f.id == "galera.sst_method").unwrap();
+        assert_eq!(sst.severity, "info", "rsync is deliberate on this cluster: {sst:?}");
+        assert_eq!(sst.points_lost, 0);
+
+        p.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn galera_tuner_live_collector_reads_wsrep() {
+        let Some(p) = pool().await else { println!("no galera1 on 3341 — skipping"); return };
+        let d = super::collectors::collect(&p).await.expect("collect");
+        let g = d.galera.as_ref().expect("wsrep_on=ON must produce GaleraInfo");
+        assert_eq!(g.gcache_size_bytes, Some(64 * 1024 * 1024), "{:?}", g.provider_options.get("gcache.size"));
+        assert!(g.provider_options.contains_key("gcs.fc_limit"), "provider options not parsed");
+        assert!(d.vu("wsrep_slave_threads").is_some(), "wsrep_slave_threads variable missing");
+        assert!(d.sf("wsrep_cert_deps_distance").is_some(), "deps distance status missing");
+        assert!(d.s("wsrep_replicated_bytes").is_some(), "replicated bytes status missing");
+        println!("  gcache.size={:?} fc_limit={:?} slave_threads={:?} deps={:?}",
+                 g.gcache_size_bytes, g.provider_options.get("gcs.fc_limit"),
+                 d.vu("wsrep_slave_threads"), d.sf("wsrep_cert_deps_distance"));
+        p.close().await;
     }
 }
 

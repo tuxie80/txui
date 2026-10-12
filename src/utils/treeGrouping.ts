@@ -12,9 +12,9 @@ export type GroupKind =
   | 'tables' | 'partitions' | 'foreign_tables' | 'distributed' | 'views' | 'matviews'
   | 'functions' | 'procedures' | 'macros'
   | 'aggregates' | 'triggers' | 'events' | 'sequences' | 'types' | 'keyspaces'
-  | 'policies' | 'extensions'
+  | 'policies' | 'statistics' | 'extensions'
   // PostgreSQL cluster-global objects — grouped at the connection root.
-  | 'publications' | 'event_triggers' | 'tablespaces' | 'foreign_servers';
+  | 'publications' | 'subscriptions' | 'event_triggers' | 'tablespaces' | 'foreign_servers';
 
 /** routine_type values that belong in the Aggregates group. */
 const AGGREGATE_TYPES = new Set(['AGGREGATE', 'WINDOW']);
@@ -73,11 +73,15 @@ const GROUP_DEFS: GroupDef[] = [
   // PostgreSQL-only, and both previously invisible: a policy decides what rows
   // a role can see at all, and an extension decides what the server can do.
   { kind: 'policies',   label: 'RLS policies',       matches: n => n.kind === 'policy' },
+  // CREATE STATISTICS objects (PG 10+): planner statistics attached to a
+  // table — the thing a DBA looks for when an estimate is wildly off.
+  { kind: 'statistics', label: 'Extended statistics', matches: n => n.kind === 'statistic_ext' },
   { kind: 'extensions', label: 'Extensions',         matches: n => n.kind === 'extension' },
   // PostgreSQL cluster-global objects. These never appear inside a schema
   // listing (only at the connection root, beside the schemas), so sharing one
   // ordered GROUP_DEFS list with the per-schema kinds is unambiguous.
   { kind: 'publications',   label: 'Publications',    matches: n => n.kind === 'publication' },
+  { kind: 'subscriptions',  label: 'Subscriptions',   matches: n => n.kind === 'subscription' },
   { kind: 'event_triggers', label: 'Event triggers',  matches: n => n.kind === 'event_trigger' },
   { kind: 'tablespaces',    label: 'Tablespaces',     matches: n => n.kind === 'tablespace' },
   { kind: 'foreign_servers', label: 'Foreign servers', matches: n => n.kind === 'foreign_server' },

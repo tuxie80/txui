@@ -349,10 +349,17 @@ export function ObjectIcon({ entry }: { entry: TreeEntry }) {
     // PostgreSQL cluster-global objects + foreign tables. No bespoke glyphs —
     // reuse the closest existing icon; the title carries the exact kind.
     case 'publication':   return <TIcon hue="ti-extension" title="publication" fallback={<ExtensionIcon />} />;
+    // A subscription is the subscriber twin of a publication — same glyph and
+    // hue; the title and subtext (→ publications) carry the direction.
+    case 'subscription':  return <TIcon hue="ti-extension" title="logical replication subscription" fallback={<ExtensionIcon />} />;
     case 'event_trigger': return <TIcon hue="ti-trigger" title="event trigger" tabler="trigger" fallback={<TriggerIcon />} />;
     case 'tablespace':    return <TIcon hue="ti-database" title="tablespace" tabler="database" fallback={<DatabaseIcon />} />;
     case 'foreign_server': return <TIcon hue="ti-schema" title={`foreign server (${entry.fdw})`} tabler="server" fallback={<SchemaIcon />} />;
     case 'foreign_table':  return <TIcon hue="ti-table" title={`foreign table → ${entry.server}`} tabler="table" fallback={<TableIcon />} />;
+    // Extended statistics are planner metadata over a table's columns — the
+    // index hue/glyph is the closest existing "structure over columns" read.
+    case 'statistic_ext':
+      return <TIcon hue="ti-index" title={`extended statistics on ${entry.table} (${entry.kinds.join(', ')})`} fallback={<IndexIcon />} />;
     case 'column':
       return entry.primary_key
         ? <TIcon hue="ti-pk" title={entry.type_name} tabler="pk" fallback={<KeyIcon />} />

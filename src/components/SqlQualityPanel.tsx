@@ -7,6 +7,7 @@
  */
 import { errorDisplay } from '../utils/appError';
 import { runQualityAnalysis, reportTimestamp } from '../utils/qualityRun';
+import { runChQualityAnalysis } from '../utils/qualityRunCh';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -43,6 +44,8 @@ interface Checks {
   explain: boolean;
   explainJson: boolean;
   analyze: boolean;
+  /** ClickHouse only: the system.query_log history section. */
+  queryLog: boolean;
 }
 
 export function SqlQualityPanel({ session, onClose }: Props) {
@@ -50,6 +53,14 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     || session.engine === 'sqlserver';
   const isMysql = session.engine === 'mysql';
   const isMssql = session.engine === 'sqlserver';
+  /**
+   * ClickHouse has its own pipeline (utils/qualityRunCh.ts) and rulebook
+   * (utils/chQuality.ts) — the MySQL checks that have no CH mechanism behind
+   * them (InnoDB stats, ceilings, EXPLAIN ANALYZE) stay greyed with the
+   * reason rather than running someone else's rules against system.*.
+   */
+  const isCh = session.engine === 'clickhouse';
+  const panelCapable = serverCapable || isCh;
   /**
    * Schema review is NOT the same capability as query analysis.
    *
@@ -66,26 +77,29 @@ export function SqlQualityPanel({ session, onClose }: Props) {
   const [dbOverride, setDbOverride] = useState('');
   const [schemas, setSchemas] = useState<string[]>([]);
   useEffect(() => {
-    if (!serverCapable) return;
+    if (!panelCapable) return;
     const q = isMysql ? 'SELECT schema_name FROM information_schema.schemata ORDER BY schema_name'
       // schema_id < 16384 excludes the empty schemas SQL Server creates for its
       // fixed database roles — a dozen entries nobody has ever put a table in.
       : isMssql ? 'SELECT name FROM sys.schemas WHERE schema_id < 16384 ORDER BY name'
+      : isCh ? 'SELECT name FROM system.databases ORDER BY name'
       : "SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' ORDER BY nspname";
     invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql: q })
       .then(r => setSchemas(r.rows.map(row => String(row[0])))).catch(() => {});
-  }, [session.sessionId, serverCapable, isMysql, isMssql]);
+  }, [session.sessionId, panelCapable, isMysql, isMssql, isCh]);
   const [checks, setChecks] = useState<Checks>({
     lint: true,
     // SQL Server's column map is the best of the three: it returns the
     // DECLARED type with its length (`nvarchar(120)`, `decimal(10,2)`) rather
-    // than a bare type name, and without executing the statement.
-    columnMap: serverCapable,
+    // than a bare type name, and without executing the statement. ClickHouse's
+    // is a LIMIT 0 describe — the HTTP meta block carries exact types.
+    columnMap: panelCapable,
     // SQL Server's statistics freshness has its own section (sys.dm_db_stats_properties).
     stats: isMysql || isMssql,
-    tables: serverCapable, types: serverCapable,
-    ceilings: serverCapable, explain: serverCapable, explainJson: serverCapable,
+    tables: panelCapable, types: serverCapable,
+    ceilings: serverCapable, explain: panelCapable, explainJson: serverCapable,
     analyze: false,
+    queryLog: isCh,
   });
   const [timeoutSec, setTimeoutSec] = useState(120);
   const [running, setRunning] = useState(false);
@@ -171,20 +185,38 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     try {
       // The pipeline itself lives in utils/qualityRun (WP-16 16.5) — pure and
       // testable; everything Tauri-backed goes in through the io object.
-      const out = await runQualityAnalysis({
-        sql, engine: session.engine, connectionName: session.connectionName,
-        isMysql, serverCapable, params, qCount, varNames, checks, timeoutSec,
-        dbOverride,
-      }, {
+      // ClickHouse dispatches to its own pipeline + rulebook (PG-parity
+      // precedent), which only needs monitor_query/get_ddl/explain_query.
+      const io = {
         say,
-        onPretty: pretty => setSql(pretty),
-        query: sqlText => invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql: sqlText }),
-        getDdl: parent => invoke<string>('get_ddl', { sessionId: session.sessionId, parent }),
-        columnMap: (sqlText, db) => invoke('column_map', { sessionId: session.sessionId, sql: sqlText, db }),
-        explainQuery: (sqlText, db) => invoke('explain_query', { sessionId: session.sessionId, sql: sqlText, analyze: false, db }),
-        explainWithWarnings: (sqlText, db) => invoke('explain_with_warnings', { sessionId: session.sessionId, sql: sqlText, db }),
-        explainAnalyzeGuarded: (sqlText, timeoutMs, db) => invoke('explain_analyze_guarded', { sessionId: session.sessionId, sql: sqlText, timeoutMs, db }),
-      });
+        onPretty: (pretty: string) => setSql(pretty),
+        query: (sqlText: string) => invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql: sqlText }),
+        getDdl: (parent: string) => invoke<string>('get_ddl', { sessionId: session.sessionId, parent }),
+        columnMap: (sqlText: string, db: string | null) => invoke('column_map', { sessionId: session.sessionId, sql: sqlText, db }) as Promise<{
+          parse_ok: boolean; parse_error: string | null; statement_kind: string | null;
+          tables: string[]; columns: { name: string; type_name: string; nullable: boolean | null }[];
+          eq_cols: string[]; range_cols: string[]; sources: string[];
+        }>,
+        explainQuery: (sqlText: string, db: string | null, mode?: string) =>
+          invoke('explain_query', { sessionId: session.sessionId, sql: sqlText, analyze: false, db, mode: mode ?? null }) as Promise<{ format: string; engine: string; content: string }>,
+        explainWithWarnings: (sqlText: string, db: string | null) => invoke('explain_with_warnings', { sessionId: session.sessionId, sql: sqlText, db }) as Promise<{ explain: QueryResult; warnings: QueryResult | null }>,
+        explainAnalyzeGuarded: (sqlText: string, timeoutMs: number, db: string | null) => invoke<string>('explain_analyze_guarded', { sessionId: session.sessionId, sql: sqlText, timeoutMs, db }),
+      };
+      const out = isCh
+        ? await runChQualityAnalysis({
+            sql, engine: session.engine, connectionName: session.connectionName,
+            params, qCount, varNames,
+            checks: {
+              lint: checks.lint, columnMap: checks.columnMap, tables: checks.tables,
+              explain: checks.explain, queryLog: checks.queryLog,
+            },
+            dbOverride,
+          }, io)
+        : await runQualityAnalysis({
+            sql, engine: session.engine, connectionName: session.connectionName,
+            isMysql, serverCapable, params, qCount, varNames, checks, timeoutSec,
+            dbOverride,
+          }, io);
       setReport({ findings: out.findings, sections: out.sections, meta: out.meta, txt: out.txt });
       setRawBlocks(out.rawBlocks);
       say(`Done — ${out.findings.length} finding${out.findings.length === 1 ? '' : 's'}.`);
@@ -193,7 +225,7 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     } finally {
       setRunning(false);
     }
-  }, [sql, running, params, qCount, varNames, checks, session, isMysql, serverCapable, timeoutSec, dbOverride]);
+  }, [sql, running, params, qCount, varNames, checks, session, isMysql, isCh, serverCapable, timeoutSec, dbOverride]);
 
   /**
    * Review the schema as it stands — the rulebook without a parser.
@@ -310,12 +342,14 @@ export function SqlQualityPanel({ session, onClose }: Props) {
             ? 'Review the schema itself: types, keys, indexes, collation — no SQL needed'
             : session.engine === 'postgres'
               ? 'Review the schema itself: timestamptz vs timestamp, identity vs serial, sequence headroom, unlogged tables, NOT VALID / unindexed foreign keys — no SQL needed'
-              : `Schema review — no rulebook for ${session.engine} yet.\nThe rules are per-engine (MySQL 8 and PostgreSQL each have their own); applying one engine's judgements to another produces confident, wrong advice.`}
+              : isCh
+                ? 'Schema review — no ClickHouse rulebook yet.\nThe 💊 Server Tuner holds the ClickHouse operational rule set (part explosion, merges, memory, keeper health) — open it from the toolbar.'
+                : `Schema review — no rulebook for ${session.engine} yet.\nThe rules are per-engine (MySQL 8 and PostgreSQL each have their own); applying one engine's judgements to another produces confident, wrong advice.`}
           aria-disabled={canSchemaReview ? undefined : true}
           onClick={() => { if (canSchemaReview) setMode('schema'); }}
         >Schema</button>
         {mode === 'query' && <button className="toolbar-btn" onClick={loadFile}>Load .sql…</button>}
-        {serverCapable && (
+        {panelCapable && (
           <label className="sqp-db" title="Run all analysis against THIS database — fixes cross-schema 'table not found' errors">
             <span>DB:</span>
             <input list="sqp-db-list" value={dbOverride}
@@ -479,30 +513,61 @@ export function SqlQualityPanel({ session, onClose }: Props) {
             <div className="sqp-check-title">Verify</div>
             <label className="gsp-check"><input type="checkbox" checked={checks.lint}
               onChange={e => set({ lint: e.target.checked })} /> Static analysis (offline lint)</label>
-            <label className="gsp-check" title={serverCapable ? 'Server prepares the statement — exact type for every output column, no execution' : 'MySQL/PostgreSQL only'}>
-              <input type="checkbox" disabled={!serverCapable} checked={checks.columnMap}
-              onChange={e => set({ columnMap: e.target.checked })} /> Column map (exact output types)</label>
-            <label className="gsp-check" title={isMysql ? 'n_rows, index cardinality, stats age from mysql.innodb_table_stats / innodb_index_stats' : 'MySQL only'}>
-              <input type="checkbox" disabled={!isMysql} checked={checks.stats}
-              onChange={e => set({ stats: e.target.checked })} /> InnoDB statistics (stale stats, cardinality)</label>
-            <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
-              <input type="checkbox" disabled={!serverCapable} checked={checks.tables}
-              onChange={e => set({ tables: e.target.checked })} /> Referenced tables — sizes + DDL</label>
-            <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
-              <input type="checkbox" disabled={!serverCapable} checked={checks.types}
-              onChange={e => set({ types: e.target.checked })} /> Data-type audit (signed/unsigned, collations, casts)</label>
-            <label className="gsp-check" title={isMysql ? 'AUTO_INCREMENT vs integer type max' : 'Sequence/identity last_value vs the column type max — PG sequences are int8, the column is not'}>
-              <input type="checkbox" disabled={!serverCapable} checked={checks.ceilings}
-              onChange={e => set({ ceilings: e.target.checked })} /> Integer ceilings ({isMysql ? 'AUTO_INCREMENT' : 'sequence/identity'})</label>
-            <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
-              <input type="checkbox" disabled={!serverCapable} checked={checks.explain}
-              onChange={e => set({ explain: e.target.checked })} /> EXPLAIN + SHOW WARNINGS</label>
-            <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
-              <input type="checkbox" disabled={!serverCapable} checked={checks.explainJson}
-              onChange={e => set({ explainJson: e.target.checked })} /> EXPLAIN FORMAT=JSON (costs)</label>
-            <label className="gsp-check sqp-danger" title="Actually executes the statement under a server-side timeout">
-              <input type="checkbox" disabled={!serverCapable} checked={checks.analyze}
-              onChange={e => set({ analyze: e.target.checked })} /> EXPLAIN ANALYZE — ⚠ executes the query</label>
+            {isCh ? (
+              <>
+                {/* The ClickHouse check list — utils/qualityRunCh.ts. The MySQL
+                    checks below stay visible but greyed, each naming the CH
+                    mechanism that answers the same question (or saying there
+                    isn't one) — never hidden. */}
+                <label className="gsp-check" title="LIMIT 0 describe — the HTTP meta block carries the exact type and Nullable() nullability of every output column, no rows read">
+                  <input type="checkbox" checked={checks.columnMap}
+                  onChange={e => set({ columnMap: e.target.checked })} /> Column map (typed result metadata)</label>
+                <label className="gsp-check" title="Engine, size, partition/sorting/primary keys from system.tables + system.columns">
+                  <input type="checkbox" checked={checks.tables}
+                  onChange={e => set({ tables: e.target.checked })} /> Referenced tables — sizes + keys</label>
+                <label className="gsp-check" title="EXPLAIN indexes = 1 (pruning evidence) + ESTIMATE (read volumes) + PIPELINE (raw) — none of them executes the query">
+                  <input type="checkbox" checked={checks.explain}
+                  onChange={e => set({ explain: e.target.checked })} /> EXPLAIN (indexes + ESTIMATE + PIPELINE)</label>
+                <label className="gsp-check" title="Avg rows / bytes / duration of recent runs of this query shape — measured history from system.query_log (per-node, grant-gated)">
+                  <input type="checkbox" checked={checks.queryLog}
+                  onChange={e => set({ queryLog: e.target.checked })} /> Recent executions (query_log)</label>
+                <label className="gsp-check unavail" data-tip="MySQL only — ClickHouse has no InnoDB statistics. The storage picture is the Table overview DBA view; the 💊 Tuner judges merges and parts.">
+                  <input type="checkbox" disabled checked={false} readOnly /> InnoDB statistics</label>
+                <label className="gsp-check unavail" data-tip="MySQL/PG/SQL Server only — ClickHouse converts operand types implicitly by design; the Column map carries the exact result types instead.">
+                  <input type="checkbox" disabled checked={false} readOnly /> Data-type audit</label>
+                <label className="gsp-check unavail" data-tip="ClickHouse has neither AUTO_INCREMENT nor sequences — ids come from the writer, so there is no ceiling to approach.">
+                  <input type="checkbox" disabled checked={false} readOnly /> Integer ceilings</label>
+                <label className="gsp-check unavail" data-tip="Does not exist in ClickHouse — the nearest measured evidence is system.query_log (Recent executions above).">
+                  <input type="checkbox" disabled checked={false} readOnly /> EXPLAIN ANALYZE</label>
+              </>
+            ) : (
+              <>
+                <label className="gsp-check" title={serverCapable ? 'Server prepares the statement — exact type for every output column, no execution' : 'MySQL/PostgreSQL only'}>
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.columnMap}
+                  onChange={e => set({ columnMap: e.target.checked })} /> Column map (exact output types)</label>
+                <label className="gsp-check" title={isMysql ? 'n_rows, index cardinality, stats age from mysql.innodb_table_stats / innodb_index_stats' : 'MySQL only'}>
+                  <input type="checkbox" disabled={!isMysql} checked={checks.stats}
+                  onChange={e => set({ stats: e.target.checked })} /> InnoDB statistics (stale stats, cardinality)</label>
+                <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.tables}
+                  onChange={e => set({ tables: e.target.checked })} /> Referenced tables — sizes + DDL</label>
+                <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.types}
+                  onChange={e => set({ types: e.target.checked })} /> Data-type audit (signed/unsigned, collations, casts)</label>
+                <label className="gsp-check" title={isMysql ? 'AUTO_INCREMENT vs integer type max' : 'Sequence/identity last_value vs the column type max — PG sequences are int8, the column is not'}>
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.ceilings}
+                  onChange={e => set({ ceilings: e.target.checked })} /> Integer ceilings ({isMysql ? 'AUTO_INCREMENT' : 'sequence/identity'})</label>
+                <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.explain}
+                  onChange={e => set({ explain: e.target.checked })} /> EXPLAIN + SHOW WARNINGS</label>
+                <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.explainJson}
+                  onChange={e => set({ explainJson: e.target.checked })} /> EXPLAIN FORMAT=JSON (costs)</label>
+                <label className="gsp-check sqp-danger" title="Actually executes the statement under a server-side timeout">
+                  <input type="checkbox" disabled={!serverCapable} checked={checks.analyze}
+                  onChange={e => set({ analyze: e.target.checked })} /> EXPLAIN ANALYZE — ⚠ executes the query</label>
+              </>
+            )}
             {checks.analyze && (
               <label className="dg-field-inline" style={{ paddingLeft: 22 }}>
                 <span>guard</span>

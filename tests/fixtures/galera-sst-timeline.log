@@ -1,0 +1,52 @@
+# Galera rejoin timeline — LIVE captures, MariaDB 11.8.8 + galera 26.4.27,
+# 3-node local cluster (galera1/2/3, ports 3341/3342/3343), 2026-10-02.
+# One line per poll round: nN=<wsrep_local_state_comment>,q:<recv_queue>,lc:<last_committed>,dc:<desync_count>.
+#
+# EXPERIMENT 1 — SST (forced): galera3 stopped at seqno 70, ~128 MB written on
+# galera1 (gcache.size=64M overrun: cached_downto moved to 142 > 70), galera3
+# restarted. n3 was connection-refused 11:58:37→11:58:54 (the whole observed
+# window); the rsync SST daemon was observed at 11:58:53.
+#
+# TRUTH vs the old assumption: the joiner's mariadbd REFUSED TCP CONNECTIONS
+# (ERROR 2002) for the entire transfer — no 1047, no Joining/Joined state was
+# ever visible over SQL; the only SQL-visible signal was the DONOR
+# (galera1 = Donor/Desynced with desync=OFF, desync_count=1, captured in
+# tests/fixtures/galera-status-mariadb118-donor.txt).
+11:58:37 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:38 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:39 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:41 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:42 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:43 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:44 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:46 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:47 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:48 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:49 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:51 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:52 n1=Synced,q:0,lc:203,dc:0 n2=Synced,q:0,lc:203,dc:0 n3=DOWN[connection refused]
+11:58:53 n1=Donor/Desynced,q:0,lc:204,dc:1 n2=Synced,q:0,lc:204,dc:0 n3=DOWN[connection refused]
+11:58:54 n1=Synced,q:0,lc:204,dc:0 n2=Synced,q:0,lc:204,dc:0 n3=DOWN[connection refused]
+11:58:56 n1=Synced,q:0,lc:204,dc:0 n2=Synced,q:0,lc:204,dc:0 n3=Synced,q:0,lc:204,dc:0   ← SST complete, all 3 Synced (donor back to dc:0)
+
+# EXPERIMENT 2 — IST: galera3 stopped, ~10 MB written (within gcache), galera3
+# restarted with ~40 MB more written during boot. Same shape: n3 connection-
+# refused (ERROR 2002) 12:05:50→12:05:54, then straight to Synced — the port
+# stays closed through IST catch-up too; no Joining/Joined/1047 on the wire.
+12:05:50 n1=Synced,r:ON,q:0,lc:249,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:250,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:50 n1=Synced,r:ON,q:0,lc:260,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:261,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:51 n1=Synced,r:ON,q:0,lc:271,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:271,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:52 n1=Synced,r:ON,q:0,lc:277,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:277,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:52 n1=Synced,r:ON,q:0,lc:283,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:283,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:53 n1=Synced,r:ON,q:0,lc:293,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:293,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:53 n1=Synced,r:ON,q:0,lc:298,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:298,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:54 n1=Synced,r:ON,q:0,lc:298,fc:0,dc:0 n2=Synced,r:ON,q:0,lc:298,fc:0,dc:0 n3=DOWN[ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (36)]
+12:05:55+ n3=Synced (IST complete; ~50 write-sets applied invisibly while the port was closed)
+
+# Conclusions recorded 2026-10-02:
+#  - MariaDB 11.8 has NO wsrep_on in SHOW GLOBAL STATUS (VARIABLES only);
+#    wsrep_incoming_addresses is a STATUS var (AUTO,AUTO,AUTO here).
+#  - wsrep_desync_count is a GAUGE (0 on all Synced nodes before AND after the
+#    SST), not a cumulative counter; an SST donor shows desync=OFF + count=1.
+#  - Donor state spelling from reality: "Donor/Desynced" (slash).
+#  - Joiner mid-SST/IST = connection refused, not 1047 — on this setup.

@@ -53,6 +53,24 @@ export async function notifyConnectFailed(connectionName: string, error: string)
 }
 
 /**
+ * A background Galera watch alert (split-brain suspicion, member lost, node
+ * unreachable, flow-control spike, SST start/finish). Unlike the long-query
+ * notice this fires while the window is FOCUSED too: the watch exists for
+ * when nobody is looking at the cluster panels, and a split-brain suspicion
+ * must not wait for you to look away. WHAT fires and how often it may
+ * re-fire is decided by the pure utils/galeraWatch.ts (crit/warn only,
+ * 15-min per-key rate limit); this is only the send. Never throws.
+ */
+export async function notifyGaleraWatch(title: string, body: string): Promise<void> {
+  try {
+    if (!await ensurePermission()) return;
+    sendNotification({ title, body });
+  } catch {
+    /* the OS said no — silence is the correct fallback, as with the beep */
+  }
+}
+
+/**
  * Notify when a run finished that took long enough to have looked away from.
  * Never throws: a notification must not take down the query that just ran.
  */

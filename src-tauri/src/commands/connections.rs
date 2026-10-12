@@ -123,6 +123,12 @@ pub async fn save_connection(
 
 /// Flush the in-memory config map to connections.json.
 async fn persist_configs(state: &State<'_, AppState>) -> Result<(), crate::apperror::AppError> {
+    persist_configs_state(state).await
+}
+
+/// The same flush on a bare `&AppState`, for commands whose work is factored
+/// into a State-free helper (galera's `adopt_members`) and for tests.
+pub(crate) async fn persist_configs_state(state: &AppState) -> Result<(), crate::apperror::AppError> {
     let configs = state.configs.read().await;
     crate::storage::save(&state.data_dir, &configs)
         .await

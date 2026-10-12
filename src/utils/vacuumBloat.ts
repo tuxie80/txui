@@ -24,7 +24,7 @@
  *
  * Pure and dependency-free apart from dbaViews + identifier quoting, so it is
  * driven straight from `node --test`. It never executes anything — the panel
- * does, through the audited `monitor_query` path.
+ * does, through the tracked, cancellable `run_vacuum` command (audited).
  */
 
 import { DBA_VIEWS } from './dbaViews.ts';

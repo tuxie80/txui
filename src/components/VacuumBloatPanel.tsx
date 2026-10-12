@@ -9,7 +9,9 @@
  * This panel subsumes the old Vacuum advisor section of 🩹 Maintenance: same
  * ranked worklist idea, but database-wide (not schema-scoped), ranked against
  * each table's OWN reloptions-honoured threshold, and the actions here EXECUTE
- * through the same audited `monitor_query` path MaintenancePanel uses — with
+ * through `run_vacuum` — a tracked, cancellable job (watch.rs-style: own
+ * connection, backend pid reported, Cancel issues pg_cancel_backend) that
+ * keeps the same audit contract MaintenancePanel's auditedRun keeps — with
  * lock level and cost stated before anything runs, typed confirmation for the
  * ACCESS EXCLUSIVE rewrites, and pg_repack as generated advice only.
  *
@@ -21,13 +23,14 @@
  * the exclusive rewrites warn that the server-side prod limit refuses them
  * unless the connection opted in.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import type { QueryResult, Session } from '../types';
 import { errorDisplay } from '../utils/appError';
 import { StatusIcon } from './StatusIcon';
 import { isoNow, logAudit, newRunId } from '../utils/audit';
 import { fmtDuration } from '../utils/fmtDuration';
+import { addLog } from '../store/logStore';
 import { usePoll } from '../hooks/usePoll';
 import { useSessionPrivileges } from '../store/sessionPrivileges';
 import { denied, privilegeTip } from '../utils/privileges';
@@ -67,9 +70,16 @@ interface ActionTarget {
 interface RunResult {
   sql: string;
   ok: boolean;
+  /** Stopped by the user — shown as cancelled, never counted as failed. */
+  cancelled?: boolean;
   message: string;
   ms: number;
 }
+
+/** The tracked run's channel events (commands/vacuum.rs, snake_case tagged). */
+type VacuumEvent =
+  | { type: 'started'; pid: number }
+  | { type: 'done'; ms: number; ok: boolean; error: string | null; cancelled: boolean };
 
 interface PgstattupleState {
   installed: boolean;
@@ -122,6 +132,10 @@ export function VacuumBloatPanel({ session, onClose }: Props) {
   const [actionId, setActionId] = useState<VbActionId>('vacuum-verbose-analyze');
   const [confirmText, setConfirmText] = useState('');
   const [running, setRunning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  /** Backend pid of the in-flight run — the Now section tracks this pid. */
+  const [runPid, setRunPid] = useState<number | null>(null);
+  const runKeyRef = useRef<string | null>(null);
   const [results, setResults] = useState<RunResult[]>([]);
 
   const q = useCallback(async (sql: string): Promise<QueryResult> => {
@@ -129,35 +143,27 @@ export function VacuumBloatPanel({ session, onClose }: Props) {
   }, [session.sessionId]);
 
   /**
-   * Every statement this panel RUNS goes through here, so it reaches the audit
-   * log — the same contract MaintenancePanel's auditedRun keeps. The server-side
-   * guard (read-only refusal, prod limits) sits inside monitor_query itself.
+   * Every statement this panel RUNS reaches the audit log — the same contract
+   * MaintenancePanel's auditedRun keeps. Execution itself goes through
+   * `run_vacuum` (below), a tracked job whose server-side guard (read-only
+   * refusal, prod limits) matches what monitor_query enforced. `alsoLog` is
+   * off because `run` writes its own richer pair of session-log lines
+   * (▶ start, then ✓ / ■ / ✗) — the editor's pattern, so nothing is doubled.
    */
-  const auditedRun = useCallback(async (sql: string): Promise<QueryResult> => {
-    const startedAt = isoNow();
-    const t0 = performance.now();
-    const base = {
+  const audit = useCallback((sql: string, startedAt: string, ms: number,
+    outcome: { ok: boolean; error: string | null; raw?: unknown }) => {
+    logAudit({
       run_id: newRunId(),
       stmt_index: 1, stmt_total: 1,
       session_id: session.sessionId, tab_title: '🧹 Vacuum & Bloat',
       database: '', source: 'panel' as const,
-      started_at: startedAt,
+      started_at: startedAt, ended_at: isoNow(), duration_ms: ms,
       connection_name: session.connectionName, db_user: '',
       engine: session.engine, sql,
-    };
-    try {
-      const res = await q(sql);
-      logAudit({ ...base, ended_at: isoNow(), duration_ms: Math.round(performance.now() - t0),
-        ok: true, rows_out: res.rows.length,
-        rows_affected: res.rows_affected === null ? null : Number(res.rows_affected),
-        error: null });
-      return res;
-    } catch (e) {
-      logAudit({ ...base, ended_at: isoNow(), duration_ms: Math.round(performance.now() - t0),
-        ok: false, rows_out: 0, rows_affected: null, error: errorDisplay(e), raw_error: e });
-      throw e;
-    }
-  }, [q, session.sessionId, session.connectionName, session.engine]);
+      ok: outcome.ok, rows_out: 0, rows_affected: null,
+      error: outcome.error, raw_error: outcome.raw,
+    }, { alsoLog: false });
+  }, [session.sessionId, session.connectionName, session.engine]);
 
   // ── section 1: Now — polled while the tab is on screen ─────────────────────
   const nowDenied = denied(privs, 'processlist-all');
@@ -286,27 +292,79 @@ export function VacuumBloatPanel({ session, onClose }: Props) {
 
   useEffect(() => { setConfirmText(''); }, [actionId, target]);
 
+  /**
+   * The tracked run: `run_vacuum` executes on a connection taken for the run
+   * alone (never the session's pinned transaction connection, where VACUUM
+   * cannot run), reports its backend pid, and is cancellable via
+   * `cancel_watched` → pg_cancel_backend. A cancel comes back as
+   * `cancelled`, not a failure — that is what the user asked for.
+   */
   const run = useCallback(async () => {
-    if (!action || !target || !action.executes || !armed || runBlockedReason) return;
+    if (!action || !target || !action.executes || !armed || runBlockedReason || running) return;
+    const sql = actionSql;
+    const runKey = crypto.randomUUID();
+    runKeyRef.current = runKey;
     setRunning(true);
+    setCancelling(false);
+    setRunPid(null);
+    addLog(session.sessionId, { level: 'info', action: 'VACUUM', detail: sql,
+      line: `▶ ${sql}` });
+    const startedAt = isoNow();
     const t0 = performance.now();
+    // Set by the terminal channel event; a missing one (invoke rejected before
+    // the run started) is the catch path below.
+    let done: { ok: boolean; cancelled: boolean; error: string | null } | null = null;
+    const chan = new Channel<VacuumEvent>();
+    chan.onmessage = ev => {
+      if (ev.type === 'started') {
+        setRunPid(ev.pid);
+      } else {
+        done = { ok: ev.ok, cancelled: ev.cancelled, error: ev.error };
+      }
+    };
     try {
-      await auditedRun(actionSql);
+      await invoke('run_vacuum', { sessionId: session.sessionId, sql, runKey, onEvent: chan });
+      const ms = Math.round(performance.now() - t0);
+      const o = done ?? { ok: true, cancelled: false, error: null };
+      audit(sql, startedAt, ms, {
+        ok: o.ok,
+        error: o.cancelled ? 'cancelled by user' : o.error,
+      });
+      addLog(session.sessionId, {
+        level: o.cancelled ? 'warn' : o.ok ? 'ok' : 'err', action: 'VACUUM', detail: sql, ms,
+        line: o.cancelled ? `■ ${sql} — cancelled after ${fmtDuration(ms)}`
+          : o.ok ? `✓ ${sql} — done in ${fmtDuration(ms)}`
+          : `✗ ${sql} — ${o.error ?? 'failed'}`,
+      });
       setResults(prev => [...prev, {
-        sql: actionSql, ok: true, message: 'done',
-        ms: Math.round(performance.now() - t0),
+        sql, ok: o.ok, cancelled: o.cancelled,
+        message: o.cancelled ? 'cancelled' : o.ok ? 'done' : (o.error ?? 'failed'),
+        ms,
       }]);
     } catch (e) {
-      setResults(prev => [...prev, {
-        sql: actionSql, ok: false, message: errorDisplay(e),
-        ms: Math.round(performance.now() - t0),
-      }]);
+      const ms = Math.round(performance.now() - t0);
+      audit(sql, startedAt, ms, { ok: false, error: errorDisplay(e), raw: e });
+      addLog(session.sessionId, { level: 'err', action: 'VACUUM', detail: sql, ms,
+        line: `✗ ${sql} — ${errorDisplay(e)}` });
+      setResults(prev => [...prev, { sql, ok: false, message: errorDisplay(e), ms }]);
     }
+    runKeyRef.current = null;
     setRunning(false);
+    setCancelling(false);
+    setRunPid(null);
     setConfirmText('');
     // The numbers the panel shows are now stale — say so by refreshing.
     void refreshAll();
-  }, [action, target, armed, runBlockedReason, actionSql, auditedRun, refreshAll]);
+  }, [action, target, armed, runBlockedReason, running, actionSql, audit, refreshAll,
+      session.sessionId]);
+
+  /** Ask the server to interrupt the in-flight run; the handler's predicate is the button's. */
+  const cancel = useCallback(() => {
+    const key = runKeyRef.current;
+    if (!key || cancelling) return;
+    setCancelling(true);
+    invoke('cancel_watched', { runKey: key }).catch(() => setCancelling(false));
+  }, [cancelling]);
 
   const pick = (t: ActionTarget, preferred?: VbActionId) => {
     setTarget(t);
@@ -601,7 +659,23 @@ export function VacuumBloatPanel({ session, onClose }: Props) {
                         </button>
                       </span>
                     )}
+                    {running && (
+                      <button
+                        className="toolbar-btn mnt-danger"
+                        title="Interrupt the statement (pg_cancel_backend) — the table keeps its pre-vacuum state"
+                        onClick={cancel}
+                      >
+                        {cancelling ? 'Cancelling…' : '■ Cancel'}
+                      </button>
+                    )}
                   </div>
+                  {running && (
+                    <div className="mnt-muted vb-cost">
+                      {cancelling
+                        ? 'Cancel requested — waiting for the server to interrupt the statement.'
+                        : `Running on its own connection${runPid != null ? ` — backend pid ${runPid}` : ''}; the Now section above tracks its phase.`}
+                    </div>
+                  )}
                 </>
               )}
             </>
@@ -610,11 +684,12 @@ export function VacuumBloatPanel({ session, onClose }: Props) {
             <div className="mnt-results">
               <div className="mnt-results-head">
                 {results.filter(r => r.ok).length} ok
-                {results.some(r => !r.ok) && ` · ${results.filter(r => !r.ok).length} failed`}
+                {results.some(r => r.cancelled) && ` · ${results.filter(r => r.cancelled).length} cancelled`}
+                {results.some(r => !r.ok && !r.cancelled) && ` · ${results.filter(r => !r.ok && !r.cancelled).length} failed`}
               </div>
               {results.map((r, i) => (
-                <div key={i} className={`mnt-result${r.ok ? '' : ' bad'}`}>
-                  <StatusIcon kind={r.ok ? 'ok' : 'error'} />
+                <div key={i} className={`mnt-result${r.ok || r.cancelled ? '' : ' bad'}`}>
+                  <StatusIcon kind={r.ok ? 'ok' : r.cancelled ? 'skipped' : 'error'} />
                   <span className="mnt-result-table">{r.sql}</span>
                   <span className="mnt-result-msg">{r.message}{r.ms > 0 ? ` · ${fmtDuration(r.ms)}` : ''}</span>
                 </div>

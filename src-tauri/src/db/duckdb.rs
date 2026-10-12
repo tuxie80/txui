@@ -118,6 +118,43 @@ pub async fn open(config: &ConnectionConfig) -> Result<DuckDbSession> {
     })
 }
 
+/// Open a `:memory:` session synchronously.
+///
+/// The Parquet dataset view (db/parquet.rs) needs a DuckDB session from inside
+/// a synchronous open path, so it cannot await [`open`]. Note DuckDB cannot
+/// launch an in-memory database in read-only mode — the engine itself refuses
+/// — so `read_only` is only meaningful here as bookkeeping, and the dataset
+/// passes false (its read-only posture is structural: no user text ever
+/// reaches this session).
+pub fn open_memory_sync(read_only: bool) -> Result<DuckDbSession> {
+    let config = duckdb::Config::default()
+        .access_mode(if read_only {
+            duckdb::AccessMode::ReadOnly
+        } else {
+            duckdb::AccessMode::Automatic
+        })
+        .map_err(|e| anyhow!("invalid DuckDB configuration: {e}"))?;
+    let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
+    let interrupt = conn.interrupt_handle();
+    Ok(DuckDbSession {
+        conn: Arc::new(Mutex::new(conn)),
+        interrupt,
+        read_only,
+        memory: true,
+    })
+}
+
+/// Synchronous twin of [`execute_params`], for callers already on a blocking
+/// thread (the Parquet driver's `spawn_blocking` paths and its tests).
+pub fn execute_params_blocking(
+    session: &DuckDbSession,
+    sql: &str,
+    params: &[String],
+) -> Result<QueryResult> {
+    let guard = session.conn.lock().unwrap_or_else(|e| e.into_inner());
+    run(&guard, sql, params, None)
+}
+
 /// Run `f` with the connection held, off the async runtime.
 async fn with_conn<T, F>(session: &DuckDbSession, f: F) -> Result<T>
 where

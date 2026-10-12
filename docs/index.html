@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxUI Help · v1.0.0</title>
+<title>TxUI Help · v1.1.0</title>
 <style>/* TxUI Help — dark-first, light-aware, red accent. */
 :root{
   --accent:#ff2d2d; --accent-dim:rgba(255,45,45,.14); --accent-brd:rgba(255,45,45,.4);
@@ -213,7 +213,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </head>
 <body class="show-mac">
 <header class="topbar">
-  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.0.0</span></div>
+  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.1.0</span></div>
   <div class="top-actions">
     <input id="globalSearch" class="global-search" placeholder="Search the docs…" oninput="globalSearch(this.value)" autocomplete="off">
     <div class="seg" id="osToggle">
@@ -225,17 +225,17 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </header>
 <div class="layout">
   <nav class="sidenav">
-    <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
-    <div class="nav-foot">Generated from source<br>at v1.0.0 · macOS screenshots</div>
+    <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
+    <div class="nav-foot">Generated from source<br>at v1.1.0 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
     
 <section id="overview" class="doc-section">
-  <h1>TxUI <span class="ver">v1.0.0</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 34 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.0.0.</p>
+  <h1>TxUI <span class="ver">v1.1.0</span></h1>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 36 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.1.0.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
-    <div class="card"><div class="big">34</div><div>tool panels</div></div>
+    <div class="card"><div class="big">36</div><div>tool panels</div></div>
     <div class="card"><div class="big">70</div><div>editor commands</div></div>
     <div class="card"><div class="big">234</div><div>DBA views</div></div>
     <div class="card"><div class="big">36</div><div>settings</div></div>
@@ -248,14 +248,14 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="engines" class="doc-section">
   <h1>Engine support matrix</h1>
-  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.0.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
+  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.1.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
   <div class="toolbar">
     <input id="engFilter" class="filter" placeholder="Filter capabilities…" oninput="filterTable('engFilter','engTable')">
   </div>
   <div class="scroll-x"><table class="ref matrix" id="engTable">
     <thead>
       <tr><th>Capability</th><th class="e-mysql">MySQL</th><th class="e-postgres">PostgreSQL</th><th class="e-sqlserver">SQL Server</th><th class="e-sqlite">SQLite</th><th class="e-clickhouse">ClickHouse</th><th class="e-duckdb">DuckDB</th><th class="e-redis">Redis</th><th class="e-parquet">Parquet</th><th class="e-mongodb">MongoDB</th></tr>
-      <tr class="cap-score"><th>of 32 capabilities</th><th class="ctr">31</th><th class="ctr">31</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">9</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">3</th><th class="ctr">2</th></tr>
+      <tr class="cap-score"><th>of 32 capabilities</th><th class="ctr">31</th><th class="ctr">31</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">3</th><th class="ctr">2</th></tr>
     </thead>
     <tbody>
   <tr class="cap-group"><td colspan="10"><b>Running queries</b> <span class="dim">What you can do with the connection itself.</span></td></tr>
@@ -421,7 +421,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <div class="cap-unlocks">Opens: <a href="#panel-quality">SQL Quality</a></div>
       <code class="cap-key">sqlQuality</code>
     </td>
-    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
 <tr data-search="maintenance maintenance the maintenance panel: table upkeep — check / analyze / optimize / repair, plus the invalid-objects scan — and, on sqlite, file upkeep (vacuum, integrity checks, analyze). analyze is the one write in the read-only dba set: the panel pre-flights the server&#39;s read-only state before running it (`super_read_only`, `pg_is_in_recovery()`, `databasepropertyex(…, &#39;updateability&#39;)`). broader than `sqldba`, which sqlite lacks. maintenance">
     <td class="cap">
@@ -515,11 +515,11 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
-<tr data-search="sequences sequences sequences exist as objects that can be listed, created and altered. not `sqldba`, for the same reason as `lockwaits`. note this is *not* the same set as the sql engines: mysql proper has no sequences at all (auto_increment is a column property), while mariadb, postgresql and sql server do — so the panel is gated on the object existing, not on the engine family. mysql-vs-mariadb is decided at runtime from the server flavour, which a static table cannot express; this flag says &quot;ask&quot;, and `sequencepanel` says &quot;mysql has none&quot; when the flavour comes back plain. sequences">
+<tr data-search="sequences sequences sequences exist as objects that can be listed, created and altered. not `sqldba`, for the same reason as `lockwaits`. note this is *not* the same set as the sql engines: mysql proper has no sequences at all (auto_increment is a column property), while mariadb, postgresql and sql server do — so the panel is gated on the object existing, not on the engine family. mysql-vs-mariadb is decided at runtime from the server flavour, which a static table cannot express; this flag says &quot;ask&quot;, and the menu surfaces (the session plugin menu and the tools-menu opener in querytabs) consult the runtime flavour probe (`store/serverflavors` + `capabilities()` in `utils/serverflavor`) before offering sequences for the mysql engine, while `sequencepanel` says &quot;mysql has none&quot; when the flavour comes back plain. sequences">
     <td class="cap">
       <b>Sequences</b>
       <div class="cap-desc">Sequences exist as objects that can be listed, created and altered.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Not <code>sqlDba</code>, for the same reason as <code>lockWaits</code>. Note this is <i>not</i> the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says &quot;ask&quot;, and <code>SequencePanel</code> says &quot;MySQL has none&quot; when the flavour comes back plain.</p></details>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Not <code>sqlDba</code>, for the same reason as <code>lockWaits</code>. Note this is <i>not</i> the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says &quot;ask&quot;, and the menu surfaces (the session plugin menu and the Tools-menu opener in QueryTabs) consult the runtime flavour probe (<code>store/serverFlavors</code> + <code>capabilities()</code> in <code>utils/serverFlavor</code>) before offering Sequences for the mysql engine, while <code>SequencePanel</code> says &quot;MySQL has none&quot; when the flavour comes back plain.</p></details>
       <div class="cap-unlocks">Opens: <a href="#panel-sequences">Sequences</a></div>
       <code class="cap-key">sequences</code>
     </td>
@@ -589,12 +589,12 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </tr></tbody>
   </table></div>
   <h2>Panels every engine gets</h2>
-  <p>7 of the 34 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>.</p>
+  <p>8 of the 36 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
   <h2>Panels only one engine can have</h2>
-  <p>6 more panels are gated on the engine itself rather than on a capability, because nothing else has an equivalent to expose:</p>
+  <p>7 more panels are gated on the engine itself rather than on a capability, because nothing else has an equivalent to expose:</p>
   <ul class="cap-exclusives">
+    <li><span class="eng-badge e-mysql">MySQL</span> <a href="#panel-binlog">Binary logs</a>, <a href="#panel-slowlog">Slow-log analyzer</a>, <a href="#panel-cluster">Galera cluster</a></li>
     <li><span class="eng-badge e-postgres">PostgreSQL</span> <a href="#panel-types">Types</a>, <a href="#panel-pglisten">Listen / Notify</a>, <a href="#panel-vacuum">Vacuum &amp; Bloat</a></li>
-    <li><span class="eng-badge e-mysql">MySQL</span> <a href="#panel-binlog">Binary logs</a>, <a href="#panel-slowlog">Slow-log analyzer</a></li>
     <li><span class="eng-badge e-clickhouse">ClickHouse</span> <a href="#panel-dictionary">Dictionary</a></li>
   </ul>
   <p class="note">The lean engines are lean on purpose. Redis is a key/value store — no SQL editor, no transactions, no schema to draw. Parquet files are read-only in-memory scans, so there is nothing to write and no server to administer. MongoDB is newest here and currently reads documents and reports server status; the rest of its row is roadmap, not refusal.</p>
@@ -605,6 +605,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   <p class="lede">Task-oriented walkthroughs from <code>docs/user-guide/</code>. New to TxUI? Start with <a href="#guide-first-steps">First steps (101)</a> — five minutes from the start screen to your first query result — then pick the guide for your engine.</p>
   <div class="guide-index"><a class="guide-card" href="#guide-first-steps">First steps (101)</a>
 <a class="guide-card" href="#guide-clickhouse">ClickHouse</a>
+<a class="guide-card" href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a>
 <a class="guide-card" href="#guide-mysql">MySQL / MariaDB / Percona</a>
 <a class="guide-card" href="#guide-platforms">Platform notes — macOS, Linux, Windows</a>
 <a class="guide-card" href="#guide-postgresql">PostgreSQL</a>
@@ -666,6 +667,48 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <h3>What a ClickHouse session does not have</h3>
 <ul><li><b>No transactions</b> — the ⚡ AUTO / ● TX controls are absent; ClickHouse has no interactive transactions.</li><li><b>No ER diagram, data generator, CSV import, or SQL Quality panel</b> — these are built on MySQL/PostgreSQL catalogs, so they are not offered.</li><li><b>No dump/restore panel</b> — the external dump tools TxUI drives are MySQL/PostgreSQL binaries.</li></ul>
 </div>
+<div class="guide-doc" id="guide-galera">
+<h2>Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</h2>
+<p>TxUI speaks wsrep: connect to any node of a MariaDB Galera Cluster or a Percona XtraDB Cluster (a plain MySQL-family connection — see <a href="#guide-mysql">MySQL / MariaDB / Percona</a>) and two extra surfaces light up: a per-session <b>❖ Galera</b> dashboard tab, and a cross-connection <b>❖ Galera cluster</b> panel that watches every node at once.</p>
+<h3>Prerequisites</h3>
+<ul><li>A saved connection per node you want in the cluster panel (or let the cluster tell you its mates and adopt them in one click — <i>Discovering and adopting cluster mates</i> below). Put the nodes in one sidebar <b>folder</b> — the cluster panel pre-selects the current connection&#39;s folder-mates.</li><li><b>No special grant is needed for monitoring</b> — everything above the water line is <code>SHOW GLOBAL STATUS/VARIABLES LIKE &#39;wsrep%&#39;</code>, which any account can run, and works on read-only connections. The extras: <b>SUPER</b> (or MySQL 8&#39;s <code>SYSTEM_VARIABLES_ADMIN</code>) for the node operations, <b>PROCESS</b> to see other users&#39; threads in the cluster processlist, and <b>SSH configured on the connection</b> for the server-log tail. Whatever is missing is shown greyed with the reason — never hidden.</li></ul>
+<h3>The per-session ❖ Galera tab</h3>
+<p>Open <b>Activity → Replication</b> (Tools menu or <code>Mod+K</code> → &quot;Replication&quot;) and switch to the <b>❖ Galera</b> tab. On a non-Galera server the tab says so and explains what it asked (<code>SHOW GLOBAL VARIABLES LIKE &#39;wsrep_on&#39;</code> came back empty/OFF); on a Galera node it polls every 5 s and renders five cards — Cluster (status, size, name), Membership (this node, incoming addresses), Node state (local state, ready, connected), Replication progress (seqnos, queues, traffic) and <b>Flow control</b> rendered large. A sparkline strip above the cards tracks flow-control paused, apply queue and commits/s over the last ~5 minutes.</p>
+<figure><img src="user-guide/screenshots/52-galera-tab.png" alt="The per-session Galera tab: cards, sparklines and the flow-control reading" loading="lazy"><figcaption>The per-session Galera tab: cards, sparklines and the flow-control reading</figcaption></figure>
+<p>Read it like this:</p>
+<ul><li><b>Flow control paused</b> materially above 0% — the cluster is throttling this node, which points at the slowest node or undersized apply threads.</li><li><b>Apply queue (recv)</b> climbing — the node is falling behind applying replicated write-sets; the fix is usually more apply threads (below).</li><li><b>Certification failures</b> — transactions that lost certification on <i>this</i> node: hot rows or multi-writer write patterns.</li><li>The gcache line under Replication progress — &quot;≈ N min of write-sets cached&quot; — is your <b>IST window</b>: a node restarted inside it rejoins incrementally; outside it, it needs a full state transfer.</li></ul>
+<p>Every state transition the poll sees (a node leaving Synced, cluster size changes, flow control crossing thresholds) lands on the <b>Incident timeline</b> automatically.</p>
+<h4>Transfers: SST / IST</h4>
+<p>When the node is donating, receiving or catching up, a transfer card appears above the cards: what is happening, elapsed time, and — for a Joined node — how many write-sets are left to apply. Galera reports <b>no SST percentage over SQL</b>, and the card says so. On PXC a determinate IST bar appears from the <code>wsrep_ist_*</code> seqnos.</p>
+<p>If the connection has SSH configured, the card offers <b>⌁ Watch server log</b>: TxUI tails the server&#39;s error log over the connection&#39;s own SSH settings and parses the SST phase lines — including the real <code>Receiving IST... 64.0%</code> percentage, the only place Galera prints one — so the pulse bar turns into a determinate fill with the last log lines underneath. <b>■ Stop</b> ends it; it also stops itself when the transfer resolves. Without SSH the button is greyed and says why. Note: on MariaDB + rsync SST a <i>joining</i> node refuses connections entirely until it is Synced — watch a join from the donor&#39;s side, or from the cluster panel.</p>
+<h4>Node operations</h4>
+<p>Expand the collapsed <b>Node operations</b> card (its one-line summary always shows the live values). Every operation runs <code>SET GLOBAL</code> on <i>this</i> node, confirms its own risk inline before running, and writes to the audit log; they are greyed on read-only sessions and without SUPER:</p>
+<ul><li><b>Backup mode (desync)</b> — <code>wsrep_desync=ON</code> takes the node out of the flow-control loop so a backup does not throttle the cluster.</li><li><b>Maintenance mode</b> — <code>wsrep_reject_queries=ALL</code> rejects every statement that touches a table or transaction (for all accounts, including SUPER), while <code>SET</code>/<code>SHOW</code> keep answering — so the same panel can turn it back off. <code>ALL_KILL</code> is deliberately not a button: it would kill the very session you need to undo it.</li><li><b>Apply threads</b> — <code>wsrep_slave_threads</code>, the fix for a persistent apply backlog.</li><li><b>gcache freeze / Evict node</b> — PXC-only provider options; greyed with the reason on MariaDB, where provider options are read-only over SQL. Eviction needs the word <code>EVICT</code> typed.</li><li><b>This session</b> — causal reads (<code>wsrep_sync_wait=1</code>) and dirty reads (<code>wsrep_dirty_reads</code>) toggles; no grant, no confirmation.</li></ul>
+<p>When the cluster has lost quorum (the poll reads non-Primary), the tab shows a <b>bootstrap advisor</b>: what happened, the copyable recovery SQL (<code>pc.bootstrap</code> / <code>galera_new_cluster</code>), and a wrong-node warning. It is deliberately <i>not</i> a button — bootstrapping the wrong node discards transactions, so the decision and the execution stay with you.</p>
+<h3>The ❖ Galera cluster panel</h3>
+<p>One node&#39;s dashboard cannot see split-brain, size disagreement or where the writes enter the cluster. Open <b>Server → Galera cluster</b> (or <code>Mod+K</code> → &quot;Galera cluster&quot;), tick the nodes (the current connection&#39;s folder-mates are pre-selected), and the panel polls every selected node every 5 s — one short-lived session per node, read-only <code>SHOW</code>s, one node&#39;s failure never fails the poll.</p>
+<figure><img src="user-guide/screenshots/53-galera-cluster.png" alt="The Galera cluster panel: three Synced nodes, the write-target badge and the findings strip" loading="lazy"><figcaption>The Galera cluster panel: three Synced nodes, the write-target badge and the findings strip</figcaption></figure>
+<p>Reading the node cards:</p>
+<ul><li><b>State badge</b> — Synced (green), Donor, Joining/Joined, unreachable, &quot;no wsrep&quot; (a reachable non-Galera server — a finding, not an error).</li><li><b>FC paused / recv queue / send queue</b> — the per-node health signals, tinted at the same thresholds the findings use.</li><li><b>commits/s, replicated, received</b> — write <i>rates</i> diffed between polls: what the nodes are doing, not just what state they are in.</li><li><b>writes here</b> — this node&#39;s share of the writes the cluster originated. A single-writer cluster is the healthy norm; several writers is where certification conflicts come from (the <b>conflicts</b> stat counts them, both sides).</li><li><b>✎ write target</b> — the panel&#39;s recommendation of <i>which</i> node writes should go to: Synced, not mid-transfer, no flow control, idle queues, and preferably the node writes already land on (moving the writer creates new cross-node conflicts). The <b>✎ Open writer</b> toolbar button opens a session on that node with a fresh query tab. It is advisory — TxUI never re-routes an existing session.</li></ul>
+<p>Above the grid: the <b>quorum line</b> (&quot;3 nodes — survives losing 1&quot;; an arbitrator&#39;s vote counts, and even-sized components get a warning) and the <b>findings strip</b> — split-brain suspicion, size/membership disagreement, donor↔joiner pairing, sustained conflict rates, and <i>ghost</i> members (an address every node lists but no polled connection covers: a greyed dashed card, classified as a likely garbd when the arithmetic fits).</p>
+<p>Toolbar extras:</p>
+<ul><li><b>▦ Processes</b> — a merged cluster-wide processlist: what every node is executing right now, identical queries grouped across nodes (&quot;×3 nodes — writeset apply&quot;), wsrep applier/system threads collapsed per node. User rows carry a per-row <b>Kill</b>: it acts on the row&#39;s <i>own</i> node (thread ids are node-local) over a short-lived session, confirms inline (naming node, thread, user@host, age and query — on a <b>prod</b> connection you must also type the thread id), and is audited exactly like the per-session Processes panel. Applier/system threads never get the button. Without the PROCESS privilege you see the probe&#39;s own threads only, and the panel says <i>that</i> too, with the GRANT to ask for.</li><li><b>⇄ Spot-check table…</b> — proof that every node holds the same rows: each node checksums the same PK-ordered sample of one table; all-equal is one green line, a difference is a red card naming the divergent node(s), with a copyable report.</li><li><b>○ Watch</b> — keep watching this cluster <i>in the background</i> while the app runs, with no panel open: transitions go to the Incident timeline, and an OS notification fires only for what is worth interrupting for (split-brain suspicion, a member leaving, a node unreachable, critical flow control, an SST starting/finishing). The status bar&#39;s &quot;⟳ running&quot; popover lists the watch with a Stop button.</li></ul>
+<h4>Watching a transfer on any node</h4>
+<p>While a node donates or receives, its card carries the transfer block with <b>⌁ Watch log</b> — the same SSH error-log tail as the per-session tab, working on any node whose connection (saved or &quot;Monitor once&quot;) has SSH: the card turns into a determinate &quot;Receiving SST… 64%&quot; with the live log lines, and <b>■ Stop</b> cancels it. A joining node that refuses connections shows that connect error inline on the card — never a hang.</p>
+<figure><img src="user-guide/screenshots/54-galera-transfer.png" alt="A donor node mid-SST: transfer card with the log-tail offer" loading="lazy"><figcaption>A donor node mid-SST: transfer card with the log-tail offer</figcaption></figure>
+<h4>Discovering and adopting cluster mates</h4>
+<p>The node you are connected to already knows its cluster mates. When the per-session Galera tab sees members with no saved connection, a banner offers:</p>
+<ul><li><b>Add as connections</b> — each member becomes a saved connection cloned from this one (credentials and SSH settings copied inside the secret store, never shown), into a folder named after the cluster.</li><li><b>Monitor once</b> — poll the members in the cluster panel <i>without</i> saving them (this app run only). The panel&#39;s notice bar (&quot;Monitoring N unsaved nodes&quot;) offers <b>Save all as connections</b> to keep them.</li><li><b>Dismiss</b> — hides the offer until more unsaved members appear.</li></ul>
+<p>One caveat: with MariaDB&#39;s default <code>wsrep_node_incoming_address=AUTO</code> the node reports <code>AUTO,AUTO,AUTO</code> and there is nothing to match against — the banner appears where real <code>host:port</code> tokens are reported (PXC, or MariaDB with the address set).</p>
+<h3>The tuner&#39;s Galera section</h3>
+<p>On a Galera node the <b>Server tuner</b> gains a <b>Galera Cluster</b> section: node state, cluster size, the gcache window against the observed write rate (&quot;a node down longer than ≈N min needs SST&quot;), apply threads vs the certification-parallelism window, the flow-control ladder, recv-queue backlogs, write-conflict rates, and the rsync-SST donor-blocking tradeoff. Fixes come as copyable <code>SET GLOBAL</code> / config-file lines — never executed.</p>
+<h3>Playground: practise on a real cluster</h3>
+<p>On a Galera session the <b>🎪 Playground</b> offers two extra scenarios (greyed with the reason otherwise, refused on read-only and prod connections):</p>
+<ul><li><b>🌊 Flow-control storm</b> — N writers looping small INSERT transactions: write-set pressure the peers must apply. Watch the queues and flow control react in the Galera tab or cluster panel.</li><li><b>💥 Hot-row certification conflict</b> — K writers updating the same hot row(s); certification losers (error 1213) are retried and counted. The retry is the lesson.</li></ul>
+<p>The scenario table is dropped when the run ends — its rows replicate to every peer, so leaving it would leave the mess.</p>
+<h3>What is deliberately not here</h3>
+<p>No kill of wsrep applier/system threads anywhere (the cluster processlist&#39;s per-row Kill covers <i>user</i> threads, routed to the row&#39;s own node and audited), no <code>ALL_KILL</code> maintenance button, no one-click bootstrap — the advisor explains, you decide and execute. See <code>docs/GALERA_DEEPDIVE.md</code> for the reasoning and the live-verification record.</p>
+</div>
 <div class="guide-doc" id="guide-mysql">
 <h2>MySQL / MariaDB / Percona</h2>
 <p>Everything in TxUI that is specific to the MySQL family. Shared features (result grid, saved queries, history, themes) are covered in the main guide.</p>
@@ -691,6 +734,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <p>Live <b>blocking chains</b> from <code>sys.innodb_lock_waits</code>: who waits on whom, wait age, both statements, one-click <b>Kill blocker</b>. Plus the <b>deadlock analyzer</b>: the server&#39;s latest InnoDB deadlock parsed per transaction (raw section available). 5 s auto-refresh with pause.</p>
 <h4>⇄ Replication</h4>
 <p><b>Multi-channel aware</b>: one summary row per channel — IO/SQL thread state, seconds-behind, source — with stopped channels tinted. Expand a row for positions, GTIDs, filters and error rows; &quot;all fields&quot; dumps everything. A prominent <b>collapsed-channel alert</b> appears the moment a thread isn&#39;t running, quoting the actual <code>Last_SQL/IO_Error</code> text (which names the failing table/query). Auto-refresh 5 s with pause; each poll stamps <code>updated HH:MM:SS</code>.</p>
+<p>The panel has two more topology tabs: <b>❖ Galera</b> (a wsrep dashboard for MariaDB Galera Cluster / Percona XtraDB Cluster — flow control, queues, SST/IST transfer watch, node operations; see the <a href="#guide-galera">Galera guide</a> for the dashboard, the cross-node ❖ Galera cluster panel, write routing and the background watch) and <b>⟡ Group replication</b> (MySQL 8.0/8.4/9.x MGR: members, transaction stats, clone progress).</p>
 <h4>🔁 Replica set dashboard</h4>
 <p>Right-click a connection <b>folder</b> → treat as replica set; star the primary. Open the dashboard: it connects to every member read-only and shows the <b>replication matrix</b> (role / lag / IO / SQL / errors, worst first, 5 s poll), the <b>unused-index intersection</b> (indexes unused on <i>every</i> member are the safe drop candidates — per-member uptimes shown as the caveat), and <b>config &amp; version drift</b> side-by-side with differences highlighted. Sessions close when the dashboard closes.</p>
 <h4>ⓘ Server variables &amp; status</h4>
@@ -911,7 +955,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="shortcuts" class="doc-section">
   <h1>Keyboard shortcuts</h1>
-  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.0.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
+  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.1.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
   <div class="toolbar"><input id="scFilter" class="filter" placeholder="Filter shortcuts by action or key…" oninput="filterTable('scFilter','scTable')"></div>
   <table class="ref" id="scTable">
     <thead><tr><th>Command</th><th>Category</th><th>Shortcut</th><th>What it does</th></tr></thead>
@@ -1062,7 +1106,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="coverage" class="doc-section">
   <h1>Feature-coverage matrix</h1>
-  <p class="lede">Every one of the 34 tool panels, cross-checked against the source at build time — the menu group it lives in, the engines it supports, whether it is documented here, and whether a screenshot could be captured. <b>29/34</b> panels have screenshots; the rest are marked <span class="na">NA</span> (they need a live server to render meaningfully) and are still fully documented in text.</p>
+  <p class="lede">Every one of the 36 tool panels, cross-checked against the source at build time — the menu group it lives in, the engines it supports, whether it is documented here, and whether a screenshot could be captured. <b>35/36</b> panels have screenshots; the rest are marked <span class="na">NA</span> (they need a live server to render meaningfully) and are still fully documented in text.</p>
   <div class="toolbar">
     <input id="covFilter" class="filter" placeholder="Filter panels…" oninput="filterTable('covFilter','covTable')">
     <select id="covEngine" class="filter" onchange="filterEngine('covEngine','covTable')">
@@ -1119,7 +1163,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="dim">Find &amp; Compare</td>
       <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
-      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
     </tr>
 <tr data-search="column profile data colprofile" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-colprofile">Column profile</a></td>
@@ -1168,7 +1212,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="dim">Find &amp; Compare</td>
       <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
-      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
     </tr>
 <tr data-search="listen / notify activity pglisten" data-engines="postgres">
       <td><a href="#panel-pglisten">Listen / Notify</a></td>
@@ -1182,7 +1226,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="dim">Insights</td>
       <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
-      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
     </tr>
 <tr data-search="binary logs insights binlog" data-engines="mysql">
       <td><a href="#panel-binlog">Binary logs</a></td>
@@ -1226,6 +1270,13 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
+<tr data-search="galera cluster server cluster" data-engines="mysql">
+      <td><a href="#panel-cluster">Galera cluster</a></td>
+      <td class="dim">Server</td>
+      <td><span class="eng-badge e-mysql">MySQL</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+    </tr>
 <tr data-search="er diagram schema erdiagram" data-engines="mysql postgres sqlserver sqlite">
       <td><a href="#panel-erdiagram">ER diagram</a></td>
       <td class="dim">Schema</td>
@@ -1254,10 +1305,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="sql quality sql quality" data-engines="mysql postgres sqlserver sqlite duckdb">
+<tr data-search="sql quality sql quality" data-engines="mysql postgres sqlserver sqlite clickhouse duckdb">
       <td><a href="#panel-quality">SQL Quality</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1273,7 +1324,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="dim">Activity</td>
       <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
-      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
     </tr>
 <tr data-search="locks &amp; deadlocks activity locks" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-locks">Locks &amp; Deadlocks</a></td>
@@ -1309,13 +1360,20 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
+    </tr>
+<tr data-search="incident timeline insights timeline" data-engines="mysql postgres sqlserver sqlite clickhouse duckdb redis parquet mongodb">
+      <td><a href="#panel-timeline">Incident timeline</a></td>
+      <td class="dim">Insights</td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
     </tr></tbody>
   </table>
 </section>
     
 <section id="panels" class="doc-section">
   <h1>Tool panels</h1>
-  <p class="lede">TxUI ships 34 tool panels, opened from the workspace menus (<b>Monitor · Server · Schema · Data · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
+  <p class="lede">TxUI ships 36 tool panels, opened from the workspace menus (<b>Monitor · Server · Schema · Data · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
   <figure><img src="shots/06-menu-monitor.png" alt="Plugins menu" loading="lazy"><figcaption>The workspace menus — each panel is one click away, and only the panels the current engine supports appear.</figcaption></figure><h2 class="group-h">Server</h2>
 <div class="panel-doc" id="panel-dbaviews">
   <div class="panel-head">
@@ -1376,6 +1434,18 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   <p class="dim"><b>Engines:</b> MySQL and PostgreSQL only (gated to sqlDba); Redis connections are excluded from label membership. MySQL uses SHOW GLOBAL VARIABLES / information_schema.statistics / mysql.innodb_table_stats; PostgreSQL uses SHOW ALL / pg_indexes / pg_stat_user_tables.</p>
   <p class="caveat"><b>Note:</b> Entirely read-only. Requires live connections to at least two reachable members of the label; fewer and it cannot compare. A member that cannot answer a given query is simply absent from that check rather than counted as &#39;everything missing&#39;. Role detection falls back to &#39;unknown&#39; for isolated servers.</p>
   <figure><img src="shots/panel-fleet.png" alt="Fleet panel" loading="lazy"><figcaption>Fleet <span class="cap-mac">— captured on macOS</span></figcaption></figure>
+</div>
+<div class="panel-doc" id="panel-cluster">
+  <div class="panel-head">
+    <h3>Galera cluster</h3>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span></div>
+  </div>
+  <p>Galera cluster group view - ALL nodes of a MariaDB Galera Cluster / Percona XtraDB Cluster monitored at once, the multi-node companion of the per-session Galera dashboard (a tab of the Replication panel). One poll opens a short-lived session per selected node (concurrency-capped, 30s per-node timeout) via the galera_cluster_poll backend command, runs the two read-only probes SHOW GLOBAL STATUS/VARIABLES LIKE &#39;wsrep%&#39;, and closes it again. Per node it shows a card with a state badge (Synced/Donor/Joining/unreachable), cluster size as that node sees it, flow-control %, recv/send queues, write rates diffed between polls (commits/s, replicated/received bytes/s), an inline SST/IST transfer card and the gcache IST window. Across all nodes it computes the findings no single node can see (pure utils/galeraCluster.ts): split-brain (differing cluster state UUIDs, or two Primary components over disjoint memberships), cluster-size and membership disagreement, donor&lt;-&gt;joiner SST pairing with elapsed time, unreachable nodes (the 1047 &#39;not yet prepared&#39; signature reported as &#39;likely mid-SST&#39;), the slowest node, and nodes picked from different clusters.</p>
+  <p class="how"><b>Open:</b> Session menu bar, Server group, &#39;Galera cluster&#39; (also Tools &gt; Server &gt; Galera cluster). Renders as the GaleraClusterPanel tab; it polls SAVED connections, not the session it is open in - the current connection&#39;s folder-mates are pre-selected because the nodes of a cluster are usually already one folder.</p>
+  <div class="acts"><b>Key actions</b><ul><li>Tick the cluster&#39;s nodes in the picker (grouped by folder; the current connection&#39;s folder is pre-selected)</li><li>Read the cluster-findings banner - split-brain CRIT is unmissable on top</li><li>Per node card: state badge, size-as-seen, FC%, queues, commits/s and bytes/s in/out, IST bar / SST transfer card, gcache window</li><li>Open (per node) - connect to that node and land on its own Galera tab</li><li>Pause/resume the 5s auto-poll; Refresh for a manual round</li></ul></div>
+  <p class="dim"><b>Engines:</b> MySQL-family with wsrep only (MariaDB Galera Cluster, Percona XtraDB Cluster); the picker lists MySQL-family connections only and the backend skips anything else with a note event.</p>
+  <p class="caveat"><b>Note:</b> Read-only by construction (SHOW STATUS needs no grant, so there is no privilege gate). Polling sessions are ephemeral - opened and closed per poll round. Snapshots, rates and the SST elapsed clocks live in memory only and reset when the panel closes. A hidden tab polls nothing. Every cluster rule tolerates missing keys and dead nodes - a node that does not answer degrades the comparisons it would have joined, never the whole view.</p>
+  <figure><img src="shots/panel-galera-cluster.png" alt="Galera cluster panel" loading="lazy"><figcaption>Galera cluster <span class="cap-mac">— captured on macOS</span></figcaption></figure>
 </div>
 <div class="panel-doc" id="panel-serverinfo">
   <div class="panel-head">
@@ -1548,7 +1618,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-quality">
   <div class="panel-head">
     <h3>SQL Quality</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span></div>
   </div>
   <p>A deep query-analysis panel modeled on a manual DBA review. In &#39;Query&#39; mode you paste or load one statement, tick which checks to run, and get a findings report: static lint, referenced-table DDL and sizes, a join/filter data-type audit, integer AUTO_INCREMENT ceilings, InnoDB statistics, an index advisor, EXPLAIN (+SHOW WARNINGS), EXPLAIN FORMAT=JSON cost overview, and a guarded EXPLAIN ANALYZE. A second MySQL-only &#39;Schema&#39; mode reviews an entire schema&#39;s catalog with no SQL input. Reports render on screen with detail/severity controls and export to Markdown or raw text.</p>
   <p class="how"><b>Open:</b> Session menu bar, SQL group, &#39;SQL Quality&#39;. Renders as the SqlQualityPanel tab with the current session.</p>
@@ -1981,7 +2051,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.0.0 · 34 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version.</footer>
+    <footer class="foot">TxUI v1.1.0 · 36 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version.</footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

@@ -301,11 +301,15 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
   },
   clickhouse: {
     // A SQL engine, but the DBA surface assumes MySQL/PG catalogs, and it has
-    // no interactive transactions. The tuner is the exception: it has its own
-    // rule set over the `system.*` operational tables.
+    // no interactive transactions. Two exceptions run their own per-engine
+    // rule sets: the tuner (over the `system.*` operational tables) and SQL
+    // Quality — its own pipeline and CH rulebook (utils/qualityRunCh.ts +
+    // utils/chQuality.ts: MergeTree key/predicate checks, EXPLAIN indexes=1
+    // pruning, ESTIMATE volumes, query_log history), not the MySQL analyzer
+    // pointed at CH output.
     sql: true, transactions: false, databaseSelect: true, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
-    dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: true,
+    dataGen: false, csvImport: false, sqlQuality: true, sqlVariables: true,
     // The designer's ClickHouse dialect: CREATE with engine + MergeTree
     // clauses, and the narrow ALTER (columns, TTL) it genuinely has.
     writes: true, tableDesigner: true, statementTimeout: true,
@@ -362,8 +366,12 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // surface, so nothing SQL-shaped applies — no variables, no transactions,
     // no default-DB plumbing, no statement ceiling. processList and serverInfo
     // are real: db.currentOp()/killOp and buildInfo/serverStatus back them.
-    // writes stays FALSE on purpose: the v1 driver exposes no write path at
-    // all (db/mongodb.rs), so nothing may claim one.
+    // The MongoBrowser workspace also carries an aggregation-pipeline runner
+    // (mongo_aggregate; $out/$merge rejected server-side) and a collection
+    // Stats tab (mongo_coll_stats over $collStats) — both surfaced only there,
+    // so no capability flag applies. writes stays FALSE on purpose: the v1
+    // driver exposes no write path at all (db/mongodb.rs), so nothing may
+    // claim one.
     sql: false, transactions: false, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: false,

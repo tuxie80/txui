@@ -359,6 +359,271 @@ export function columnsFor(engine) {
   }
 }
 
+// ── Galera (wsrep) fixtures ─────────────────────────────────────────────────
+//
+// Real wsrep rows mined from tests/fixtures/galera-status-mariadb118-*.txt —
+// live captures of the 3-node MariaDB 11.8.8 + galera 26.4.27 fleet
+// (2026-10-02). Two fixture paths consume them:
+//
+//   (a) the per-session ❖ Galera tab — monitor_query answering the wsrep
+//       SHOWs (detection probe, STATUS/VARIABLES polls, the ops probes);
+//   (b) the ❖ Galera cluster panel — galera_cluster_poll driving its Channel
+//       with one `node` event per selected connection, then `done`.
+//
+// The counter BASES are the real captures; the per-poll `bump` deltas are
+// synthetic (the captures are of an idle cluster, and an idle cluster has no
+// write shares to photograph) — installMock() adds them per poll tick, which
+// is what gives the rate math (commits/s, bytes/s, "writes here", the ✎ write
+// target badge) and the gcache window estimator a second poll to diff against.
+// Shapes verified against parseGaleraStatus (src/utils/galeraStatus.ts) and
+// the GaleraNodeEvent wire type in src/components/GaleraClusterPanel.tsx.
+
+/** The 3-node cluster as saved connections (one folder — the common case). */
+export const GALERA_CONNECTIONS = [
+  { id: 'g1', name: 'galera1 (mysql)', engine: 'mysql', host: '127.0.0.1', port: 3341, group: 'Galera' },
+  { id: 'g2', name: 'galera2 (mysql)', engine: 'mysql', host: '127.0.0.1', port: 3342, group: 'Galera' },
+  { id: 'g3', name: 'galera3 (mysql)', engine: 'mysql', host: '127.0.0.1', port: 3343, group: 'Galera' },
+];
+
+const GALERA_UUID = 'b110b4c2-be33-11f1-bc82-9e6500f05053';
+
+/** STATUS rows for node n (1-based), donor = mid-SST donor state. */
+function galeraStatusRows(n, donor) {
+  return [
+    ['wsrep_local_state_uuid', GALERA_UUID],
+    ['wsrep_protocol_version', '11'],
+    ['wsrep_last_committed', '19000'],
+    ['wsrep_replicated', n === 1 ? '6200' : n === 2 ? '3000' : '800'],
+    ['wsrep_replicated_bytes', n === 1 ? '812004112' : n === 2 ? '402118804' : '88120441'],
+    ['wsrep_repl_keys', n === 1 ? '12400' : n === 2 ? '6000' : '1600'],
+    ['wsrep_repl_keys_bytes', n === 1 ? '198400' : n === 2 ? '96000' : '25600'],
+    ['wsrep_repl_data_bytes', n === 1 ? '790118442' : n === 2 ? '391002118' : '86011223'],
+    ['wsrep_repl_other_bytes', '0'],
+    ['wsrep_received', n === 1 ? '190' : n === 2 ? '350' : '460'],
+    ['wsrep_received_bytes', n === 1 ? '1500000' : n === 2 ? '2700000' : '3600000'],
+    ['wsrep_local_commits', '0'],
+    ['wsrep_local_cert_failures', '0'],
+    ['wsrep_local_replays', '0'],
+    ['wsrep_local_send_queue', '0'],
+    ['wsrep_local_send_queue_max', '2'],
+    ['wsrep_local_send_queue_min', '0'],
+    ['wsrep_local_send_queue_avg', '0.000000'],
+    ['wsrep_local_recv_queue', '0'],
+    ['wsrep_local_recv_queue_max', '1'],
+    ['wsrep_local_recv_queue_min', '0'],
+    ['wsrep_local_recv_queue_avg', '0.000000'],
+    ['wsrep_local_cached_downto', '1000'],
+    ['wsrep_flow_control_paused_ns', '0'],
+    ['wsrep_flow_control_paused', '0.000000'],
+    ['wsrep_flow_control_sent', '0'],
+    ['wsrep_flow_control_recv', '0'],
+    ['wsrep_flow_control_active', 'false'],
+    ['wsrep_flow_control_requested', 'false'],
+    ['wsrep_cert_deps_distance', '3.200000'],
+    ['wsrep_apply_oooe', '0.000000'],
+    ['wsrep_apply_oool', '0.000000'],
+    ['wsrep_apply_window', '1.000000'],
+    ['wsrep_commit_oooe', '0.000000'],
+    ['wsrep_commit_oool', '0.000000'],
+    ['wsrep_commit_window', '1.000000'],
+    ['wsrep_local_state', donor ? '2' : '4'],
+    ['wsrep_local_state_comment', donor ? 'Donor/Desynced' : 'Synced'],
+    ['wsrep_cert_index_size', '12'],
+    ['wsrep_causal_reads', '0'],
+    ['wsrep_cert_interval', '0'],
+    ['wsrep_open_transactions', '0'],
+    ['wsrep_open_connections', '3'],
+    ['wsrep_incoming_addresses', 'AUTO,AUTO,AUTO'],
+    ['wsrep_cluster_weight', '3'],
+    ['wsrep_desync_count', donor ? '1' : '0'],
+    ['wsrep_evs_delayed', ''],
+    ['wsrep_evs_evict_list', ''],
+    ['wsrep_evs_repl_latency', '0.000219/0.000478/0.00212/0.00031/0.041'],
+    ['wsrep_evs_state', 'OPERATIONAL'],
+    ['wsrep_gcomm_uuid', '8ec2e96a-be44-11f1-9ecb-6e972a549e21'],
+    ['wsrep_gmcast_segment', '0'],
+    ['wsrep_applier_thread_count', '4'],
+    ['wsrep_cluster_conf_id', '11'],
+    ['wsrep_cluster_size', '3'],
+    ['wsrep_cluster_state_uuid', GALERA_UUID],
+    ['wsrep_cluster_status', 'Primary'],
+    ['wsrep_connected', 'ON'],
+    ['wsrep_local_bf_aborts', '0'],
+    ['wsrep_local_index', String(n - 1)],
+    ['wsrep_provider_capabilities', ':MULTI_MASTER:CERTIFICATION:PARALLEL_APPLYING:TRX_REPLAY:ISOLATION:PAUSE:CAUSAL_READS:INCREMENTAL_WRITESET:UNORDERED:PREORDERED:STREAMING:NBO:'],
+    ['wsrep_provider_name', 'Galera'],
+    ['wsrep_provider_vendor', 'Codership Oy <info@codership.com>'],
+    ['wsrep_provider_version', '4.27(r2633b84)'],
+    ['wsrep_ready', 'ON'],
+    ['wsrep_rollbacker_thread_count', '1'],
+    ['wsrep_thread_count', '5'],
+  ];
+}
+
+/** VARIABLES rows for node n — the identity keys parseGaleraStatus reads. */
+function galeraVariableRows(n) {
+  return [
+    ['wsrep_on', 'ON'],
+    ['wsrep_provider', '/opt/homebrew/lib/galera/libgalera_smm.so'],
+    ['wsrep_cluster_name', 'txui-galera'],
+    ['wsrep_cluster_address', 'gcomm://127.0.0.1:4561,127.0.0.1:4562,127.0.0.1:4563'],
+    ['wsrep_node_address', `127.0.0.1:456${n}`],
+    ['wsrep_node_incoming_address', 'AUTO'],
+    ['wsrep_node_name', `galera${n}`],
+    ['wsrep_desync', 'OFF'],
+    ['wsrep_dirty_reads', 'OFF'],
+    ['wsrep_reject_queries', 'NONE'],
+    ['wsrep_slave_threads', '4'],
+    ['wsrep_sst_method', 'rsync'],
+    ['wsrep_sync_wait', '0'],
+    ['wsrep_osu_method', 'TOI'],
+    ['wsrep_auto_increment_control', 'ON'],
+    ['wsrep_provider_options', 'base_dir = /var/lib/galera/; gcache.size = 64M; '
+      + 'gcache.page_size = 128M; gcache.recover = yes; gcs.fc_limit = 16; '
+      + 'gcs.fc_factor = 1.0; gcs.max_throttle = 0.25; evs.suspect_timeout = PT5S; '
+      + 'pc.wait_prim = true; pc.recovery = true;'],
+    ['wsrep_start_position', `${GALERA_UUID}:64`],
+  ];
+}
+
+/**
+ * The `__GALERA__` payload (plain JSON — installMock() rebuilds the functions
+ * from it inside the page). `bump` is added to the named counters per poll
+ * tick: node 1 originates ≈62% of the writes, node 2 ≈30%, node 3 ≈8%, so the
+ * write-share stats and the ✎ write target badge have something to show.
+ * `received` bumps are the peers' originated writes (what this node applies).
+ * `donor` puts that node in Donor/Desynced mid-SST (desync OFF + count 1 —
+ * the real MariaDB 11.8 donor signature) for the transfer-card shot.
+ */
+export function galeraFixture({ donor = null } = {}) {
+  const deltas = {
+    g1: { replicated: 310, bytes: 2_400_000 },
+    g2: { replicated: 150, bytes: 1_200_000 },
+    g3: { replicated: 40, bytes: 300_000 },
+  };
+  const nodes = {};
+  for (const n of [1, 2, 3]) {
+    const id = `g${n}`;
+    const d = deltas[id];
+    const others = [1, 2, 3].filter(m => m !== n).map(m => deltas[`g${m}`]);
+    nodes[id] = {
+      status: galeraStatusRows(n, donor === id),
+      vars: galeraVariableRows(n),
+      bump: {
+        wsrep_last_committed: 500,
+        wsrep_replicated: donor === id ? 0 : d.replicated,
+        wsrep_replicated_bytes: donor === id ? 0 : d.bytes,
+        wsrep_received: others.reduce((s, o) => s + o.replicated, 0),
+        wsrep_received_bytes: others.reduce((s, o) => s + o.bytes, 0),
+        // Keeps the gcache window (last_committed − cached_downto) constant at
+        // 18 000 seqnos while the burn rate runs — ≈3 min at 100 commits/s.
+        wsrep_local_cached_downto: 500,
+      },
+    };
+  }
+  return {
+    sessionNode: 'g1',
+    names: Object.fromEntries(GALERA_CONNECTIONS.map(c => [c.id, c.name])),
+    nodes,
+  };
+}
+
+// ── Galera cluster processlist + per-row kill fixtures ───────────────────────
+//
+// Step-⑤ verification (dev/verify_cluster_kill.mjs): `galera_cluster_processlist`
+// Channel events for the 3 nodes — realistic MariaDB 11.8 FULL PROCESSLIST
+// shapes (per-node columns arrays, applier/rollbacker/event_scheduler system
+// threads plus distinct user threads), mined from tests/galeraProcesslist.test.ts
+// (itself grounded on the live MariaDB 11.8 capture) — and `galera_cluster_kill`
+// outcomes, one thread id wired to fail with ER_KILL_DENIED_ERROR so the inline
+// error path renders. installMock() rebuilds the argument-dependent functions
+// from the plain `__GALERA_PROC__` payload.
+
+/**
+ * The 3-node cluster as saved connections WITH the gating fields the kill
+ * flow reads: g2 is prod (typed confirm), g3 is read-only (greyed kill).
+ * GALERA_CONNECTIONS stays untouched — the docs screenshots need plain nodes.
+ */
+export const GALERA_KILL_CONNECTIONS = [
+  { id: 'g1', name: 'galera1 (mysql)', engine: 'mysql', host: '127.0.0.1', port: 3341,
+    user: 'root', database: null, group: 'Galera', environment: null, read_only: false },
+  { id: 'g2', name: 'galera2 (mysql)', engine: 'mysql', host: '127.0.0.1', port: 3342,
+    user: 'root', database: null, group: 'Galera', environment: 'prod', read_only: false },
+  { id: 'g3', name: 'galera3 (mysql)', engine: 'mysql', host: '127.0.0.1', port: 3343,
+    user: 'root', database: null, group: 'Galera', environment: null, read_only: true },
+];
+
+/** MariaDB 11.8 FULL PROCESSLIST column order (adds Progress). */
+const PROC_COLS = ['Id', 'User', 'Host', 'db', 'Command', 'Time', 'State', 'Info', 'Progress'];
+
+/** wsrep system threads every live node keeps (appliers, aborter, scheduler). */
+function procSystemRows() {
+  return [
+    ['1', 'system user', '', '', 'Sleep', '1445', 'wsrep aborter idle', '', '0.000'],
+    ['2', 'system user', '', '', 'Sleep', '1445', '', '', '0.000'],
+    ['3', 'system user', '', '', 'Sleep', '1440', '', '', '0.000'],
+    // Identical Info on every node → the cross-node "writeset apply" group.
+    ['4', 'system user', '', '', 'Query', '4', 'applying',
+      "UPDATE   orders\nSET status = 'shipped'  WHERE id = 9", '0.000'],
+    ['7', 'event_scheduler', 'localhost', '', 'Daemon', '88431', 'Waiting on empty queue', '', '0.000'],
+  ];
+}
+
+/** The probe's own connection — a `user` row every node's poll produces. */
+function procProbeRow(id) {
+  return [String(id), 'root', 'localhost:54688', '', 'Query', '0', 'starting',
+    'SHOW FULL PROCESSLIST', '0.000'];
+}
+
+/**
+ * The `__GALERA_PROC__` payload (plain JSON). `kill.failIds` lists the thread
+ * ids whose kill comes back `ok: false` (ER_KILL_DENIED_ERROR — a missing
+ * CONNECTION_ADMIN surfacing honestly). All other ids succeed.
+ */
+export function galeraProcesslistFixture() {
+  return {
+    names: Object.fromEntries(GALERA_KILL_CONNECTIONS.map(c => [c.id, c.name])),
+    kill: { failIds: [425] },
+    nodes: {
+      // g1 — the normal node: two killable user threads (412 ok, 425 denied).
+      g1: {
+        columns: PROC_COLS,
+        rows: [
+          ...procSystemRows(),
+          ['412', 'app_rw', '10.0.2.31:51422', 'shop', 'Query', '184', 'Sending data',
+            'SELECT o.id, o.total FROM orders o JOIN order_lines l ON l.order_id = o.id WHERE o.created_at > \'2026-08-01\'',
+            '0.000'],
+          ['425', 'reporting', '10.0.4.8:44120', 'shop', 'Query', '61', 'Copying to tmp table',
+            'SELECT channel, count(*) FROM orders GROUP BY channel', '0.000'],
+          procProbeRow(431),
+        ],
+      },
+      // g2 — the prod node: one long-running UPDATE (typed confirm).
+      g2: {
+        columns: PROC_COLS,
+        rows: [
+          ...procSystemRows(),
+          ['777', 'app_rw', '10.0.2.34:51930', 'shop', 'Query', '92',
+            'Waiting for table metadata lock',
+            'ALTER TABLE order_lines ADD INDEX idx_order (order_id)', '0.000'],
+          procProbeRow(781),
+        ],
+      },
+      // g3 — the read-only node: its rows' Kill greys out with the reason.
+      g3: {
+        columns: PROC_COLS,
+        rows: [
+          ...procSystemRows(),
+          ['901', 'backup', '10.0.9.2:60122', null, 'Query', '305', 'Sending data',
+            'SELECT * FROM shop.orders ORDER BY created_at DESC', '0.000'],
+          procProbeRow(909),
+        ],
+      },
+    },
+  };
+}
+
+
 /**
  * The full `window.__MOCK__` payload for one engine.
  *
@@ -372,6 +637,12 @@ export function columnsFor(engine) {
 export function mockFor(engine) {
   return {
     __TREE__: schemaFor(engine),
+    // Galera fixtures ride the mysql mock by default so the help-site panel
+    // sweep (dev/shoot.mjs) captures the ❖ Galera cluster panel with a real
+    // node card instead of an eternal "Polling…". Nothing else sends wsrep
+    // SQL, so non-Galera panels are unaffected (the monitor_query router
+    // falls through to ORDERS_RESULT for anything else).
+    ...(engine === 'mysql' ? { __GALERA__: galeraFixture() } : {}),
     open_connection: `sess-doc-${engine}`,
     session_ping: 3,
     list_columns: columnsFor(engine),
@@ -418,6 +689,31 @@ export function installMock(payload) {
   const tree = payload.__TREE__ ?? {};
   const grants = payload.__GRANTS__;
   const panel = payload.panel_query;
+  const gal = payload.__GALERA__;
+  const proc = payload.__GALERA_PROC__;
+  // Tick counters live in the page: each poll round bumps the wsrep counters
+  // by the fixture's `bump` deltas, so the second poll has something to diff
+  // (write rates, shares, the gcache burn rate) — an unchanging counter set
+  // photographs as an idle cluster with every rate at "—".
+  let galSessTick = 0;
+  let galClusterTick = 0;
+  /** STATUS rows with one tick of deltas applied (numbers as strings, as SHOW). */
+  const galTickRows = (node, tick) => node.status.map(([k, v]) => {
+    const b = node.bump[k];
+    return b === undefined ? [k, v] : [k, String(Number(v) + b * tick)];
+  });
+  /** QueryResult in the [Variable_name, Value] shape SHOW produces. */
+  const galKv = rows => ({
+    columns: [
+      { name: 'Variable_name', type_name: 'varchar', nullable: false },
+      { name: 'Value', type_name: 'varchar', nullable: true },
+    ],
+    rows, rows_affected: null, execution_ms: 2.1, fetch_ms: 0.4, warnings: [],
+  });
+  const galPlain = rows => ({
+    columns: rows[0]?.map((_, i) => ({ name: `c${i}`, type_name: 'varchar', nullable: true })) ?? [],
+    rows, rows_affected: null, execution_ms: 1.8, fetch_ms: 0.3, warnings: [],
+  });
   window.__MOCK__ = {
     ...payload,
     list_schema: args => tree[(args && args.context) || '__root'] ?? [],
@@ -427,5 +723,94 @@ export function installMock(payload) {
     panel_query: args =>
       (grants && args && typeof args.token === 'string'
         && args.token.startsWith('privileges-')) ? grants : panel,
+    ...(gal ? {
+      // The ❖ Galera tab's probe set (GaleraClusterView.tsx): detection, the
+      // 5 s STATUS/VARIABLES poll, the ops probes. Anything else (the async
+      // replication tab's SHOWs, …) falls through to the static fixture.
+      monitor_query: args => {
+        const sql = String((args && args.sql) ?? '');
+        const node = gal.nodes[gal.sessionNode];
+        if (sql === "SHOW GLOBAL VARIABLES LIKE 'wsrep_on'") {
+          return galKv([['wsrep_on', 'ON']]);
+        }
+        if (sql === "SHOW GLOBAL STATUS LIKE 'wsrep%'") {
+          galSessTick += 1;
+          return galKv(galTickRows(node, galSessTick));
+        }
+        if (sql === "SHOW GLOBAL VARIABLES LIKE 'wsrep%'") return galKv(node.vars);
+        if (sql.includes('@@session.wsrep_sync_wait')) return galPlain([[0, 'OFF']]);
+        if (sql.includes('SYSTEM_VARIABLES')) return galPlain([['YES']]);
+        if (sql.includes('WSREP_MEMBERSHIP')) return galPlain([]);
+        return payload.monitor_query;
+      },
+      // The ❖ Galera cluster panel (GaleraClusterPanel.tsx): one `node` event
+      // per selected connection on the Channel handed over in the invoke args,
+      // then `done`. A connection id with no fixture node reuses node 1's rows.
+      galera_cluster_poll: args => {
+        galClusterTick += 1;
+        const ch = args && args.onEvent;
+        const ids = [
+          ...((args && args.connectionIds) ?? []),
+          ...(((args && args.adhocConfigs) ?? []).map(c => c.id)),
+        ];
+        if (ch && ch.onmessage) {
+          for (const id of ids) {
+            const node = gal.nodes[id] ?? gal.nodes.g1;
+            ch.onmessage({
+              type: 'node', connection_id: id,
+              connection_name: gal.names[id] ?? id,
+              ok: true, error: null,
+              status_rows: galTickRows(node, galClusterTick),
+              variable_rows: node.vars,
+              elapsed_ms: 9 + Math.round(Math.random() * 8),
+            });
+          }
+          ch.onmessage({ type: 'done', nodes: ids.length, ok_count: ids.length, total_ms: 31 });
+        }
+        return null;
+      },
+    } : {}),
+    ...(proc ? {
+      // #2 cluster-wide processlist (the "▦ Processes" view): one `node` event
+      // per selected connection carrying that node's columns + raw string rows,
+      // then `done`. A connection id with no fixture node reuses node 1's.
+      galera_cluster_processlist: args => {
+        const ch = args && args.onEvent;
+        const ids = [
+          ...((args && args.connectionIds) ?? []),
+          ...(((args && args.adhocConfigs) ?? []).map(c => c.id)),
+        ];
+        if (ch && ch.onmessage) {
+          for (const id of ids) {
+            const node = proc.nodes[id] ?? proc.nodes[Object.keys(proc.nodes)[0]];
+            ch.onmessage({
+              type: 'node', connection_id: id,
+              connection_name: proc.names[id] ?? id,
+              ok: true, error: null,
+              columns: node.columns, rows: node.rows,
+              elapsed_ms: 6 + Math.round(Math.random() * 5),
+            });
+          }
+          ch.onmessage({ type: 'done', nodes: ids.length, ok_count: ids.length, total_ms: 24 });
+        }
+        return null;
+      },
+      // Per-row Kill: KillOutcome[] exactly as the backend returns it — the
+      // statement actually issued, per-thread failure as data (never a throw).
+      // `failIds` threads come back ER_KILL_DENIED_ERROR so the inline error
+      // path renders in the verification run.
+      galera_cluster_kill: args => {
+        const id = Number(args && args.id);
+        const statement = `${(args && args.mode) === 'connection' ? 'KILL' : 'KILL QUERY'} ${id}`;
+        if (((proc.kill && proc.kill.failIds) ?? []).includes(id)) {
+          return [{
+            id, ok: false,
+            error: `ER_KILL_DENIED_ERROR: You are not owner of thread ${id}`,
+            statement,
+          }];
+        }
+        return [{ id, ok: true, error: null, statement }];
+      },
+    } : {}),
   };
 }

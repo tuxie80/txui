@@ -12,12 +12,13 @@
  * polling. Nothing else changes — one-shot panels ignore it, and work that runs
  * on the SERVER (a query, a generation job, a Playground run) is untouched:
  * that keeps going whether you are looking or not.
+ *
+ * The Provider lives in ./TabVisibleProvider.tsx — react-refresh wants files
+ * to export either components or hooks, not both.
  */
 import { createContext, useContext } from 'react';
 
-const TabVisibleCtx = createContext(true);
-
-export const TabVisibleProvider = TabVisibleCtx.Provider;
+export const TabVisibleCtx = createContext(true);
 
 /** True when this panel's tab is the one on screen (default outside a tab). */
 export function useTabVisible(): boolean {

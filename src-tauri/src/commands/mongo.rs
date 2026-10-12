@@ -1,7 +1,9 @@
-//! MongoDB-specific commands: `mongo_find` (the find editor's run path) and
-//! `mongo_explain` (its Explain button). Both are READS — the driver has no
-//! write path at all (db/mongodb.rs), so there is no write guard to apply:
-//! a filter document cannot mutate anything.
+//! MongoDB-specific commands: `mongo_find` (the find editor's run path),
+//! `mongo_explain` (its Explain button), `mongo_aggregate` (the pipeline
+//! runner) and `mongo_coll_stats` (the Stats tab). All are READS — the driver
+//! has no insert/update/delete path at all (db/mongodb.rs), and the pipeline
+//! runner rejects the write-capable stages (`WRITE_STAGES`: $out/$merge)
+//! before anything reaches the server, so read-only stays structural.
 use tauri::State;
 use uuid::Uuid;
 
@@ -65,6 +67,41 @@ pub async fn mongo_explain(
     let client = get_client(session_id, &state).await?;
     crate::db::mongodb::explain_find(
         &client, &db, &collection, filter.as_deref(), analyze.unwrap_or(false))
+        .await
+        .map_err(Into::into)
+}
+
+/// Run a read-only aggregation pipeline: the pipeline as a JSON array of
+/// stage documents (extended JSON accepted), an optional row cap for the
+/// trailing `$limit` guard. Write stages ($out/$merge) are rejected in Rust
+/// before anything reaches the server (db/mongodb.rs::aggregate).
+#[tauri::command]
+pub async fn mongo_aggregate(
+    session_id: Uuid,
+    db:         String,
+    collection: String,
+    pipeline:   String,
+    limit:      Option<i64>,
+    state:      State<'_, AppState>,
+) -> Result<QueryResult, crate::apperror::AppError> {
+    let client = get_client(session_id, &state).await?;
+    crate::db::mongodb::aggregate(&client, &db, &collection, &pipeline, limit)
+        .await
+        .map_err(Into::into)
+}
+
+/// Collection stats ($collStats: storageStats + count + latencyStats),
+/// flattened into the (section, name, value) grid. Views refuse server-side;
+/// that error surfaces readably — the Stats tab shows it as-is.
+#[tauri::command]
+pub async fn mongo_coll_stats(
+    session_id: Uuid,
+    db:         String,
+    collection: String,
+    state:      State<'_, AppState>,
+) -> Result<QueryResult, crate::apperror::AppError> {
+    let client = get_client(session_id, &state).await?;
+    crate::db::mongodb::coll_stats(&client, &db, &collection)
         .await
         .map_err(Into::into)
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  countsText, flavorLabel, fmtUptime, groupFindings, isProblem,
+  CATEGORY_LABELS, countsText, flavorLabel, fmtUptime, groupFindings, isProblem,
   reportFileName, reportToMarkdown, scoreColor,
 } from '../src/utils/tunerReport.ts';
 import type { TunerFinding, TunerReport } from '../src/utils/tunerReport.ts';
@@ -105,6 +105,22 @@ test('groupFindings: points_lost breaks ties, unknown category → config, empty
   assert.deepEqual(groups[0].findings.map(f => f.id), ['b', 'a']);
   assert.deepEqual(groups[1].findings.map(f => f.id), ['c']);
   assert.equal(groupFindings([]).length, 0);
+});
+
+test('groupFindings: galera.* ids form their own section, scoring category untouched', () => {
+  const fs: TunerFinding[] = [
+    { id: 'perf.slow_log', category: 'performance', severity: 'advice', title: '', detail: '', recommendation: null, fix_sql: [], fix_config: [], points_lost: 2 },
+    // Galera findings keep a real scoring category but render together.
+    { id: 'galera.flow_control', category: 'performance', severity: 'warn', title: '', detail: '', recommendation: null, fix_sql: [], fix_config: [], points_lost: 5 },
+    { id: 'galera.cluster_size', category: 'resilience', severity: 'ok', title: '', detail: '', recommendation: null, fix_sql: [], fix_config: [], points_lost: 0 },
+  ];
+  const groups = groupFindings(fs);
+  assert.deepEqual(groups.map(g => g.category), ['performance', 'galera']);
+  // The galera group holds both, hottest first, and their `category` fields
+  // still say where the points came from.
+  assert.deepEqual(groups[1].findings.map(f => f.id), ['galera.flow_control', 'galera.cluster_size']);
+  assert.deepEqual(groups[1].findings.map(f => f.category), ['performance', 'resilience']);
+  assert.equal(CATEGORY_LABELS[groups[1].category], 'Galera Cluster');
 });
 
 test('countsText: hottest first, zero counts skipped', () => {

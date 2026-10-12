@@ -14,7 +14,7 @@ pub mod secretstore;
 pub mod tuner;
 mod commands;
 
-use commands::{ai::*, connections::*, connimport::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*};
+use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -489,6 +489,10 @@ pub fn run() {
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/fleet.png"))?)
                 .build(app)?;
+            let t_cluster = IconMenuItemBuilder::with_id("tool:cluster", "Galera cluster")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/cluster.png"))?)
+                .build(app)?;
             let t_txshell = IconMenuItemBuilder::with_id("tool:txshell", "TxShell")
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/txshell.png"))?)
@@ -500,6 +504,10 @@ pub fn run() {
             let t_history = IconMenuItemBuilder::with_id("tool:history", "Query history")
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/history.png"))?)
+                .build(app)?;
+            let t_timeline = IconMenuItemBuilder::with_id("tool:timeline", "Incident timeline")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/timeline.png"))?)
                 .build(app)?;
 
             // The seven submenus mirror PLUGIN_MENU one for one (same labels,
@@ -520,6 +528,7 @@ pub fn run() {
                 .item(&t_slowlog)
                 .item(&t_binlog)
                 .item(&t_history)
+                .item(&t_timeline)
                 .build()?;
             let m_server = SubmenuBuilder::new(app, "Server")
                 .item(&t_serverinfo)
@@ -529,6 +538,7 @@ pub fn run() {
                 .item(&t_maintenance)
                 .item(&t_vacuum)
                 .item(&t_fleet)
+                .item(&t_cluster)
                 .build()?;
             let m_schema = SubmenuBuilder::new(app, "Schema")
                 .item(&t_erdiagram)
@@ -730,6 +740,7 @@ pub fn run() {
             save_folder_meta,
             create_sqlite_file,
             write_parquet_file,
+            create_parquet_file,
             panel_query,
             cancel_panel_query,
             kill_panel_query,
@@ -759,6 +770,11 @@ pub fn run() {
             list_deadlock_events,
             get_deadlock_event,
             delete_deadlock_event,
+            // long-query captures + incident timeline
+            record_long_query_event,
+            // Galera transition captures (wsrep state diffs from the dashboard)
+            record_galera_event,
+            incident_timeline,
             // data browser
             get_table_meta,
             browse_table,
@@ -773,9 +789,11 @@ pub fn run() {
             redis_server_info,
             redis_key_audit,
             redis_sentinel_overview,
-            // mongo browser (find editor)
+            // mongo browser (find editor, pipeline runner, stats)
             mongo_find,
             mongo_explain,
+            mongo_aggregate,
+            mongo_coll_stats,
             // export
             write_text_file,
             export_parquet_file,
@@ -793,6 +811,23 @@ pub fn run() {
             multi_execute,
             list_multi_runs,
             get_multi_run,
+            // Galera cluster group poll (all nodes at once, read-only)
+            galera_cluster_poll,
+            // Galera consistency spot-check (builder-generated read-only checksums)
+            galera_consistency_check,
+            // Galera SST/IST error-log tail over SSH (Channel-streamed)
+            galera_sst_log_tail,
+            // Same tail for the multi-node cluster panel: the config arrives
+            // whole (saved or ad-hoc), the session is ephemeral per tail
+            galera_cluster_sst_tail,
+            // Galera auto-discovery: adopt wsrep_incoming_addresses members
+            // as saved connections (secrets copied to the new ids)
+            galera_adopt_members,
+            // Galera cluster-wide processlist (read-only observability)
+            galera_cluster_processlist,
+            // Kill one thread on its own node from that processlist —
+            // delegates to the factored kill_processes body
+            galera_cluster_kill,
             // saved queries
             list_saved_queries,
             save_query,
@@ -831,6 +866,8 @@ pub fn run() {
             resolve_sequence_start,
             run_watched,
             cancel_watched,
+            // Vacuum & Bloat panel's tracked, cancellable maintenance runs
+            commands::vacuum::run_vacuum,
             // kill hinting (the `kill …` / `killall` editor popup)
             kill_candidates,
             kill_processes,

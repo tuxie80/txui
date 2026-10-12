@@ -13,6 +13,7 @@ import { PALETTE } from '../utils/palette';
 import { basename } from '../utils/platform';
 import { available, unavailableProps } from '../utils/platformCaps';
 import { parseLabels, formatLabels, labelsFromTags } from '../utils/labels';
+import { ParquetSchemaDialog } from './ParquetSchemaDialog';
 
 const ENGINE_LABELS: Record<Engine, string> = {
   mysql:    'MySQL / MariaDB / Percona',
@@ -22,7 +23,7 @@ const ENGINE_LABELS: Record<Engine, string> = {
   redis:    'Redis',
   clickhouse: 'ClickHouse (HTTP)',
   sqlite:  'SQLite (file)',
-  parquet: 'Parquet (file)',
+  parquet: 'Parquet (file or folder)',
   duckdb:  'DuckDB (file or :memory:)',
   mongodb: 'MongoDB',
   // SQL logins only (no Windows/integrated auth, no named instances) — the
@@ -88,6 +89,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [sslMode,  setSslMode]  = useState<SslMode>(initial?.ssl_mode ?? 'preferred');
   const [saving,   setSaving]   = useState(false);
   const [error,    setError]    = useState<string | null>(null);
+  // Parquet "New…" — design the schema, then the dialog creates the file.
+  const [showParquetNew, setShowParquetNew] = useState(false);
 
   // SSH tunnel
   const [useSsh,     setUseSsh]     = useState(initial?.use_ssh ?? false);
@@ -211,9 +214,19 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     }
   }
 
+  /** Native folder picker — a Parquet partitioned dataset is a directory. */
+  async function pickFolder() {
+    const picked = await openDialog({ multiple: false, directory: true });
+    if (typeof picked !== 'string') return;
+    setFilePath(picked);
+    // Same default-name rule as a file: the folder's own name.
+    if (!name.trim()) {
+      setName(basename(picked) ?? picked);
+    }
+  }
+
   /** Create a brand-new, empty SQLite database and point this connection at it. */
-  async function newSqliteFile() {
-    const picked = await saveDialog({
+  async function newSqliteFile() {    const picked = await saveDialog({
       defaultPath: 'new-database.sqlite',
       filters: [{ name: 'SQLite database', extensions: ['sqlite', 'sqlite3', 'db'] }],
     });
@@ -435,24 +448,36 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
         </div>
         {isFile && (
           <div className="cf-row">
-            <label>File</label>
+            <label>{engine === 'parquet' ? 'File / folder' : 'File'}</label>
             <div className="cf-pair">
               <input value={filePath} onChange={e => setFilePath(e.target.value)}
                      placeholder={engine === 'sqlite'
                        ? '/path/to/database.sqlite'
                        : engine === 'duckdb'
                          ? '/path/to/database.duckdb — or :memory:'
-                         : '/path/to/data.parquet'}
+                         : '/path/to/data.parquet — or a dataset folder'}
                      title={engine === 'parquet'
-                       ? 'Parquet files are immutable — create one with Export → Parquet on a result grid'
+                       ? 'A single Parquet file, or a folder of them opened as one partitioned dataset. Files are immutable — New… creates an empty one with a schema you design, or Export → Parquet writes one from a result grid'
                        : engine === 'duckdb'
                          ? 'The file must already exist — a mistyped path is an error, never a new database'
                          : undefined}
                      style={{ flex: 1 }} />
               <button type="button" className="toolbar-btn" onClick={pickFile}>Browse…</button>
+              {engine === 'parquet' && (
+                <button type="button" className="toolbar-btn" onClick={pickFolder}
+                        title="Open a whole directory of Parquet files as one partitioned dataset — hive key=value folders become filterable columns">
+                  Folder…
+                </button>
+              )}
               {engine === 'sqlite' && (
                 <button type="button" className="toolbar-btn" onClick={newSqliteFile}
                         title="Create a new, empty SQLite database (WAL, foreign keys on)">
+                  New…
+                </button>
+              )}
+              {engine === 'parquet' && (
+                <button type="button" className="toolbar-btn" onClick={() => setShowParquetNew(true)}
+                        title="Create a new, empty Parquet file with a schema you design">
                   New…
                 </button>
               )}
@@ -1000,6 +1025,20 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
+
+      {showParquetNew && (
+        <ParquetSchemaDialog
+          onCancel={() => setShowParquetNew(false)}
+          onCreated={path => {
+            setShowParquetNew(false);
+            setFilePath(path);
+            if (!name.trim()) {
+              setName(basename(path).replace(/\.[^.]+$/, '') ?? path);
+            }
+            setError(null);
+          }}
+        />
+      )}
     </div>
   );
 }

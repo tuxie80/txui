@@ -17,6 +17,7 @@ const QueryStorePanel = lazy(() =>
 // React.lazy caches the resolved module, so once loaded a panel stays mounted
 // for its tab's life exactly as a static import would.
 const HistoryPanel = lazy(() => import('./HistoryPanel').then(m => ({ default: m.HistoryPanel })));
+const IncidentTimelinePanel = lazy(() => import('./IncidentTimelinePanel').then(m => ({ default: m.IncidentTimelinePanel })));
 const ProcessListPanel = lazy(() => import('./ProcessListPanel').then(m => ({ default: m.ProcessListPanel })));
 const ServerInfoPanel = lazy(() => import('./ServerInfoPanel').then(m => ({ default: m.ServerInfoPanel })));
 const WatchPanel = lazy(() => import('./WatchPanel').then(m => ({ default: m.WatchPanel })));
@@ -53,6 +54,7 @@ const MaintenancePanel = lazy(() => import('./MaintenancePanel').then(m => ({ de
 const VacuumBloatPanel = lazy(() => import('./VacuumBloatPanel').then(m => ({ default: m.VacuumBloatPanel })));
 const DocumenterPanel = lazy(() => import('./DocumenterPanel').then(m => ({ default: m.DocumenterPanel })));
 const FleetPanel = lazy(() => import('./FleetPanel').then(m => ({ default: m.FleetPanel })));
+const GaleraClusterPanel = lazy(() => import('./GaleraClusterPanel').then(m => ({ default: m.GaleraClusterPanel })));
 const BufferHistory = lazy(() => import('./BufferHistory').then(m => ({ default: m.BufferHistory })));
 import { snapshot, loadHistory, saveHistory, historyKey } from '../utils/bufferHistory';
 import {
@@ -115,7 +117,7 @@ import { EngineLogo } from './engineLogos';
 import { PALETTE } from '../utils/palette';
 import { tabStyle } from '../utils/tabStyle';
 import { stopSessionRuns } from '../store/playgroundRuns';
-import { TabVisibleProvider } from '../store/tabVisibility';
+import { TabVisibleProvider } from '../store/TabVisibleProvider';
 import { forgetKillPickerState } from '../store/killPickerState';
 import { loadBuffers, saveBuffers } from '../utils/bufferStore';
 import {
@@ -570,7 +572,9 @@ const PANEL_META: Record<string, {
   replication: {
     label: 'Replication',
     render: (c, close) =>
-      <ReplicationPanel sessionId={c.session.sessionId} engine={c.session.engine} onClose={close} />,
+      <ReplicationPanel sessionId={c.session.sessionId} connectionId={c.session.connectionId}
+          engine={c.session.engine} connectionName={c.session.connectionName}
+          environment={c.session.environment} readOnly={c.session.readOnly} onClose={close} />,
   },
   dbaviews: {
     label: 'DBA views',
@@ -714,6 +718,15 @@ const PANEL_META: Record<string, {
     render: (_c, close) =>
       <FleetPanel onClose={close} />,
   },
+  cluster: {
+    label: 'Galera cluster',
+    // Cross-connection like Fleet: the session ctx pre-selects the current
+    // connection's folder-mates in the node picker and receives the cluster
+    // kill's log lines (attributed to the row's node by name).
+    render: (c, close) =>
+      <GaleraClusterPanel currentConnectionId={c.session.connectionId}
+          sessionId={c.session.sessionId} onClose={close} />,
+  },
   erdiagram: {
     label: 'ER diagram',
     render: (c, close) =>
@@ -782,6 +795,11 @@ const PANEL_META: Record<string, {
     render: (c, close) =>
       <HistoryPanel connectionId={c.session.connectionId}
           onSelect={c.handleHistorySelect} onClose={close} />,
+  },
+  timeline: {
+    label: 'Incident timeline',
+    render: (c, close) =>
+      <IncidentTimelinePanel session={c.session} onClose={close} />,
   },
 };
 

@@ -17,8 +17,39 @@
 //! field carries the command, and the driver interprets it. Anything that
 //! looks like SQL is rejected with a message saying so, rather than being
 //! half-parsed into something that silently returns the wrong rows.
+//!
+//! ## Datasets
+//!
+//! A connection's `file_path` may also be a **directory**: a partitioned
+//! dataset (`ParquetSource::Dataset`). Opening one walks the tree for
+//! Parquet files (capped, see [`MAX_DATASET_FILES`]), reads every footer —
+//! still O(footer) per file — and collects the hive `key=value` path segments
+//! as partition columns. The footer commands then run per file with a leading
+//! `file` column, and FILEINFO summarises the whole.
+//!
+//! Rows are the one thing footers cannot page across files, so a dataset
+//! additionally holds a **read-only in-memory DuckDB session** with a single
+//! temp view:
+//!
+//! ```sql
+//! CREATE TEMP VIEW dataset AS SELECT * FROM read_parquet(
+//!     ['<root>/**/*.parquet', …], hive_partitioning = true,
+//!     union_by_name = true, filename = true)
+//! ```
+//!
+//! and the data browser routes through it (filters and sort become real
+//! pushdown SQL instead of an in-memory scan). That is ALL the view is used
+//! for: the SQL editor stays refused on dataset sessions in v1 — ad-hoc SQL
+//! over Parquet already exists via the DuckDB `:memory:` engine. (DuckDB
+//! cannot launch an in-memory database in read-only mode, so the session is
+//! an ordinary scratch one; the read-only posture is structural — no user
+//! text ever reaches it, only the browser's parameterised SELECTs.) The glob
+//! is re-expanded per query, so files added after open appear in the browser
+//! automatically; the footer forensics are from open time — reconnect to
+//! re-walk.
 
 use anyhow::{anyhow, bail, Result};
+use arrow_array::ArrayRef;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::reader::FileReader;
@@ -72,13 +103,205 @@ impl ParquetFile {
     }
 }
 
-pub fn open(config: &ConnectionConfig) -> Result<ParquetFile> {
+/// What a Parquet connection opened: one file, or a directory of them.
+///
+/// Single files keep the pure arrow/parquet path unchanged. A dataset carries
+/// everything the footer commands need (every file's footer, the hive
+/// partition columns) plus the read-only DuckDB session the row path uses.
+pub enum ParquetSource {
+    Single(ParquetFile),
+    Dataset(ParquetDataset),
+}
+
+impl std::fmt::Debug for ParquetSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParquetSource::Single(file) => f.debug_tuple("Single").field(file).finish(),
+            ParquetSource::Dataset(d) => f.debug_tuple("Dataset").field(d).finish(),
+        }
+    }
+}
+
+/// An opened dataset: the root directory, every file's footer, the hive
+/// partition keys found in the paths, and the DuckDB session the `dataset`
+/// view lives on (see the module docs).
+pub struct ParquetDataset {
+    pub root: PathBuf,
+    pub files: Vec<ParquetFile>,
+    /// Hive `key=value` directory names, in first-seen order. Empty when no
+    /// path segment of any file has that shape.
+    pub partition_cols: Vec<String>,
+    pub duck: Arc<super::duckdb::DuckDbSession>,
+    /// The exact CREATE VIEW statement run at open — kept as the dataset's
+    /// DDL answer (it IS the dataset's definition).
+    view_sql: String,
+}
+
+impl std::fmt::Debug for ParquetDataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParquetDataset")
+            .field("root", &self.root)
+            .field("files", &self.files.len())
+            .field("partition_cols", &self.partition_cols)
+            .field("rows", &self.num_rows())
+            .finish()
+    }
+}
+
+impl ParquetDataset {
+    /// Total rows across every file — exact and free: each count is in its
+    /// file's footer, not counted.
+    pub fn num_rows(&self) -> i64 {
+        self.files.iter().map(|f| f.num_rows()).sum()
+    }
+
+    /// The directory's own name — the dataset's database/table name in the
+    /// tree, the way [`file_stem`] names a single file.
+    pub fn name(&self) -> String {
+        self.root
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "dataset".into())
+    }
+
+    /// A member file's path relative to the root — the value the leading
+    /// `file` column carries in the per-file views.
+    pub fn relative_path(&self, file: &ParquetFile) -> String {
+        file.path
+            .strip_prefix(&self.root)
+            .unwrap_or(&file.path)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Hard cap on files in one dataset. Footer reads are O(1) each, but a
+/// wrongly picked root (a home directory, a mount point) must not mean
+/// opening a million files — past the cap the error names it.
+const MAX_DATASET_FILES: usize = 10_000;
+
+/// Escape a single-quoted SQL string literal.
+fn sql_str(v: &str) -> String {
+    v.replace('\'', "''")
+}
+
+/// Every Parquet file under `root`, recursively, sorted for a stable order.
+/// Extensions matched case-insensitively: .parquet, .parq, .pq.
+fn walk_parquet_files(root: &Path, cap: usize) -> Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| anyhow!("cannot list {}: {e}", dir.display()))?
+        {
+            let path = entry.map_err(|e| anyhow!("cannot list {}: {e}", dir.display()))?.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("parquet") | Some("parq") | Some("pq")) {
+                out.push(path);
+                if out.len() > cap {
+                    bail!(
+                        "more than {cap} Parquet files under {} — that is the dataset cap; \
+                         open a smaller subtree",
+                        root.display()
+                    );
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Hive partition keys: the `key` of every `key=value` path segment between
+/// the root and a file, in first-seen order across the whole walk.
+fn partition_columns(root: &Path, files: &[PathBuf]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in files {
+        let Ok(rel) = f.strip_prefix(root) else { continue };
+        for seg in rel.components().map(|c| c.as_os_str().to_string_lossy()) {
+            if let Some((key, value)) = seg.split_once('=') {
+                if !key.is_empty() && !value.is_empty() && !out.iter().any(|k| k == key) {
+                    out.push(key.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Open a directory as a partitioned dataset. See the module docs for the
+/// shape; the short version: walk, read every footer, build the DuckDB view.
+pub fn open_dataset(root: &Path) -> Result<ParquetDataset> {
+    let paths = walk_parquet_files(root, MAX_DATASET_FILES)?;
+    if paths.is_empty() {
+        bail!("no Parquet files (*.parquet, *.parq, *.pq) under {}", root.display());
+    }
+    let mut files = Vec::with_capacity(paths.len());
+    for p in &paths {
+        // A corrupt member must name itself — "not a readable Parquet file"
+        // about a 400-file dataset is no help at all.
+        files.push(open_path(p).map_err(|e| anyhow!("{}: {e:#}", p.display()))?);
+    }
+    let partition_cols = partition_columns(root, &paths);
+
+    // DuckDB cannot launch an in-memory database in read-only mode at all
+    // ("Cannot launch in-memory database in read-only mode"), so the session
+    // is an ordinary scratch one. The read-only posture is structural
+    // instead: the only statements this session ever runs are the browser's
+    // parameterised SELECT builder, the PREVIEW verb's inlined integer LIMIT,
+    // and COPY … TO for export — no user text reaches it.
+    let duck = super::duckdb::open_memory_sync(false)?;
+    // A read_parquet list fails wholesale when ANY glob matches nothing, so
+    // the patterns are built from the extensions the walk actually found —
+    // never a speculative `*.parq` about a directory that has none.
+    let mut exts: Vec<String> = Vec::new();
+    for p in &paths {
+        if let Some(e) = p.extension().and_then(|e| e.to_str()) {
+            if !exts.iter().any(|x| x == e) {
+                exts.push(e.to_string());
+            }
+        }
+    }
+    let globs = exts
+        .iter()
+        .map(|ext| format!("'{}/**/*.{ext}'", sql_str(&root.to_string_lossy())))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let view_sql = format!(
+        "CREATE TEMP VIEW dataset AS SELECT * FROM read_parquet([{globs}], \
+         hive_partitioning = true, union_by_name = true, filename = true)"
+    );
+    super::duckdb::execute_params_blocking(&duck, &view_sql, &[])?;
+
+    Ok(ParquetDataset {
+        root: root.to_path_buf(),
+        files,
+        partition_cols,
+        duck: Arc::new(duck),
+        view_sql,
+    })
+}
+
+pub fn open(config: &ConnectionConfig) -> Result<ParquetSource> {
     let path = config
         .file_path
         .as_deref()
         .filter(|p| !p.trim().is_empty())
         .ok_or_else(|| anyhow!("no Parquet file chosen for this connection"))?;
-    open_path(Path::new(path))
+    let p = Path::new(path);
+    // A directory is a partitioned dataset; anything else is one file.
+    if p.is_dir() {
+        Ok(ParquetSource::Dataset(open_dataset(p)?))
+    } else {
+        Ok(ParquetSource::Single(open_path(p)?))
+    }
 }
 
 pub fn open_path(path: &Path) -> Result<ParquetFile> {
@@ -105,7 +328,22 @@ pub fn open_path(path: &Path) -> Result<ParquetFile> {
     })
 }
 
-pub fn ping(file: &ParquetFile) -> PingResult {
+pub fn ping(src: &ParquetSource) -> PingResult {
+    match src {
+        ParquetSource::Single(f) => ping_file(f),
+        ParquetSource::Dataset(d) => {
+            let start = Instant::now();
+            PingResult {
+                ok: true,
+                latency_ms: start.elapsed().as_millis() as u64,
+                server_version: Some(format!("Parquet dataset · {} files", d.files.len())),
+                error: None,
+            }
+        }
+    }
+}
+
+fn ping_file(file: &ParquetFile) -> PingResult {
     let start = Instant::now();
     let created = file
         .metadata
@@ -129,16 +367,30 @@ pub fn ping(file: &ParquetFile) -> PingResult {
 /// A Parquet file has no databases and no tables. The tree is therefore one
 /// synthetic "table" named after the file, whose children are its columns —
 /// which is what makes the data browser and the column list work unchanged.
-pub fn list_schema(file: &ParquetFile, context: Option<&str>) -> Vec<SchemaNode> {
-    match context {
-        None => vec![SchemaNode::Database { name: file_stem(file) }],
-        Some(_) => vec![SchemaNode::Table {
-            name: file_stem(file),
-            schema: Some(file_stem(file)),
-            row_count: Some(file.num_rows()),
-            partition_of: None,
-            temporal: false,
-        }],
+/// A dataset is the same shape named after the directory, with the summed
+/// row count of every file's footer.
+pub fn list_schema(src: &ParquetSource, context: Option<&str>) -> Vec<SchemaNode> {
+    match src {
+        ParquetSource::Single(f) => match context {
+            None => vec![SchemaNode::Database { name: file_stem(f) }],
+            Some(_) => vec![SchemaNode::Table {
+                name: file_stem(f),
+                schema: Some(file_stem(f)),
+                row_count: Some(f.num_rows()),
+                partition_of: None,
+                temporal: false,
+            }],
+        },
+        ParquetSource::Dataset(d) => match context {
+            None => vec![SchemaNode::Database { name: d.name() }],
+            Some(_) => vec![SchemaNode::Table {
+                name: d.name(),
+                schema: Some(d.name()),
+                row_count: Some(d.num_rows()),
+                partition_of: None,
+                temporal: false,
+            }],
+        },
     }
 }
 
@@ -170,23 +422,88 @@ fn field_to_node(t: &parquet::schema::types::Type, parent_path: &str) -> SchemaN
 
 /// Top-level columns of the file — nested groups appear as expandable
 /// StructColumns rather than being flattened to dotted leaves.
-pub fn list_columns(file: &ParquetFile) -> Vec<SchemaNode> {
+fn file_columns(file: &ParquetFile) -> Vec<SchemaNode> {
     let root = file.metadata.file_metadata().schema_descr().root_schema();
     root.get_fields().iter().map(|c| field_to_node(c, "")).collect()
 }
 
-/// Children of a nested column identified by its dotted `path` from the root.
-/// Empty when the path does not resolve or is not a group.
-pub fn struct_children(file: &ParquetFile, path: &str) -> Vec<SchemaNode> {
-    let mut cur = file.metadata.file_metadata().schema_descr().root_schema();
-    for seg in path.split('.') {
-        match cur.get_fields().iter().find(|c| c.name() == seg) {
-            Some(next) => cur = next,
-            None => return vec![],
+fn node_name(n: &SchemaNode) -> &str {
+    match n {
+        SchemaNode::Column { name, .. } | SchemaNode::StructColumn { name, .. } => name,
+        _ => "",
+    }
+}
+
+/// Column list for the tree. A dataset's is the merged top-level schema —
+/// first file wins on a name conflict — with the hive partition columns and
+/// the view's source-file column appended, tagged as what they are (the
+/// browser can filter and sort on all of them).
+pub fn list_columns(src: &ParquetSource) -> Vec<SchemaNode> {
+    match src {
+        ParquetSource::Single(f) => file_columns(f),
+        ParquetSource::Dataset(d) => {
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut out = Vec::new();
+            for f in &d.files {
+                for node in file_columns(f) {
+                    if seen.insert(node_name(&node).to_string()) {
+                        out.push(node);
+                    }
+                }
+            }
+            for pc in &d.partition_cols {
+                if seen.insert(pc.clone()) {
+                    out.push(SchemaNode::Column {
+                        name: pc.clone(),
+                        type_name: "VARCHAR · partition".into(),
+                        nullable: true,
+                        primary_key: false,
+                    });
+                }
+            }
+            if seen.insert("filename".to_string()) {
+                out.push(SchemaNode::Column {
+                    name: "filename".into(),
+                    type_name: "VARCHAR · source file".into(),
+                    nullable: false,
+                    primary_key: false,
+                });
+            }
+            out
         }
     }
-    if !cur.is_group() { return vec![]; }
-    cur.get_fields().iter().map(|c| field_to_node(c, path)).collect()
+}
+
+/// The group a dotted `path` resolves to, if it resolves to a group at all.
+fn resolve_group<'a>(
+    file: &'a ParquetFile,
+    path: &str,
+) -> Option<&'a parquet::schema::types::Type> {
+    let mut cur = file.metadata.file_metadata().schema_descr().root_schema();
+    for seg in path.split('.') {
+        cur = cur.get_fields().iter().find(|c| c.name() == seg)?;
+    }
+    cur.is_group().then_some(cur)
+}
+
+/// Children of a nested column identified by its dotted `path` from the root.
+/// Empty when the path does not resolve or is not a group. On a dataset the
+/// first file whose schema resolves the path answers — the same first-wins
+/// rule as the merged column list.
+pub fn struct_children(src: &ParquetSource, path: &str) -> Vec<SchemaNode> {
+    match src {
+        ParquetSource::Single(f) => resolve_group(f, path)
+            .map(|g| g.get_fields().iter().map(|c| field_to_node(c, path)).collect())
+            .unwrap_or_default(),
+        ParquetSource::Dataset(d) => d
+            .files
+            .iter()
+            .find_map(|f| {
+                resolve_group(f, path)
+                    .map(|g| g.get_fields().iter().map(|c| field_to_node(c, path)).collect())
+            })
+            .unwrap_or_default(),
+    }
 }
 
 /// The file name without its extension — used as both database and table name
@@ -198,12 +515,30 @@ pub fn file_stem(file: &ParquetFile) -> String {
         .unwrap_or_else(|| "parquet".into())
 }
 
-pub fn get_ddl(file: &ParquetFile) -> String {
-    // Parquet's own schema language, which is what the footer actually holds —
-    // printing a CREATE TABLE would be inventing something that never existed.
-    let mut buf = Vec::new();
-    parquet::schema::printer::print_schema(&mut buf, file.metadata.file_metadata().schema());
-    String::from_utf8_lossy(&buf).into_owned()
+pub fn get_ddl(src: &ParquetSource) -> String {
+    match src {
+        ParquetSource::Single(f) => {
+            // Parquet's own schema language, which is what the footer actually holds —
+            // printing a CREATE TABLE would be inventing something that never existed.
+            let mut buf = Vec::new();
+            parquet::schema::printer::print_schema(&mut buf, f.metadata.file_metadata().schema());
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        ParquetSource::Dataset(d) => {
+            // The CREATE VIEW is the dataset's actual definition. The merged
+            // schema follows as a comment, since the view text names no columns.
+            let mut out = format!(
+                "-- Parquet dataset: {} files under {}\n{};\n",
+                d.files.len(),
+                d.root.display(),
+                d.view_sql
+            );
+            if !d.partition_cols.is_empty() {
+                out.push_str(&format!("-- partition columns: {}\n", d.partition_cols.join(", ")));
+            }
+            out
+        }
+    }
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -217,7 +552,119 @@ pub const COMMANDS: &[&str] = &[
     "BLOOM", "HEALTH",
 ];
 
-pub fn execute(file: &ParquetFile, command: &str) -> Result<QueryResult> {
+pub fn execute(src: &ParquetSource, command: &str) -> Result<QueryResult> {
+    match src {
+        ParquetSource::Single(f) => execute_file(f, command),
+        ParquetSource::Dataset(d) => execute_dataset(d, command),
+    }
+}
+
+/// The dataset form of every verb: per-file views run per file with a leading
+/// `file` column (the path relative to the root), FILEINFO summarises the
+/// whole dataset, and PREVIEW reads through the DuckDB view — the one verb
+/// that was already a row read, so it gains files and partition columns for
+/// free.
+fn execute_dataset(d: &ParquetDataset, command: &str) -> Result<QueryResult> {
+    let start = Instant::now();
+    let trimmed = command.trim().trim_end_matches(';').trim();
+    let mut parts = trimmed.split_whitespace();
+    let verb = parts.next().unwrap_or("").to_ascii_uppercase();
+    let arg = parts.next();
+
+    let (columns, rows) = match verb.as_str() {
+        "FILEINFO" => dataset_file_info(d),
+        "SCHEMA" => per_file(d, schema_rows),
+        "ROWGROUPS" => per_file(d, row_groups),
+        "COLUMNCHUNKS" => per_file(d, column_chunks),
+        "STATS" => per_file(d, stats),
+        "KEYVALUE" => per_file(d, key_value),
+        "PAGES" => per_file(d, pages),
+        "ENCODINGS" => per_file(d, encodings),
+        "CODECS" => per_file(d, codecs),
+        "NULLS" => per_file(d, nulls),
+        "CARDINALITY" => per_file(d, cardinality),
+        "SKEW" => per_file(d, skew),
+        "SORTING" => per_file(d, sorting),
+        "BLOOM" => per_file(d, bloom),
+        "HEALTH" => per_file(d, health),
+        "PREVIEW" => {
+            let n = arg.and_then(|a| a.parse::<usize>().ok()).unwrap_or(100);
+            // `n` is a parsed usize — nothing to inject, same rule as the
+            // browser's inlined LIMIT.
+            let mut r = super::duckdb::execute_params_blocking(
+                &d.duck,
+                &format!("SELECT * FROM dataset LIMIT {n}"),
+                &[],
+            )?;
+            r.execution_ms = start.elapsed().as_millis() as u64;
+            return Ok(r);
+        }
+        other if is_sql_ish(other) => bail!(
+            "Parquet is a file, not a query engine — `{other}` cannot be run against it. \
+             Use the data browser to page through rows, or one of: {}",
+            COMMANDS.join(", ")
+        ),
+        other => bail!("unknown Parquet command `{other}`. Try one of: {}", COMMANDS.join(", ")),
+    };
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        rows_affected: None,
+        execution_ms: start.elapsed().as_millis() as u64,
+        fetch_ms: 0,
+        warnings: vec![],
+        truncated: false,
+    })
+}
+
+/// Run one per-file view over every file in the dataset, prepending the
+/// file's path relative to the root as the leading `file` column.
+fn per_file(
+    d: &ParquetDataset,
+    view: fn(&ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>),
+) -> (Vec<ColumnInfo>, Vec<Row>) {
+    let mut columns: Option<Vec<ColumnInfo>> = None;
+    let mut rows: Vec<Row> = Vec::new();
+    for f in &d.files {
+        let (c, r) = view(f);
+        let rel = d.relative_path(f);
+        columns.get_or_insert_with(|| {
+            let mut c = c;
+            c.insert(0, ColumnInfo { name: "file".into(), type_name: "text".into(), nullable: false });
+            c
+        });
+        for mut row in r {
+            row.insert(0, s(rel.clone()));
+            rows.push(row);
+        }
+    }
+    (columns.unwrap_or_else(|| cols(&["file"])), rows)
+}
+
+/// Dataset-wide summary — the FILEINFO answer for a directory.
+fn dataset_file_info(d: &ParquetDataset) -> (Vec<ColumnInfo>, Vec<Row>) {
+    let total_size: u64 = d.files.iter().map(|f| f.file_size).sum();
+    let total_groups: usize = d.files.iter().map(|f| f.metadata.num_row_groups()).sum();
+    let rows: Vec<Row> = vec![
+        vec![s("root"), s(d.root.to_string_lossy())],
+        vec![s("files"), n(d.files.len() as i64)],
+        vec![s("rows"), n(d.num_rows())],
+        vec![s("row groups"), n(total_groups as i64)],
+        vec![s("size on disk"), s(human_bytes(total_size as i64))],
+        vec![
+            s("partition columns"),
+            s(if d.partition_cols.is_empty() {
+                "(none — flat directory)".to_string()
+            } else {
+                d.partition_cols.join(", ")
+            }),
+        ],
+    ];
+    (cols(&["property", "value"]), rows)
+}
+
+fn execute_file(file: &ParquetFile, command: &str) -> Result<QueryResult> {
     let start = Instant::now();
     let trimmed = command.trim().trim_end_matches(';').trim();
     let mut parts = trimmed.split_whitespace();
@@ -459,6 +906,86 @@ fn key_value(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
 
 // ── Row reading ──────────────────────────────────────────────────────────────
 
+/// Does this type need [`cell_json`] rather than the plain Arrow formatter?
+fn is_nested(dt: &arrow_schema::DataType) -> bool {
+    use arrow_schema::DataType::*;
+    matches!(dt, Struct(_) | List(_) | LargeList(_) | FixedSizeList(_, _) | Map(_, _))
+}
+
+/// One cell of a nested (struct/list/map) column as real JSON.
+///
+/// Arrow's display format renders a struct as `{city: nyc, zip: 10001}` —
+/// not JSON, not parseable, and the grid's JSON cell viewer has nothing to
+/// grab. Nested values become `Value::Object` / `Value::Array` instead, which
+/// the grid stringifies compactly and the cell viewer opens as a tree.
+/// Primitive leaves still go through the Arrow formatter, so timestamps stay
+/// ISO and decimals stay exact text — the same rendering a scalar column gets.
+fn cell_json(array: &ArrayRef, row: usize) -> Result<serde_json::Value> {
+    use arrow_array::{
+        Array, FixedSizeListArray, LargeListArray, ListArray, MapArray, StructArray,
+    };
+    use arrow_schema::DataType;
+
+    // NULL is checked before anything else: a NULL struct and a struct whose
+    // fields all happen to be NULL are different rows and must stay different.
+    if array.is_null(row) {
+        return Ok(serde_json::Value::Null);
+    }
+    match array.data_type() {
+        DataType::Struct(_) => {
+            let st = array.as_any().downcast_ref::<StructArray>().unwrap();
+            let mut obj = serde_json::Map::with_capacity(st.num_columns());
+            for (i, field) in st.fields().iter().enumerate() {
+                obj.insert(field.name().clone(), cell_json(st.column(i), row)?);
+            }
+            Ok(serde_json::Value::Object(obj))
+        }
+        DataType::List(_) => {
+            let l = array.as_any().downcast_ref::<ListArray>().unwrap();
+            list_json(&l.value(row))
+        }
+        DataType::LargeList(_) => {
+            let l = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            list_json(&l.value(row))
+        }
+        DataType::FixedSizeList(_, _) => {
+            let l = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+            list_json(&l.value(row))
+        }
+        DataType::Map(_, _) => {
+            let m = array.as_any().downcast_ref::<MapArray>().unwrap();
+            let offsets = m.offsets();
+            let (from, to) = (offsets[row] as usize, offsets[row + 1] as usize);
+            let mut obj = serde_json::Map::with_capacity(to - from);
+            // Map keys are never null by construction; they render the same
+            // way a scalar cell would.
+            for i in from..to {
+                obj.insert(leaf_text(m.keys(), i)?, cell_json(m.values(), i)?);
+            }
+            Ok(serde_json::Value::Object(obj))
+        }
+        _ => Ok(s(leaf_text(array, row)?)),
+    }
+}
+
+/// A list slice (one row's elements) as a JSON array.
+fn list_json(values: &ArrayRef) -> Result<serde_json::Value> {
+    use arrow_array::Array;
+    let mut out = Vec::with_capacity(values.len());
+    for i in 0..values.len() {
+        out.push(cell_json(values, i)?);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+/// A primitive leaf through the Arrow formatter — the same text a scalar
+/// column produces. NULLs are the caller's business, never formatted here.
+fn leaf_text(array: &ArrayRef, row: usize) -> Result<String> {
+    use arrow_cast::display::{ArrayFormatter, FormatOptions};
+    let fmt = ArrayFormatter::try_new(array.as_ref(), &FormatOptions::default())?;
+    Ok(fmt.value(row).to_string())
+}
+
 /// Read `limit` rows starting at `offset`.
 ///
 /// Row groups whose row range falls entirely before the offset are skipped
@@ -505,6 +1032,7 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
             nullable: fld.is_nullable(),
         })
         .collect();
+    let nested: Vec<bool> = schema.fields().iter().map(|f| is_nested(f.data_type())).collect();
 
     let opts = FormatOptions::default().with_null("");
     let mut out: Vec<Row> = Vec::new();
@@ -531,6 +1059,11 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
                 // the two are different and the grid renders them differently.
                 if batch.column(ci).is_null(r) {
                     row.push(serde_json::Value::Null);
+                } else if nested[ci] {
+                    // Structs/lists/maps go out as real JSON objects/arrays,
+                    // not arrow's display text, so the grid and the cell
+                    // viewer's JSON tree can read them.
+                    row.push(cell_json(batch.column(ci), r)?);
                 } else {
                     row.push(s(fm.value(r).to_string()));
                 }
@@ -598,7 +1131,13 @@ fn passes(cell: &serde_json::Value, f: &crate::db::types::FilterClause) -> bool 
         _ => {}
     }
     if is_null { return false; } // a NULL never satisfies a value comparison
-    let cv = cell.as_str().unwrap_or("");
+    // Non-string cells (a nested column's JSON object/array) compare against
+    // their compact JSON — the same text the grid shows for them.
+    let json_owned;
+    let cv: &str = match cell {
+        serde_json::Value::String(st) => st,
+        other => { json_owned = other.to_string(); &json_owned }
+    };
     let want = f.value.as_deref().unwrap_or("");
     match f.op {
         Eq  => cell_cmp(cv, want) == std::cmp::Ordering::Equal,
@@ -705,6 +1244,7 @@ pub fn preview_filtered(
         type_name: fld.data_type().to_string(),
         nullable: fld.is_nullable(),
     }).collect();
+    let nested: Vec<bool> = schema.fields().iter().map(|f| is_nested(f.data_type())).collect();
     let col_index = |name: &str| columns.iter().position(|c| c.name == name);
 
     // Resolve filter/sort columns up front; an unknown column is an error the
@@ -738,6 +1278,8 @@ pub fn preview_filtered(
             for (ci, fm) in fmts.iter().enumerate() {
                 if batch.column(ci).is_null(r) {
                     row.push(serde_json::Value::Null);
+                } else if nested[ci] {
+                    row.push(cell_json(batch.column(ci), r)?);
                 } else {
                     row.push(s(fm.value(r).to_string()));
                 }
@@ -808,6 +1350,7 @@ pub fn export_to_file(f: &ParquetFile, out_path: &Path, format: &str) -> Result<
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let schema = builder.schema().clone();
     let names: Vec<String> = schema.fields().iter().map(|x| x.name().clone()).collect();
+    let nested: Vec<bool> = schema.fields().iter().map(|f| is_nested(f.data_type())).collect();
     let reader = builder.with_batch_size(8192).build()?;
 
     let out = File::create(out_path)
@@ -836,6 +1379,10 @@ pub fn export_to_file(f: &ParquetFile, out_path: &Path, format: &str) -> Result<
                 for (ci, fm) in fmts.iter().enumerate() {
                     let v = if batch.column(ci).is_null(r) {
                         serde_json::Value::Null
+                    } else if nested[ci] {
+                        // ndjson embeds the JSON natively — the object stays
+                        // an object, not a string that looks like one.
+                        cell_json(batch.column(ci), r)?
                     } else {
                         serde_json::Value::String(fm.value(r).to_string())
                     };
@@ -844,9 +1391,15 @@ pub fn export_to_file(f: &ParquetFile, out_path: &Path, format: &str) -> Result<
                 writeln!(w, "{}", serde_json::Value::Object(obj))?;
             } else {
                 let line = (0..fmts.len()).map(|ci| {
-                    if batch.column(ci).is_null(r) { String::new() }
-                    else { delim_field(&fmts[ci].value(r).to_string(), sep) }
-                }).collect::<Vec<_>>().join(&sep_s);
+                    if batch.column(ci).is_null(r) { return Ok(String::new()); }
+                    let text = if nested[ci] {
+                        // csv/tsv have no nesting; the JSON text is the cell.
+                        cell_json(batch.column(ci), r)?.to_string()
+                    } else {
+                        fmts[ci].value(r).to_string()
+                    };
+                    Ok(delim_field(&text, sep))
+                }).collect::<Result<Vec<_>>>()?.join(&sep_s);
                 writeln!(w, "{line}")?;
             }
             rows += 1;
@@ -854,6 +1407,26 @@ pub fn export_to_file(f: &ParquetFile, out_path: &Path, format: &str) -> Result<
     }
     w.flush()?;
     Ok(rows)
+}
+
+/// Stream a whole dataset to csv / tsv / (nd)json through the DuckDB view's
+/// own `COPY … TO` — DuckDB streams the scan, so like [`export_to_file`] the
+/// rows never all live in memory. A read-only DuckDB connection may still
+/// export: COPY TO writes a new file, never the database. Returns the row
+/// count written (the sum of the footers — what a full scan must produce).
+pub fn export_dataset_to_file(d: &ParquetDataset, out_path: &Path, format: &str) -> Result<u64> {
+    let options = match format {
+        "csv" => "FORMAT CSV, HEADER",
+        "tsv" => "FORMAT CSV, DELIMITER '\t', HEADER",
+        "json" | "ndjson" => "FORMAT JSON",
+        other => bail!("unknown export format: {other}"),
+    };
+    let sql = format!(
+        "COPY (SELECT * FROM dataset) TO '{}' ({options})",
+        sql_str(&out_path.to_string_lossy())
+    );
+    super::duckdb::execute_params_blocking(&d.duck, &sql, &[])?;
+    Ok(d.num_rows() as u64)
 }
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
@@ -1049,7 +1622,7 @@ mod tests {
         assert_eq!(f.leaf_names(), vec!["id", "label"]);
 
         // Nullability comes from the repetition level, not from a flag.
-        let cols = list_columns(&f);
+        let cols = list_columns(&ParquetSource::Single(f));
         assert!(cols.iter().any(|c| matches!(c,
             SchemaNode::Column { name, nullable: false, .. } if name == "id")));
         assert!(cols.iter().any(|c| matches!(c,
@@ -1092,20 +1665,20 @@ mod tests {
         w.write(&batch).unwrap();
         w.close().unwrap();
 
-        let f = open_path(&path).unwrap();
-        let top = list_columns(&f);
+        let src = ParquetSource::Single(open_path(&path).unwrap());
+        let top = list_columns(&src);
         // Top level: a leaf `id` and an expandable struct `addr`.
         assert!(top.iter().any(|c| matches!(c, SchemaNode::Column { name, .. } if name == "id")));
         assert!(top.iter().any(|c| matches!(c,
             SchemaNode::StructColumn { name, path, .. } if name == "addr" && path == "addr")));
         // Expanding `addr` yields its two child fields, with nullability preserved.
-        let kids = struct_children(&f, "addr");
+        let kids = struct_children(&src, "addr");
         assert!(kids.iter().any(|c| matches!(c,
             SchemaNode::Column { name, nullable: true, .. } if name == "city")));
         assert!(kids.iter().any(|c| matches!(c,
             SchemaNode::Column { name, nullable: false, .. } if name == "zip")));
         // An unknown path resolves to nothing rather than panicking.
-        assert!(struct_children(&f, "nope").is_empty());
+        assert!(struct_children(&src, "nope").is_empty());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1114,15 +1687,15 @@ mod tests {
         let path = fixture("cmd.parquet", 250, 100);
         let f = open_path(&path).unwrap();
 
-        let rg = execute(&f, "ROWGROUPS").unwrap();
+        let rg = execute_file(&f, "ROWGROUPS").unwrap();
         assert_eq!(rg.rows.len(), 3);
 
-        let cc = execute(&f, "COLUMNCHUNKS").unwrap();
+        let cc = execute_file(&f, "COLUMNCHUNKS").unwrap();
         assert_eq!(cc.rows.len(), 6); // 3 row groups x 2 leaf columns
         let codec_idx = cc.columns.iter().position(|c| c.name == "codec").unwrap();
         assert!(cc.rows.iter().all(|r| r[codec_idx] == serde_json::json!("ZSTD")));
 
-        let st = execute(&f, "STATS").unwrap();
+        let st = execute_file(&f, "STATS").unwrap();
         assert_eq!(st.rows.len(), 2);
         // Every third label is NULL — 84 of 250 (i = 0, 3, … 249).
         let nulls_idx = st.columns.iter().position(|c| c.name == "nulls").unwrap();
@@ -1130,8 +1703,8 @@ mod tests {
         let label = st.rows.iter().find(|r| r[col_idx] == serde_json::json!("label")).unwrap();
         assert_eq!(label[nulls_idx], serde_json::json!(84));
 
-        assert!(!execute(&f, "FILEINFO").unwrap().rows.is_empty());
-        assert!(!execute(&f, "SCHEMA").unwrap().rows.is_empty());
+        assert!(!execute_file(&f, "FILEINFO").unwrap().rows.is_empty());
+        assert!(!execute_file(&f, "SCHEMA").unwrap().rows.is_empty());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1139,12 +1712,12 @@ mod tests {
     fn sql_is_refused_with_a_message_that_explains_why() {
         let path = fixture("sql.parquet", 10, 10);
         let f = open_path(&path).unwrap();
-        let err = execute(&f, "SELECT * FROM t").unwrap_err().to_string();
+        let err = execute_file(&f, "SELECT * FROM t").unwrap_err().to_string();
         assert!(err.contains("not a query engine"), "{err}");
         // And the message tells you what you CAN do.
         assert!(err.contains("ROWGROUPS"), "{err}");
 
-        let unknown = execute(&f, "WOBBLE").unwrap_err().to_string();
+        let unknown = execute_file(&f, "WOBBLE").unwrap_err().to_string();
         assert!(unknown.contains("unknown Parquet command"), "{unknown}");
         let _ = std::fs::remove_file(&path);
     }
@@ -1534,17 +2107,17 @@ mod sample_tests {
             if *cmd == "PREVIEW" {
                 continue;
             }
-            let r = execute(&f, cmd).unwrap_or_else(|e| panic!("{cmd} failed: {e}"));
+            let r = execute_file(&f, cmd).unwrap_or_else(|e| panic!("{cmd} failed: {e}"));
             assert!(!r.columns.is_empty(), "{cmd} returned no columns");
             eprintln!("  {cmd:<14} {:>4} rows x {} cols", r.rows.len(), r.columns.len());
         }
 
         // Every leaf column must appear in STATS exactly once.
-        let st = execute(&f, "STATS").unwrap();
+        let st = execute_file(&f, "STATS").unwrap();
         assert_eq!(st.rows.len(), f.leaf_names().len());
 
         // COLUMNCHUNKS is row_groups x leaf columns.
-        let cc = execute(&f, "COLUMNCHUNKS").unwrap();
+        let cc = execute_file(&f, "COLUMNCHUNKS").unwrap();
         assert_eq!(cc.rows.len(), f.metadata.num_row_groups() * f.leaf_names().len());
     }
 
@@ -1577,7 +2150,7 @@ mod sample_tests {
         let Some(f) = sample() else { return };
         let before = std::fs::metadata(SAMPLE).unwrap();
         for cmd in COMMANDS {
-            let _ = execute(&f, cmd);
+            let _ = execute_file(&f, cmd);
         }
         let _ = preview(&f, 50, 0);
         let after = std::fs::metadata(SAMPLE).unwrap();
@@ -1588,26 +2161,35 @@ mod sample_tests {
 
 // ── Writing ──────────────────────────────────────────────────────────────────
 
+/// The writer settings every Parquet file TxUI creates shares.
+///
+/// Deliberately opinionated: ZSTD, one row group per 128k rows, statistics on
+/// (the crate default). Those are the settings that make a file useful to
+/// whatever reads it next, and none of them are worth a dialog.
+fn writer_properties() -> Result<parquet::file::properties::WriterProperties> {
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::WriterProperties;
+    Ok(WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
+        .set_max_row_group_row_count(Some(128 * 1024))
+        .set_created_by("TxUI".to_string())
+        .build())
+}
+
 /// Create a Parquet file from a result grid.
 ///
 /// This is how a Parquet file gets *made* here: Parquet is immutable, so
 /// "create" means "write once, completely". The source is any query result
 /// from any engine, so the schema has to be inferred from the values rather
 /// than taken from a catalog — see [`infer_type`].
-///
-/// The writer is deliberately opinionated: ZSTD, one row group per 128k rows,
-/// statistics on. Those are the settings that make a file useful to whatever
-/// reads it next, and none of them are worth a dialog.
 pub fn write_grid(
     path: &Path,
     columns: &[String],
     rows: &[Vec<serde_json::Value>],
 ) -> Result<u64> {
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
+    use arrow_array::{BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
-    use parquet::basic::{Compression, ZstdLevel};
-    use parquet::file::properties::WriterProperties;
 
     if columns.is_empty() {
         bail!("nothing to write: the result has no columns");
@@ -1652,20 +2234,42 @@ pub fn write_grid(
         })
         .collect();
 
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
-        .set_max_row_group_row_count(Some(128 * 1024))
-        .set_created_by("TxUI".to_string())
-        .build();
-
     let file = File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_properties()?))?;
     // An empty result still produces a valid file — schema, no rows. That is a
     // legitimate thing to want, and RecordBatch::try_new rejects zero columns,
     // not zero rows.
     if !rows.is_empty() {
         writer.write(&RecordBatch::try_new(schema, arrays)?)?;
     }
+    writer.close()?;
+    Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+}
+
+/// Create a Parquet file with a chosen schema and no rows.
+///
+/// The sibling of [`write_grid`]: that one infers a schema from a result
+/// grid's values; this one takes the schema the user designed (the connection
+/// form's *New…* dialog) and writes a valid, readable empty file with it.
+/// Field nullability is honoured — a file that lies about REQUIRED columns is
+/// worse than no file. Returns the size of the file written.
+pub fn write_empty(path: &Path, fields: &[(String, arrow_schema::DataType, bool)]) -> Result<u64> {
+    use arrow_schema::{Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    if fields.is_empty() {
+        bail!("a Parquet file needs at least one column");
+    }
+    let schema = Arc::new(Schema::new(
+        fields
+            .iter()
+            .map(|(name, dt, nullable)| Field::new(name, dt.clone(), *nullable))
+            .collect::<Vec<_>>(),
+    ));
+    let file = File::create(path)?;
+    // Zero batches: schema, no rows — a valid file, and closing the writer is
+    // what writes the footer.
+    let writer = ArrowWriter::try_new(file, schema, Some(writer_properties()?))?;
     writer.close()?;
     Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
 }
@@ -1790,7 +2394,7 @@ mod write_tests {
         assert_eq!(f.leaf_names(), cols);
         // Our own writer must be recorded, and the codec must be the one asked for.
         assert!(f.metadata.file_metadata().created_by().unwrap_or("").contains("TxUI"));
-        let cc = execute(&f, "COLUMNCHUNKS").unwrap();
+        let cc = execute_file(&f, "COLUMNCHUNKS").unwrap();
         let codec = cc.columns.iter().position(|c| c.name == "codec").unwrap();
         assert!(cc.rows.iter().all(|r| r[codec] == json!("ZSTD")));
 
@@ -1813,7 +2417,7 @@ mod write_tests {
         assert_eq!(f.num_rows(), 0);
         assert_eq!(f.leaf_names(), cols);
         // The schema is still readable, which is the point of writing it.
-        assert_eq!(execute(&f, "SCHEMA").unwrap().rows.len(), 2);
+        assert_eq!(execute_file(&f, "SCHEMA").unwrap().rows.len(), 2);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1824,10 +2428,280 @@ mod write_tests {
         assert!(err.contains("no columns"), "{err}");
         assert!(!path.exists(), "no file should have been created");
     }
+
+    #[test]
+    fn write_empty_creates_a_valid_file_with_the_exact_schema() {
+        use arrow_schema::{DataType, TimeUnit};
+        let path = tmp("created.parquet");
+        let fields = vec![
+            ("id".to_string(), DataType::Int64, false),
+            ("name".to_string(), DataType::Utf8, true),
+            ("amount".to_string(), DataType::Decimal128(10, 2), true),
+            ("when".to_string(), DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ];
+        let size = write_empty(&path, &fields).unwrap();
+        assert!(size > 0);
+
+        let f = open_path(&path).unwrap();
+        assert_eq!(f.num_rows(), 0);
+        assert_eq!(f.leaf_names(), ["id", "name", "amount", "when"]);
+        assert!(f.metadata.file_metadata().created_by().unwrap_or("").contains("TxUI"));
+
+        // Names, types and nullability come back exactly as asked for.
+        let schema_cols = preview(&f, 1, 0).unwrap().columns;
+        let find = |name: &str| schema_cols.iter().find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no column {name}"));
+        assert_eq!(find("id").type_name, "Int64");
+        assert!(!find("id").nullable);
+        assert_eq!(find("name").type_name, "Utf8");
+        assert!(find("name").nullable);
+        assert_eq!(find("amount").type_name, "Decimal128(10, 2)");
+        // Parquet's own TIMESTAMP(MILLIS) logical type reads back as "Timestamp(ms)".
+        assert_eq!(find("when").type_name, "Timestamp(ms)");
+
+        // An empty file still pages and reports its schema.
+        assert_eq!(preview(&f, 10, 0).unwrap().rows.len(), 0);
+        assert_eq!(execute_file(&f, "SCHEMA").unwrap().rows.len(), 4);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_empty_refuses_a_schema_with_no_columns() {
+        let path = tmp("created-nocols.parquet");
+        let err = write_empty(&path, &[]).unwrap_err().to_string();
+        assert!(err.contains("at least one column"), "{err}");
+        assert!(!path.exists(), "no file should have been created");
+    }
+}
+
+/// Nested columns (struct/list/map) must cross the row boundary as real JSON —
+/// objects and arrays the grid and the cell viewer's JSON tree can read —
+/// never as arrow's `{city: nyc}` display text. And the two ways a struct can
+/// look empty (NULL struct vs all-NULL fields) must stay distinct.
+#[cfg(test)]
+mod nested_json_tests {
+    use super::*;
+    use crate::db::types::{FilterClause, FilterOp};
+    use arrow_array::{
+        builder::{
+            ArrayBuilder, ListBuilder, MapBuilder, PrimitiveBuilder, StringBuilder, StructBuilder,
+        },
+        types::Int64Type,
+        ArrayRef, Int64Array, RecordBatch,
+    };
+    use arrow_schema::{DataType, Field, Fields, Schema};
+    use parquet::arrow::ArrowWriter;
+    use serde_json::json;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("txui-pqn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// One file holding every nested shape: a struct (one row NULL, one row
+    /// with all-NULL fields), a list of ints (one row NULL) and a string→int
+    /// map, plus a plain `id` to filter on.
+    fn nested_fixture(name: &str) -> PathBuf {
+        let path = tmp(name);
+        let addr_fields = Fields::from(vec![
+            Field::new("city", DataType::Utf8, true),
+            Field::new("zip", DataType::Int64, true),
+        ]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("addr", DataType::Struct(addr_fields.clone()), true),
+            Field::new(
+                "tags",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+            Field::new(
+                "props",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("keys", DataType::Utf8, false),
+                            Field::new("values", DataType::Int64, true),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                true,
+            ),
+        ]));
+
+        // Row 0: full values. Row 1: NULL struct, NULL list, NULL map.
+        // Row 2: struct with all-NULL fields — NOT the same as row 1's NULL.
+        let mut addr = StructBuilder::new(
+            addr_fields,
+            vec![
+                Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>,
+                Box::new(PrimitiveBuilder::<Int64Type>::new()) as Box<dyn ArrayBuilder>,
+            ],
+        );
+        addr.field_builder::<StringBuilder>(0).unwrap().append_value("nyc");
+        addr.field_builder::<PrimitiveBuilder<Int64Type>>(1).unwrap().append_value(10001);
+        addr.append(true);
+        addr.field_builder::<StringBuilder>(0).unwrap().append_null();
+        addr.field_builder::<PrimitiveBuilder<Int64Type>>(1).unwrap().append_null();
+        addr.append(false); // NULL struct
+        addr.field_builder::<StringBuilder>(0).unwrap().append_null();
+        addr.field_builder::<PrimitiveBuilder<Int64Type>>(1).unwrap().append_null();
+        addr.append(true); // present, all-NULL fields
+        let mut tags = ListBuilder::new(PrimitiveBuilder::<Int64Type>::new());
+        tags.values().append_value(1);
+        tags.values().append_value(2);
+        tags.append(true);
+        tags.append(false); // NULL list
+        tags.append(true); // empty list
+        let mut props = MapBuilder::new(None, StringBuilder::new(), PrimitiveBuilder::<Int64Type>::new());
+        props.keys().append_value("a");
+        props.values().append_value(1);
+        props.append(true).unwrap();
+        props.append(false).unwrap(); // NULL map
+        props.append(true).unwrap(); // empty map
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![0i64, 1, 2])) as ArrayRef,
+                Arc::new(addr.finish()) as ArrayRef,
+                Arc::new(tags.finish()) as ArrayRef,
+                Arc::new(props.finish()) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        path
+    }
+
+    #[test]
+    fn preview_returns_json_objects_and_arrays_not_arrow_display_text() {
+        let path = nested_fixture("nested-json.parquet");
+        let f = open_path(&path).unwrap();
+        let r = preview(&f, 10, 0).unwrap();
+        assert_eq!(r.rows.len(), 3);
+
+        // Struct → object, list → array, map → object.
+        assert_eq!(r.rows[0][1], json!({"city": "nyc", "zip": "10001"}));
+        assert_eq!(r.rows[0][2], json!(["1", "2"]));
+        assert_eq!(r.rows[0][3], json!({"a": "1"}));
+        // None of it is the arrow display format.
+        for row in &r.rows {
+            for cell in &row[1..] {
+                if let serde_json::Value::String(st) = cell {
+                    assert!(!st.starts_with('{'), "arrow display text leaked: {st}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_null_struct_and_an_all_null_fields_struct_are_not_the_same() {
+        let path = nested_fixture("nested-nulls.parquet");
+        let f = open_path(&path).unwrap();
+        let r = preview(&f, 10, 0).unwrap();
+        // Row 1: the struct itself is NULL.
+        assert_eq!(r.rows[1][1], serde_json::Value::Null);
+        assert_eq!(r.rows[1][2], serde_json::Value::Null);
+        assert_eq!(r.rows[1][3], serde_json::Value::Null);
+        // Row 2: present, with every field NULL — an object, not a NULL.
+        assert_eq!(r.rows[2][1], json!({"city": null, "zip": null}));
+        assert_eq!(r.rows[2][2], json!([]));
+        assert_eq!(r.rows[2][3], json!({}));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn nested_values_survive_a_filter_on_a_sibling_column() {
+        let path = nested_fixture("nested-filter.parquet");
+        let f = open_path(&path).unwrap();
+        let filters = [FilterClause {
+            column: "id".into(),
+            op: FilterOp::Eq,
+            value: Some("0".into()),
+        }];
+        let r = preview_filtered(&f, 10, 0, &filters, &[]).unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][1], json!({"city": "nyc", "zip": "10001"}));
+        assert_eq!(r.rows[0][2], json!(["1", "2"]));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ndjson_export_embeds_nested_json_natively_and_csv_stringifies_it() {
+        let path = nested_fixture("nested-export.parquet");
+        let f = open_path(&path).unwrap();
+
+        let out = tmp("nested.ndjson");
+        export_to_file(&f, &out, "json").unwrap();
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["addr"], json!({"city": "nyc", "zip": "10001"}));
+        assert_eq!(lines[0]["tags"], json!(["1", "2"]));
+        assert_eq!(lines[1]["addr"], serde_json::Value::Null);
+        assert_eq!(lines[2]["addr"], json!({"city": null, "zip": null}));
+        let _ = std::fs::remove_file(&out);
+
+        let out = tmp("nested.csv");
+        export_to_file(&f, &out, "csv").unwrap();
+        let body = std::fs::read_to_string(&out).unwrap();
+        let csv_lines: Vec<&str> = body.lines().collect();
+        // The struct cell is quoted JSON text, with the quotes doubled.
+        assert!(csv_lines[1].contains("\"{\"\"city\"\":\"\"nyc\"\",\"\"zip\"\":\"\"10001\"\"}\""),
+            "csv line: {}", csv_lines[1]);
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_decimal_leaf_keeps_its_exact_text_inside_a_struct() {
+        use arrow_array::{Decimal128Array, StructArray};
+        let path = tmp("nested-decimal.parquet");
+        let dec_field = Field::new("amount", DataType::Decimal128(10, 2), true);
+        let fields = Fields::from(vec![dec_field.clone()]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "line",
+            DataType::Struct(fields.clone()),
+            false,
+        )]));
+        let st = StructArray::new(
+            fields,
+            vec![Arc::new(
+                Decimal128Array::from(vec![12345i128])
+                    .with_precision_and_scale(10, 2)
+                    .unwrap(),
+            ) as ArrayRef],
+            None,
+        );
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(st) as ArrayRef]).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let f = open_path(&path).unwrap();
+        let r = preview(&f, 10, 0).unwrap();
+        // Exact text — never a float.
+        assert_eq!(r.rows[0][0], json!({"amount": "123.45"}));
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 // ── Deeper views ─────────────────────────────────────────────────────────────
-
 /// Per-PAGE statistics, from the page index.
 ///
 /// This is the finest granularity Parquet exposes and the level a reader
@@ -2330,14 +3204,14 @@ mod deep_view_tests {
         let f = open_path(Path::new(SAMPLE)).unwrap();
         for cmd in COMMANDS {
             if *cmd == "PREVIEW" { continue; }
-            let r = execute(&f, cmd).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+            let r = execute_file(&f, cmd).unwrap_or_else(|e| panic!("{cmd}: {e}"));
             assert!(!r.columns.is_empty(), "{cmd} produced no columns");
             eprintln!("{cmd:<12} {:>5} rows x {} cols", r.rows.len(), r.columns.len());
         }
 
         // HEALTH must always produce at least one row — silence would be
         // indistinguishable from the view being broken.
-        let h = execute(&f, "HEALTH").unwrap();
+        let h = execute_file(&f, "HEALTH").unwrap();
         assert!(!h.rows.is_empty());
         eprintln!("\n--- HEALTH ---");
         for row in &h.rows {
@@ -2354,5 +3228,261 @@ mod deep_view_tests {
         let rank = |s: &str| match s { "critical" => 0, "warn" => 1, "advice" => 2, _ => 3 };
         let ranks: Vec<i32> = h.rows.iter().map(|r| rank(r[0].as_str().unwrap())).collect();
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "findings are not worst-first");
+    }
+}
+
+/// Partitioned datasets: a directory opened as one object. The fixtures build
+/// a hive layout (`year=…/month=…/part.parquet`) with one schema-drifted file,
+/// and the assertions cover the two halves of the feature — the footer
+/// forensics (per file, with a leading `file` column) and the row path (the
+/// read-only DuckDB view, driven exactly the way the data browser drives it).
+#[cfg(test)]
+mod dataset_tests {
+    use super::*;
+    use crate::db::types::{Engine, FilterClause, FilterOp, SortClause, SortDir};
+    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use serde_json::json;
+
+    /// One test-private dataset root (tests in this module run in parallel).
+    fn root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("txui-pqds-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Write one member file: `id` (REQUIRED), `label`, and optionally an
+    /// `extra` column that only exists in the drifted file.
+    fn write_part(path: &Path, ids: std::ops::Range<i64>, with_extra: bool) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut fields = vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ];
+        if with_extra {
+            fields.push(Field::new("extra", DataType::Utf8, true));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let mut cols: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(ids.clone().collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(StringArray::from(
+                ids.clone().map(|i| Some(format!("row-{i}"))).collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ];
+        if with_extra {
+            cols.push(Arc::new(StringArray::from(
+                ids.map(|i| Some(format!("x-{i}"))).collect::<Vec<_>>(),
+            )) as ArrayRef);
+        }
+        let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+        let file = File::create(path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    }
+
+    /// The standard fixture: 150 rows in three files over two years, the
+    /// 2025 file carrying the drifted `extra` column.
+    fn fixture(tag: &str) -> PathBuf {
+        let root = root(tag);
+        write_part(&root.join("year=2024/month=01/part.parquet"), 0..50, false);
+        write_part(&root.join("year=2024/month=02/part.parquet"), 50..100, false);
+        write_part(&root.join("year=2025/month=01/part.parquet"), 100..150, true);
+        root
+    }
+
+    fn config_for(root: &Path) -> ConnectionConfig {
+        let mut c = ConnectionConfig::new(Engine::Parquet, "ds");
+        c.file_path = Some(root.to_string_lossy().into_owned());
+        c
+    }
+
+    #[test]
+    fn a_directory_opens_as_a_dataset_with_partitions_and_a_total_row_count() {
+        let root = fixture("open");
+        let src = open(&config_for(&root)).unwrap();
+        let ParquetSource::Dataset(d) = &src else {
+            panic!("a directory must open as a dataset");
+        };
+        assert_eq!(d.files.len(), 3);
+        assert_eq!(d.partition_cols, vec!["year", "month"]);
+        assert_eq!(d.num_rows(), 150);
+
+        // Ping says what this is.
+        let p = ping(&src);
+        assert!(p.ok);
+        assert_eq!(p.server_version.as_deref(), Some("Parquet dataset · 3 files"));
+
+        // The tree is named after the directory and carries the summed count.
+        let dir_name = root.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(matches!(&list_schema(&src, None)[0],
+            SchemaNode::Database { name } if name == &dir_name));
+        assert!(matches!(&list_schema(&src, Some(&dir_name))[0],
+            SchemaNode::Table { name, row_count: Some(150), .. } if name == &dir_name));
+
+        // Merged schema: data columns first-wins, then the tagged extras.
+        let cols = list_columns(&src);
+        let has = |name: &str, tag: &str| cols.iter().any(|c| matches!(c,
+            SchemaNode::Column { name: n, type_name, .. } if n == name && type_name.contains(tag)));
+        assert!(has("id", "INT64"));
+        assert!(has("label", "BYTE_ARRAY"));
+        assert!(has("extra", "BYTE_ARRAY"), "drifted column must merge in: {cols:?}");
+        assert!(has("year", "partition"));
+        assert!(has("month", "partition"));
+        assert!(has("filename", "source file"));
+
+        // FILEINFO is the dataset summary, not one file's.
+        let fi = execute(&src, "FILEINFO").unwrap();
+        let val = |key: &str| fi.rows.iter()
+            .find(|r| r[0] == json!(key)).map(|r| r[1].clone()).unwrap();
+        assert_eq!(val("files"), json!(3));
+        assert_eq!(val("rows"), json!(150));
+        assert_eq!(val("partition columns"), json!("year, month"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_browser_query_filters_on_a_hive_key_through_the_view() {
+        let root = fixture("hive");
+        let d = open_dataset(&root).unwrap();
+
+        // Exactly what browse_table builds and runs for a dataset session:
+        // the PG-form builder against the `dataset` view, string params bound.
+        let filters = vec![FilterClause {
+            column: "year".into(),
+            op: FilterOp::Eq,
+            value: Some("2024".into()),
+        }];
+        let sort = vec![SortClause { column: "id".into(), direction: SortDir::Desc }];
+        let q = crate::db::browser::build_select("dataset", &filters, &sort, 500, 0, true,
+                                                 &Default::default());
+        let r = super::super::duckdb::execute_params_blocking(&d.duck, &q.sql, &q.values).unwrap();
+        // Only the 2024 files match — the hive wiring, not a full scan.
+        assert_eq!(r.rows.len(), 100);
+        let id = r.columns.iter().position(|c| c.name == "id").unwrap();
+        let file = r.columns.iter().position(|c| c.name == "filename").unwrap();
+        // Sort pushed down: largest id of the 2024 range first.
+        assert_eq!(r.rows[0][id], json!(99));
+        for row in &r.rows {
+            assert!(row[file].as_str().unwrap().contains("year=2024"),
+                    "a 2025 row leaked through the hive filter: {row:?}");
+        }
+
+        // The partition columns are real, queryable columns.
+        let r = super::super::duckdb::execute_params_blocking(
+            &d.duck, "SELECT DISTINCT month FROM dataset WHERE year = '2024' ORDER BY 1", &[])
+            .unwrap();
+        assert_eq!(r.rows.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn schema_drift_reads_through_union_by_name() {
+        let root = fixture("drift");
+        let d = open_dataset(&root).unwrap();
+        let q = |sql: &str| super::super::duckdb::execute_params_blocking(&d.duck, sql, &[]).unwrap();
+
+        // Every row reads; the drifted column is NULL where the file lacks it.
+        assert_eq!(q("SELECT COUNT(*) FROM dataset").rows[0][0], json!(150));
+        assert_eq!(q("SELECT COUNT(*) FROM dataset WHERE extra IS NOT NULL").rows[0][0], json!(50));
+        assert_eq!(q("SELECT extra FROM dataset WHERE id = 100").rows[0][0], json!("x-100"));
+        assert_eq!(q("SELECT extra FROM dataset WHERE id = 5").rows[0][0], serde_json::Value::Null);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_command_returns_a_grid_on_a_dataset() {
+        let root = fixture("verbs");
+        let src = open(&config_for(&root)).unwrap();
+        for cmd in COMMANDS {
+            let r = execute(&src, cmd).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+            assert!(!r.columns.is_empty(), "{cmd} produced no columns");
+            assert!(!r.rows.is_empty(), "{cmd} produced no rows");
+        }
+
+        // Per-file views gain the leading `file` column, one entry per file.
+        let rg = execute(&src, "ROWGROUPS").unwrap();
+        assert_eq!(rg.columns[0].name, "file");
+        assert_eq!(rg.rows.len(), 3);
+        let files: std::collections::HashSet<_> =
+            rg.rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+        assert!(files.iter().all(|f| f.starts_with("year=")), "{files:?}");
+
+        // HEALTH aggregates the same way, and its severity set is unchanged.
+        let h = execute(&src, "HEALTH").unwrap();
+        assert_eq!(h.columns[0].name, "file");
+        for row in &h.rows {
+            let sev = row[1].as_str().unwrap();
+            assert!(["critical", "warn", "advice", "ok"].contains(&sev), "bad severity {sev}");
+        }
+
+        // PREVIEW goes through the view: data, partition and filename columns.
+        let p = execute(&src, "PREVIEW 10").unwrap();
+        assert_eq!(p.rows.len(), 10);
+        assert!(p.columns.iter().any(|c| c.name == "year"));
+        assert!(p.columns.iter().any(|c| c.name == "filename"));
+
+        // SQL is still refused by name on a dataset.
+        let err = execute(&src, "SELECT * FROM dataset").unwrap_err().to_string();
+        assert!(err.contains("not a query engine"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dataset_exports_through_the_view() {
+        let root = fixture("export");
+        let d = open_dataset(&root).unwrap();
+
+        let out = root.join("out.csv");
+        let written = export_dataset_to_file(&d, &out, "csv").unwrap();
+        assert_eq!(written, 150);
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(body.lines().count(), 151); // header + 150 rows
+        assert!(body.contains("year"), "partition columns export too: {}", body.lines().next().unwrap_or(""));
+
+        let out = root.join("out.ndjson");
+        let written = export_dataset_to_file(&d, &out, "json").unwrap();
+        assert_eq!(written, 150);
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 150);
+        assert!(lines.iter().all(|o| o.get("filename").is_some()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_directory_and_an_over_cap_walk_are_clean_errors() {
+        let empty = root("empty");
+        let err = open_dataset(&empty).unwrap_err().to_string();
+        assert!(err.contains("no Parquet files"), "{err}");
+        let _ = std::fs::remove_dir_all(&empty);
+
+        // The cap is named in the error (walked with a small cap — the real
+        // 10 000 stays for production, the mechanism is what is tested).
+        let full = fixture("capped");
+        let err = walk_parquet_files(&full, 2).unwrap_err().to_string();
+        assert!(err.contains("2") && err.contains("dataset cap"), "{err}");
+        let _ = std::fs::remove_dir_all(&full);
+    }
+
+    #[test]
+    fn a_corrupt_member_names_itself() {
+        let root = root("corrupt");
+        write_part(&root.join("year=2024/good.parquet"), 0..10, false);
+        std::fs::write(root.join("bad.parquet"), b"not a parquet file at all").unwrap();
+        let err = open_dataset(&root).unwrap_err().to_string();
+        assert!(err.contains("bad.parquet"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

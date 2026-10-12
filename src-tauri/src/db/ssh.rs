@@ -114,6 +114,33 @@ fn setsid_available() -> bool {
     }
 }
 
+/// A GUI app spawning a console program on Windows pops a console window —
+/// here, one per ssh child (tunnel or exec), for as long as the child lives.
+/// CREATE_NO_WINDOW suppresses it. There is no Unix equivalent because there
+/// is no Unix problem.
+///
+/// `creation_flags` is tokio's own Windows-only method (it forwards to
+/// `std::os::windows::process::CommandExt`), so importing that trait here
+/// would not help and does not compile: tokio's `Command` is not std's.
+///
+/// This calls a Windows-only API: `dev/xplat_check.sh` forces Windows gates
+/// on while compiling against the local toolchain, where this method does
+/// not exist, so checking it there would fail for a reason that has nothing
+/// to do with this branch. The marker below opts this one gate out, and must
+/// stay on the line directly above it. Both spawn sites share this helper so
+/// the marker — the project's count of manually-read Windows branches —
+/// stays at one.
+fn suppress_console_window(cmd: &mut tokio::process::Command) {
+    // xplat-skip
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 impl SshTunnel {
     /// Spawn `ssh -N -L local_port:db_host:db_port user@ssh_host` and wait
     /// up to 1 second for the process to stabilise (quick-exit = failure).
@@ -196,27 +223,7 @@ impl SshTunnel {
            // complaint) are the diagnosis — "exit code Some(255)" was not.
            .stderr(std::process::Stdio::piped());
 
-        // A GUI app spawning a console program on Windows pops a console
-        // window — here, one per tunnel, for as long as the tunnel lives.
-        // CREATE_NO_WINDOW suppresses it. There is no Unix equivalent because
-        // there is no Unix problem.
-        //
-        // `creation_flags` is tokio's own Windows-only method (it forwards to
-        // `std::os::windows::process::CommandExt`), so importing that trait
-        // here would not help and does not compile: tokio's `Command` is not
-        // std's.
-        //
-        // This calls a Windows-only API: `dev/xplat_check.sh` forces Windows
-        // gates on while compiling against the local toolchain, where this
-        // method does not exist, so checking it there would fail for a reason
-        // that has nothing to do with this branch. The marker below opts this
-        // one gate out, and must stay on the line directly above it.
-        // xplat-skip
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        suppress_console_window(&mut cmd);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -313,6 +320,158 @@ fn cleanup_askpass(askpass: &Option<std::path::PathBuf>) {
     }
 }
 
+/// A remote path we are willing to interpolate into a single-quoted remote
+/// command. Allowlist, not blocklist: alphanumerics plus the punctuation a
+/// real log path carries (`/var/log/mysql/mariadb.err`,
+/// `/opt/homebrew/var/log/mariadb-galera-1.err`). Crucially the single quote
+/// itself is NOT allowed, so the `'…'` wrapping in [`tail_command`] cannot be
+/// broken out of — the quote is the whole escape.
+pub fn validate_remote_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        anyhow::bail!("remote log path is empty");
+    }
+    if !path.starts_with('/') {
+        anyhow::bail!("remote log path must be absolute: {path:?}");
+    }
+    if !path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@: ~".contains(c)) {
+        anyhow::bail!("remote log path contains characters outside the safe set: {path:?}");
+    }
+    Ok(())
+}
+
+/// The remote command for the SST/IST log tail: bounded initial backlog,
+/// then follow. `-F` (capital) rather than `-f` so a log that does not exist
+/// yet — or is rotated away mid-transfer — is retried instead of fatal.
+/// Both GNU and BSD tail spell it the same, which matters because the remote
+/// side is whatever the DB host runs, not the desktop we ship on.
+pub fn tail_command(path: &str, backlog_lines: u32) -> Result<String> {
+    validate_remote_path(path)?;
+    Ok(format!("tail -n {backlog_lines} -F '{path}'"))
+}
+
+/// Spawn `ssh -T user@host '<remote_command>'` for a long-running remote
+/// EXEC — the sibling of [`SshTunnel::open`], sharing its auth machinery
+/// (askpass script, jump validation, key path) but running a command instead
+/// of forwarding a port. `-T` disables pty allocation: the command is a
+/// machine-read stream, and a pty would make ssh buffer and mangle it.
+///
+/// The remote command arrives as ONE argv element — no local shell ever sees
+/// it; the remote shell is sshd's business, which is exactly why
+/// [`validate_remote_path`] exists for anything interpolated into it.
+///
+/// Like the tunnel, this waits ~500 ms for the process to settle: an ssh
+/// that exits in that window failed (auth, host key, unreachable), and its
+/// own stderr words are the diagnosis. The caller owns the child's stdout —
+/// lines read until EOF or cancel, then the child is killed.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_ssh_exec(
+    ssh_host:       &str,
+    ssh_port:       u16,
+    ssh_user:       &str,
+    ssh_key_path:   Option<&str>,
+    ssh_jump:       Option<&str>,
+    ssh_password:   Option<&str>,
+    remote_command: &str,
+) -> Result<tokio::process::Child> {
+    if let Some(jump) = ssh_jump {
+        validate_jump(jump)?;
+    }
+
+    let askpass = match ssh_password {
+        Some(_) => Some(write_askpass_script()?),
+        None => None,
+    };
+    let use_setsid = ssh_password.is_some() && setsid_available();
+    let mut cmd = if use_setsid {
+        let mut c = tokio::process::Command::new("setsid");
+        c.arg("ssh");
+        c
+    } else {
+        tokio::process::Command::new("ssh")
+    };
+
+    let ssh_target = format!("{ssh_user}@{ssh_host}");
+    cmd.args([
+        "-T",
+        "-p", &ssh_port.to_string(),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "ConnectTimeout=10",
+    ]);
+
+    if let Some(password) = ssh_password {
+        // BatchMode intentionally omitted: it disables password prompts.
+        let script = askpass.as_ref().expect("askpass script written above");
+        cmd.env("SSH_ASKPASS", script)
+           .env("SSH_ASKPASS_REQUIRE", "force")
+           .env("DISPLAY", "txui:0")
+           .env("TXUI_SSH_PASS", password);
+    } else {
+        cmd.args(["-o", "BatchMode=yes"]);
+    }
+
+    if let Some(jump) = ssh_jump {
+        cmd.args(["-J", jump]);
+    }
+    if let Some(key) = ssh_key_path {
+        cmd.args(["-i", key]);
+    }
+
+    cmd.arg(&ssh_target)
+       .arg(remote_command)
+       .stdout(std::process::Stdio::piped())
+       .stderr(std::process::Stdio::piped());
+
+    suppress_console_window(&mut cmd);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            cleanup_askpass(&askpass);
+            return Err(anyhow::anyhow!("Failed to spawn ssh: {}. {}", e, install_hint()));
+        }
+    };
+
+    // Quick-exit = failure; read ssh's own words from stderr for the message.
+    let mut result = Ok(());
+    for attempt in 0..5 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut err_tail = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = String::new();
+                    let _ = stderr.read_to_string(&mut buf).await;
+                    let lines: Vec<&str> = buf.lines().filter(|l| !l.trim().is_empty()).collect();
+                    let tail = lines.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" | ");
+                    if !tail.is_empty() {
+                        err_tail = format!(" ssh said: {tail}");
+                    }
+                }
+                result = Err(anyhow::anyhow!(
+                    "SSH exec exited immediately (exit code {:?}).{} \
+                     Check host/user/key and that the remote command is valid.",
+                    status.code(), err_tail
+                ));
+                break;
+            }
+            Ok(None) if attempt >= 4 => break,
+            Ok(None) => continue,
+            Err(e) => {
+                result = Err(anyhow::anyhow!("SSH process error: {}", e));
+                break;
+            }
+        }
+    }
+
+    // ssh has settled (or failed) — the askpass helper is no longer needed.
+    cleanup_askpass(&askpass);
+    result?;
+    Ok(child)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +494,36 @@ mod tests {
         assert!(validate_jump("$(whoami)@host").is_err());
         assert!(validate_jump("user@host`id`").is_err());
         assert!(validate_jump("user@host\n").is_err());
+    }
+
+    #[test]
+    fn remote_path_validation_accepts_real_log_paths() {
+        // The live MariaDB 11.8 Galera testbed and the usual Linux layouts.
+        assert!(validate_remote_path("/opt/homebrew/var/log/mariadb-galera-1.err").is_ok());
+        assert!(validate_remote_path("/var/log/mysql/error.log").is_ok());
+        assert!(validate_remote_path("/var/lib/mysql/db-host-01.err").is_ok());
+        assert!(validate_remote_path("/home/dba/mysql logs/node.err").is_ok(), "space is legal inside single quotes");
+    }
+
+    #[test]
+    fn remote_path_validation_rejects_breakout_and_relative() {
+        assert!(validate_remote_path("").is_err());
+        assert!(validate_remote_path("relative/path.err").is_err(), "must be absolute");
+        // The single quote is the breakout character for the `'…'` wrapping.
+        assert!(validate_remote_path("/x/err'; rm -rf /; echo '.log").is_err());
+        assert!(validate_remote_path("/x/$(whoami).err").is_err());
+        assert!(validate_remote_path("/x/`id`.err").is_err());
+        assert!(validate_remote_path("/x/a;id.err").is_err());
+        assert!(validate_remote_path("/x/a|cat.err").is_err());
+        assert!(validate_remote_path("/x/a\nid.err").is_err());
+        assert!(validate_remote_path("/x/*.err").is_err());
+    }
+
+    #[test]
+    fn tail_command_wraps_single_quoted_with_backlog() {
+        let c = tail_command("/var/log/mysql/error.log", 200).unwrap();
+        assert_eq!(c, "tail -n 200 -F '/var/log/mysql/error.log'");
+        // A rejected path must fail BEFORE a command string exists.
+        assert!(tail_command("/x/err';id;'.log", 200).is_err());
     }
 }

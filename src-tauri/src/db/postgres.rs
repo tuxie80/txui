@@ -377,13 +377,13 @@ pub async fn list_schemas(pool: &PgPool) -> Result<Vec<SchemaNode>> {
         names.into_iter().map(|name| SchemaNode::Schema { name }).collect();
 
     // ── Cluster-global objects ──────────────────────────────────────────
-    // Publications, event triggers, tablespaces and foreign servers do not
-    // live in a schema — they belong to the database/cluster. The tree has no
-    // server node, so they hang off the connection root beside the schemas and
-    // are bucketed into their own groups client-side. Each query
-    // `unwrap_or_default`s so a permission miss or an old server (pre-10
-    // publications, pre-9.3 event triggers) simply omits that group rather
-    // than failing the whole root listing.
+    // Publications, subscriptions, event triggers, tablespaces and foreign
+    // servers do not live in a schema — they belong to the database/cluster.
+    // The tree has no server node, so they hang off the connection root beside
+    // the schemas and are bucketed into their own groups client-side. Each
+    // query `unwrap_or_default`s so a permission miss or an old server (pre-10
+    // publications/subscriptions, pre-9.3 event triggers) simply omits that
+    // group rather than failing the whole root listing.
 
     // Publications (PG 10+). `puballtables` marks FOR ALL TABLES; the member
     // count comes from pg_publication_rel (explicitly added relations only).
@@ -396,6 +396,20 @@ pub async fn list_schemas(pool: &PgPool) -> Result<Vec<SchemaNode>> {
     .fetch_all(pool).await.unwrap_or_default();
     for (name, all_tables, table_count) in publications {
         nodes.push(SchemaNode::Publication { name, schema: None, all_tables, table_count });
+    }
+
+    // Subscriptions (PG 10+). pg_subscription is superuser-only, so on a
+    // non-superuser connection this errors and unwrap_or_default omits the
+    // group — the same tolerance an old server gets. `subconninfo` is NOT
+    // selected: it can embed a password, and a tree node never needs it.
+    let subscriptions: Vec<(String, bool, Vec<String>)> = sqlx::query_as(
+        "SELECT s.subname, s.subenabled, s.subpublications \
+         FROM pg_catalog.pg_subscription s \
+         ORDER BY s.subname"
+    )
+    .fetch_all(pool).await.unwrap_or_default();
+    for (name, enabled, publications) in subscriptions {
+        nodes.push(SchemaNode::Subscription { name, schema: None, enabled, publications });
     }
 
     // Event triggers (PG 9.3+). evtenabled: 'D' = disabled, anything else fires.
@@ -565,6 +579,32 @@ pub async fn list_tables(pool: &PgPool, schema: &str) -> Result<Vec<SchemaNode>>
     .fetch_all(pool).await.unwrap_or_default();
     for (name, table, command) in policies {
         nodes.push(SchemaNode::Policy { name, schema: ns.clone(), table, command });
+    }
+
+    // ── Extended statistics (CREATE STATISTICS, PG 10+) ─────────────────
+    // Planner statistic objects attached to a table — a DBA looking at a bad
+    // estimate needs to know one exists. pg_statistic_ext does not exist
+    // before PG 10; unwrap_or_default turns that (or a permission miss) into
+    // "no group", the same tolerance the policy query uses. stxkind letters:
+    // 'd' ndistinct, 'f' dependencies, 'm' MCV; anything newer (e.g. the
+    // internal 'e' expression stats) falls through to its raw letter.
+    let statistics: Vec<(String, String, Vec<String>)> = sqlx::query_as(
+        "SELECT s.stxname, c.relname, \
+                coalesce((SELECT array_agg(CASE k WHEN 'd' THEN 'ndistinct' \
+                                                  WHEN 'f' THEN 'dependencies' \
+                                                  WHEN 'm' THEN 'mcv' \
+                                                  ELSE k::text END) \
+                          FROM unnest(s.stxkind) AS k), '{}'::text[]) \
+         FROM pg_catalog.pg_statistic_ext s \
+         JOIN pg_catalog.pg_class c ON c.oid = s.stxrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = s.stxnamespace \
+         WHERE n.nspname = $1 \
+         ORDER BY c.relname, s.stxname"
+    )
+    .bind(schema)
+    .fetch_all(pool).await.unwrap_or_default();
+    for (name, table, kinds) in statistics {
+        nodes.push(SchemaNode::StatisticExt { name, schema: ns.clone(), table, kinds });
     }
 
     // ── Extensions ──────────────────────────────────────────────────────
@@ -771,9 +811,10 @@ pub async fn get_ddl(pool: &PgPool, schema: &str, object: &str) -> Result<String
 
     let qualified = format!("{}.{}", quote_ident(schema), quote_ident(object));
 
-    // Cluster-global objects (publications, event triggers, tablespaces,
-    // foreign servers) have no schema. The tree routes their "View DDL" through
-    // a `pg_global.<name>` sentinel parent; resolve them by name alone.
+    // Cluster-global objects (publications, subscriptions, event triggers,
+    // tablespaces, foreign servers) have no schema. The tree routes their
+    // "View DDL" through a `pg_global.<name>` sentinel parent; resolve them by
+    // name alone.
     if schema == PG_GLOBAL_SCHEMA {
         return global_object_ddl(pool, object).await;
     }
@@ -843,6 +884,23 @@ pub async fn get_ddl(pool: &PgPool, schema: &str, object: &str) -> Result<String
         return Ok(trg.join("\n"));
     }
 
+    // Extended statistics (PG 10+). pg_get_statisticsobjdef is PG 12+; on
+    // 10/11 — both long EOL, below the supported matrix — the lookup simply
+    // finds nothing and falls through to the not-found error.
+    if ver >= 120_000 {
+        let stx: Vec<String> = sqlx::query_scalar(
+            "SELECT pg_catalog.pg_get_statisticsobjdef(s.oid) || ';' \
+             FROM pg_catalog.pg_statistic_ext s \
+             JOIN pg_catalog.pg_namespace n ON n.oid = s.stxnamespace \
+             WHERE n.nspname = $1 AND s.stxname = $2"
+        )
+        .bind(schema).bind(object)
+        .fetch_all(pool).await.unwrap_or_default();
+        if !stx.is_empty() {
+            return Ok(stx.join("\n"));
+        }
+    }
+
     Err(anyhow::anyhow!("DDL not found for {}.{}", schema, object))
 }
 
@@ -854,8 +912,7 @@ pub const PG_GLOBAL_SCHEMA: &str = "pg_global";
 
 /// Reconstruct DDL for a cluster-global object by name. Tries each catalog in
 /// turn; names are unique within their own catalog, so the first hit wins.
-async fn global_object_ddl(pool: &PgPool, name: &str) -> Result<String> {
-    // Publication.
+async fn global_object_ddl(pool: &PgPool, name: &str) -> Result<String> {    // Publication.
     let pubrow = sqlx::query(
         "SELECT puballtables FROM pg_catalog.pg_publication WHERE pubname = $1"
     )
@@ -878,6 +935,31 @@ async fn global_object_ddl(pool: &PgPool, name: &str) -> Result<String> {
         } else {
             format!("CREATE PUBLICATION {qname}\n    FOR TABLE {};", tables.join(", "))
         });
+    }
+
+    // Subscription (PG 10+). subconninfo is never read — it can embed a
+    // password, so emitted DDL carries a placeholder and a comment instead of
+    // a credential. pg_subscription is superuser-only, which is also why this
+    // fetch_optional quietly finds nothing for a non-superuser.
+    let subrow = sqlx::query(
+        "SELECT s.subenabled, s.subpublications \
+         FROM pg_catalog.pg_subscription s WHERE s.subname = $1"
+    )
+    .bind(name)
+    .fetch_optional(pool).await.ok().flatten();
+    if let Some(row) = subrow {
+        let enabled: bool = row.try_get(0).unwrap_or(true);
+        let pubs: Vec<String> = row.try_get(1).unwrap_or_default();
+        let qname = quote_ident(name);
+        let pub_list = pubs.iter().map(|p| quote_ident(p)).collect::<Vec<_>>().join(", ");
+        let mut out = format!(
+            "-- The connection string is withheld: it can embed a password.\n\
+             CREATE SUBSCRIPTION {qname}\n    CONNECTION '<conninfo withheld>'\n    PUBLICATION {pub_list};"
+        );
+        if !enabled {
+            out.push_str(&format!("\nALTER SUBSCRIPTION {qname} DISABLE;"));
+        }
+        return Ok(out);
     }
 
     // Event trigger.
@@ -1308,6 +1390,7 @@ mod live_tests {
             let mut tables = 0; let mut views = 0; let mut matviews = 0;
             let mut funcs = 0; let mut procs = 0; let mut aggs = 0;
             let mut triggers = 0; let mut seqs = 0; let mut types = 0;
+            let mut stats = 0;
             for o in &objs {
                 match o {
                     SchemaNode::Table { .. }    => tables += 1,
@@ -1321,6 +1404,7 @@ mod live_tests {
                     SchemaNode::Trigger { .. }  => triggers += 1,
                     SchemaNode::Sequence { .. } => seqs += 1,
                     SchemaNode::Type { .. }     => types += 1,
+                    SchemaNode::StatisticExt { .. } => stats += 1,
                     _ => {}
                 }
             }
@@ -1350,7 +1434,46 @@ mod live_tests {
             assert_eq!(triggers, 2, "{port}: triggers");
             assert_eq!(seqs,     1, "{port}: standalone sequences");
             assert_eq!(types,    3, "{port}: enum + domain + composite");
-            println!("  {port}: {tables}t {views}v {matviews}mv {funcs}f {procs}p {aggs}agg {triggers}trg {seqs}seq {types}ty");
+            // The fixture defines one CREATE STATISTICS object on orders.
+            assert_eq!(stats,    1, "{port}: extended statistics");
+            let stx = objs.iter().find_map(|o| match o {
+                SchemaNode::StatisticExt { name, table, kinds, .. } => Some((name, table, kinds)),
+                _ => None,
+            }).expect("statistic_ext node");
+            assert_eq!(stx.0, "orders_status_total");
+            assert_eq!(stx.1, "orders");
+            assert_eq!(stx.2, &["ndistinct".to_string(), "dependencies".to_string()]);
+            println!("  {port}: {tables}t {views}v {matviews}mv {funcs}f {procs}p {aggs}agg {triggers}trg {seqs}seq {types}ty {stats}stx");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn pg_live_subscriptions_are_tolerant_and_never_leak_conninfo() {
+        // The fixture servers have no logical-replication setup (wal_level is
+        // not guaranteed to be `logical`), so this asserts behaviour, not
+        // contents: list_schemas must succeed on every version, and any
+        // subscription node that does appear carries name/enabled/publications
+        // only — never the conninfo, which can embed a password.
+        for port in PORTS {
+            let p = pool(port).await;
+            let nodes = super::list_schemas(&p).await.expect("list_schemas");
+            let subs: Vec<&SchemaNode> = nodes.iter()
+                .filter(|n| matches!(n, SchemaNode::Subscription { .. }))
+                .collect();
+            for s in &subs {
+                if let SchemaNode::Subscription { publications, .. } = s {
+                    assert!(!publications.is_empty(), "{port}: subscription with no publications?");
+                }
+            }
+            // And a subscription's DDL — when one exists — withholds the
+            // connection string instead of printing credentials.
+            if let Some(SchemaNode::Subscription { name, .. }) = subs.first() {
+                let ddl = super::global_object_ddl(&p, name).await.expect("subscription DDL");
+                assert!(ddl.contains("<conninfo withheld>"), "{port}: {ddl}");
+                assert!(!ddl.contains("password="), "{port}: conninfo leaked: {ddl}");
+            }
+            println!("  {port}: {} subscription(s), all conninfo-free", subs.len());
         }
     }
 

@@ -68,7 +68,13 @@ export interface QualityIo {
     tables: string[]; columns: { name: string; type_name: string; nullable: boolean | null }[];
     eq_cols: string[]; range_cols: string[]; sources: string[];
   }>;
-  explainQuery(sql: string, db: string | null): Promise<{ format: string; engine: string; content: string }>;
+  /**
+   * explain_query on the panel's session. `mode` is ClickHouse-only — which
+   * EXPLAIN kind ('indexes' default, 'pipeline', 'estimate', 'plan'); every
+   * other engine ignores it. Added for the ClickHouse quality pipeline
+   * (utils/qualityRunCh.ts), which asks for all three kinds in one run.
+   */
+  explainQuery(sql: string, db: string | null, mode?: string): Promise<{ format: string; engine: string; content: string }>;
   explainWithWarnings(sql: string, db: string | null): Promise<{ explain: QueryResult; warnings: QueryResult | null }>;
   explainAnalyzeGuarded(sql: string, timeoutMs: number, db: string | null): Promise<string>;
 }

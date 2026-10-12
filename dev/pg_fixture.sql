@@ -92,6 +92,9 @@ CREATE INDEX        idx_customers_lower   ON customers (lower(name));
 CREATE INDEX        idx_customers_meta    ON customers USING gin (meta);
 CREATE INDEX        idx_orders_desc       ON orders (placed_at DESC NULLS LAST);
 
+-- ── Extended statistics (CREATE STATISTICS, PG 10+) ─────────────────
+CREATE STATISTICS orders_status_total (ndistinct, dependencies) ON status, total_cents FROM orders;
+
 -- ── Views + materialized view ────────────────────────────────────────
 CREATE VIEW v_open_orders AS
     SELECT o.id, c.name, o.total_cents, o.status

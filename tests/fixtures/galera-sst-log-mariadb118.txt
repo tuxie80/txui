@@ -1,0 +1,66 @@
+# Galera error-log SST/IST lines — LIVE captures from the 3-node MariaDB
+# 11.8.8 + galera 26.4.27 cluster (galera1/2/3, ports 3341/3342/3343),
+# 2026-10-02. Joiner block: /opt/homebrew/var/log/mariadb-galera-3.err
+# 13:36:49→13:36:51 (a forced rsync SST, gcache overrun — see
+# galera-sst-timeline.log). Donor block: mariadb-galera-1.err, same window.
+# Error block: real WSREP_SST [ERROR] lines from the 10:14 mariabackup SST
+# that failed on a missing socat. Timestamps/seqnos/UUIDs verbatim.
+#
+# ── JOINER (galera3): full rsync SST + IST catch-up ──────────────────────
+2026-10-02 13:36:49 2 [Note] WSREP: State transfer required: 
+	Group state: b110b4c2-be33-11f1-bc82-9e6500f05053:383
+	Local state: 00000000-0000-0000-0000-000000000000:-1
+2026-10-02 13:36:49 2 [Note] WSREP: Server status change connected -> joiner
+2026-10-02 13:36:49 0 [Note] WSREP: Joiner monitor thread started to monitor
+WSREP_SST: [INFO] rsync SST started on joiner (20261002 13:36:49.000)
+WSREP_SST: [INFO] 'lsof' is selected as a socket information utility. (20261002 13:36:49.000)
+2026-10-02 13:36:49 0 [Note] WSREP: Member 0.0 (galera3) requested state transfer from '*any*'. Selected 1.0 (galera1)(SYNCED) as donor.
+2026-10-02 13:36:49 0 [Note] WSREP: Shifting PRIMARY -> JOINER (TO: 383)
+2026-10-02 13:36:49 2 [Note] WSREP: Requesting state transfer: success, donor: 1
+WSREP_SST: [INFO] Extracting binlog files: (20261002 13:36:50.000)
+WSREP_SST: [INFO] Galera co-ords from recovery: b110b4c2-be33-11f1-bc82-9e6500f05053:383 0 (20261002 13:36:50.000)
+WSREP_SST: [INFO] rsync SST completed on joiner (20261002 13:36:50.000)
+WSREP_SST: [INFO] Joiner cleanup: rsync PID=59743, stunnel PID=0 (20261002 13:36:50.000)
+WSREP_SST: [INFO] Joiner cleanup done. (20261002 13:36:51.000)
+2026-10-02 13:36:51 0 [Note] WSREP: SST received
+2026-10-02 13:36:51 2 [Note] WSREP: Server status change joiner -> initializing
+2026-10-02 13:36:51 0 [Note] WSREP: SST succeeded for position b110b4c2-be33-11f1-bc82-9e6500f05053:383
+2026-10-02 13:36:51 0 [Note] WSREP: Joiner monitor thread ended with total time 2 sec
+2026-10-02 13:36:51 0 [Note] WSREP: Receiving IST... 0.0% (0/7 events) complete.
+2026-10-02 13:36:51 0 [Note] WSREP: Receiving IST... 100.0% (7/7 events) complete.
+2026-10-02 13:36:51 2 [Note] WSREP: IST received: b110b4c2-be33-11f1-bc82-9e6500f05053:383
+2026-10-02 13:36:51 0 [Note] WSREP: 0.0 (galera3): State transfer from 1.0 (galera1) complete.
+2026-10-02 13:36:51 0 [Note] WSREP: Shifting JOINER -> JOINED (TO: 383)
+2026-10-02 13:36:51 0 [Note] WSREP: Shifting JOINED -> SYNCED (TO: 383)
+2026-10-02 13:36:51 2 [Note] WSREP: Server galera3 synced with group
+#
+# ── DONOR (galera1): same transfer, donor side ───────────────────────────
+2026-10-02 13:36:49 0 [Note] WSREP: Shifting SYNCED -> DONOR/DESYNCED (TO: 383)
+2026-10-02 13:36:49 2 [Note] WSREP: Server status change synced -> donor
+2026-10-02 13:36:49 0 [Note] WSREP: Donor monitor thread started to monitor
+WSREP_SST: [INFO] rsync SST started on donor (20261002 13:36:49.000)
+2026-10-02 13:36:49 0 [Note] WSREP: Flushing tables for SST...
+WSREP_SST: [INFO] Tables flushed (20261002 13:36:49.000)
+WSREP_SST: [INFO] Preparing binlog files for transfer: (20261002 13:36:50.000)
+WSREP_SST: [INFO] Transfer of normal directories done (20261002 13:36:50.000)
+WSREP_SST: [INFO] Transfer of InnoDB data files done (20261002 13:36:50.000)
+WSREP_SST: [INFO] Transfer of InnoDB log files done (20261002 13:36:50.000)
+WSREP_SST: [INFO] Transfer of InnoDB undo logs done (20261002 13:36:50.000)
+WSREP_SST: [INFO] Transfer of Aria logs done (20261002 13:36:50.000)
+WSREP_SST: [INFO] Transfer of data done (20261002 13:36:50.000)
+WSREP_SST: [INFO] Sending continue to donor (20261002 13:36:50.000)
+2026-10-02 13:36:50 0 [Note] WSREP: SST sent: b110b4c2-be33-11f1-bc82-9e6500f05053:383
+2026-10-02 13:36:50 0 [Note] WSREP: Server status change donor -> joined
+2026-10-02 13:36:50 0 [Note] WSREP: 1.0 (galera1): State transfer to 0.0 (galera3) complete.
+2026-10-02 13:36:50 0 [Note] WSREP: Shifting DONOR/DESYNCED -> JOINED (TO: 383)
+#
+# ── ERRORS (galera1/2, 10:14 mariabackup SST that failed on missing socat) ─
+WSREP_SST: [ERROR] 'socat' not found in path (20261002 09:52:45.000)
+WSREP_SST: [ERROR] Error while getting data from donor node: exit codes: 1 0 (20261002 10:14:24.000)
+WSREP_SST: [ERROR] mariadb-backup finished with error: 1. Check syslog or '/opt/homebrew/var/mariadb-galera-1/mariabackup.backup.log' for details (20261002 10:14:24.000)
+WSREP_SST: [ERROR] Cleanup after exit with status: 22 (20261002 10:14:24.000)
+WSREP_SST: [INFO] mariabackup SST started on joiner (20261002 10:14:14.000)
+WSREP_SST: [INFO] Streaming the backup to joiner at 127.0.0.1:4442 (20261002 10:14:14.000)
+WSREP_SST: [INFO] Streaming with mbstream (20261002 10:14:14.000)
+WSREP_SST: [INFO] Proceeding with SST (20261002 10:14:14.000)
+WSREP_SST: [INFO] Waiting for SST streaming to complete! (20261002 10:14:14.000)

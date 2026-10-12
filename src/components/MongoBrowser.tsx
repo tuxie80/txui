@@ -7,15 +7,25 @@
  * (databases → collections/views → sampled keys); double-clicking a
  * collection dispatches `dbgui:browse-table` and this listens for it.
  *
- * Shape:
- * - an address bar naming the collection being queried (db.collection),
- * - one CodeMirror document for the FILTER (extended JSON accepted:
- *   {"_id": {"$oid": "…"}} works), plus plain inputs for projection / sort /
- *   limit / skip,
- * - Run → `mongo_find`; results render in the shared ResultGrid (JSON grid:
- *   union of the page's top-level keys, nested values as JSON text),
- * - Explain → `mongo_explain` (queryPlanner; executionStats is opt-in because
- *   it executes the query) shown as pretty JSON.
+ * Shape (three permanent tabs plus the DBA panels):
+ * - **Find**: an address bar naming the collection being queried
+ *   (db.collection), one CodeMirror document for the FILTER (extended JSON
+ *   accepted: {"_id": {"$oid": "…"}} works), plus plain inputs for
+ *   projection / sort / limit / skip. Run → `mongo_find`; results render in
+ *   the shared ResultGrid (JSON grid: union of the page's top-level keys,
+ *   nested values as JSON text). Explain → `mongo_explain` (queryPlanner;
+ *   executionStats is opt-in because it executes the query) shown as pretty
+ *   JSON.
+ * - **Aggregate**: one CodeMirror document for the PIPELINE (a JSON array of
+ *   stage documents) plus a stage-snippet dropdown and a limit input. Run
+ *   pre-flights utils/mongoPipeline.validatePipeline() (client-side, no
+ *   invoke) and then calls `mongo_aggregate`; the Rust side rejects
+ *   $out/$merge again before anything reaches the server. No skip-paging in
+ *   v1 — a pipeline is not a stable ordered scan.
+ * - **Stats**: `mongo_coll_stats` ($collStats: storageStats + count +
+ *   latencyStats) flattened to the (section, name, value) grid. Loads on tab
+ *   entry and on explicit Refresh only — no polling. A view's server-side
+ *   refusal is shown readably, not pre-hidden.
  *
  * DBA panels (Processes / Server) open as extra tabs via the Tools menu's
  * `dbgui:toggle-panel` events — the listener has to live here for the same
@@ -35,6 +45,7 @@ import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import type { QueryResult, Session } from '../types';
 import { errorDisplay } from '../utils/appError';
 import { mongoPanel, mongoPanelAllowed } from '../utils/mongoPanels';
+import { DEFAULT_PIPELINE, STAGE_SNIPPETS, appendSnippet, validatePipeline } from '../utils/mongoPipeline';
 import { PanelIcon } from './panelIcons';
 import { ProcessListPanel } from './ProcessListPanel';
 import { ServerInfoPanel } from './ServerInfoPanel';
@@ -49,18 +60,22 @@ const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 10_000; // mirrors MAX_FIND_LIMIT in src-tauri/src/db/mongodb.rs
 
 /**
- * The filter document editor: CodeMirror with no language mode (lang-json is
+ * One JSON document editor: CodeMirror with no language mode (lang-json is
  * deliberately not a dependency — the value here is editing comfort, not
  * highlighting: brackets close, history works, errors come from the server
- * side parse with the field named).
+ * side parse with the field named). Shared by the Find filter and the
+ * Aggregate pipeline; `viewRef` hands the EditorView back so a caller (the
+ * snippet dropdown) can replace the whole document.
  */
-function FilterEditor({ value, onChange, onRun }: {
+function JsonEditor({ value, onChange, onRun, className, minHeight, viewRef }: {
   value: string;
   onChange: (v: string) => void;
   onRun: () => void;
+  className: string;
+  minHeight?: number;
+  viewRef?: React.MutableRefObject<EditorView | null>;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<EditorView | null>(null);
   const runRef = useRef(onRun);
   runRef.current = onRun;
 
@@ -78,7 +93,7 @@ function FilterEditor({ value, onChange, onRun }: {
           closeBrackets(),
           history(),
           keymap.of([
-            // Mod-Enter runs the find — the muscle memory from the SQL editor.
+            // Mod-Enter runs the query — the muscle memory from the SQL editor.
             { key: 'Mod-Enter', run: () => { runRef.current(); return true; } },
             ...closeBracketsKeymap,
             ...defaultKeymap,
@@ -93,21 +108,21 @@ function FilterEditor({ value, onChange, onRun }: {
               borderRadius: '4px',
               background: 'var(--bg)',
             },
-            '.cm-scroller': { fontFamily: 'var(--mono, monospace)', minHeight: '72px' },
+            '.cm-scroller': { fontFamily: 'var(--mono, monospace)', minHeight: `${minHeight ?? 72}px` },
             '.cm-gutters': { background: 'var(--bg)', color: 'var(--muted)', border: 'none' },
             '&.cm-focused': { outline: 'none', borderColor: 'var(--accent)' },
           }),
         ],
       }),
     });
-    viewRef.current = view;
-    return () => { view.destroy(); viewRef.current = null; };
+    if (viewRef) viewRef.current = view;
+    return () => { view.destroy(); if (viewRef) viewRef.current = null; };
     // Mount once; the component owns the doc afterwards (onChange is the only
-    // way back out — the address bar never rewrites the filter).
+    // way back out — the address bar never rewrites the document).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return <div ref={hostRef} className="mb-filter" />;
+  return <div ref={hostRef} className={className} />;
 }
 
 export function MongoBrowser({ session, isActive }: Props) {
@@ -124,6 +139,17 @@ export function MongoBrowser({ session, isActive }: Props) {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [plan, setPlan] = useState<string | null>(null);
   const [analyze, setAnalyze] = useState(false);
+  // Aggregate tab.
+  const [pipeline, setPipeline] = useState(DEFAULT_PIPELINE);
+  const [aggLimit, setAggLimit] = useState(String(DEFAULT_LIMIT));
+  const [aggRunning, setAggRunning] = useState(false);
+  const [aggErr, setAggErr] = useState<string | null>(null);
+  const [aggResult, setAggResult] = useState<QueryResult | null>(null);
+  const pipelineViewRef = useRef<EditorView | null>(null);
+  // Stats tab.
+  const [statsRunning, setStatsRunning] = useState(false);
+  const [statsErr, setStatsErr] = useState<string | null>(null);
+  const [statsResult, setStatsResult] = useState<QueryResult | null>(null);
 
   const run = useCallback(async (a: Address, pageSkip?: number) => {
     const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || DEFAULT_LIMIT));
@@ -168,6 +194,76 @@ export function MongoBrowser({ session, isActive }: Props) {
     }
   }, [sessionId, filter, analyze]);
 
+  // ── Aggregate tab ──────────────────────────────────────────────────────────
+
+  const runAggregate = useCallback(async (a: Address) => {
+    // Client-side pre-flight first: a bad pipeline never leaves the webview.
+    // The Rust side enforces the same rules (and the $out/$merge rejection)
+    // again before anything reaches the server.
+    const v = validatePipeline(pipeline);
+    if (!v.ok) {
+      setAggErr(v.error);
+      return;
+    }
+    const lim = Math.max(1, Math.min(MAX_LIMIT, Number(aggLimit) || DEFAULT_LIMIT));
+    setAggRunning(true);
+    setAggErr(null);
+    try {
+      const r = await invoke<QueryResult>('mongo_aggregate', {
+        sessionId, db: a.db, collection: a.coll,
+        pipeline,
+        limit: lim,
+      });
+      setAggResult(r);
+    } catch (e) {
+      setAggErr(errorDisplay(e));
+      setAggResult(null);
+    } finally {
+      setAggRunning(false);
+    }
+  }, [sessionId, pipeline, aggLimit]);
+
+  const addSnippet = useCallback((name: string) => {
+    const s = STAGE_SNIPPETS.find(x => x.name === name);
+    if (!s) return;
+    const r = appendSnippet(pipeline, s.snippet);
+    if (!r.ok) {
+      setAggErr(r.error);
+      return;
+    }
+    setAggErr(null);
+    setPipeline(r.text);
+    // The editor owns its doc after mount — replace it wholesale.
+    const view = pipelineViewRef.current;
+    if (view) {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: r.text } });
+    }
+  }, [pipeline]);
+
+  // ── Stats tab ──────────────────────────────────────────────────────────────
+
+  const loadStats = useCallback(async (a: Address) => {
+    setStatsRunning(true);
+    setStatsErr(null);
+    try {
+      const r = await invoke<QueryResult>('mongo_coll_stats', {
+        sessionId, db: a.db, collection: a.coll,
+      });
+      setStatsResult(r);
+    } catch (e) {
+      setStatsErr(errorDisplay(e));
+      setStatsResult(null);
+    } finally {
+      setStatsRunning(false);
+    }
+  }, [sessionId]);
+
+  // Load on tab entry (and when the address changes while looking at Stats);
+  // afterwards only the explicit Refresh button reloads — no polling.
+  useEffect(() => {
+    if (tab === 'stats' && addr) void loadStats(addr);
+  }, [tab, addr, loadStats]);
+
   // The tree's double-click / "Browse table" lands here. Only the ACTIVE
   // session answers (every session workspace stays mounted).
   useEffect(() => {
@@ -204,6 +300,25 @@ export function MongoBrowser({ session, isActive }: Props) {
   const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || DEFAULT_LIMIT));
   const sk = Math.max(0, Number(skip) || 0);
 
+  // Shared by the three workspace tabs.
+  const addrBar = (
+    <div className="mb-addr-bar">
+      <span className="form-hint">collection</span>
+      <code className="mb-addr">{addr ? `${addr.db}.${addr.coll}` : '(pick a collection in the tree)'}</code>
+      <span className="form-hint mb-ro-hint"
+        title="MongoDB v1 is read-only by design — the driver has no write path at all.">
+        read-only
+      </span>
+    </div>
+  );
+  const emptyHint = (
+    <div className="rb-empty" style={{ padding: 24 }}>
+      Open a database in the object explorer and double-click a collection
+      to query it here. The filter is a MongoDB query document —
+      <code>{' {"parity": "even", "n": {"$gte": 100}} '}</code> — not SQL.
+    </div>
+  );
+
   return (
     <div className="redis-browser">
       <div className="rb-tab-bar">
@@ -211,6 +326,14 @@ export function MongoBrowser({ session, isActive }: Props) {
           className={`rb-tab ${tab === 'find' ? 'active' : ''}`}
           onClick={() => setTab('find')}
         >Find</button>
+        <button
+          className={`rb-tab ${tab === 'aggregate' ? 'active' : ''}`}
+          onClick={() => setTab('aggregate')}
+        >Aggregate</button>
+        <button
+          className={`rb-tab ${tab === 'stats' ? 'active' : ''}`}
+          onClick={() => setTab('stats')}
+        >Stats</button>
         {activePanel && (
           <button
             className="rb-tab active"
@@ -230,20 +353,13 @@ export function MongoBrowser({ session, isActive }: Props) {
 
       {tab === 'find' && (
         <div className="mb-find-pane">
-          <div className="mb-addr-bar">
-            <span className="form-hint">collection</span>
-            <code className="mb-addr">{addr ? `${addr.db}.${addr.coll}` : '(pick a collection in the tree)'}</code>
-            <span className="form-hint mb-ro-hint"
-              title="MongoDB v1 is read-only by design — the driver has no write path at all.">
-              read-only
-            </span>
-          </div>
+          {addrBar}
 
           {addr && (
             <>
               <div className="mb-editor-block">
                 <div className="form-hint mb-label">filter (JSON document; extended JSON like {'{"$oid": "…"}'} works)</div>
-                <FilterEditor value={filter} onChange={setFilter} onRun={() => void run(addr)} />
+                <JsonEditor value={filter} onChange={setFilter} onRun={() => void run(addr)} className="mb-filter" />
               </div>
               <div className="mb-fields">
                 <label className="form-hint">projection
@@ -298,13 +414,85 @@ export function MongoBrowser({ session, isActive }: Props) {
             </div>
           )}
 
-          {!addr && (
-            <div className="rb-empty" style={{ padding: 24 }}>
-              Open a database in the object explorer and double-click a collection
-              to query it here. The filter is a MongoDB query document —
-              <code>{' {"parity": "even", "n": {"$gte": 100}} '}</code> — not SQL.
+          {!addr && emptyHint}
+        </div>
+      )}
+
+      {tab === 'aggregate' && (
+        <div className="mb-find-pane">
+          {addrBar}
+
+          {addr && (
+            <>
+              <div className="mb-editor-block">
+                <div className="form-hint mb-label">
+                  pipeline (JSON array of stages; extended JSON works — $out/$merge are rejected, read-only by design)
+                </div>
+                <JsonEditor value={pipeline} onChange={setPipeline} onRun={() => void runAggregate(addr)}
+                  className="mb-pipeline" minHeight={140} viewRef={pipelineViewRef} />
+              </div>
+              <div className="mb-fields">
+                <label className="form-hint">add stage
+                  <select value="" onChange={e => { if (e.target.value) addSnippet(e.target.value); }}>
+                    <option value="">snippet…</option>
+                    {STAGE_SNIPPETS.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                  </select>
+                </label>
+                <label className="form-hint">limit
+                  <input type="number" min={1} max={MAX_LIMIT} value={aggLimit}
+                    onChange={e => setAggLimit(e.target.value)} style={{ width: 90 }} />
+                </label>
+                <button className="primary" onClick={() => void runAggregate(addr)} disabled={aggRunning}>
+                  {aggRunning ? 'Running…' : 'Run ⏎'}
+                </button>
+                <span className="form-hint"
+                  title="A trailing $limit (this value, capped at 10 000) is appended server-side — an unbounded pipeline never streams a whole collection. allowDiskUse is on, so big $group/$sort stages spill instead of failing.">
+                  trailing $limit guard · allowDiskUse on
+                </span>
+              </div>
+            </>
+          )}
+
+          {aggErr && <div className="rb-err">{aggErr}</div>}
+
+          {aggResult && (
+            <div className="mb-grid">
+              <ResultGrid result={aggResult} />
             </div>
           )}
+
+          {!addr && emptyHint}
+        </div>
+      )}
+
+      {tab === 'stats' && (
+        <div className="mb-find-pane">
+          {addrBar}
+
+          {addr && (
+            <div className="mb-fields">
+              <button className="toolbar-btn" onClick={() => void loadStats(addr)} disabled={statsRunning}>
+                {statsRunning ? 'Loading…' : 'Refresh'}
+              </button>
+            </div>
+          )}
+
+          {statsErr && <div className="rb-err">{statsErr}</div>}
+
+          {statsResult && (
+            <div className="mb-grid">
+              <ResultGrid result={statsResult} />
+            </div>
+          )}
+
+          {addr && (
+            <div className="mb-stats-foot">
+              From the $collStats aggregation stage (storageStats + count + latencyStats).
+              Views refuse server-side — the refusal is shown as-is above.
+            </div>
+          )}
+
+          {!addr && emptyHint}
         </div>
       )}
     </div>

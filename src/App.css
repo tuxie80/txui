@@ -832,6 +832,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .pi-analyze     { color: #9b8ec8; }
 .pi-maintenance { color: #d1a85e; }
 .pi-fleet       { color: #4fb8a8; }
+.pi-cluster     { color: #d18eb0; }
 .pi-playground  { color: #e07a5f; }
 .pi-erdiagram   { color: #b48ec8; }
 .pi-designer    { color: #e0b34f; }
@@ -854,6 +855,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .pi-slowlog    { color: #e07a5f; }
 .pi-vacuum     { color: #d1a85e; }
 .pi-querystore { color: #9b8ec8; }
+.pi-timeline   { color: #a8b8e0; }
 
 .tree-slow-hint {
   font-size: calc(10px * var(--font-scale, 1));
@@ -1370,6 +1372,139 @@ button.primary:disabled { opacity: .5; cursor: default; }
   color: var(--text2);
   font-size: calc(12px * var(--font-scale, 1));
 }
+
+/* ── Incident timeline panel ────────────────────────────────── */
+.tl-when {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 6px;
+  font-size: calc(11.5px * var(--font-scale, 1));
+  font-family: var(--font-ui);
+  color-scheme: dark;
+}
+
+.tl-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+
+.tl-strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 28px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tl-strip-bar {
+  flex: 1;
+  min-width: 3px;
+  background: var(--accent);
+  opacity: .55;
+  border-radius: 2px 2px 0 0;
+}
+.tl-strip-bar:hover { opacity: 1; }
+
+.tl-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.tl-day-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 12px 4px;
+  font-size: calc(11px * var(--font-scale, 1));
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.tl-row { border-bottom: 1px solid #1e1e28; }
+.tl-row:hover { background: var(--bg3); }
+.tl-row.tl-bad .tl-title { color: var(--red); }
+
+.tl-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tl-time {
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--text2);
+  flex-shrink: 0;
+}
+
+.tl-kind {
+  flex-shrink: 0;
+  font-size: calc(10px * var(--font-scale, 1));
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg3);
+  color: var(--text2);
+}
+.tl-kind-audit { color: #8fa8c8; }
+.tl-kind-lifecycle { color: #4fb8a8; }
+.tl-kind-deadlock { color: #d86a5c; }
+.tl-kind-digest_snapshot { color: #9b8ec8; }
+.tl-kind-multi_run { color: #d1a85e; }
+.tl-kind-long_query { color: #e07a5f; }
+.tl-kind-galera_event { color: #5e9ed1; }
+
+.tl-title {
+  font-family: var(--font-mono);
+  font-size: calc(11.5px * var(--font-scale, 1));
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.tl-dur {
+  flex-shrink: 0;
+  font-size: calc(10.5px * var(--font-scale, 1));
+  color: var(--text2);
+}
+
+.tl-status {
+  flex-shrink: 0;
+  font-size: calc(10px * var(--font-scale, 1));
+  font-weight: 600;
+  color: var(--red);
+}
+
+.tl-detail { padding: 2px 12px 8px 96px; }
+.tl-detail-text {
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0 0 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.tl-detail-actions { display: flex; gap: 6px; }
 
 /* ── Filter bar ─────────────────────────────────────────────── */
 .filter-bar {
@@ -3882,6 +4017,357 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .repl-hint { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); margin-top: 6px; }
 .repl-updated { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); white-space: nowrap; }
 
+/* Galera cluster view (a tab of the Replication panel, mysql engine) */
+.gal-tabs { display: inline-flex; gap: 4px; margin-left: 4px; }
+.gal-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.gal-empty {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg2);
+  padding: 14px 16px; max-width: 720px; color: var(--text2);
+  font-size: calc(12px * var(--font-scale, 1)); line-height: 1.5;
+}
+.gal-empty-title { color: var(--text); font-weight: 600; font-size: calc(13px * var(--font-scale, 1)); margin-bottom: 4px; }
+.gal-empty code { font-family: var(--font-mono); color: var(--text); }
+.gal-findings { margin-bottom: 14px; }
+.gal-finding {
+  border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: 6px; padding: 7px 12px; margin-bottom: 8px; background: var(--bg2);
+}
+.gal-finding.gal-crit { border-color: var(--red); border-left-color: var(--red); }
+.gal-finding.gal-warn { border-left-color: var(--yellow); }
+.gal-finding.gal-info { border-left-color: var(--accent); }
+.gal-finding.gal-ok   { border-left-color: var(--green); }
+.gal-finding-title { font-weight: 600; font-size: calc(12px * var(--font-scale, 1)); }
+.gal-finding.gal-crit .gal-finding-title { color: var(--red); }
+.gal-finding.gal-warn .gal-finding-title { color: var(--yellow); }
+.gal-finding.gal-ok   .gal-finding-title { color: var(--green); }
+.gal-finding-detail { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); margin-top: 3px; line-height: 1.45; user-select: text; }
+.gal-fc { display: flex; align-items: baseline; gap: 12px; margin: 4px 0 8px; }
+.gal-fc-big { font-size: calc(22px * var(--font-scale, 1)); font-weight: 700; font-variant-numeric: tabular-nums; }
+.gal-fc-big.gal-good { color: var(--green); }
+.gal-fc-big.gal-warn { color: var(--yellow); }
+.gal-fc-big.gal-bad  { color: var(--red); }
+.gal-fc-label { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); max-width: 560px; }
+
+/* Galera SST/IST transfer watch — the prominent card above the dashboard */
+.gal-transfer {
+  border: 1px solid var(--accent); border-left: 4px solid var(--accent);
+  border-radius: 6px; background: var(--bg2); padding: 12px 16px; margin-bottom: 14px;
+}
+.gal-transfer-sst     { border-color: var(--yellow); border-left-color: var(--yellow); }
+.gal-transfer-catchup { border-color: var(--accent); border-left-color: var(--accent); }
+.gal-transfer-donor   { border-color: var(--accent); border-left-color: var(--accent); }
+.gal-transfer-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.gal-transfer-title { font-weight: 700; font-size: calc(14px * var(--font-scale, 1)); }
+.gal-transfer-sst .gal-transfer-title { color: var(--yellow); }
+.gal-transfer-elapsed {
+  color: var(--text2); font-size: calc(12px * var(--font-scale, 1));
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.gal-transfer-detail { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); margin-top: 4px; line-height: 1.45; }
+.gal-progress {
+  position: relative; height: 8px; border-radius: 4px; background: var(--bg3);
+  overflow: hidden; margin-top: 10px;
+}
+.gal-progress-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.6s ease; }
+@keyframes gal-pulse {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
+.gal-progress-pulse {
+  position: absolute; top: 0; height: 100%; width: 40%; border-radius: 4px;
+  background: var(--yellow); opacity: 0.75; animation: gal-pulse 1.4s ease-in-out infinite;
+}
+.gal-ist { margin-top: 10px; }
+.gal-transfer > .gal-ist:first-child { margin-top: 0; }
+.gal-ist-label { font-weight: 600; font-size: calc(12px * var(--font-scale, 1)); font-variant-numeric: tabular-nums; }
+.gal-ist-status { color: var(--text2); font-weight: 400; }
+.gal-logwatch { margin-top: 10px; }
+.gal-logwatch-offer { margin-top: 10px; }
+.gal-logwatch-lines {
+  margin-top: 6px; padding: 6px 8px; max-height: 120px; overflow: auto;
+  font-family: var(--font-mono); font-size: calc(11px * var(--font-scale, 1));
+  color: var(--text2); background: var(--bg2); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.gal-gcache {
+  margin-top: 8px; color: var(--text2); font-size: calc(12px * var(--font-scale, 1));
+  line-height: 1.45; max-width: 720px;
+}
+
+/* Galera sparkline strip — flow control / apply queue / commits per second,
+   fed by the dashboard's own poll samples. */
+.gal-spark-strip {
+  display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.gal-spark-item {
+  flex: 1; min-width: 150px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg2); padding: 6px 10px 8px;
+  display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 2px 8px;
+}
+.gal-spark-label { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); }
+.gal-spark-val {
+  font-weight: 700; font-size: calc(13px * var(--font-scale, 1));
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.gal-spark { grid-column: 1 / -1; width: 100%; height: 24px; color: var(--accent); margin-top: 4px; }
+.gal-spark-hot { color: var(--yellow); }
+
+/* Dense card grid for the kv sections — the tighter spacing is scoped to
+   gal-card so the async tab's .repl-section rhythm is untouched. */
+.gal-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px; margin-bottom: 12px; align-items: start;
+}
+.gal-card {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg2);
+  padding: 8px 10px 10px; min-width: 0;
+}
+.gal-card .repl-title { margin-bottom: 6px; }
+.gal-card .repl-kv { min-width: 0; width: 100%; }
+.gal-card .repl-kv td { padding: 2px 10px 2px 0; }
+.gal-card .gal-fc { gap: 8px; margin: 2px 0 6px; }
+.gal-card .gal-fc-big { font-size: calc(18px * var(--font-scale, 1)); }
+.gal-card .gal-fc-label { font-size: calc(11px * var(--font-scale, 1)); }
+.gal-card .gal-gcache {
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--bg3);
+}
+/* Trivia line (provider, state UUID, config id) — one muted mono row instead
+   of three kv rows. */
+.gal-trivia {
+  margin-top: 6px; color: var(--text2); font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-scale, 1)); word-break: break-all; opacity: .8;
+  user-select: text;
+}
+/* Collapsible expander rows (membership table, node operations). */
+.gal-exp {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  border: none; background: none; padding: 4px 0 0; cursor: pointer;
+  color: var(--text2); font-size: calc(12px * var(--font-scale, 1));
+  font-family: inherit; text-align: left;
+}
+.gal-exp:hover { color: var(--text); }
+.gal-chev { display: inline-block; transition: transform .12s ease; flex-shrink: 0; }
+.gal-chev.open { transform: rotate(90deg); }
+/* Node operations card: collapsed to a one-line summary bar by default. */
+.gal-ops { margin-bottom: 14px; padding: 0; }
+.gal-ops-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: none; background: none; cursor: pointer; padding: 8px 10px;
+  font-family: inherit; text-align: left; border-radius: 6px;
+}
+.gal-ops-head:hover { background: var(--bg3); }
+.gal-ops-head .repl-title { margin: 0; flex-shrink: 0; }
+.gal-ops-summary {
+  color: var(--text2); font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-scale, 1)); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gal-ops-body { padding: 8px 10px 10px; border-top: 1px solid var(--bg3); }
+
+/* WSREP_INFO membership table (optional plugin — rendered only when probed). */
+.gal-membership {
+  margin-top: 8px; border-collapse: collapse; font-size: calc(12px * var(--font-scale, 1));
+}
+.gal-membership th {
+  text-align: left; color: var(--text2); font-weight: 600; padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.gal-membership td { padding: 3px 12px 3px 0; border-bottom: 1px solid var(--bg3); }
+
+/* MySQL Group Replication tab (components/GroupReplicationView.tsx) — member
+   role/state badges; the rest reuses the gal-* blocks. */
+.mgr-badge {
+  display: inline-block; padding: 0 7px; border-radius: 8px;
+  font-size: calc(11px * var(--font-scale, 1)); font-weight: 600;
+  border: 1px solid var(--border);
+}
+.mgr-badge-primary { color: var(--accent); border-color: var(--accent); }
+.mgr-badge-secondary { color: var(--text2); }
+.mgr-state-good { color: var(--green); border-color: var(--green); }
+.mgr-state-warn { color: var(--yellow); border-color: var(--yellow); }
+.mgr-state-bad { color: var(--red); border-color: var(--red); }
+.mgr-state-unknown { color: var(--text2); }
+.mgr-state-pulse { animation: gal-pulse-opacity 1.4s ease-in-out infinite; }
+@keyframes gal-pulse-opacity { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.mgr-this {
+  margin-left: 8px; color: var(--text2);
+  font-size: calc(11px * var(--font-scale, 1)); font-style: italic;
+}
+.mgr-members td, .mgr-stats td { padding: 3px 12px 3px 0; }
+.mgr-num { font-variant-numeric: tabular-nums; text-align: right; padding-right: 16px !important; }
+.mgr-stats th { white-space: nowrap; }
+
+/* Galera node operations (the write side) + the bootstrap advisor card. */
+.gal-advisor { margin-bottom: 14px; }
+/* The auto-discovery banner's action row (Add as connections / Monitor once /
+   Dismiss) — no font-size of its own, the toolbar-btns carry theirs. */
+.gal-discover-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.gal-advisor-sql {
+  display: flex; align-items: center; gap: 8px; margin: 8px 0;
+}
+.gal-advisor-sql code {
+  font-family: var(--font-mono); font-size: calc(12px * var(--font-scale, 1));
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  padding: 4px 8px; user-select: text;
+}
+.gal-advisor-warn { color: var(--red); font-weight: 600; margin: 6px 0; }
+.gal-ops-note {
+  color: var(--text2); font-size: calc(12px * var(--font-scale, 1));
+  line-height: 1.45; max-width: 720px; margin-bottom: 8px;
+}
+.gal-op-row {
+  display: flex; align-items: center; gap: 10px; padding: 4px 0; flex-wrap: wrap;
+}
+.gal-op-label {
+  min-width: 150px; font-weight: 600; font-size: calc(12px * var(--font-scale, 1));
+}
+.gal-op-cur { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); }
+.gal-warn-text { color: var(--yellow); }
+.gal-op-hint { font-style: normal; opacity: 0.8; }
+.gal-threads-in { width: 70px; }
+.gal-evict-in { width: 300px; font-family: var(--font-mono); }
+.gal-op-confirm {
+  border: 1px solid var(--yellow); border-left-width: 3px; border-radius: 6px;
+  background: var(--bg2); padding: 8px 12px; margin: 8px 0;
+}
+.gal-op-risk {
+  color: var(--text); font-size: calc(12px * var(--font-scale, 1));
+  line-height: 1.45; max-width: 720px; margin-bottom: 6px;
+}
+.gal-op-sess {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+}
+
+/* ── Galera cluster group view (all nodes at once) ──────────────────────────
+   The multi-node companion of the single-node dashboard above: same gal-*
+   visual language (findings banner, transfer/IST cards are reused as-is),
+   plus per-node cards in a grid. */
+.galc-root { display: flex; flex-direction: column; height: 100%; overflow-y: auto; padding: 10px 14px 18px; }
+.galc-picker {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg2);
+  padding: 6px 10px; margin-bottom: 12px; max-height: 220px; overflow-y: auto;
+}
+.galc-picker-group { margin-bottom: 2px; }
+.galc-host { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); font-family: var(--font-mono); margin-left: 6px; }
+.galc-note { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); padding: 4px 2px; }
+/* The "Monitoring N unsaved nodes" bar — the ad-hoc ("Monitor once") notice. */
+.galc-adhoc {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg2);
+  padding: 6px 10px; margin-bottom: 12px;
+}
+/* The quorum advisor line (#6) above the findings strip. */
+.galc-quorum {
+  font-size: calc(12px * var(--font-scale, 1)); font-weight: 600;
+  color: var(--text2); margin: 0 0 10px; padding: 4px 2px;
+}
+/* Ghost-member cards (#8): a garbd/unknown member renders greyed and quiet —
+   dashed border so it never reads as a polled node that failed. */
+.galc-ghost { opacity: 0.75; border-style: dashed; }
+.galc-ghost .galc-error, .galc-ghost-note { color: var(--text2); }
+
+/* #2 cluster-wide processlist — the merged per-node table (galc-cc-grid
+   carries the base compact-table look). */
+.galc-proc-grid { width: 100%; margin-bottom: 8px; }
+.galc-proc-grid td { vertical-align: top; }
+.galc-proc-info {
+  font-family: var(--font-mono); font-size: calc(11px * var(--font-scale, 1));
+  max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block;
+}
+.galc-proc-group td {
+  background: var(--bg3); font-weight: 600; border-top: 1px solid var(--border);
+  padding-top: 4px; padding-bottom: 4px;
+}
+.galc-proc-ghead { color: var(--accent, inherit); }
+.galc-proc-sys td {
+  cursor: pointer; color: var(--text2); font-size: calc(11px * var(--font-scale, 1));
+  border-top: 1px solid var(--border); padding-top: 4px; user-select: none;
+}
+.galc-proc-sysrow td { color: var(--text2); }
+/* The per-row Kill action cell + the inline confirm strip under the row. */
+.galc-proc-act { text-align: right; white-space: nowrap; }
+.galc-kill-confirm td { padding: 0; border-top: none; }
+.galc-kill-confirm .gal-op-confirm { margin: 2px 0 6px; }
+.galc-watch { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 4px; }
+.galc-watch .mx-server { padding-left: 2px; }
+.galc-watch-interval {
+  display: flex; align-items: center; gap: 6px; padding-left: 22px;
+  font-size: calc(12px * var(--font-scale, 1)); color: var(--text2);
+}
+.galc-watch-on { border-color: var(--accent, #4a9eff); color: var(--accent, #4a9eff); }
+.galc-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 10px; align-items: start;
+}
+.galc-card {
+  border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px;
+  background: var(--bg2); padding: 8px 10px 10px;
+}
+.galc-card.galc-synced { border-left-color: var(--green); }
+.galc-card.galc-donor  { border-left-color: var(--yellow); }
+.galc-card.galc-joining,
+.galc-card.galc-joined { border-left-color: var(--accent); }
+.galc-card.galc-down   { border-left-color: var(--red); }
+.galc-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.galc-state {
+  font-size: calc(11px * var(--font-scale, 1)); font-weight: 700;
+  padding: 1px 7px; border-radius: 8px; white-space: nowrap;
+}
+.galc-state-synced { background: var(--green); color: #fff; }
+.galc-state-donor  { background: var(--yellow); color: #222; }
+.galc-state-joined { background: var(--accent); color: #fff; }
+.galc-state-joining { background: var(--accent); color: #fff; animation: gal-pulse 1.4s ease-in-out infinite; }
+.galc-state-down   { background: var(--red); color: #fff; }
+.galc-name { font-weight: 600; font-size: calc(13px * var(--font-scale, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.galc-nodename { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); font-family: var(--font-mono); }
+.galc-writer {
+  font-size: calc(11px * var(--font-scale, 1)); font-weight: 700;
+  color: var(--accent, #4a9eff); white-space: nowrap;
+}
+.galc-error { color: var(--red); font-size: calc(12px * var(--font-scale, 1)); line-height: 1.4; user-select: text; word-break: break-word; }
+.galc-stats { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; }
+.galc-stat { display: flex; align-items: baseline; gap: 5px; }
+.galc-stat-wide { flex-basis: 100%; }
+.galc-stat-k { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); }
+.galc-stat-v { font-size: calc(12px * var(--font-scale, 1)); font-variant-numeric: tabular-nums; }
+.galc-stat-v.galc-warn { color: var(--yellow); }
+.galc-stat-v.galc-bad  { color: var(--red); }
+
+/* consistency spot-check */
+.galc-cc-form {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 4px 0 2px;
+}
+.galc-cc-form label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: calc(12px * var(--font-scale, 1)); color: var(--text2);
+}
+.galc-cc-table-in {
+  width: 240px; font-family: var(--font-mono);
+  font-size: calc(12px * var(--font-scale, 1));
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+}
+.galc-cc-ack { color: var(--yellow); }
+.galc-cc-verdict { margin-top: 8px; }
+.galc-cc-advice { margin-bottom: 6px; }
+.galc-cc-grid { border-collapse: collapse; margin: 4px 0 6px; }
+.galc-cc-grid th {
+  text-align: left; color: var(--text2); font-weight: 600;
+  font-size: calc(11px * var(--font-scale, 1)); padding: 2px 14px 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+.galc-cc-grid td {
+  padding: 2px 14px 2px 0; border-bottom: 1px solid var(--bg3);
+  font-size: calc(12px * var(--font-scale, 1));
+}
+.galc-cc-grid tr.galc-cc-divergent td { color: var(--red); }
+.galc-cc-num { font-variant-numeric: tabular-nums; }
+.galc-cc-sum { font-family: var(--font-mono); }
+.galc-cc-inc { color: var(--yellow); }
+.galc-cc-copy { margin-top: 2px; }
+
 /* ═══ DBA views ════════════════════════════════════════════════════════════ */
 
 .dv-desc { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5417,6 +5903,8 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .pg-role-holder { color: var(--yellow); }
 .pg-role-waiter { color: #ff9040; }
 .pg-role-churn  { color: var(--text2); }
+.pg-role-writer    { color: var(--accent); }
+.pg-role-contender { color: #ff9040; }
 .pg-w-tid    { width: 62px; color: var(--text); }
 .pg-w-status { width: 96px; color: var(--text2); }
 .pg-w-sql    { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text2); }
@@ -5612,6 +6100,11 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .wc-arm    { border-color: var(--red); color: var(--red); }
 .wc-run    { border-color: var(--yellow); color: var(--yellow); }
 .wc-run:disabled { opacity: .5; }
+
+/* Parquet schema designer (connection form → New…) */
+.pq-null { display: inline-flex; align-items: center; gap: 4px; font-size: calc(11px * var(--font-scale, 1)); color: var(--text2); white-space: nowrap; }
+.pq-errors { margin: 8px 0 0; padding-left: 18px; color: var(--red); font-size: calc(12px * var(--font-scale, 1)); }
+.pq-errors li { margin: 2px 0; }
 
 .qsb-diag { display: inline-flex; gap: 8px; align-items: center; font-family: var(--font-mono); font-size: calc(11px * var(--font-scale, 1)); }
 .qsb-diag-err  { color: var(--red); }
@@ -8254,6 +8747,11 @@ tr.cmp-same td { opacity: .62; }
   color: var(--text); font-family: var(--font-mono);
   font-size: calc(12px * var(--font-scale, 1)); padding: 4px 8px;
 }
+.mb-fields select {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text);
+  font-size: calc(12px * var(--font-scale, 1)); padding: 4px 6px;
+}
 .mb-analyze { flex-direction: row !important; align-items: center; gap: 4px !important; }
 .mb-grid { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .mb-plan {
@@ -8261,4 +8759,8 @@ tr.cmp-same td { opacity: .62; }
   background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
   font-family: var(--font-mono); font-size: calc(12px * var(--font-scale, 1));
   white-space: pre-wrap; word-break: break-all;
+}
+.mb-stats-foot {
+  padding: 6px 10px; border-top: 1px solid var(--border); flex-shrink: 0;
+  color: var(--muted); font-size: calc(11px * var(--font-scale, 1));
 }

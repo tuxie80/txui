@@ -7,6 +7,13 @@
 
 export type TunerSeverity = 'ok' | 'info' | 'advice' | 'warn' | 'critical';
 export type TunerCategory = 'performance' | 'security' | 'resilience' | 'schema' | 'config';
+/**
+ * Display-only group: the backend keeps every Galera finding in a real scoring
+ * category (performance/resilience/config — the health-score math is unchanged)
+ * and marks them by id prefix `galera.`; the report renders them as their own
+ * section. See src-tauri/src/tuner/galera_checks.rs.
+ */
+export type TunerGroupCategory = TunerCategory | 'galera';
 export type TunerFlavor = 'mysql' | 'mariadb' | 'percona' | 'postgres' | 'redis' | 'clickhouse' | 'sqlite';
 
 export interface TunerFinding {
@@ -52,10 +59,16 @@ export interface TunerReport {
 
 export const CATEGORY_ORDER: TunerCategory[] = ['performance', 'security', 'resilience', 'schema', 'config'];
 
-export const CATEGORY_LABELS: Record<TunerCategory, string> = {
+/** Render order for finding groups: the scoring order with Galera inserted
+ *  after resilience (its findings are mostly performance/resilience). */
+export const GROUP_ORDER: TunerGroupCategory[] =
+  ['performance', 'security', 'resilience', 'galera', 'schema', 'config'];
+
+export const CATEGORY_LABELS: Record<TunerGroupCategory, string> = {
   performance: 'Performance',
   security: 'Security',
   resilience: 'Resilience',
+  galera: 'Galera Cluster',
   schema: 'Schema',
   config: 'Config',
 };
@@ -88,7 +101,7 @@ export function isProblem(severity: TunerSeverity): boolean {
 }
 
 export interface FindingGroup {
-  category: TunerCategory;
+  category: TunerGroupCategory;
   findings: TunerFinding[];
   counts: Partial<Record<TunerSeverity, number>>;
   /** warn + critical + advice count. */
@@ -96,18 +109,20 @@ export interface FindingGroup {
 }
 
 /**
- * Group findings by category (in CATEGORY_ORDER order, empty categories
- * dropped). Inside a group, hottest severity first, then most points lost.
- * Unknown categories from the backend fall into 'config'.
+ * Group findings for display (in GROUP_ORDER order, empty groups dropped).
+ * Inside a group, hottest severity first, then most points lost.
+ * `galera.`-prefixed ids form their own Galera section regardless of their
+ * scoring category; other unknown categories fall into 'config'.
  */
 export function groupFindings(findings: TunerFinding[]): FindingGroup[] {
-  const byCat = new Map<TunerCategory, TunerFinding[]>();
+  const byCat = new Map<TunerGroupCategory, TunerFinding[]>();
   for (const f of findings) {
-    const cat = (CATEGORY_ORDER as string[]).includes(f.category) ? f.category : 'config';
+    const cat: TunerGroupCategory = f.id.startsWith('galera.') ? 'galera'
+      : (CATEGORY_ORDER as string[]).includes(f.category) ? f.category : 'config';
     if (!byCat.has(cat)) byCat.set(cat, []);
     byCat.get(cat)!.push(f);
   }
-  return CATEGORY_ORDER.filter(c => byCat.has(c)).map(c => {
+  return GROUP_ORDER.filter(c => byCat.has(c)).map(c => {
     const list = [...byCat.get(c)!].sort((a, b) =>
       SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || b.points_lost - a.points_lost);
     const counts: Partial<Record<TunerSeverity, number>> = {};

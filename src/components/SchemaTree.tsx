@@ -87,10 +87,10 @@ function childTreeNodes(parent: TreeNode, children: SchemaNode[]): TreeNode[] {
 
 /**
  * Root-level nodes get a virtual group level too, but only for the PG
- * cluster-global kinds (publications / event triggers / tablespaces / foreign
- * servers). Databases (MySQL) and schemas (PG) match no group def, so they
- * fall through to `ungrouped` and stay flat at the top exactly as before; the
- * global-object groups are appended after them.
+ * cluster-global kinds (publications / subscriptions / event triggers /
+ * tablespaces / foreign servers). Databases (MySQL) and schemas (PG) match no
+ * group def, so they fall through to `ungrouped` and stay flat at the top
+ * exactly as before; the global-object groups are appended after them.
  */
 function rootTreeNodes(nodes: SchemaNode[]): TreeNode[] {
   const { groups, ungrouped } = groupSchemaObjects(nodes);
@@ -125,7 +125,7 @@ function isRelation(node: TreeEntry): boolean {
  * inside a schema). They have no schema, so their "View DDL" is routed through
  * the `pg_global.<name>` sentinel the backend understands.
  */
-const PG_GLOBAL_KINDS = new Set(['publication', 'event_trigger', 'tablespace', 'foreign_server']);
+const PG_GLOBAL_KINDS = new Set(['publication', 'subscription', 'event_trigger', 'tablespace', 'foreign_server']);
 function isPgGlobal(node: TreeEntry): boolean {
   return PG_GLOBAL_KINDS.has(node.kind);
 }
@@ -134,6 +134,7 @@ function isPgGlobal(node: TreeEntry): boolean {
 function isDdlOnly(node: TreeEntry): boolean {
   return node.kind === 'routine' || node.kind === 'trigger' || node.kind === 'event'
     || node.kind === 'sequence' || node.kind === 'type' || node.kind === 'foreign_table'
+    || node.kind === 'statistic_ext'
     || isPgGlobal(node);
 }
 
@@ -231,10 +232,13 @@ function nodeSubtext(node: TreeEntry): string | null {
   }
   // Global PG objects: the one fact you look for on each.
   if (node.kind === 'publication')   return node.all_tables ? 'all tables' : `${node.table_count} tables`;
+  if (node.kind === 'subscription')  return `→ ${node.publications.join(', ')}${node.enabled ? '' : ' · disabled'}`;
   if (node.kind === 'event_trigger') return `${node.event}${node.enabled ? '' : ' · disabled'}`;
   if (node.kind === 'tablespace')    return node.location || node.owner;
   if (node.kind === 'foreign_server') return node.fdw;
   if (node.kind === 'foreign_table')  return `→ ${node.server}`;
+  // Extended statistics: the table they describe and the kinds enabled.
+  if (node.kind === 'statistic_ext') return `on ${node.table} · ${node.kinds.join(', ')}`;
   if (node.kind === 'trigger' && node.table) return `on ${node.table}`;
   if (node.kind === 'table' && node.partition_of) return `of ${node.partition_of}`;
   // Says the table keeps history. Worth a permanent marker rather than a

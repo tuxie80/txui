@@ -10,6 +10,7 @@ pub mod redis_browser;
 pub mod mongo;
 
 pub mod export;
+pub mod galera;
 pub mod ops;
 pub mod multi_exec;
 pub mod saved;
@@ -22,6 +23,7 @@ pub mod audit;
 pub mod dump;
 pub mod datagen;
 pub mod watch;
+pub mod vacuum;
 pub mod kill;
 pub mod playground;
 pub mod metrics;

@@ -1,0 +1,16 @@
+Expression ((Projection + Before ORDER BY))
+  FilterTransform
+    ReadFromMergeTree (default.events)
+      Indexes:
+        MinMax
+          Condition: true
+          Parts: 12/12
+          Granules: 98154/98154
+        Partition
+          Condition: true
+          Parts: 12/12
+          Granules: 98154/98154
+        PrimaryKey
+          Condition: true
+          Parts: 12/12
+          Granules: 98154/98154

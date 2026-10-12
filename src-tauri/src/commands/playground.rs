@@ -23,6 +23,12 @@ use crate::state::AppState;
 /// (2 rows; recreating it every run would itself need DDL locks).
 const PG_TABLE: &str = "txui_playground";
 const MY_TABLE: &str = "txui_playground";
+/// Table the Galera write scenarios churn on. Unlike the lock table it IS
+/// dropped at the end of the run: a flow storm can pile up millions of rows,
+/// and on a cluster every one of them replicates to the peers.
+const GALERA_TABLE: &str = "txui_playground_galera";
+
+fn default_rows_per_tx() -> u32 { 1 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,10 +36,12 @@ pub struct MessSpec {
     /// "sleep" — N identical long statements (a rogue family)
     /// "lock"  — 1 holder + N waiters queued on one row (blocking chain)
     /// "mixed" — a rogue family + benign churn + a blocking chain
+    /// "galera-flow"     — N writers streaming single-row write txs (Galera only)
+    /// "galera-conflict" — K writers updating the same hot row(s) (Galera only)
     pub scenario: String,
     /// Workers to spawn (server threads held simultaneously)
     pub threads: u32,
-    /// Seconds each statement runs
+    /// Seconds each statement runs (sleep/lock/mixed) / the storm lasts (galera)
     pub duration_secs: f64,
     /// Delay between launches — 0 = all at once, >0 = staggered ages
     pub stagger_ms: u64,
@@ -47,6 +55,12 @@ pub struct MessSpec {
     pub hold_secs: f64,
     /// Baked into the statement comment: makes the family recognizable
     pub tag: Option<String>,
+    /// Rows per transaction — Galera write scenarios only.
+    #[serde(default = "default_rows_per_tx")]
+    pub rows_per_tx: u32,
+    /// Pause between a worker's transactions (ms) — Galera write scenarios only.
+    #[serde(default)]
+    pub sleep_ms: u64,
 }
 
 /// Clamped, engine-independent view of a spec. Clamping happens once, here,
@@ -62,18 +76,37 @@ pub struct Plan {
     pub hold: f64,
     pub tag: String,
     pub database: Option<String>,
+    /// Galera write scenarios: rows per transaction.
+    pub rows_per_tx: u32,
+    /// Galera write scenarios: pause between a worker's transactions (ms).
+    pub sleep_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scenario { Sleep, Lock, Mixed }
+pub enum Scenario { Sleep, Lock, Mixed, GaleraFlow, GaleraConflict }
+
+impl Scenario {
+    /// Does the scenario write to the server? Everything except Sleep creates
+    /// a table and updates rows — the read-only gate keys off this.
+    pub fn writes(self) -> bool {
+        self != Scenario::Sleep
+    }
+    /// Galera scenarios are MySQL-family-only AND need wsrep_on ON.
+    pub fn is_galera(self) -> bool {
+        matches!(self, Scenario::GaleraFlow | Scenario::GaleraConflict)
+    }
+}
 
 /// Smallest thread count a scenario can express: a chain needs a holder AND a
-/// waiter; "mixed" needs a rogue family, some churn and a chain.
+/// waiter; "mixed" needs a rogue family, some churn and a chain; a hot-row
+/// conflict needs at least two writers contending.
 pub fn min_threads(scenario: Scenario) -> u32 {
     match scenario {
         Scenario::Sleep => 1,
         Scenario::Lock  => 2,
         Scenario::Mixed => 4,
+        Scenario::GaleraFlow => 1,
+        Scenario::GaleraConflict => 2,
     }
 }
 
@@ -85,6 +118,8 @@ pub fn plan_from(spec: &MessSpec) -> Plan {
     let scenario = match spec.scenario.as_str() {
         "lock"  => Scenario::Lock,
         "mixed" => Scenario::Mixed,
+        "galera-flow"     => Scenario::GaleraFlow,
+        "galera-conflict" => Scenario::GaleraConflict,
         _       => Scenario::Sleep,
     };
     let tag = {
@@ -105,6 +140,10 @@ pub fn plan_from(spec: &MessSpec) -> Plan {
         hold:       spec.hold_secs.clamp(0.1, 600.0),
         tag,
         database:   spec.database.clone().filter(|d| !d.trim().is_empty()),
+        // Galera write knobs: at most 1000 rows in one write-set, at most a
+        // 10 s pause between a worker's transactions.
+        rows_per_tx: spec.rows_per_tx.clamp(1, 1000),
+        sleep_ms:    spec.sleep_ms.min(10_000),
     }
 }
 
@@ -287,12 +326,94 @@ fn lock_waiter(engine: Engine, tag: &str, slot: u32, db: Option<&str>) -> Worker
     Worker { slot, role: "waiter".into(), statements }
 }
 
+/// The Galera table, qualified and quoted like the lock table's MySQL arm.
+fn galera_table(db: Option<&str>) -> String {
+    match db {
+        Some(d) => format!("`{}`.`{}`", d.replace('`', "``"), GALERA_TABLE),
+        None    => format!("`{}`", GALERA_TABLE),
+    }
+}
+
+/// Hot rows the conflict scenario contends on: one for small runs, up to 4 —
+/// few enough that conflicts are certain, more than one so the processlist
+/// shows a family rather than a single statement.
+pub fn galera_hot_rows(threads: u32) -> u32 {
+    (threads / 4).clamp(1, 4)
+}
+
+/// DDL for the Galera scenarios, run on the control connection before any
+/// worker starts. One table serves both: the flow storm appends to it, the
+/// conflict scenario updates the seeded hot rows. MySQL-only by construction
+/// (the dispatch refuses anything else).
+pub fn galera_setup(db: Option<&str>, hot_rows: u32) -> Vec<String> {
+    let t = galera_table(db);
+    let mut v = Vec::new();
+    if let Some(d) = db {
+        v.push(format!("CREATE DATABASE IF NOT EXISTS `{}`", d.replace('`', "``")));
+    }
+    v.push(format!(
+        "CREATE TABLE IF NOT EXISTS {t} (id BIGINT AUTO_INCREMENT PRIMARY KEY, \
+         worker INT NOT NULL DEFAULT 0, n BIGINT NOT NULL DEFAULT 0, note VARCHAR(64)) ENGINE=InnoDB"));
+    // Seed the hot rows id 1..=hot_rows for the conflict scenario.
+    let rows: Vec<String> = (1..=hot_rows).map(|i| format!("({i}, 0, 0, 'hot')")).collect();
+    v.push(format!("INSERT IGNORE INTO {t} (id, worker, n, note) VALUES {}", rows.join(", ")));
+    v
+}
+
+/// Best-effort cleanup: the Galera table is DROPPED at the end of every run —
+/// a flow storm piles up rows that replicate to every peer, so leaving it
+/// behind is leaving the mess behind.
+pub fn galera_cleanup(db: Option<&str>) -> String {
+    format!("DROP TABLE IF EXISTS {}", galera_table(db))
+}
+
+/// One flow-storm transaction: rows_per_tx rows in ONE multi-row INSERT —
+/// one statement, one autocommit tx, one write-set to certify and replicate.
+fn galera_flow_stmt(tag: &str, slot: u32, db: Option<&str>, rows_per_tx: u32) -> String {
+    let c = comment(tag, "flow", slot);
+    let t = galera_table(db);
+    let rows: Vec<String> = (0..rows_per_tx).map(|_| format!("({slot}, 0, 'flow')")).collect();
+    format!("INSERT {c} INTO {t} (worker, n, note) VALUES {}", rows.join(", "))
+}
+
+/// One conflict-storm transaction: a single-row UPDATE on one of the hot rows.
+fn galera_conflict_stmt(tag: &str, slot: u32, db: Option<&str>, threads: u32) -> String {
+    let c = comment(tag, "hotrow", slot);
+    let t = galera_table(db);
+    let row = slot % galera_hot_rows(threads) + 1;
+    format!("UPDATE {c} {t} SET n = n + 1 WHERE id = {row}")
+}
+
+/// Is this error the Galera certification signature? Certification failures
+/// and brute-force aborts both surface as error 1213 (ER_LOCK_DEADLOCK) with
+/// "Deadlock" / "certification" text on MariaDB and PXC. These are RETRIED —
+/// retrying them is the lesson the scenario teaches. Anything else ends the
+/// worker.
+pub fn is_cert_conflict(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("1213") || e.contains("deadlock") || e.contains("certification")
+}
 /// Turn a plan into the exact worker scripts. Pure — unit-tested below, and
-/// the UI shows the same statements before you press Spawn.
+/// the UI shows the same statements before you press Spawn. For the Galera
+/// scenarios each worker's `statements` holds ONE representative statement:
+/// the runner loops it until the duration elapses, so the shape shown in the
+/// UI and the Spawned event is the shape that actually runs.
 pub fn build_workers(plan: &Plan, engine: Engine) -> Vec<Worker> {
     let db = plan.database.as_deref();
     let tag = plan.tag.as_str();
     match plan.scenario {
+        Scenario::GaleraFlow => (0..plan.threads).map(|slot| Worker {
+            slot,
+            role: "writer".into(),
+            statements: vec![galera_flow_stmt(tag, slot, db, plan.rows_per_tx)],
+        }).collect(),
+
+        Scenario::GaleraConflict => (0..plan.threads).map(|slot| Worker {
+            slot,
+            role: "contender".into(),
+            statements: vec![galera_conflict_stmt(tag, slot, db, plan.threads)],
+        }).collect(),
+
         Scenario::Sleep => (0..plan.threads).map(|slot| {
             let secs = jittered(plan.duration, plan.jitter_pct, slot);
             Worker {
@@ -437,12 +558,35 @@ pub async fn playground_spawn(
                  manufactures load, lock chains and sleeping connections"));
         }
     }
-    // Lock scenarios write (a table, a row) — a read-only connection refuses.
-    let writes = plan.scenario != Scenario::Sleep;
-    if writes && state.is_read_only(&session_id).await {
-        return Err("this connection is read-only — the lock scenarios need to create \
-                    a playground table and update a row. Use the Sleep scenario, or \
+    // Write scenarios (lock chain, Galera storms) create a table and update
+    // rows — a read-only connection refuses them.
+    if plan.scenario.writes() && state.is_read_only(&session_id).await {
+        return Err("this connection is read-only — the lock and Galera scenarios need to create \
+                    a playground table and write rows. Use the Sleep scenario, or \
                     a writable connection.".into());
+    }
+
+    // Galera scenarios: MySQL-family only, and the session must be an actual
+    // Galera node. Detection reads the wsrep_on VARIABLE on the session's own
+    // pool — MariaDB has no STATUS row for it (verified live on 11.8). The UI
+    // greys the cards on the same predicate; this is the defense-in-depth copy.
+    if plan.scenario.is_galera() {
+        if config.engine != Engine::Mysql {
+            return Err("the Galera scenarios need a MySQL-family (wsrep) session".into());
+        }
+        let on = match session_pool(&state, session_id).await {
+            Some(PoolRef::My(p)) => crate::db::mysql::execute(&p,
+                    "SHOW GLOBAL VARIABLES LIKE 'wsrep_on'").await.ok()
+                .and_then(|r| r.rows.first().and_then(|row| row.get(1)).cloned())
+                .and_then(|v| v.as_str().map(|s| s.eq_ignore_ascii_case("on")))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !on {
+            return Err("this session is not a Galera node — SHOW GLOBAL VARIABLES LIKE \
+                        'wsrep_on' answered OFF or empty. The Galera scenarios only make \
+                        sense on a MariaDB Galera / Percona XtraDB Cluster member.".into());
+        }
     }
 
     let workers = build_workers(&plan, config.engine);
@@ -494,8 +638,13 @@ pub async fn playground_spawn(
         Engine::Mysql => {
             let pool = crate::db::mysql::open_pool(&config, password, host_override, pool_size)
                 .await.map_err(|e| format!("playground pool: {:#}", e))?;
-            let r = run_my(pool.clone(), plan.clone(), workers, on_event.clone(),
-                           cancel_rx, spawned_ids.clone()).await;
+            let r = if plan.scenario.is_galera() {
+                run_my_galera(pool.clone(), plan.clone(), workers, on_event.clone(),
+                              cancel_rx, spawned_ids.clone()).await
+            } else {
+                run_my(pool.clone(), plan.clone(), workers, on_event.clone(),
+                       cancel_rx, spawned_ids.clone()).await
+            };
             pool.close().await;
             r
         }
@@ -630,6 +779,163 @@ run_engine!(run_my, sqlx::MySqlPool, crate::db::mysql::execute, Engine::Mysql,
 run_engine!(run_pg, sqlx::PgPool, crate::db::postgres::execute, Engine::Postgres,
             "SELECT pg_backend_pid()::bigint", "SELECT pg_terminate_backend({})");
 
+/// The Galera write-storm runner (flow-control storm + hot-row certification
+/// conflict). Not built from `run_engine!`, because these workers LOOP their
+/// statement until the duration elapses (the other scenarios run a fixed
+/// statement list), the certification-conflict signature (error 1213) is
+/// retried rather than fatal — retrying it is the lesson the conflict
+/// scenario teaches — and the table is DROPPED at the end of every run: flow
+/// rows replicate to every peer, so leaving the table leaves the mess.
+async fn run_my_galera(
+    pool: sqlx::MySqlPool,
+    plan: Plan,
+    workers: Vec<Worker>,
+    on_event: Channel<MessEvent>,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    spawned_ids: Arc<Mutex<Vec<u64>>>,
+) -> Result<bool, crate::apperror::AppError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Setup on the control connection: the database, the table, and the hot
+    // rows the conflict scenario contends on.
+    {
+        let mut c = pool.acquire().await?;
+        for stmt in galera_setup(plan.database.as_deref(), galera_hot_rows(plan.threads)) {
+            crate::db::mysql::execute(&mut *c, &stmt).await
+                .map_err(|e| format!("playground setup failed on `{stmt}`: {e}"))?;
+        }
+    }
+    let _ = on_event.send(MessEvent::Log { level: "ok".into(),
+        msg: format!("playground table {} ready ({} s storm, {} rows/tx{})",
+            galera_table(plan.database.as_deref()), plan.duration, plan.rows_per_tx,
+            if plan.scenario == Scenario::GaleraConflict {
+                format!(", {} hot row(s)", galera_hot_rows(plan.threads))
+            } else { String::new() }) });
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    // (transactions committed, rows written, certification conflicts retried)
+    let totals: Arc<Mutex<(u64, u64, u64)>> = Arc::new(Mutex::new((0, 0, 0)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(plan.duration);
+
+    let mut set = tokio::task::JoinSet::new();
+    let launch = async {
+        for w in workers {
+            let pool = pool.clone();
+            let ev = on_event.clone();
+            let ids = spawned_ids.clone();
+            let cancelled = cancelled.clone();
+            let totals = totals.clone();
+            let rows_per_tx = if plan.scenario == Scenario::GaleraFlow { plan.rows_per_tx as u64 } else { 1 };
+            let retry_conflicts = plan.scenario == Scenario::GaleraConflict;
+            let sleep_ms = plan.sleep_ms;
+            set.spawn(async move {
+                let t0 = std::time::Instant::now();
+                let mut conn = match pool.acquire().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = ev.send(MessEvent::Ended { slot: w.slot, thread_id: 0,
+                            ms: t0.elapsed().as_millis() as u64, ok: false,
+                            error: Some(format!("no connection: {e}")) });
+                        return;
+                    }
+                };
+                let tid: u64 = sqlx::query_scalar("SELECT CAST(CONNECTION_ID() AS SIGNED)")
+                    .fetch_one(&mut *conn).await
+                    .map(|v: i64| v as u64)
+                    .unwrap_or(0);
+                ids.lock().await.push(tid);
+                let _ = ev.send(MessEvent::Spawned { slot: w.slot, thread_id: tid,
+                    role: w.role.clone(), sql: w.statements[0].clone() });
+                let mut err: Option<String> = None;
+                let mut txs = 0u64;
+                let mut conflicts = 0u64;
+                while std::time::Instant::now() < deadline && !cancelled.load(Ordering::Relaxed) {
+                    match crate::db::mysql::execute(&mut *conn, &w.statements[0]).await {
+                        Ok(_) => txs += 1,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if retry_conflicts && is_cert_conflict(&msg) {
+                                // THE lesson: a certification conflict (1213)
+                                // is safe to retry — the row's new value is
+                                // already certified cluster-wide.
+                                conflicts += 1;
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                continue;
+                            }
+                            // A KILL on cancel reports as an error; that is the
+                            // expected end, not a failure.
+                            if cancelled.load(Ordering::Relaxed) { break; }
+                            err = Some(msg);
+                            break;
+                        }
+                    }
+                    if sleep_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                    }
+                }
+                totals.lock().await.0 += txs;
+                totals.lock().await.1 += txs * rows_per_tx;
+                totals.lock().await.2 += conflicts;
+                let _ = ev.send(MessEvent::Ended { slot: w.slot, thread_id: tid,
+                    ms: t0.elapsed().as_millis() as u64, ok: err.is_none(), error: err.clone() });
+                if conflicts > 0 {
+                    let _ = ev.send(MessEvent::Log { level: "info".into(),
+                        msg: format!("slot {} retried {} certification conflict(s) (error 1213)", w.slot, conflicts) });
+                }
+                if let Some(e) = err.filter(|_| !cancelled.load(Ordering::Relaxed)) {
+                    let _ = ev.send(MessEvent::Log { level: "err".into(),
+                        msg: format!("slot {} ended on a non-conflict error: {}", w.slot, e) });
+                }
+            });
+            if plan.stagger_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(plan.stagger_ms)).await;
+            }
+        }
+        while set.join_next().await.is_some() {}
+    };
+
+    let was_cancelled = tokio::select! {
+        _ = launch => false,
+        _ = &mut cancel_rx => {
+            cancelled.store(true, Ordering::Relaxed);
+            let ids = spawned_ids.lock().await.clone();
+            if let Ok(mut k) = pool.acquire().await {
+                for id in ids.iter().filter(|i| **i != 0) {
+                    let _ = crate::db::mysql::execute(&mut *k, &format!("KILL {id}")).await;
+                }
+            }
+            // Workers notice the flag (or the kill) between transactions —
+            // wait for them so the cleanup below does not contend.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while set.join_next().await.is_some() {}
+            }).await;
+            let _ = on_event.send(MessEvent::Log { level: "warn".into(),
+                msg: format!("stopped — killed {} playground thread(s)", ids.len()) });
+            true
+        }
+    };
+
+    // Cleanup on every path: the storm's rows replicate to every peer.
+    match pool.acquire().await {
+        Ok(mut c) => {
+            if let Err(e) = crate::db::mysql::execute(&mut *c, &galera_cleanup(plan.database.as_deref())).await {
+                let _ = on_event.send(MessEvent::Log { level: "err".into(),
+                    msg: format!("cleanup failed — drop {} by hand: {e}", galera_table(plan.database.as_deref())) });
+            }
+        }
+        Err(e) => {
+            let _ = on_event.send(MessEvent::Log { level: "err".into(),
+                msg: format!("cleanup could not get a connection — drop {} by hand: {e}",
+                    galera_table(plan.database.as_deref())) });
+        }
+    }
+    let (txs, rows, conflicts) = *totals.lock().await;
+    let _ = on_event.send(MessEvent::Log { level: "ok".into(),
+        msg: format!("totals: {txs} transaction(s), {rows} row(s) written, \
+                      {conflicts} certification conflict(s) retried — playground table dropped") });
+    Ok(was_cancelled)
+}
+
 /// The SQL Server runner.
 ///
 /// Not built from `run_engine!`, because SQL Server has no pool to draw from:
@@ -751,6 +1057,7 @@ mod mssql_playground_live_tests {
             scenario: Scenario::Lock, threads: 3, duration: 5.0, hold: 5.0,
             repeats: 1, jitter_pct: 0, stagger_ms: 0,
             tag: "t".into(), database: Some("dbo".into()),
+            rows_per_tx: 1, sleep_ms: 0,
         };
         let all = build_workers(&plan, Engine::SqlServer);
         let text = all.iter().flat_map(|w| w.statements.clone()).collect::<Vec<_>>().join("\n");
@@ -786,6 +1093,7 @@ mod mssql_playground_live_tests {
             scenario: Scenario::Lock, threads: 3, duration: 30.0, hold: 30.0,
             repeats: 1, jitter_pct: 0, stagger_ms: 50,
             tag: "livetest".into(), database: Some("dbo".into()),
+            rows_per_tx: 1, sleep_ms: 0,
         };
         let workers = build_workers(&plan, Engine::SqlServer);
         assert_eq!(workers.len(), 3);
@@ -859,6 +1167,7 @@ mod tests {
             scenario: scenario.into(), threads, duration_secs: 30.0, stagger_ms: 100,
             repeats: 1, jitter_pct: 0, database: Some("playground".into()),
             hold_secs: 60.0, tag: Some("demo".into()),
+            rows_per_tx: 1, sleep_ms: 0,
         }
     }
 
@@ -1024,6 +1333,7 @@ mod tests {
             scenario: "sleep".into(), threads: 3, duration_secs: 60.0, stagger_ms: 0,
             repeats: 1, jitter_pct: 0, database: None, hold_secs: 1.0,
             tag: Some("selftest-sleep".into()),
+            rows_per_tx: 1, sleep_ms: 0,
         });
         let workers = build_workers(&plan, Engine::Mysql);
         let pool = crate::db::mysql::open_pool(&config, password.clone(), None, 6).await.unwrap();
@@ -1082,6 +1392,7 @@ mod tests {
             scenario: "lock".into(), threads: 3, duration_secs: 1.0, stagger_ms: 200,
             repeats: 1, jitter_pct: 0, database: Some("txui_playground".into()),
             hold_secs: 20.0, tag: Some("selftest-lock".into()),
+            rows_per_tx: 1, sleep_ms: 0,
         });
         let workers = build_workers(&plan, Engine::Mysql);
         let pool = crate::db::mysql::open_pool(&config, password.clone(), None, 6).await.unwrap();
@@ -1140,5 +1451,197 @@ mod tests {
         assert!(with[0].starts_with("CREATE SCHEMA IF NOT EXISTS \"pg\""));
         assert_eq!(with.len(), 3);
         assert_eq!(lock_setup(Engine::Postgres, None).len(), 2);
+    }
+
+    // ── Galera scenarios ────────────────────────────────────────────────────
+
+    #[test]
+    fn galera_scenario_names_and_clamps() {
+        let p = plan_from(&spec("galera-flow", 4));
+        assert_eq!(p.scenario, Scenario::GaleraFlow);
+        assert!(p.scenario.writes() && p.scenario.is_galera());
+        let p = plan_from(&spec("galera-conflict", 1));
+        assert_eq!(p.scenario, Scenario::GaleraConflict);
+        assert_eq!(p.threads, 2, "a conflict needs two contending writers");
+
+        let mut s = spec("galera-flow", 4);
+        s.rows_per_tx = 50_000;
+        s.sleep_ms = 999_999;
+        let p = plan_from(&s);
+        assert_eq!(p.rows_per_tx, 1000);
+        assert_eq!(p.sleep_ms, 10_000);
+        // rows_per_tx defaults to 1 when the field is absent (older frontend)
+        let json = serde_json::json!({
+            "scenario": "galera-flow", "threads": 2, "durationSecs": 10.0,
+            "staggerMs": 0, "repeats": 1, "jitterPct": 0, "holdSecs": 1.0,
+        });
+        let spec: MessSpec = serde_json::from_value(json).expect("old payload still parses");
+        assert_eq!(spec.rows_per_tx, 1);
+        assert_eq!(spec.sleep_ms, 0);
+    }
+
+    #[test]
+    fn galera_flow_workers_carry_one_multirow_insert() {
+        let mut s = spec("galera-flow", 3);
+        s.rows_per_tx = 5;
+        let p = plan_from(&s);
+        let w = build_workers(&p, Engine::Mysql);
+        assert_eq!(w.len(), 3);
+        for x in &w {
+            assert_eq!(x.role, "writer");
+            assert_eq!(x.statements.len(), 1, "the runner loops one statement shape");
+            let sql = &x.statements[0];
+            assert!(sql.contains("txui-playground demo flow"), "{sql}");
+            assert!(sql.contains("`playground`.`txui_playground_galera`"), "{sql}");
+            assert_eq!(sql.matches(&format!("({}, 0, 'flow')", x.slot)).count(), 5, "rows_per_tx=5: {sql}");
+        }
+    }
+
+    #[test]
+    fn galera_conflict_workers_share_hot_rows() {
+        let p = plan_from(&spec("galera-conflict", 8));
+        let w = build_workers(&p, Engine::Mysql);
+        assert_eq!(w.len(), 8);
+        for x in &w {
+            assert_eq!(x.role, "contender");
+            let sql = &x.statements[0];
+            assert!(sql.contains("txui-playground demo hotrow"), "{sql}");
+            assert!(sql.contains("UPDATE"), "{sql}");
+        }
+        // 8 threads → 2 hot rows; the UPDATEs target only ids in that range.
+        let rows: std::collections::HashSet<String> = w.iter().map(|x| {
+            x.statements[0].split("WHERE id = ").nth(1).unwrap().to_string()
+        }).collect();
+        assert_eq!(rows.len(), 2, "8 threads contend on 2 hot rows: {rows:?}");
+        assert_eq!(galera_hot_rows(4), 1);
+        assert_eq!(galera_hot_rows(64), 4);
+    }
+
+    #[test]
+    fn galera_setup_and_cleanup_quote_and_seed() {
+        let setup = galera_setup(Some("pg`x"), 3);
+        assert!(setup[0].starts_with("CREATE DATABASE IF NOT EXISTS `pg``x`"));
+        assert!(setup[1].contains("CREATE TABLE IF NOT EXISTS `pg``x`.`txui_playground_galera`"));
+        assert!(setup[2].contains("(1, 0, 0, 'hot')") && setup[2].contains("(3, 0, 0, 'hot')"));
+        assert!(galera_cleanup(Some("pg")).contains("DROP TABLE IF EXISTS `pg`.`txui_playground_galera`"));
+    }
+
+    #[test]
+    fn cert_conflict_signature_matching() {
+        assert!(is_cert_conflict("Deadlock found when trying to get lock; try restarting transaction"));
+        assert!(is_cert_conflict("ERROR 1213 (40001): Deadlock found"));
+        assert!(is_cert_conflict("WSREP: certification failure"));
+        assert!(!is_cert_conflict("ERROR 1146 (42S02): Table doesn't exist"));
+        assert!(!is_cert_conflict("Lost connection to MySQL server"));
+    }
+}
+
+/// The Galera playground scenarios against the real 3-node MariaDB 11.8
+/// cluster (galera1 on 127.0.0.1:3341, root/root — dbctl manages the nodes).
+/// The scenario is only real if the rows land AND the cluster status counters
+/// move; both are asserted from the SERVER's side, not from the events.
+///
+///   cargo test --lib galera_playground -- --ignored --nocapture
+///
+/// Skipped when nothing is listening on 3341.
+#[cfg(test)]
+mod galera_playground_live_tests {
+    use super::*;
+    use crate::db::types::{ConnectionConfig, Engine, SslMode};
+
+    fn config() -> ConnectionConfig {
+        let mut c = ConnectionConfig::new(Engine::Mysql, "galera1");
+        c.host = Some("127.0.0.1".into());
+        c.port = Some(3341);
+        c.user = Some("root".into());
+        c.database = Some("galera_smoke".into());
+        c.ssl_mode = SslMode::Disable;
+        c
+    }
+
+    async fn pool(size: u32) -> Option<sqlx::MySqlPool> {
+        crate::db::mysql::open_pool(&config(), Some("root".into()), None, size).await.ok()
+    }
+
+    async fn status_u64(pool: &sqlx::MySqlPool, key: &str) -> u64 {
+        sqlx::query_scalar::<_, String>(
+            "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS \
+             WHERE VARIABLE_NAME = ?")
+            .bind(key)
+            .fetch_one(pool).await.ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn galera_flow_storm_writes_real_rows_and_cleans_up() {
+        let Some(probe) = pool(2).await else { println!("no galera1 on 3341 — skipping"); return };
+        let plan = plan_from(&MessSpec {
+            scenario: "galera-flow".into(), threads: 4, duration_secs: 10.0, stagger_ms: 0,
+            repeats: 1, jitter_pct: 0, database: Some("galera_smoke".into()), hold_secs: 1.0,
+            tag: Some("livetest-flow".into()),
+            rows_per_tx: 5, sleep_ms: 0,
+        });
+        let workers = build_workers(&plan, Engine::Mysql);
+        let run_pool = pool((workers.len() + 2) as u32).await.unwrap();
+
+        let committed0 = status_u64(&probe, "WSREP_REPLICATED").await;
+        let chan = Channel::new(|_| Ok(()));
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let cancelled = run_my_galera(run_pool.clone(), plan, workers, chan, cancel_rx, ids.clone())
+            .await.expect("run");
+        assert!(!cancelled, "no cancel was sent");
+        assert_eq!(ids.lock().await.len(), 4, "every worker got a server thread");
+
+        // The writes really happened: wsrep replicated write-sets moved by
+        // roughly the tx count, and the table is GONE afterwards.
+        let committed1 = status_u64(&probe, "WSREP_REPLICATED").await;
+        assert!(committed1 > committed0, "no write-sets replicated: {committed0} → {committed1}");
+        println!("  flow storm: wsrep_replicated {committed0} → {committed1} (+{} write-sets)",
+                 committed1 - committed0);
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = 'galera_smoke' AND TABLE_NAME = 'txui_playground_galera'")
+            .fetch_one(&probe).await.unwrap();
+        assert_eq!(left, 0, "the flow table must be dropped at the end of the run");
+        run_pool.close().await;
+        probe.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn galera_conflict_storm_bumps_cert_failures() {
+        let Some(probe) = pool(2).await else { println!("no galera1 on 3341 — skipping"); return };
+        let plan = plan_from(&MessSpec {
+            scenario: "galera-conflict".into(), threads: 8, duration_secs: 10.0, stagger_ms: 0,
+            repeats: 1, jitter_pct: 0, database: Some("galera_smoke".into()), hold_secs: 1.0,
+            tag: Some("livetest-conflict".into()),
+            rows_per_tx: 1, sleep_ms: 0,
+        });
+        let workers = build_workers(&plan, Engine::Mysql);
+        let run_pool = pool((workers.len() + 2) as u32).await.unwrap();
+
+        let cert0 = status_u64(&probe, "WSREP_LOCAL_CERT_FAILURES").await
+            + status_u64(&probe, "WSREP_LOCAL_BF_ABORTS").await;
+        let chan = Channel::new(|_| Ok(()));
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let ids = Arc::new(Mutex::new(Vec::<u64>::new()));
+        run_my_galera(run_pool.clone(), plan, workers, chan, cancel_rx, ids.clone())
+            .await.expect("run");
+
+        let cert1 = status_u64(&probe, "WSREP_LOCAL_CERT_FAILURES").await
+            + status_u64(&probe, "WSREP_LOCAL_BF_ABORTS").await;
+        println!("  conflict storm: cert failures + bf aborts {cert0} → {cert1}");
+        assert!(cert1 > cert0,
+            "8 writers on 2 hot rows must produce certification conflicts ({cert0} → {cert1})");
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = 'galera_smoke' AND TABLE_NAME = 'txui_playground_galera'")
+            .fetch_one(&probe).await.unwrap();
+        assert_eq!(left, 0, "the conflict table must be dropped at the end of the run");
+        run_pool.close().await;
+        probe.close().await;
     }
 }

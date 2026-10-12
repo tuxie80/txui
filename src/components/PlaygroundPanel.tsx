@@ -24,7 +24,8 @@
 import { errorDisplay } from '../utils/appError';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
-import type { Session } from '../types';
+import type { QueryResult, Session } from '../types';
+import { detectGalera } from '../utils/galeraStatus';
 import { addLog } from '../store/logStore';
 import {
   addRunLog, addWorker, clearRun, finishRun, startRun, stopRun, updateWorker, usePlaygroundRun,
@@ -42,7 +43,7 @@ interface Props {
   onClose: () => void;
 }
 
-type ScenarioId = 'sleep' | 'lock' | 'mixed';
+type ScenarioId = 'sleep' | 'lock' | 'mixed' | 'galera-flow' | 'galera-conflict';
 
 interface Scenario {
   id: ScenarioId;
@@ -51,6 +52,8 @@ interface Scenario {
   what: string;
   then: string;
   writes: boolean;
+  /** Galera-only scenario: needs a MySQL-family session with wsrep_on ON. */
+  galera?: boolean;
 }
 
 /**
@@ -58,7 +61,12 @@ interface Scenario {
  * commands/playground.rs. `threads` is the EXACT number of server threads the
  * run will hold: no scenario adds any behind your back.
  */
-const MIN_THREADS: Record<ScenarioId, number> = { sleep: 1, lock: 2, mixed: 4 };
+const MIN_THREADS: Record<ScenarioId, number> = {
+  sleep: 1, lock: 2, mixed: 4, 'galera-flow': 1, 'galera-conflict': 2,
+};
+
+/** Mirrors galera_hot_rows() in commands/playground.rs. */
+const hotRows = (threads: number) => Math.max(1, Math.min(4, Math.floor(threads / 4)));
 
 const SCENARIOS: Scenario[] = [
   {
@@ -79,6 +87,20 @@ const SCENARIOS: Scenario[] = [
     then: 'Type `killall`: the blocking chain outranks the family, and the churn must be left alone.',
     writes: true,
   },
+  {
+    id: 'galera-flow', icon: '🌊', name: 'Flow-control storm',
+    galera: true,
+    what: 'N writers stream small INSERT transactions for the duration — sustained write-set pressure every peer must apply.',
+    then: 'Watch the ❖ Galera tab / ❖ Galera cluster panel: recv queues on the peers react, and flow control throttles this node if one falls behind.',
+    writes: true,
+  },
+  {
+    id: 'galera-conflict', icon: '💥', name: 'Hot-row certification conflict',
+    galera: true,
+    what: 'K writers UPDATE the same hot row(s) at once — losers die with error 1213 (certification conflict) and are retried, which is exactly the app-side fix.',
+    then: 'Watch wsrep_local_cert_failures climb on this node (❖ Galera tab); the run log reports how many conflicts were retried. True cross-node conflicts need writers on two nodes — observe them in the cluster panel.',
+    writes: true,
+  },
 ];
 
 export function PlaygroundPanel({ session, onClose }: Props) {
@@ -95,6 +117,43 @@ export function PlaygroundPanel({ session, onClose }: Props) {
   const [hold, setHold] = useState(120);
   const [database, setDatabase] = useState('txui_playground');
   const [tag, setTag] = useState('mess');
+  const [rowsPerTx, setRowsPerTx] = useState(5);
+  const [sleepMs, setSleepMs] = useState(0);
+  const [galeraProbe, setGaleraProbe] = useState<'?' | 'yes' | 'no'>(
+    session.engine === 'mysql' ? '?' : 'no');
+
+  // One wsrep detection probe per session — the same probe the Galera tab
+  // uses (the VARIABLE, not STATUS: MariaDB has no wsrep_on status row).
+  // Failure to answer reads as "not Galera".
+  useEffect(() => {
+    if (session.engine !== 'mysql') return;
+    let dead = false;
+    (async () => {
+      try {
+        const r = await invoke<QueryResult>('monitor_query', {
+          sessionId: session.sessionId, sql: "SHOW GLOBAL VARIABLES LIKE 'wsrep_on'",
+        });
+        const rows: [string, string][] = r.rows.map(row => [String(row[0] ?? ''), row[1] == null ? '' : String(row[1])]);
+        if (!dead) setGaleraProbe(detectGalera(rows) ? 'yes' : 'no');
+      } catch {
+        if (!dead) setGaleraProbe('no');
+      }
+    })();
+    return () => { dead = true; };
+  }, [session.sessionId, session.engine]);
+
+  /** Why a Galera scenario is unavailable here; null = available. */
+  const galeraBlocked = useCallback((s: Scenario): string | null => {
+    if (!s.galera) return null;
+    if (session.engine !== 'mysql') {
+      return 'Galera scenarios need a MySQL-family session (MariaDB Galera / Percona XtraDB Cluster)';
+    }
+    if (galeraProbe === '?') return "probing wsrep_on…";
+    if (galeraProbe === 'no') {
+      return "not a Galera node — SHOW GLOBAL VARIABLES LIKE 'wsrep_on' answered OFF or empty";
+    }
+    return null;
+  }, [session.engine, galeraProbe]);
 
   const sc = SCENARIOS.find(s => s.id === scenario)!;
   const minThreads = MIN_THREADS[scenario];
@@ -123,7 +182,7 @@ export function PlaygroundPanel({ session, onClose }: Props) {
       kill: () => stopRun(session.sessionId),
     });
   }, [key, liveRun, liveThreadKey, session.sessionId]);
-  const blocked = sc.writes && session.readOnly;
+  const blocked = (sc.writes && session.readOnly) || galeraBlocked(sc) !== null;
   const running = run?.running ?? false;
   const workers = run?.workers ?? [];
   const log = run?.log ?? [];
@@ -181,11 +240,27 @@ export function PlaygroundPanel({ session, onClose }: Props) {
         + `${isMs ? ` '${hhmmss(duration / 8)}'` : `(${(duration / 8).toFixed(2)})`}`
         + ' repeated — benign, must survive killall');
     }
-    if (scenario !== 'sleep') {
+    if (scenario === 'galera-flow') {
+      const gt = `\`${database}\`.\`txui_playground_galera\``;
+      lines.push(`${threadCount}× writers, looping for ${duration}s:`);
+      lines.push(`INSERT /* txui-playground ${tag} flow slot=N */ INTO ${gt} (worker, n, note) VALUES … ${rowsPerTx} row(s) per transaction`);
+      if (sleepMs > 0) lines.push(`each worker pauses ${sleepMs}ms between its transactions`);
+      lines.push(`table ${gt} is created if missing and DROPPED when the run ends — the rows replicate to every peer`);
+    }
+    if (scenario === 'galera-conflict') {
+      const gt = `\`${database}\`.\`txui_playground_galera\``;
+      const rows = hotRows(threadCount);
+      lines.push(`${threadCount}× writers, looping for ${duration}s, contending on ${rows} hot row(s):`);
+      lines.push(`UPDATE /* txui-playground ${tag} hotrow slot=N */ ${gt} SET n = n + 1 WHERE id = <1..${rows}>`);
+      lines.push('certification conflicts (error 1213) are retried by the worker and counted in the log');
+      if (sleepMs > 0) lines.push(`each worker pauses ${sleepMs}ms between its transactions`);
+      lines.push(`table ${gt} is created if missing (hot rows seeded) and DROPPED when the run ends`);
+    }
+    if (scenario !== 'sleep' && !sc.galera) {
       lines.push(`table ${t} is created if missing (2 columns, one row id=1) — the only thing written`);
     }
     return lines;
-  }, [scenario, threadCount, duration, repeats, jitter, hold, database, tag, isPg, isMs]);
+  }, [scenario, threadCount, duration, repeats, jitter, hold, database, tag, isPg, isMs, rowsPerTx, sleepMs, sc.galera]);
 
   const spawn = useCallback(async () => {
     if (running || blocked) return;
@@ -193,16 +268,24 @@ export function PlaygroundPanel({ session, onClose }: Props) {
     const sessionId = session.sessionId;
     // icon-slot-skip: one line of prose in the run banner, not a column of
     // labels — nothing lines up against it, so the icon can sit in the text.
-    const summary = `${sc.icon} ${sc.name} · ${threadCount} worker(s) · ${duration}s · ${stagger}ms apart`
-      + `${repeats > 1 ? ` · ×${repeats}` : ''}${jitter ? ` · ±${jitter}%` : ''}`
-      + `${sc.writes ? ` · ${database} · hold ${hold}s` : ''} · tag=${tag}`;
+    // icon-slot-skip: one line of prose in the run banner, not a column of
+    // labels — nothing lines up against it, so the icon can sit in the text.
+    const summary = `${sc.icon} ${sc.name} · ${threadCount} worker(s) · ${duration}s · ` + (sc.galera
+      ? `${database}${scenario === 'galera-flow' ? ` · ${rowsPerTx} rows/tx` : ''}`
+        + `${sleepMs ? ` · ${sleepMs}ms between txs` : ''} · tag=${tag}`
+      : `${stagger}ms apart${repeats > 1 ? ` · ×${repeats}` : ''}${jitter ? ` · ±${jitter}%` : ''}`
+        + `${sc.writes ? ` · ${database} · hold ${hold}s` : ''} · tag=${tag}`);
     startRun(sessionId, { runKey, summary, scenario });
-    addRunLog(sessionId, 'info', `▶ ${sc.name}: ${threadCount} worker(s), ${duration}s each, ${stagger}ms apart`);
+    addRunLog(sessionId, 'info', sc.galera
+      ? `▶ ${sc.name}: ${threadCount} writer(s) for ${duration}s on ${database}`
+      : `▶ ${sc.name}: ${threadCount} worker(s), ${duration}s each, ${stagger}ms apart`);
     addLog(sessionId, {
       level: 'warn', action: 'PLAYGROUND',
       detail: `spawn mess · scenario=${scenario} threads=${threadCount} duration=${duration}s `
-        + `stagger=${stagger}ms repeats=${repeats} jitter=${jitter}% `
-        + `${sc.writes ? `db=${database} hold=${hold}s ` : ''}tag=${tag}`,
+        + (sc.galera
+          ? `db=${database} rows_per_tx=${rowsPerTx} sleep_ms=${sleepMs} tag=${tag}`
+          : `stagger=${stagger}ms repeats=${repeats} jitter=${jitter}% `
+            + `${sc.writes ? `db=${database} hold=${hold}s ` : ''}tag=${tag}`),
     });
 
     // The channel outlives this component on purpose: it writes into the store,
@@ -243,6 +326,7 @@ export function PlaygroundPanel({ session, onClose }: Props) {
           scenario, threads: threadCount, durationSecs: duration, staggerMs: stagger,
           repeats, jitterPct: jitter, holdSecs: hold,
           database: sc.writes ? database : null, tag,
+          rowsPerTx, sleepMs,
         },
       });
     } catch (e) {
@@ -251,7 +335,7 @@ export function PlaygroundPanel({ session, onClose }: Props) {
       addLog(sessionId, { level: 'err', action: 'PLAYGROUND', detail: `spawn failed: ${errorDisplay(e)}` });
     }
   }, [running, blocked, sc, scenario, threadCount, duration, stagger, repeats, jitter, hold,
-      database, tag, session.sessionId, session.connectionId]);
+      database, tag, rowsPerTx, sleepMs, session.sessionId, session.connectionId]);
 
   const live = workers.filter(w => w.status === 'running').length;
 
@@ -275,19 +359,27 @@ export function PlaygroundPanel({ session, onClose }: Props) {
       <div className="pg-body">
         <div className="pg-config">
           <div className="pg-scenarios">
-            {SCENARIOS.map(s => (
-              <button
-                key={s.id}
-                className={`pg-card ${scenario === s.id ? 'pg-card-on' : ''}`}
-                onClick={() => setScenario(s.id)}
-                disabled={running}
-              >
-                <span className="pg-card-title"><span className="icon-slot">{s.icon}</span>{s.name}</span>
-                <span className="pg-card-what">{s.what}</span>
-                <span className="pg-card-then">{s.then}</span>
-                {s.writes && <span className="pg-card-writes">needs write access (creates one table, updates one row)</span>}
-              </button>
-            ))}
+            {SCENARIOS.map(s => {
+              const unavailable = galeraBlocked(s);
+              const card = (
+                <button
+                  key={s.id}
+                  className={`pg-card ${scenario === s.id ? 'pg-card-on' : ''} ${unavailable ? 'unavail' : ''}`}
+                  onClick={() => { if (!unavailable) setScenario(s.id); }}
+                  disabled={running}
+                >
+                  <span className="pg-card-title"><span className="icon-slot">{s.icon}</span>{s.name}</span>
+                  <span className="pg-card-what">{s.what}</span>
+                  <span className="pg-card-then">{s.then}</span>
+                  {s.writes && <span className="pg-card-writes">needs write access (creates one table{s.galera ? ', streams rows, drops it at the end' : ', updates one row'})</span>}
+                </button>
+              );
+              // Not hidden — greyed with the reason, per the unavailable-feature
+              // doctrine (a disabled element fires no hover, so wrap instead).
+              return unavailable && !running
+                ? <span key={s.id} className="unavail" data-tip={unavailable} style={{ display: 'contents' }}>{card}</span>
+                : card;
+            })}
           </div>
 
           <div className="pg-params">
@@ -302,36 +394,64 @@ export function PlaygroundPanel({ session, onClose }: Props) {
             <label>duration
               <input type="number" min={0.1} max={600} step={1} value={duration} disabled={running}
                 onChange={e => setDuration(Math.max(0.1, Math.min(600, Number(e.target.value) || 1)))} />
-              <i>seconds per statement — long enough to look at</i>
+              <i>{sc.galera ? 'seconds the storm lasts' : 'seconds per statement — long enough to look at'}</i>
             </label>
-            <label>stagger
-              <input type="number" min={0} max={60000} step={100} value={stagger} disabled={running}
-                onChange={e => setStagger(Math.max(0, Math.min(60000, Number(e.target.value) || 0)))} />
-              <i>ms between launches — 0 = all at once, higher = a spread of ages</i>
-            </label>
-            <label>repeats
-              <input type="number" min={1} max={200} value={repeats} disabled={running}
-                onChange={e => setRepeats(Math.max(1, Math.min(200, Number(e.target.value) || 1)))} />
-              <i>statements per worker — &gt;1 makes threads come and go (churn)</i>
-            </label>
-            <label>jitter %
-              <input type="number" min={0} max={100} value={jitter} disabled={running}
-                onChange={e => setJitter(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} />
-              <i>± variation of duration, so ages differ like real traffic</i>
-            </label>
-            {sc.writes && (
+            {sc.galera && (
               <>
-                <label>hold
-                  <input type="number" min={0.1} max={600} value={hold} disabled={running}
-                    onChange={e => setHold(Math.max(0.1, Math.min(600, Number(e.target.value) || 1)))} />
-                  <i>seconds the blocker holds its row lock</i>
-                </label>
-                <label>{isPg || isMs ? 'schema' : 'database'}
-                  <input type="text" value={database} disabled={running}
-                    onChange={e => setDatabase(e.target.value)} />
-                  <i>created if missing; holds the single contended row</i>
+                {scenario === 'galera-flow' && (
+                  <label>rows per tx
+                    <input type="number" min={1} max={1000} value={rowsPerTx} disabled={running}
+                      onChange={e => setRowsPerTx(Math.max(1, Math.min(1000, Number(e.target.value) || 1)))} />
+                    <i>rows in each INSERT — one write-set to certify + replicate per transaction</i>
+                  </label>
+                )}
+                {scenario === 'galera-conflict' && (
+                  <label>hot rows
+                    <input type="number" value={hotRows(threadCount)} disabled readOnly />
+                    <i>derived: max(1, min(4, threads/4)) — contention is the point</i>
+                  </label>
+                )}
+                <label>pause between txs
+                  <input type="number" min={0} max={10000} step={10} value={sleepMs} disabled={running}
+                    onChange={e => setSleepMs(Math.max(0, Math.min(10000, Number(e.target.value) || 0)))} />
+                  <i>ms each worker waits between transactions — 0 = flat out</i>
                 </label>
               </>
+            )}
+            {!sc.galera && (
+              <>
+                <label>stagger
+                  <input type="number" min={0} max={60000} step={100} value={stagger} disabled={running}
+                    onChange={e => setStagger(Math.max(0, Math.min(60000, Number(e.target.value) || 0)))} />
+                  <i>ms between launches — 0 = all at once, higher = a spread of ages</i>
+                </label>
+                <label>repeats
+                  <input type="number" min={1} max={200} value={repeats} disabled={running}
+                    onChange={e => setRepeats(Math.max(1, Math.min(200, Number(e.target.value) || 1)))} />
+                  <i>statements per worker — &gt;1 makes threads come and go (churn)</i>
+                </label>
+                <label>jitter %
+                  <input type="number" min={0} max={100} value={jitter} disabled={running}
+                    onChange={e => setJitter(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} />
+                  <i>± variation of duration, so ages differ like real traffic</i>
+                </label>
+              </>
+            )}
+            {sc.writes && !sc.galera && (
+              <label>hold
+                <input type="number" min={0.1} max={600} value={hold} disabled={running}
+                  onChange={e => setHold(Math.max(0.1, Math.min(600, Number(e.target.value) || 1)))} />
+                <i>seconds the blocker holds its row lock</i>
+              </label>
+            )}
+            {sc.writes && (
+              <label>{isPg || isMs ? 'schema' : 'database'}
+                <input type="text" value={database} disabled={running}
+                  onChange={e => setDatabase(e.target.value)} />
+                <i>{sc.galera
+                  ? 'created if missing; the storm table inside it is dropped when the run ends'
+                  : 'created if missing; holds the single contended row'}</i>
+              </label>
             )}
             <label>tag
               <input type="text" value={tag} disabled={running} maxLength={32}
@@ -345,11 +465,16 @@ export function PlaygroundPanel({ session, onClose }: Props) {
             {preview.map((l, i) => <code key={i} className="pg-preview-line">{l}</code>)}
           </div>
 
-          {blocked && (
+          {blocked && session.readOnly && sc.writes && (
             <div className="pg-warn">
-              This connection is <b>read-only</b> — the lock scenarios need to create the playground
-              table and update its row. Use <b>💤 Sleep mess</b> (pure <code>SELECT SLEEP</code>, no writes),
+              This connection is <b>read-only</b> — the write scenarios need to create the playground
+              table and write rows. Use <b>💤 Sleep mess</b> (pure <code>SELECT SLEEP</code>, no writes),
               or open a writable connection.
+            </div>
+          )}
+          {blocked && galeraBlocked(sc) !== null && (
+            <div className="pg-warn">
+              <b>{sc.name}</b> is only available on a Galera node: {galeraBlocked(sc)}.
             </div>
           )}
           {run?.error && <div className="pg-err">{run.error}</div>}
@@ -386,7 +511,15 @@ export function PlaygroundPanel({ session, onClose }: Props) {
             ))}
           </div>
 
-          {workers.length > 0 && (
+          {workers.length > 0 && (run?.scenario === 'galera-flow' || run?.scenario === 'galera-conflict') && (
+            <div className="pg-next">
+              <b>Now:</b> watch the cluster react — open the ❖ <b>Galera</b> tab (Replication panel)
+              or the ❖ <b>Galera cluster</b> panel and watch flow control, the apply queues and
+              the certification counters while the storm runs. The workers loop until the
+              duration ends or you press Stop; the table is dropped when the run finishes.
+            </div>
+          )}
+          {workers.length > 0 && run?.scenario !== 'galera-flow' && run?.scenario !== 'galera-conflict' && (
             <div className="pg-next">
               <b>Now:</b> switch to a SQL tab and type <code>killall</code> — the threads keep
               running whether this tab is open or not. Or{' '}

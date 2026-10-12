@@ -847,3 +847,101 @@ async fn clickhouse_live_explain_shapes() {
     outcome.expect("EXPLAIN shape assertions");
     dropped.expect("drop scratch database");
 }
+
+// ── SQL Quality shapes (src/utils/qualityRunCh.ts) ──────────────────────────
+//
+// The ClickHouse SQL Quality pipeline consumes: the three safe EXPLAIN kinds,
+// two system.* metadata queries (table keys/sizes, per-column key flags), a
+// `SELECT * FROM (<sql>) LIMIT 0` describe (the JSONCompact meta IS the column
+// map), and one aggregated system.query_log read. The system.* SQL below is
+// mirrored verbatim from qualityRunCh.ts (CH_TABLE_META_SQL /
+// CH_COLUMN_META_SQL / CH_QUERY_LOG_SQL) — change it in both places.
+
+async fn quality_shapes_inner(s: &ChSession) -> Result<()> {
+    clickhouse::execute(s, "CREATE DATABASE txui_ch_live_quality").await?;
+    clickhouse::execute(s,
+        "CREATE TABLE txui_ch_live_quality.t (id UInt64, s String) \
+         ENGINE = MergeTree ORDER BY id PARTITION BY intDiv(id, 1000)",
+    ).await?;
+    clickhouse::execute(s, "INSERT INTO txui_ch_live_quality.t VALUES (1, 'a'), (2, 'b'), (3, 'c')").await?;
+
+    let sql = "SELECT id, s FROM txui_ch_live_quality.t WHERE id = 1";
+
+    // 1. EXPLAIN indexes = 1 — ReadFromMergeTree + an Indexes section with
+    //    real Parts counts is what chExplainRules parses.
+    let r = clickhouse::execute(s, &format!("EXPLAIN indexes = 1 {sql}")).await?;
+    let text = check_text_plan("indexes", &r);
+    assert!(text.contains("ReadFromMergeTree"), "indexes: no scan node: {text:?}");
+    assert!(text.contains("Indexes:"), "indexes: no Indexes section: {text:?}");
+    assert!(text.contains("Parts:"), "indexes: no Parts counts: {text:?}");
+
+    // 2. EXPLAIN ESTIMATE — five numeric-ish columns, one row per table read.
+    let r = clickhouse::execute(s, &format!("EXPLAIN ESTIMATE {sql}")).await?;
+    let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["database", "table", "parts", "rows", "marks"]);
+    assert!(!r.rows.is_empty(), "ESTIMATE must name the table it read");
+
+    // 3. EXPLAIN PIPELINE — scope headers + transform lines (raw-only in v1).
+    let r = clickhouse::execute(s, &format!("EXPLAIN PIPELINE {sql}")).await?;
+    let text = check_text_plan("pipeline", &r);
+    assert!(text.contains("Transform"), "pipeline: no transform lines: {text:?}");
+
+    // 4. Table metadata — mirrored from qualityRunCh.ts CH_TABLE_META_SQL.
+    let r = clickhouse::execute(s,
+        "SELECT database, name, engine, total_rows, total_bytes, partition_key, sorting_key, primary_key \
+         FROM system.tables WHERE database || '.' || name IN ('txui_ch_live_quality.t')").await?;
+    assert_eq!(r.rows.len(), 1, "CH_TABLE_META_SQL must find the scratch table");
+    let row = &r.rows[0];
+    assert_eq!(row[2].as_str(), Some("MergeTree"));
+    assert_eq!(row[5].as_str(), Some("intDiv(id, 1000)"), "partition_key");
+    assert_eq!(row[6].as_str(), Some("id"), "sorting_key");
+    // total_rows may be NULL briefly after insert — unknown, never zero.
+
+    // 5. Per-column key flags — mirrored from CH_COLUMN_META_SQL.
+    let r = clickhouse::execute(s,
+        "SELECT database, table, name, type, is_in_partition_key, is_in_sorting_key, is_in_primary_key \
+         FROM system.columns WHERE database || '.' || table IN ('txui_ch_live_quality.t') \
+         ORDER BY database, table, position").await?;
+    assert_eq!(r.rows.len(), 2, "two columns in the scratch table");
+    let id = r.rows.iter().find(|row| row[2].as_str() == Some("id")).expect("id column");
+    assert_eq!(id[4].as_u64(), Some(1), "id is in the partition key");
+    assert_eq!(id[5].as_u64(), Some(1), "id is in the sorting key");
+    assert_eq!(id[6].as_u64(), Some(1), "id is in the primary key");
+
+    // 6. LIMIT 0 describe — the frontend column map. Types must arrive in the
+    //    meta with no rows read.
+    let r = clickhouse::execute(s, &format!("SELECT * FROM ({sql}) LIMIT 0")).await?;
+    assert!(r.rows.is_empty(), "LIMIT 0 reads nothing");
+    let types: Vec<&str> = r.columns.iter().map(|c| c.type_name.as_str()).collect();
+    assert_eq!(types, ["UInt64", "String"], "LIMIT 0 meta carries exact types");
+
+    // 7. system.query_log aggregate — mirrored from CH_QUERY_LOG_SQL. May be
+    //    grant-gated or disabled: that path is a feature (the section
+    //    degrades), so access-denied prints and passes.
+    let qlog = clickhouse::execute(s,
+        "SELECT count() AS executions, round(avg(read_rows)) AS avg_read_rows, \
+                round(avg(read_bytes)) AS avg_read_bytes, round(avg(query_duration_ms)) AS avg_ms \
+         FROM system.query_log WHERE type = 'QueryFinish' \
+         AND event_time > now() - INTERVAL 30 DAY \
+         AND normalized_query_hash = normalizedQueryHash('SELECT 1')").await;
+    match qlog {
+        Ok(r) => {
+            assert_eq!(r.rows.len(), 1, "an aggregate always answers one row");
+            println!("  query_log: readable, executions={:?}", r.rows[0][0]);
+        }
+        Err(e) => println!("  query_log: unreadable ({e:#}) — the panel degrades on exactly this"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs TXUI_CH_PASSWORD and a live ClickHouse"]
+async fn clickhouse_live_quality_shapes() {
+    skip_unless!(s);
+    // Clean slate, and drop the scratch database even when an assertion fails.
+    let _ = clickhouse::execute(&s, "DROP DATABASE IF EXISTS txui_ch_live_quality").await;
+    let outcome = quality_shapes_inner(&s).await;
+    let dropped = clickhouse::execute(&s, "DROP DATABASE IF EXISTS txui_ch_live_quality").await;
+    outcome.expect("quality shape assertions");
+    dropped.expect("drop scratch database");
+}

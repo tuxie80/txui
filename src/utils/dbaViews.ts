@@ -193,6 +193,13 @@ export const DBA_VIEWS: Record<string, DbaView[]> = {
   // ── Parquet ───────────────────────────────────────────────────────────────
   // Not SQL: these are commands the Parquet driver interprets (see
   // db/parquet.rs), the same way the Redis views carry Redis commands.
+  //
+  // On a DATASET (a connection pointed at a folder of Parquet files) every
+  // per-file view gains a leading `file` column — the path relative to the
+  // dataset root — FILEINFO summarises the whole dataset instead of one file,
+  // and the data browser reads through a DuckDB view (hive partition columns
+  // and the source filename included), so its filters and sort are real
+  // pushdown SQL rather than an in-memory scan.
   parquet: [
     { id: 'pq-file', label: 'File info', category: 'File',
       sql: 'FILEINFO',

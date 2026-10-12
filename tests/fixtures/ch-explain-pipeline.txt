@@ -1,0 +1,8 @@
+(Expression)
+ExpressionTransform × 8
+  (Aggregating)
+  AggregatingTransform × 8
+    (Expression)
+    ExpressionTransform × 8
+      (ReadFromMergeTree)
+      MergeTreeSelect(pool: PrefetchedReadPool, algorithm: Thread) × 8 0 → 1

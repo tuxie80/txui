@@ -1,0 +1,15 @@
+Expression ((Projection + Before ORDER BY))
+  ReadFromMergeTree (default.events)
+    Indexes:
+      MinMax
+        Condition: (event_date in [20005, 20005])
+        Parts: 1/12
+        Granules: 128/98154
+      Partition
+        Condition: (toYYYYMM(event_date) in [202609, 202609])
+        Parts: 1/12
+        Granules: 128/98154
+      PrimaryKey
+        Condition: (user_id in 1-element set)
+        Parts: 1/1
+        Granules: 3/128

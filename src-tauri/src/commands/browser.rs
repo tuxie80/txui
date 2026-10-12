@@ -42,7 +42,12 @@ pub async fn get_table_meta(
         LiveSession::Sqlite(pool) =>
             browser::get_table_meta_sqlite(pool, ns.unwrap_or("main"), table)
                 .await.map_err(Into::into),
-        LiveSession::Parquet(f) => Ok(browser::get_table_meta_parquet(f)),
+        LiveSession::Parquet(src) => match src.as_ref() {
+            crate::db::parquet::ParquetSource::Single(f) =>
+                Ok(browser::get_table_meta_parquet(f)),
+            crate::db::parquet::ParquetSource::Dataset(d) =>
+                Ok(browser::get_table_meta_parquet_dataset(d)),
+        },
         LiveSession::MongoDb(client) => {
             // Sampled keys + estimated count. `ns` is the database; a bare
             // collection name cannot be addressed (no default db on a session).
@@ -217,30 +222,46 @@ pub async fn browse_table(
             executed = display;
             Ok(r)
         }
-        // A Parquet file has no query engine, so filters and sort are applied
-        // by an in-memory scan (db::parquet::preview_filtered). Plain paging
-        // still takes the fast row-group-skipping path inside that function.
-        LiveSession::Parquet(f) => {
-            executed = if params.filters.is_empty() && params.sort.is_empty() {
-                format!("(parquet page: rows {}..{})",
-                        params.offset.max(0), params.offset.max(0) + params.limit.max(0))
-            } else {
-                format!("(parquet in-memory scan: {} filter(s), {} sort key(s))",
-                        params.filters.len(), params.sort.len())
-            };
-            {
-                // A filtered browse can decode up to SCAN_CAP (1M) rows of a
-                // multi-GiB file — CPU-bound work that pinned an async worker
-                // for seconds. Off the runtime, mirroring commands/export.rs.
-                let f = f.clone();
-                let (limit, offset) = (params.limit.max(0) as usize, params.offset.max(0) as usize);
-                let filters = params.filters.clone();
-                let sort = params.sort.clone();
-                tokio::task::spawn_blocking(move ||
-                    crate::db::parquet::preview_filtered(&f, limit, offset, &filters, &sort))
-                    .await
-                    .map_err(|e| crate::apperror::AppError::from(format!("parquet task failed: {e}")))?
-                    .map_err(Into::into)
+        // A single Parquet file has no query engine, so filters and sort are
+        // applied by an in-memory scan (db::parquet::preview_filtered). Plain
+        // paging still takes the fast row-group-skipping path inside that
+        // function. A DATASET browses through its DuckDB `dataset` view
+        // instead: the existing PG-form builder emits real pushdown SQL
+        // (filters, sort, page) that DuckDB executes against read_parquet.
+        LiveSession::Parquet(src) => match src.as_ref() {
+            crate::db::parquet::ParquetSource::Dataset(d) => {
+                let q = build_select("dataset", &params.filters, &params.sort,
+                                     params.limit, params.offset, true, &Default::default());
+                executed = inline_params(&q.sql, &q.values, LitStyle::Standard);
+                crate::db::duckdb::execute_params(&d.duck, &q.sql, &q.values)
+                    .await.map_err(Into::into)
+            }
+            crate::db::parquet::ParquetSource::Single(_) => {
+                executed = if params.filters.is_empty() && params.sort.is_empty() {
+                    format!("(parquet page: rows {}..{})",
+                            params.offset.max(0), params.offset.max(0) + params.limit.max(0))
+                } else {
+                    format!("(parquet in-memory scan: {} filter(s), {} sort key(s))",
+                            params.filters.len(), params.sort.len())
+                };
+                {
+                    // A filtered browse can decode up to SCAN_CAP (1M) rows of a
+                    // multi-GiB file — CPU-bound work that pinned an async worker
+                    // for seconds. Off the runtime, mirroring commands/export.rs.
+                    let src = src.clone();
+                    let (limit, offset) = (params.limit.max(0) as usize, params.offset.max(0) as usize);
+                    let filters = params.filters.clone();
+                    let sort = params.sort.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let crate::db::parquet::ParquetSource::Single(f) = src.as_ref() else {
+                            unreachable!("matched Single above");
+                        };
+                        crate::db::parquet::preview_filtered(f, limit, offset, &filters, &sort)
+                    })
+                        .await
+                        .map_err(|e| crate::apperror::AppError::from(format!("parquet task failed: {e}")))?
+                        .map_err(Into::into)
+                }
             }
         }
     }?;
@@ -380,10 +401,18 @@ pub async fn column_value_counts(
             let q = build_value_counts(&table, &column, &filters, limit, false, &Default::default());
             run_sqlite(pool, q).await.map_err(Into::into)
         }
-        // Would require a GROUP BY, which is exactly what Parquet cannot do.
-        // The header filter popover is hidden for this engine.
-        LiveSession::Parquet(_) =>
-            Err("value counts need a query engine — Parquet is a file".into()),
+        // A single file would require a GROUP BY, which is exactly what
+        // Parquet cannot do. A dataset's DuckDB view does it natively — same
+        // builder as the DuckDB arm.
+        LiveSession::Parquet(src) => match src.as_ref() {
+            crate::db::parquet::ParquetSource::Single(_) =>
+                Err("value counts need a query engine — Parquet is a file".into()),
+            crate::db::parquet::ParquetSource::Dataset(d) => {
+                let q = build_value_counts("dataset", &column, &filters, limit, true, &Default::default());
+                crate::db::duckdb::execute_params(&d.duck, &q.sql, &q.values)
+                    .await.map_err(Into::into)
+            }
+        },
         // One $group pipeline would answer this, but v1 keeps the popover
         // honest: no aggregation surface, no counts.
         LiveSession::MongoDb(_) =>

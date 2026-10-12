@@ -25,12 +25,26 @@ const SAMPLE: Record<string, any> = {
 };
 
 function fallback(cmd: string): any {
-  if (cmd.startsWith('list_') || cmd.startsWith('get_') && cmd.endsWith('s')) return [];
+  // list_*/search_* return arrays (search_history returned null here once, and
+  // HistoryPanel's `rows.length` crash took the whole workspace down with it —
+  // ErrorBoundary replaces the app chrome, so every panel shot after 'Query
+  // history' in the sweep photographed the error screen).
+  if (cmd.startsWith('list_') || cmd.startsWith('search_') || cmd.startsWith('get_') && cmd.endsWith('s')) return [];
   if (cmd.startsWith('get_') || cmd.startsWith('load_')) return null;
   return null;
 }
 
 export async function invoke<T = any>(cmd: string, _args?: any): Promise<T> {
+  // Record every call on window.__CALLS__ so verification scripts (e.g.
+  // dev/verify_cluster_kill.mjs) can assert exactly what the frontend asked
+  // the backend to do — command name and args. Capped; Channels survive via
+  // their toJSON. Recording itself must never break the mock.
+  try {
+    const g = globalThis as any;
+    const calls = (g.__CALLS__ ??= []);
+    calls.push({ cmd, args: _args ?? null });
+    if (calls.length > 5000) calls.splice(0, calls.length - 5000);
+  } catch { /* recording is best-effort */ }
   // Allow a test page to inject per-command responses via window.__MOCK__.
   // The injection wins over SAMPLE so a shot can deliberately EMPTY a list
   // SAMPLE fills — the zero-connection first-run screen is unreachable while

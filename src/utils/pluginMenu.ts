@@ -67,6 +67,9 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
       { panel: 'slowlog', label: 'Slow-log analyzer', tip: 'Slow-query-log analyzer (pt-query-digest style)', when: 'mysql' },
       { panel: 'binlog', label: 'Binary logs', tip: 'Binary log events viewer + PITR helper', when: 'mysql' },
       { panel: 'history', label: 'Query history', tip: 'Query history' },
+      // Local data only (history.db), so no engine gate and no privilege
+      // entry — the timeline reads stores TxUI itself wrote, never the server.
+      { panel: 'timeline', label: 'Incident timeline', tip: 'Incident timeline — what happened on this server and when: statements, errors, deadlocks, snapshots, fleet runs' },
     ],
   },
   {
@@ -84,6 +87,9 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
       // Fleet lives under Server, not Activity: it is a per-server property
       // (checks across every server sharing a label), not one session's load.
       { panel: 'fleet', label: 'Fleet', tip: 'Fleet — checks across every server sharing a label', when: 'fleet' },
+      // Cross-connection like Fleet, MySQL-family only: wsrep exists nowhere
+      // else. The panel picks SAVED connections, the session only pre-selects.
+      { panel: 'cluster', label: 'Galera cluster', tip: 'Galera cluster — all nodes at once: state, queues, flow control, write rates, split-brain detection', when: 'mysql' },
     ],
   },
   {

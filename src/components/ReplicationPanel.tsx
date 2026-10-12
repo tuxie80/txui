@@ -18,7 +18,7 @@
  * the refresh is visible.
  */
 import { errorDisplay } from '../utils/appError';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   pgCreatePublicationSql, pgDropPublicationSql, pgRefreshPublicationSql,
   pgCreateSubscriptionSql, pgDropSubscriptionSql, pgCreateSlotSql, pgDropSlotSql,
@@ -26,6 +26,8 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { usePoll } from '../hooks/usePoll';
 import { FastGrid } from './FastGrid';
+import { GaleraClusterView } from './GaleraClusterView';
+import { GroupReplicationView } from './GroupReplicationView';
 import {
   type Channel, type Health, type ReplSection,
   isChannelSection, toChannel, isRunning, nonEmpty, channelError,
@@ -34,14 +36,20 @@ import {
 
 interface Props {
   sessionId: string;
+  /** Saved-connection id — the Galera tab scopes its persisted events by it. */
+  connectionId: string;
   engine: string;
+  /** The Galera tab's node operations badge prod and grey on read-only. */
+  connectionName?: string;
+  environment?: string | null;
+  readOnly?: boolean;
   onClose: () => void;
 }
 
 /** If a poll somehow never settles (backend hang), don't wedge the guard forever. */
 const IN_FLIGHT_WATCHDOG_MS = 30_000;
 
-export function ReplicationPanel({ sessionId, engine, onClose }: Props) {
+export function ReplicationPanel({ sessionId, connectionId, engine, connectionName, environment, readOnly, onClose }: Props) {
   const isPg = engine === 'postgres';
   const [pubName, setPubName] = useState('');
   const [slotName, setSlotName] = useState('');
@@ -55,6 +63,19 @@ export function ReplicationPanel({ sessionId, engine, onClose }: Props) {
   const [paused, setPaused] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  // Three views on the MySQL family: async channels (below), the Galera/wsrep
+  // cluster dashboard, and the MySQL Group Replication (MGR) surface. A node
+  // can run more than one of these at once, so the views coexist as tabs
+  // rather than one replacing another. Detection lives inside each view
+  // (wsrep_on / group_replication plugin probe → honest empty state), per the
+  // doctrine for surfaces that cannot be gated statically.
+  const [view, setView] = useState<'async' | 'galera' | 'mgr'>('async');
+  // Drill-in from the Galera cluster panel: land on the Galera tab directly.
+  useEffect(() => {
+    const onGalera = () => setView('galera');
+    window.addEventListener('dbgui:galera-tab', onGalera);
+    return () => window.removeEventListener('dbgui:galera-tab', onGalera);
+  }, []);
   const body = useCallback(async () => {
     try {
       const s = await invoke<ReplSection[]>('replication_status', { sessionId });
@@ -84,6 +105,26 @@ export function ReplicationPanel({ sessionId, engine, onClose }: Props) {
     <div className="proc-panel">
       <div className="proc-toolbar">
         <span className="proc-title">⇄ Replication</span>
+        {engine === 'mysql' && (
+          <span className="gal-tabs">
+            <button
+              className={`toolbar-btn ${view === 'async' ? 'active' : ''}`}
+              onClick={() => setView('async')}
+              data-tip="Async primary/replica channels (SHOW REPLICA STATUS)"
+            >⇄ Async</button>
+            <button
+              className={`toolbar-btn ${view === 'galera' ? 'active' : ''}`}
+              onClick={() => setView('galera')}
+              data-tip="Galera / wsrep cluster status (MariaDB Galera Cluster, Percona XtraDB Cluster)"
+            >❖ Galera</button>
+            <button
+              className={`toolbar-btn ${view === 'mgr' ? 'active' : ''}`}
+              onClick={() => setView('mgr')}
+              data-tip="MySQL Group Replication status (performance_schema.replication_group_members — MySQL 8.0/8.4/9.x only)"
+            >⟡ Group replication</button>
+          </span>
+        )}
+        {view === 'async' && (<>
         {channels.length > 0 && (
           <span className="repl-chan-count">{channels.length} channel{channels.length === 1 ? '' : 's'}</span>
         )}
@@ -95,7 +136,9 @@ export function ReplicationPanel({ sessionId, engine, onClose }: Props) {
           {paused ? '▶ Resume' : '⏸ Pause'}
         </button>
         <button className="toolbar-btn" onClick={refresh}>↻ Refresh</button>
+        </>)}
         <div style={{ flex: 1 }} />
+        {view === 'async' && (<>
         {updatedAt && (
           <span className="repl-updated" title="Last successful refresh">
             updated {updatedAt.toLocaleTimeString()}
@@ -104,10 +147,22 @@ export function ReplicationPanel({ sessionId, engine, onClose }: Props) {
         <span className="proc-status" style={{ border: 'none', background: 'none' }}>
           {paused ? 'paused' : 'every 5s'}
         </span>
+        </>)}
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
 
-      {error && <div className="proc-error-bar">{error}</div>}
+      {view === 'async' && error && <div className="proc-error-bar">{error}</div>}
+
+      {view === 'galera' && engine === 'mysql' ? (
+        <div className="repl-body">
+          <GaleraClusterView sessionId={sessionId} connectionId={connectionId}
+            connectionName={connectionName ?? ''} environment={environment} readOnly={readOnly} />
+        </div>
+      ) : view === 'mgr' && engine === 'mysql' ? (
+        <div className="repl-body">
+          <GroupReplicationView sessionId={sessionId} />
+        </div>
+      ) : (<>
 
       {/* PostgreSQL logical-replication actions — generate DDL into the editor
           (review before running). Complements the read-only monitoring below. */}
@@ -248,6 +303,7 @@ export function ReplicationPanel({ sessionId, engine, onClose }: Props) {
           </div>
         ))}
       </div>
+      </>)}
     </div>
   );
 }

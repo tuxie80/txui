@@ -69,6 +69,20 @@ test('a DBA account with PROCESS + REPLICATION CLIENT gets the operational panel
   assert.equal(p['stats-views'].state, 'granted');       // global SELECT
 });
 
+test('SET GLOBAL gates on SUPER, with SYSTEM_VARIABLES_ADMIN as the MySQL 8 split-out', () => {
+  const p = mysqlPrivileges(REPORTING);
+  assert.equal(p['server-admin'].state, 'denied');
+  assert.match(p['server-admin'].needs!, /SUPER/);
+  // The DBA fixture carries SUPER.
+  assert.equal(mysqlPrivileges(DBA)['server-admin'].state, 'granted');
+  // MySQL 8's finer-grained grant answers too.
+  const m8 = mysqlPrivileges([
+    "GRANT SELECT, SYSTEM_VARIABLES_ADMIN ON *.* TO `ops`@`%`",
+  ]);
+  assert.equal(m8['server-admin'].state, 'granted');
+  assert.equal(m8['kill-others'].state, 'denied'); // it is NOT a kill grant
+});
+
 test('an explicit performance_schema grant is enough for the stats views', () => {
   const p = mysqlPrivileges([
     "GRANT USAGE ON *.* TO `obs`@`%`",
@@ -142,6 +156,12 @@ test('a plain login role is told which role to ask for', () => {
 test('reading roles needs nothing on PostgreSQL', () => {
   const p = pgPrivileges({ is_super: false, is_monitor: false, read_all_stats: false, signal_backend: false, has_pgss: false });
   assert.equal(p['user-admin'].state, 'granted');
+});
+
+test('server-wide settings answer to the superuser alone', () => {
+  const p = pgPrivileges({ is_super: false, is_monitor: true, read_all_stats: true, signal_backend: true, has_pgss: true });
+  assert.equal(p['server-admin'].state, 'denied');
+  assert.match(p['server-admin'].needs!, /superuser/);
 });
 
 // ── what the UI sees ────────────────────────────────────────────────────────
@@ -254,4 +274,13 @@ test('the probe asks the server, rather than reassembling its rules', () => {
   assert.ok(!/sys\.server_permissions/.test(MSSQL_PROBE));
   // Every column the reader looks for is actually selected.
   for (const c of MS_COLS) assert.ok(MSSQL_PROBE.includes(c), c);
+  assert.ok(MSSQL_PROBE.includes('alter_settings'));
+});
+
+test('sp_configure answers to ALTER SETTINGS, or sysadmin', () => {
+  const viaPerm = mssqlPrivileges(mssqlProbeFromRow(['alter_settings'], [1]));
+  assert.equal(viaPerm['server-admin'].state, 'granted');
+  const nothing = mssqlPrivileges(mssqlProbeFromRow(MS_COLS, LOW_ROW));
+  assert.equal(nothing['server-admin'].state, 'denied');
+  assert.match(nothing['server-admin'].needs!, /ALTER SETTINGS/);
 });

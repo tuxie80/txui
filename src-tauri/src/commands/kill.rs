@@ -569,6 +569,19 @@ pub async fn kill_processes(
     mode: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<KillOutcome>, crate::apperror::AppError> {
+    do_kill_processes(&state, session_id, ids, mode).await
+}
+
+/// The kill body, shared with `galera_cluster_kill` — there is ONE kill
+/// implementation, so no caller (the Processes panel, the editor popup, the
+/// cluster-wide processlist) can bypass the read-only gate or the self-kill
+/// refusal. Testable without a Tauri State wrapper.
+pub(crate) async fn do_kill_processes(
+    state: &AppState,
+    session_id: Uuid,
+    ids: Vec<u64>,
+    mode: String,
+) -> Result<Vec<KillOutcome>, crate::apperror::AppError> {
     let terminate = mode != "query";
     // Killing a backend is a destructive server-side action, so a read-only
     // connection refuses it — "read-only" has to mean the session cannot

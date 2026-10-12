@@ -20,11 +20,17 @@ pub async fn export_parquet_file(
 ) -> Result<u64, crate::apperror::AppError> {
     let session = get_session_pub(session_id, &state.sessions).await?;
     match session.as_ref() {
-        LiveSession::Parquet(f) => {
-            let f = f.clone();
+        LiveSession::Parquet(src) => {
+            let src = src.clone();
             let out = PathBuf::from(out_path);
             // File I/O + decode is blocking; keep it off the async runtime.
-            tokio::task::spawn_blocking(move || crate::db::parquet::export_to_file(&f, &out, &format))
+            tokio::task::spawn_blocking(move || match src.as_ref() {
+                crate::db::parquet::ParquetSource::Single(f) =>
+                    crate::db::parquet::export_to_file(f, &out, &format),
+                // A dataset streams through its DuckDB view's COPY … TO.
+                crate::db::parquet::ParquetSource::Dataset(d) =>
+                    crate::db::parquet::export_dataset_to_file(d, &out, &format),
+            })
                 .await
                 .map_err(|e| crate::apperror::AppError::from(format!("export task failed: {e}")))?
                 .map_err(Into::into)
@@ -149,6 +155,165 @@ pub async fn read_slow_log(
 #[tauri::command]
 pub async fn create_sqlite_file(path: PathBuf) -> Result<(), crate::apperror::AppError> {
     crate::db::sqlite::create(&path).await.map_err(Into::into)
+}
+
+/// One column of the schema for a new, empty Parquet file, as the connection
+/// form's *New…* dialog sends it. `data_type` is one of the names in
+/// [`resolve_parquet_type`] — the allowlist mirrored by the frontend's
+/// `utils/parquetSchema.ts` dropdown; anything else is refused here.
+#[derive(serde::Deserialize)]
+pub struct ParquetColumnDef {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+}
+
+/// Map the dialog's type name to an Arrow type. Kept deliberately small —
+/// the scalar types a hand-designed file schema actually needs; nested types
+/// stay the domain of writers with real data (export).
+fn resolve_parquet_type(spec: &str) -> Result<arrow_schema::DataType, String> {
+    use arrow_schema::{DataType, TimeUnit};
+    match spec {
+        "string" => Ok(DataType::Utf8),
+        "integer" => Ok(DataType::Int64),
+        "float" => Ok(DataType::Float64),
+        "boolean" => Ok(DataType::Boolean),
+        "date" => Ok(DataType::Date32),
+        "timestamp" => Ok(DataType::Timestamp(TimeUnit::Millisecond, None)),
+        "binary" => Ok(DataType::Binary),
+        _ => {
+            let Some(inner) = spec.strip_prefix("decimal(").and_then(|t| t.strip_suffix(')')) else {
+                return Err(format!("unknown Parquet column type: {spec}"));
+            };
+            let (p, s) = inner
+                .split_once(',')
+                .and_then(|(p, s)| p.trim().parse::<u8>().ok().zip(s.trim().parse::<u8>().ok()))
+                .ok_or_else(|| format!("decimal wants decimal(precision,scale), got: {spec}"))?;
+            if !(1..=38).contains(&p) {
+                return Err(format!("decimal precision must be 1..=38, got {p}"));
+            }
+            if s > p {
+                return Err(format!("decimal scale ({s}) cannot exceed precision ({p})"));
+            }
+            Ok(DataType::Decimal128(p, s as i8))
+        }
+    }
+}
+
+/// Create a new, empty Parquet file with a chosen schema.
+///
+/// The schema-designing sibling of `write_parquet_file` (which infers its
+/// schema from a result grid). Same rule as `create_sqlite_file`: creating a
+/// file is a standalone action, never a side effect of connecting, and an
+/// existing path is refused outright. Returns the size of the file written.
+#[tauri::command]
+pub async fn create_parquet_file(
+    path: PathBuf,
+    columns: Vec<ParquetColumnDef>,
+) -> Result<u64, crate::apperror::AppError> {
+    if path.exists() {
+        return Err(format!("{} already exists", path.display()).into());
+    }
+    if columns.is_empty() {
+        return Err("a Parquet file needs at least one column".into());
+    }
+    let mut fields = Vec::with_capacity(columns.len());
+    for c in &columns {
+        let name = c.name.trim();
+        if name.is_empty() {
+            return Err("column names cannot be empty".into());
+        }
+        if name.chars().count() > 128 {
+            return Err(format!("column name too long (max 128 chars): {name}").into());
+        }
+        if name.chars().any(|ch| ch.is_control()) {
+            return Err(format!("column name holds a control character: {name:?}").into());
+        }
+        if fields.iter().any(|(n, _, _): &(String, arrow_schema::DataType, bool)| n == name) {
+            return Err(format!("duplicate column name: {name}").into());
+        }
+        let dt = resolve_parquet_type(&c.data_type)?;
+        fields.push((name.to_string(), dt, c.nullable));
+    }
+    // File I/O + encoding is blocking; keep it off the async runtime.
+    tokio::task::spawn_blocking(move || crate::db::parquet::write_empty(&path, &fields))
+        .await
+        .map_err(|e| crate::apperror::AppError::from(format!("create task failed: {e}")))?
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod create_parquet_tests {
+    use super::*;
+
+    fn col(name: &str, data_type: &str) -> ParquetColumnDef {
+        ParquetColumnDef { name: name.into(), data_type: data_type.into(), nullable: true }
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("txui-pqc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn the_type_allowlist_maps_and_rejects() {
+        use arrow_schema::DataType;
+        assert_eq!(resolve_parquet_type("string").unwrap(), DataType::Utf8);
+        assert_eq!(resolve_parquet_type("integer").unwrap(), DataType::Int64);
+        assert_eq!(resolve_parquet_type("float").unwrap(), DataType::Float64);
+        assert_eq!(resolve_parquet_type("boolean").unwrap(), DataType::Boolean);
+        assert_eq!(resolve_parquet_type("date").unwrap(), DataType::Date32);
+        assert_eq!(resolve_parquet_type("binary").unwrap(), DataType::Binary);
+        assert_eq!(resolve_parquet_type("decimal(10,2)").unwrap(), DataType::Decimal128(10, 2));
+        assert_eq!(resolve_parquet_type("decimal(38, 38)").unwrap(), DataType::Decimal128(38, 38));
+        // Everything outside the allowlist is refused, with a reason.
+        assert!(resolve_parquet_type("struct").is_err());
+        assert!(resolve_parquet_type("varchar(10)").is_err());
+        assert!(resolve_parquet_type("decimal(0,0)").is_err());
+        assert!(resolve_parquet_type("decimal(39,0)").is_err());
+        assert!(resolve_parquet_type("decimal(5,6)").is_err()); // scale > precision
+        assert!(resolve_parquet_type("decimal(x,y)").is_err());
+    }
+
+    #[tokio::test]
+    async fn creates_a_file_with_the_designed_schema() {
+        let path = tmp("designed.parquet");
+        let cols = vec![
+            col("id", "integer"),
+            col("amount", "decimal(10,2)"),
+            ParquetColumnDef { name: "flag".into(), data_type: "boolean".into(), nullable: false },
+        ];
+        let size = create_parquet_file(path.clone(), cols).await.unwrap();
+        assert!(size > 0);
+        let f = crate::db::parquet::open_path(&path).unwrap();
+        assert_eq!(f.num_rows(), 0);
+        assert_eq!(f.leaf_names(), ["id", "amount", "flag"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn refuses_an_existing_path_and_bad_input() {
+        let path = tmp("occupied.parquet");
+        std::fs::write(&path, b"already here").unwrap();
+        let err = create_parquet_file(path.clone(), vec![col("a", "string")])
+            .await.unwrap_err().to_string();
+        assert!(err.contains("already exists"), "{err}");
+        // …and the file was not touched.
+        assert_eq!(std::fs::read(&path).unwrap(), b"already here");
+        let _ = std::fs::remove_file(&path);
+
+        let path = tmp("bad.parquet");
+        assert!(create_parquet_file(path.clone(), vec![]).await.is_err());
+        assert!(create_parquet_file(path.clone(), vec![col("", "string")]).await.is_err());
+        assert!(create_parquet_file(path.clone(), vec![col("a", "string"), col("a", "integer")]).await.is_err());
+        assert!(create_parquet_file(path.clone(), vec![col(&"x".repeat(200), "string")]).await.is_err());
+        assert!(create_parquet_file(path.clone(), vec![col("a\u{0007}b", "string")]).await.is_err());
+        assert!(create_parquet_file(path.clone(), vec![col("a", "decimal(2,9)")]).await.is_err());
+        assert!(!path.exists(), "a refused create must not leave a file behind");
+    }
 }
 
 /// Write a result grid to a new Parquet file.

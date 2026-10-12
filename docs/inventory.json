@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "engines": [
     "mysql",
     "postgres",
@@ -176,7 +176,7 @@
       "erDiagram": false,
       "dataGen": false,
       "csvImport": false,
-      "sqlQuality": false,
+      "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": true,
@@ -389,7 +389,7 @@
     "sequences": {
       "summary": "Sequences exist as objects that can be listed, created and altered.",
       "detail": [
-        "Not `sqlDba`, for the same reason as `lockWaits`. Note this is *not* the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says \"ask\", and `SequencePanel` says \"MySQL has none\" when the flavour comes back plain."
+        "Not `sqlDba`, for the same reason as `lockWaits`. Note this is *not* the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says \"ask\", and the menu surfaces (the session plugin menu and the Tools-menu opener in QueryTabs) consult the runtime flavour probe (`store/serverFlavors` + `capabilities()` in `utils/serverFlavor`) before offering Sequences for the mysql engine, while `SequencePanel` says \"MySQL has none\" when the flavour comes back plain."
       ]
     },
     "longQueryWatch": {
@@ -728,6 +728,15 @@
       "inMenu": true
     },
     {
+      "id": "cluster",
+      "label": "Galera cluster",
+      "menuLabel": "Galera cluster",
+      "group": "Server",
+      "tip": "Galera cluster — all nodes at once: state, queues, flow control, write rates, split-brain detection",
+      "when": "mysql",
+      "inMenu": true
+    },
+    {
       "id": "erdiagram",
       "label": "ER diagram",
       "menuLabel": "ER diagram",
@@ -832,6 +841,15 @@
       "menuLabel": "Query history",
       "group": "Insights",
       "tip": "Query history",
+      "when": null,
+      "inMenu": true
+    },
+    {
+      "id": "timeline",
+      "label": "Incident timeline",
+      "menuLabel": "Incident timeline",
+      "group": "Insights",
+      "tip": "Incident timeline — what happened on this server and when: statements, errors, deadlocks, snapshots, fleet runs",
       "when": null,
       "inMenu": true
     }
@@ -2855,7 +2873,7 @@
     }
   },
   "counts": {
-    "panels": 34,
+    "panels": 36,
     "commands": 70,
     "engines": 9,
     "capabilities": 32,

@@ -2,9 +2,12 @@
 //!
 //! Scope of the v1 engine: connect, the database/collection tree, the find
 //! editor (`mongo_find`), the data browser over collections, a processlist
-//! (`currentOp`/`killOp`) and buildInfo/serverStatus. There is deliberately
-//! **no write path at all**: this module exposes no insert/update/delete/
-//! aggregate-$out function, so the house read-only enforcement (PG's
+//! (`currentOp`/`killOp`), buildInfo/serverStatus, an aggregation-pipeline
+//! runner (`aggregate`) and collection stats (`coll_stats`). There is
+//! deliberately **no write path at all**: this module exposes no
+//! insert/update/delete function, and the pipeline runner REJECTS the two
+//! write-capable stages (`$out`, `$merge` — see `WRITE_STAGES`) before
+//! anything reaches the server. So the house read-only enforcement (PG's
 //! `default_transaction_read_only`, MySQL's `SET SESSION transaction_read_only`,
 //! ClickHouse's `readonly=1`) needs no Mongo equivalent — a write cannot be
 //! expressed. Every decoded document is data going OUT, never in.
@@ -36,6 +39,16 @@ pub const APP_NAME: &str = "TxUI";
 /// LIMIT guard: an accidental unbounded find over a huge collection must not
 /// stream it all into the webview.
 pub const MAX_FIND_LIMIT: i64 = 10_000;
+
+/// Hard ceiling on an aggregation's trailing `$limit` guard — same default-
+/// LIMIT doctrine as MAX_FIND_LIMIT, for the pipeline runner.
+pub const MAX_AGG_LIMIT: i64 = 10_000;
+
+/// Aggregation stages that WRITE. The pipeline runner refuses any pipeline
+/// containing one, keeping this driver read-only by design even though
+/// `aggregate()` can in principle mutate. Mirrored in
+/// src/utils/mongoPipeline.ts — drift-guarded by tests/mongoPipeline.test.ts.
+pub const WRITE_STAGES: [&str; 2] = ["$out", "$merge"];
 
 /// Documents sampled to infer a collection's key list (tree expansion, data
 /// browser metadata). A sample, not a full scan: a collection is schemaless,
@@ -477,6 +490,152 @@ pub async fn explain_find(
         .unwrap_or_default())
 }
 
+// ── aggregation pipeline runner ───────────────────────────────────────────────
+
+/// Parse the pipeline editor's text into BSON stages. Same to_bson route as
+/// parse_doc, so extended JSON (`{"$oid": …}`, `{"$date": …}`) works inside
+/// stage arguments. Each element must be a single-key object whose key is a
+/// stage operator (`$match`, `$group`, …) — the errors name the stage (1-based)
+/// so a bad stage reads as a bad stage, not a server error.
+pub fn parse_pipeline(raw: &str) -> Result<Vec<Document>> {
+    let v: serde_json::Value = serde_json::from_str(raw.trim())
+        .map_err(|e| anyhow::anyhow!("invalid pipeline JSON: {e}"))?;
+    let serde_json::Value::Array(items) = v else {
+        anyhow::bail!("pipeline must be a JSON array of stages ([ {{ \"$match\": … }} ])")
+    };
+    let mut stages = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
+        let n = i + 1;
+        let bson = mongodb::bson::to_bson(&item)
+            .map_err(|e| anyhow::anyhow!("invalid stage {n}: {e}"))?;
+        let Bson::Document(d) = bson else {
+            anyhow::bail!("stage {n} must be a JSON object ({{ \"$match\": … }})")
+        };
+        if d.len() != 1 {
+            anyhow::bail!("stage {n} must have exactly one key (the stage operator)")
+        }
+        let key = d.keys().next().expect("len checked");
+        if !key.starts_with('$') {
+            anyhow::bail!("stage {n} key \"{key}\" is not a stage operator — stage keys start with '$'")
+        }
+        stages.push(d);
+    }
+    Ok(stages)
+}
+
+/// The first write-capable stage in the pipeline, top-level keys only (a
+/// `$match` argument containing the text "$out" is data, not a stage). Stage
+/// shape is already validated by parse_pipeline, so one key per document.
+pub fn write_stage(stages: &[Document]) -> Option<&'static str> {
+    for d in stages {
+        if let Some(key) = d.keys().next() {
+            if let Some(w) = WRITE_STAGES.iter().find(|w| **w == key) {
+                return Some(*w);
+            }
+        }
+    }
+    None
+}
+
+/// Run a read-only aggregation pipeline and shape the result like a find
+/// page. Three guards before anything reaches the server:
+/// - write stages (`$out`/`$merge`) are rejected — read-only is structural;
+/// - a trailing `$limit` is appended LAST (default 500, clamped to
+///   MAX_AGG_LIMIT): for a read pipeline a final limit only truncates, which
+///   is exactly the house default-LIMIT doctrine;
+/// - `allowDiskUse` is set so a big `$group`/`$sort` spills instead of
+///   dying at the 100 MB memory cap.
+///
+/// No skip-paging in v1: a pipeline is not a stable ordered scan.
+pub async fn aggregate(
+    client: &mongodb::Client,
+    db: &str,
+    coll: &str,
+    pipeline_json: &str,
+    limit: Option<i64>,
+) -> Result<QueryResult> {
+    let mut stages = parse_pipeline(pipeline_json)?;
+    if let Some(w) = write_stage(&stages) {
+        anyhow::bail!("write stage {w} is not allowed — this MongoDB driver is read-only by design");
+    }
+    // clamp, never trust — same rule as find()'s limit.
+    let limit = match limit {
+        Some(l) if l > 0 => l.min(MAX_AGG_LIMIT),
+        _ => 500,
+    };
+    stages.push(doc! { "$limit": limit });
+
+    let start = Instant::now();
+    let mut cursor = client.database(db).collection::<Document>(coll)
+        .aggregate(stages)
+        .allow_disk_use(true)
+        .await
+        .map_err(readable)?;
+
+    let mut docs: Vec<Document> = Vec::new();
+    let mut first_ms: Option<u64> = None;
+    while let Some(d) = cursor.try_next().await.map_err(readable)? {
+        if first_ms.is_none() { first_ms = Some(start.elapsed().as_millis() as u64); }
+        docs.push(d);
+    }
+    let execution_ms = first_ms.unwrap_or_else(|| start.elapsed().as_millis() as u64);
+    let fetch_ms = start.elapsed().as_millis() as u64 - execution_ms;
+
+    let (columns, rows) = shape_docs(&docs);
+    Ok(QueryResult {
+        columns, rows, rows_affected: None, execution_ms, fetch_ms, warnings: vec![],
+        truncated: false,
+    })
+}
+
+/// Collection stats via the `$collStats` aggregation stage (the legacy
+/// collStats command is deprecated since 6.2): storageStats + count +
+/// latencyStats, flattened into the same (section, name, value) grid
+/// server_info() produces. On a sharded cluster the stage returns one
+/// document per shard — the shard name becomes the section. Views refuse
+/// server-side; that error is surfaced readably, by design.
+pub async fn coll_stats(client: &mongodb::Client, db: &str, coll: &str) -> Result<QueryResult> {
+    let start = Instant::now();
+    let mut cursor = client.database(db).collection::<Document>(coll)
+        .aggregate([doc! { "$collStats": {
+            "latencyStats": { "histograms": true },
+            "storageStats": {},
+            "count": {},
+        } }])
+        .await
+        .map_err(readable)?;
+    let mut docs: Vec<Document> = Vec::new();
+    while let Some(d) = cursor.try_next().await.map_err(readable)? {
+        docs.push(d);
+    }
+
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    for d in &docs {
+        // A sharded cluster names each shard in its document; a standalone
+        // has no shard field — one "local" section then.
+        let section = match d.get("shard").map(bson_to_json) {
+            Some(serde_json::Value::String(s)) => s,
+            _ => "local".to_string(),
+        };
+        for (k, v) in d.iter() {
+            flatten_doc(v, &section, k, &mut rows);
+        }
+    }
+    // storageStats + latency histograms flatten deep; cap like server_info.
+    rows.truncate(2000);
+
+    let ms = start.elapsed().as_millis() as u64;
+    Ok(QueryResult {
+        columns: vec![
+            ColumnInfo { name: "section".into(), type_name: "string".into(), nullable: false },
+            ColumnInfo { name: "name".into(),    type_name: "string".into(), nullable: false },
+            ColumnInfo { name: "value".into(),   type_name: "string".into(), nullable: true },
+        ],
+        rows, rows_affected: None, execution_ms: ms, fetch_ms: 0, warnings: vec![],
+        truncated: false,
+    })
+}
+
 // ── currentOp / killOp (the processlist) ─────────────────────────────────────
 
 /// In-progress operations, shaped as a grid for the Processes panel.
@@ -885,6 +1044,87 @@ mod tests {
         let ci = cols.iter().position(|c| c.name == "v").unwrap();
         assert_eq!(cols[ci].type_name, "int");
     }
+
+    // ── parse_pipeline / write_stage ─────────────────────────────────────────
+
+    #[test]
+    fn a_valid_pipeline_parses_stage_by_stage() {
+        let stages = parse_pipeline(
+            r#"[{"$match": {"parity": "even"}}, {"$group": {"_id": "$grp", "n": {"$sum": 1}}}]"#,
+        ).unwrap();
+        assert_eq!(stages.len(), 2);
+        assert!(stages[0].contains_key("$match"));
+        assert!(stages[1].contains_key("$group"));
+        // Extended JSON inside a stage argument typechecks (same to_bson route
+        // as parse_doc).
+        let ext = parse_pipeline(
+            r#"[{"$match": {"_id": {"$oid": "64b7f2a7c7d7a81a4c3f9e01"}}}]"#,
+        ).unwrap();
+        assert_eq!(ext.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_pipeline_is_valid() {
+        assert_eq!(parse_pipeline("[]").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_non_array_is_refused() {
+        let e = parse_pipeline(r#"{"$match": {}}"#).unwrap_err().to_string();
+        assert!(e.contains("array"), "{e}");
+    }
+
+    #[test]
+    fn bad_json_is_a_pipeline_error() {
+        let e = parse_pipeline("[{not json").unwrap_err().to_string();
+        assert!(e.contains("pipeline"), "{e}");
+        assert!(e.contains("JSON"), "{e}");
+    }
+
+    #[test]
+    fn a_non_object_stage_is_refused_with_its_index() {
+        let e = parse_pipeline(r#"[{"$match": {}}, 42]"#).unwrap_err().to_string();
+        assert!(e.contains("stage 2"), "{e}");
+        assert!(e.contains("object"), "{e}");
+    }
+
+    #[test]
+    fn a_multi_key_stage_is_refused_with_its_index() {
+        let e = parse_pipeline(r#"[{"$match": {}, "$sort": {"n": 1}}]"#)
+            .unwrap_err().to_string();
+        assert!(e.contains("stage 1"), "{e}");
+        assert!(e.contains("one key"), "{e}");
+    }
+
+    #[test]
+    fn a_stage_key_without_dollar_is_refused_with_its_index() {
+        let e = parse_pipeline(r#"[{"$match": {}}, {"match": {}}]"#)
+            .unwrap_err().to_string();
+        assert!(e.contains("stage 2"), "{e}");
+        assert!(e.contains("'$'"), "{e}");
+    }
+
+    #[test]
+    fn write_stages_are_found_at_any_position() {
+        let mk = |json: &str| parse_pipeline(json).unwrap();
+        assert_eq!(write_stage(&mk(r#"[{"$out": "other"}]"#)), Some("$out"));
+        assert_eq!(write_stage(&mk(
+            r#"[{"$match": {}}, {"$group": {"_id": "$g"}}, {"$merge": {"into": "t"}}]"#,
+        )), Some("$merge"));
+    }
+
+    #[test]
+    fn read_stages_pass_the_write_guard() {
+        let stages = parse_pipeline(concat!(
+            r#"[{"$match": {"a": 1}}, {"$group": {"_id": "$g"}}, {"$sort": {"n": -1}},"#,
+            r#" {"$limit": 10}, {"$lookup": {"from": "t", "localField": "a", "foreignField": "b", "as": "j"}},"#,
+            r#" {"$unwind": "$arr"}, {"$facet": {"x": [{"$count": "n"}]}}]"#,
+        )).unwrap();
+        assert_eq!(write_stage(&stages), None);
+        // "$out" as DATA inside a stage argument is not a write stage.
+        let data = parse_pipeline(r#"[{"$match": {"op": "$out"}}]"#).unwrap();
+        assert_eq!(write_stage(&data), None);
+    }
 }
 
 #[cfg(test)]
@@ -1196,5 +1436,77 @@ mod live_tests {
         // is a request), no error — so the UI must word it as "sent".
         super::kill_op(&c, u64::MAX - 1).await.expect("killOp dead id");
         println!("  killOp on a dead id returned ok (request semantics)");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn mongo_live_aggregate_groups_and_caps_output() {
+        let Some(c) = client().await else { println!("no mongodb — skipping"); return };
+        const DB: &str = "txui_mongo_test_agg";
+        fixture(&c, DB, 10_000).await;
+
+        // A $group over the whole fixture: 10 groups, shaped into the grid.
+        let r = super::aggregate(&c, DB, "items",
+            r#"[{"$group": {"_id": "$grp", "n": {"$sum": 1}}}, {"$sort": {"_id": 1}}]"#,
+            Some(100),
+        ).await.expect("group aggregate");
+        println!("  $group: {} rows ({}+{} ms)", r.rows.len(), r.execution_ms, r.fetch_ms);
+        assert_eq!(r.rows.len(), 10);
+        let ni = r.columns.iter().position(|c| c.name == "n").unwrap();
+        assert!(r.rows.iter().all(|row| row[ni] == serde_json::json!(1000)));
+
+        // The trailing-$limit guard clamps: asking for 20k rows gets the cap.
+        let r = super::aggregate(&c, DB, "items",
+            r#"[{"$match": {"parity": "even"}}]"#, Some(20_000),
+        ).await.expect("clamped aggregate");
+        assert_eq!(r.rows.len() as i64, super::MAX_AGG_LIMIT);
+        println!("  clamped page: {} rows", r.rows.len());
+
+        // Default limit applies when none is asked for.
+        let r = super::aggregate(&c, DB, "items", r#"[{"$match": {}}]"#, None)
+            .await.expect("default-limit aggregate");
+        assert_eq!(r.rows.len(), 500);
+
+        // A write stage never reaches the server.
+        let e = super::aggregate(&c, DB, "items",
+            r#"[{"$match": {}}, {"$out": "elsewhere"}]"#, None,
+        ).await.unwrap_err().to_string();
+        println!("  $out rejected: {e}");
+        assert!(e.contains("$out"), "{e}");
+        assert!(e.contains("read-only"), "{e}");
+
+        cleanup(&c, DB).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn mongo_live_coll_stats_returns_storage_and_count() {
+        let Some(c) = client().await else { println!("no mongodb — skipping"); return };
+        const DB: &str = "txui_mongo_test_stats";
+        fixture(&c, DB, 1_000).await;
+
+        let r = super::coll_stats(&c, DB, "items").await.expect("collStats");
+        let has = |section: &str, name_prefix: &str| r.rows.iter().any(|row|
+            row[0] == serde_json::json!(section) && row[1].as_str().unwrap_or("").starts_with(name_prefix));
+        println!("  collStats: {} flattened rows", r.rows.len());
+        assert!(has("local", "storageStats.size"), "storageStats.size missing");
+        assert!(has("local", "count"), "count missing");
+        assert!(has("local", "storageStats.indexSizes."), "indexSizes.* missing");
+        // The fixture count is exact.
+        let count = r.rows.iter().find(|row| row[1] == serde_json::json!("count"))
+            .and_then(|row| row[2].as_str().map(str::to_string))
+            .expect("count row");
+        assert_eq!(count, "1000");
+
+        // A view refuses server-side — surfaced readably, not pre-hidden.
+        c.database(DB).run_command(doc! {
+            "create": "v_even", "viewOn": "items",
+            "pipeline": [ { "$match": { "parity": "even" } } ],
+        }).await.expect("create view");
+        let e = super::coll_stats(&c, DB, "v_even").await.unwrap_err().to_string();
+        println!("  view refusal: {e}");
+        assert!(e.contains("view") || e.contains("Namespace"), "{e}");
+
+        cleanup(&c, DB).await;
     }
 }

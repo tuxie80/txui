@@ -202,7 +202,7 @@ pub struct GenParams {
 #[serde(rename_all = "camelCase")]
 pub struct ColumnSpec {
     pub name: String,
-    #[allow(dead_code)] // part of the shared wire format; used by the UI for DDL
+    /// e.g. "VARCHAR(20)" — the uniqueness tag must never push a value past it
     pub type_name: String,
     pub generator: String,
     pub params: GenParams,
@@ -342,6 +342,14 @@ fn fmt_ms(ms: i64, with_time: bool) -> String {
     let dt = chrono::DateTime::from_timestamp_millis(ms)
         .unwrap_or_else(|| chrono::DateTime::from_timestamp_millis(0).unwrap());
     dt.format(if with_time { "%Y-%m-%d %H:%M:%S" } else { "%Y-%m-%d" }).to_string()
+}
+
+/// The declared length in a parenthesised type name — "VARCHAR(20)" → 20.
+/// Anything unparsable (DECIMAL(10,2), BIGINT, no parens) → None.
+fn paren_len(type_name: &str) -> Option<usize> {
+    let open = type_name.find('(')?;
+    let close = type_name[open..].find(')')? + open;
+    type_name[open + 1..close].trim().parse().ok()
 }
 
 /// Tiny reverse-regex expander: literals, [a-z]/[0-9]/[A-Z] classes with
@@ -1096,10 +1104,25 @@ fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
         // ascending sequence; strings get an index tag (before '@' for emails).
         match v {
             GenValue::Int(_) => GenValue::Int(seq_start + row_idx as i64),
-            GenValue::Str(s) => GenValue::Str(match s.find('@') {
-                Some(at) => format!("{}.{}{}", &s[..at], row_idx, &s[at..]),
-                None => format!("{s}_{row_idx}"),
-            }),
+            GenValue::Str(s) => {
+                let (base, domain) = match s.find('@') {
+                    Some(at) => (format!("{}.{row_idx}", &s[..at]), s[at..].to_string()),
+                    None => (format!("{s}_{row_idx}"), String::new()),
+                };
+                // The tag grows with the row index — a 17-char ISBN in a
+                // VARCHAR(20) fits `_99` but overflows at `_100` ("Data too
+                // long" mid-run). Shrink the base's LEFT edge (never the tag
+                // — uniqueness is what the tag is for) so base+domain fits.
+                if let Some(max) = paren_len(&spec.type_name) {
+                    let keep = max.saturating_sub(domain.chars().count());
+                    let base_chars: Vec<char> = base.chars().collect();
+                    if base_chars.len() > keep {
+                        let trimmed: String = base_chars[base_chars.len() - keep..].iter().collect();
+                        return GenValue::Str(format!("{trimmed}{domain}"));
+                    }
+                }
+                GenValue::Str(format!("{base}{domain}"))
+            }
             other => other,
         }
     }).collect()
@@ -2185,6 +2208,56 @@ mod tests {
         let mut rng = Rng(1);
         let row = gen_row(&s, &mut rng, 0, 5_000, "default", &[None,None,None]);
         assert!(matches!(row[0], GenValue::Int(5_000)));
+    }
+
+    #[test]
+    fn paren_len_reads_declared_size() {
+        assert_eq!(paren_len("VARCHAR(20)"), Some(20));
+        assert_eq!(paren_len("char(8)"), Some(8));
+        assert_eq!(paren_len("DECIMAL(10,2)"), None);
+        assert_eq!(paren_len("BIGINT"), None);
+    }
+
+    /// Regression: the library kit's isbn is a 17-char regex value in a
+    /// VARCHAR(20) UNIQUE column. The `_rowIdx` uniqueness tag fits at rows
+    /// 0–99 but pushed the value to 21 chars at row 100 (MySQL's "row 101")
+    /// — "Data too long for column 'isbn'". The tag must shrink the base,
+    /// never the column.
+    #[test]
+    fn unique_tag_never_overflows_column_length() {
+        let mut p = params();
+        p.list = "97[89]-\\d{2}-\\d{5}-\\d{2}-\\d".into();
+        let s = vec![ColumnSpec {
+            name: "isbn".into(), type_name: "VARCHAR(20)".into(),
+            generator: "regex".into(), params: p, unique: true,
+        }];
+        let mut rng = Rng(42);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..2_500u64 {
+            let row = gen_row(&s, &mut rng, i, 1, "default", &[None]);
+            let v = as_str(row.into_iter().next().unwrap());
+            assert!(v.chars().count() <= 20, "row {i}: {v} ({} chars)", v.chars().count());
+            assert!(seen.insert(v.clone()), "row {i}: duplicate {v}");
+        }
+    }
+
+    /// The same overflow guard on the email path: the tag lives before the
+    /// '@', so the base shrinks while the domain survives intact.
+    #[test]
+    fn unique_tag_keeps_email_domain_when_truncating() {
+        let s = vec![ColumnSpec {
+            name: "email".into(), type_name: "VARCHAR(24)".into(),
+            generator: "email".into(), params: params(), unique: true,
+        }];
+        let mut rng = Rng(7);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..2_500u64 {
+            let row = gen_row(&s, &mut rng, i, 1, "default", &[None]);
+            let v = as_str(row.into_iter().next().unwrap());
+            assert!(v.chars().count() <= 24, "row {i}: {v} ({} chars)", v.chars().count());
+            assert!(v.contains('@'), "row {i}: lost the domain: {v}");
+            assert!(seen.insert(v.clone()), "row {i}: duplicate {v}");
+        }
     }
 
     fn as_str(v: GenValue) -> String {

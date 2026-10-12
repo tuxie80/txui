@@ -335,6 +335,58 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(&mut *tx).await?;
 
+    // Long-query captures: one row per detected threshold crossing, recorded
+    // by the Long query panel's watchdog the moment a statement first crosses
+    // its threshold (the panel's `newOnes`). The persistent half of what was a
+    // session-only list, and one of the incident timeline's event kinds —
+    // `age_secs` is the age AT DETECTION, not the statement's final runtime.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS long_query_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id TEXT    NOT NULL,
+            engine        TEXT    NOT NULL,
+            db_user       TEXT    NOT NULL DEFAULT '',
+            host          TEXT    NOT NULL DEFAULT '',
+            db            TEXT    NOT NULL DEFAULT '',
+            age_secs      INTEGER NOT NULL DEFAULT 0,
+            sql           TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        )"
+    )
+    .execute(&mut *tx).await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_long_query_conn \
+         ON long_query_events(connection_id, created_at DESC)"
+    )
+    .execute(&mut *tx).await?;
+
+    // Galera events: one row per wsrep state TRANSITION the Galera dashboard
+    // observes (local state changes, cluster size changes, flow-control
+    // threshold crossings, cluster-view changes) — the frontend's
+    // galeraEventsFromTransition decides what is an event; this store just
+    // keeps it. `ok` marks recovery/neutral events so the incident timeline
+    // does not paint a node returning to Synced red.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS galera_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id TEXT    NOT NULL,
+            engine        TEXT    NOT NULL,
+            event_type    TEXT    NOT NULL,
+            summary       TEXT    NOT NULL,
+            detail        TEXT    NOT NULL DEFAULT '',
+            ok            INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        )"
+    )
+    .execute(&mut *tx).await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_galera_events_conn \
+         ON galera_events(connection_id, created_at DESC)"
+    )
+    .execute(&mut *tx).await?;
+
     tx.commit().await?;
 
     seed_sql_templates(pool).await?;
@@ -1201,6 +1253,263 @@ pub async fn delete_deadlock_event(store: &HistoryStore, id: i64) -> Result<()> 
     Ok(())
 }
 
+// ── Long-query events (watchdog capture store) ───────────────────────────────
+
+/// Events kept per connection — double the deadlock cap: a watched busy server
+/// crosses the threshold far more often than it deadlocks, and each row is
+/// small (no raw report, no parsed graph). Same trade as the other bounded
+/// stores in this file: the oldest roll off past the cap.
+const MAX_LONG_QUERY_EVENTS_PER_CONN: i64 = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// The incident timeline reads this table with its own scoped query; the row
+// struct + list helper exist for the store tests (and the day a Long query
+// panel history tab wants them), mirroring DeadlockEvent.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct LongQueryEvent {
+    pub id: i64,
+    pub connection_id: String,
+    pub engine: String,
+    pub db_user: String,
+    pub host: String,
+    pub db: String,
+    /// Seconds the statement had been running when it crossed the threshold.
+    pub age_secs: i64,
+    pub sql: String,
+    pub created_at: String,
+}
+
+/// Returns the new row id, or None when nothing was recorded.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_long_query_event(
+    store: &HistoryStore,
+    connection_id: &str,
+    engine: &str,
+    db_user: &str,
+    host: &str,
+    db: &str,
+    age_secs: i64,
+    sql: &str,
+) -> Result<Option<i64>> {
+    record_long_query_event_capped(
+        store, connection_id, engine, db_user, host, db, age_secs, sql,
+        MAX_LONG_QUERY_EVENTS_PER_CONN,
+    ).await
+}
+
+/// `cap` is a parameter so the retention test does not have to insert 101
+/// events to see one roll off.
+#[allow(clippy::too_many_arguments)]
+async fn record_long_query_event_capped(
+    store: &HistoryStore,
+    connection_id: &str,
+    engine: &str,
+    db_user: &str,
+    host: &str,
+    db: &str,
+    age_secs: i64,
+    sql: &str,
+    cap: i64,
+) -> Result<Option<i64>> {
+    let pool = store;
+
+    // Dedupe, mirroring the deadlock store: the watchdog fires once per
+    // crossing, but a poll that sees the same statement on a recycled thread
+    // id fires again — identical text from the same user as the newest stored
+    // event ⇒ the same incident, nothing new to record. A genuinely repeated
+    // long run still lands, because anything stored in between (another user,
+    // another statement) breaks the identity.
+    let latest: Option<(String, String)> = sqlx::query_as(
+        "SELECT db_user, sql FROM long_query_events WHERE connection_id = ? ORDER BY id DESC LIMIT 1"
+    )
+    .bind(connection_id)
+    .fetch_optional(&*pool).await?;
+    if latest.as_ref().is_some_and(|(u, s)| u == db_user && s == sql) {
+        return Ok(None);
+    }
+
+    let id = sqlx::query(
+        "INSERT INTO long_query_events
+            (connection_id, engine, db_user, host, db, age_secs, sql)
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(connection_id)
+    .bind(engine)
+    .bind(db_user)
+    .bind(host)
+    .bind(db)
+    .bind(age_secs)
+    .bind(sql)
+    .execute(&*pool).await?
+    .last_insert_rowid();
+
+    // Retention: roll off the oldest events beyond the cap.
+    sqlx::query(
+        "DELETE FROM long_query_events WHERE connection_id = ? AND id IN (
+            SELECT id FROM long_query_events WHERE connection_id = ?
+            ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)"
+    )
+    .bind(connection_id)
+    .bind(connection_id)
+    .bind(cap)
+    .execute(&*pool).await?;
+
+    Ok(Some(id))
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // see LongQueryEvent above
+pub async fn list_long_query_events(
+    store: &HistoryStore,
+    connection_id: &str,
+) -> Result<Vec<LongQueryEvent>> {
+    let pool = store;
+    let rows = sqlx::query(
+        "SELECT id, connection_id, engine, db_user, host, db, age_secs, sql, created_at
+         FROM long_query_events WHERE connection_id = ?
+         ORDER BY created_at DESC, id DESC"
+    )
+    .bind(connection_id)
+    .fetch_all(&*pool).await?;
+    Ok(rows.iter().map(|r| LongQueryEvent {
+        id:            r.get(0),
+        connection_id: r.get(1),
+        engine:        r.get(2),
+        db_user:       r.get(3),
+        host:          r.get(4),
+        db:            r.get(5),
+        age_secs:      r.get(6),
+        sql:           r.get(7),
+        created_at:    r.get(8),
+    }).collect())
+}
+
+// ── Galera events (wsrep transition captures) ────────────────────────────────
+
+/// Events kept per connection — same bound as the long-query store: rows are
+/// small, and a flapping cluster can produce a burst of transitions. The
+/// oldest roll off past the cap.
+const MAX_GALERA_EVENTS_PER_CONN: i64 = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// The incident timeline reads this table with its own scoped query; the row
+// struct + list helper exist for the store tests, mirroring LongQueryEvent.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct GaleraEvent {
+    pub id: i64,
+    pub connection_id: String,
+    pub engine: String,
+    /// The transition class: local_state / cluster_size / flow_control /
+    /// cluster_view (decided by the frontend's galeraEventsFromTransition).
+    pub event_type: String,
+    pub summary: String,
+    pub detail: String,
+    /// false = incident (left Synced, member lost, FC rising); true = recovery
+    /// or neutral observation — the timeline's red/green styling keys off it.
+    pub ok: bool,
+    pub created_at: String,
+}
+
+/// Returns the new row id, or None when nothing was recorded.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_galera_event(
+    store: &HistoryStore,
+    connection_id: &str,
+    engine: &str,
+    event_type: &str,
+    summary: &str,
+    detail: &str,
+    ok: bool,
+) -> Result<Option<i64>> {
+    record_galera_event_capped(
+        store, connection_id, engine, event_type, summary, detail, ok,
+        MAX_GALERA_EVENTS_PER_CONN,
+    ).await
+}
+
+/// `cap` is a parameter so the retention test does not have to insert 101
+/// events to see one roll off.
+#[allow(clippy::too_many_arguments)]
+async fn record_galera_event_capped(
+    store: &HistoryStore,
+    connection_id: &str,
+    engine: &str,
+    event_type: &str,
+    summary: &str,
+    detail: &str,
+    ok: bool,
+    cap: i64,
+) -> Result<Option<i64>> {
+    let pool = store;
+
+    // Dedupe, mirroring the long-query store: a node oscillating between two
+    // states across consecutive polls would otherwise store the same
+    // transition twice when the poll diffs against a stale previous sample.
+    // Identical type+summary to the newest stored event ⇒ the same
+    // observation, nothing new to record; anything in between (a recovery, a
+    // different transition) breaks the identity, so a genuinely repeated
+    // incident still lands.
+    let latest: Option<(String, String)> = sqlx::query_as(
+        "SELECT event_type, summary FROM galera_events WHERE connection_id = ? ORDER BY id DESC LIMIT 1"
+    )
+    .bind(connection_id)
+    .fetch_optional(pool).await?;
+    if latest.as_ref().is_some_and(|(t, s)| t == event_type && s == summary) {
+        return Ok(None);
+    }
+
+    let id = sqlx::query(
+        "INSERT INTO galera_events
+            (connection_id, engine, event_type, summary, detail, ok)
+         VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(connection_id)
+    .bind(engine)
+    .bind(event_type)
+    .bind(summary)
+    .bind(detail)
+    .bind(ok)
+    .execute(pool).await?
+    .last_insert_rowid();
+
+    // Retention: roll off the oldest events beyond the cap.
+    sqlx::query(
+        "DELETE FROM galera_events WHERE connection_id = ? AND id IN (
+            SELECT id FROM galera_events WHERE connection_id = ?
+            ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)"
+    )
+    .bind(connection_id)
+    .bind(connection_id)
+    .bind(cap)
+    .execute(pool).await?;
+
+    Ok(Some(id))
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // see GaleraEvent above
+pub async fn list_galera_events(
+    store: &HistoryStore,
+    connection_id: &str,
+) -> Result<Vec<GaleraEvent>> {
+    let pool = store;
+    let rows = sqlx::query(
+        "SELECT id, connection_id, engine, event_type, summary, detail, ok, created_at
+         FROM galera_events WHERE connection_id = ?
+         ORDER BY created_at DESC, id DESC"
+    )
+    .bind(connection_id)
+    .fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| GaleraEvent {
+        id:            r.get(0),
+        connection_id: r.get(1),
+        engine:        r.get(2),
+        event_type:    r.get(3),
+        summary:       r.get(4),
+        detail:        r.get(5),
+        ok:            r.get::<i64, _>(6) != 0,
+        created_at:    r.get(7),
+    }).collect())
+}
+
 /// Pure delta math over two stored snapshots — see DigestDelta for semantics.
 /// Sorted by total-time increase, then call increase, then digest id, the
 /// same "what got slower" ordering the live panels use.
@@ -1600,6 +1909,151 @@ mod deadlock_store_tests {
     }
 }
 
+#[cfg(test)]
+mod long_query_store_tests {
+    use super::*;
+
+    async fn temp_store(tag: &str) -> (HistoryStore, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("txui_longq_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = open(&dir).await.expect("open temp history db");
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn record_list_roundtrip() {
+        let (store, dir) = temp_store("roundtrip").await;
+        let id = record_long_query_event(&store, "c1", "mysql",
+            "app", "10.0.0.4:5123", "shop", 75, "UPDATE orders SET x = 1")
+            .await.expect("record")
+            .expect("a new event is recorded");
+
+        let listed = list_long_query_events(&store, "c1").await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].db_user, "app");
+        assert_eq!(listed[0].host, "10.0.0.4:5123");
+        assert_eq!(listed[0].db, "shop");
+        assert_eq!(listed[0].age_secs, 75);
+        assert_eq!(listed[0].sql, "UPDATE orders SET x = 1");
+        // Another connection must not see it.
+        assert!(list_long_query_events(&store, "c2").await.expect("list other").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_same_incident_is_not_recorded_twice() {
+        let (store, dir) = temp_store("dedupe").await;
+        let first = record_long_query_event(&store, "c", "mysql", "app", "h", "d", 60, "SAME SQL")
+            .await.unwrap();
+        assert!(first.is_some());
+        // A recycled thread id re-detects the unchanged statement.
+        let again = record_long_query_event(&store, "c", "mysql", "app", "h", "d", 61, "SAME SQL")
+            .await.unwrap();
+        assert_eq!(again, None, "identical user+sql to the newest event ⇒ nothing new");
+        // The same statement from a different user is a different incident.
+        let other = record_long_query_event(&store, "c", "mysql", "root", "h", "d", 62, "SAME SQL")
+            .await.unwrap();
+        assert!(other.is_some());
+        // …and after it, the original user crossing again is new too.
+        let later = record_long_query_event(&store, "c", "mysql", "app", "h", "d", 63, "SAME SQL")
+            .await.unwrap();
+        assert!(later.is_some());
+        assert_eq!(list_long_query_events(&store, "c").await.unwrap().len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_oldest_beyond_cap() {
+        let (store, dir) = temp_store("prune").await;
+        let mut first_id = 0;
+        for i in 0..4 {
+            let id = record_long_query_event_capped(&store, "c", "mysql", "u", "", "", 60,
+                &format!("sql {i}"), 3)
+                .await.unwrap().unwrap();
+            if i == 0 { first_id = id; }
+        }
+        let listed = list_long_query_events(&store, "c").await.expect("list");
+        assert_eq!(listed.len(), 3, "cap is 3");
+        assert!(listed.iter().all(|m| m.id != first_id), "the oldest rolled off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+#[cfg(test)]
+mod galera_store_tests {
+    use super::*;
+
+    async fn temp_store(tag: &str) -> (HistoryStore, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("txui_galera_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = open(&dir).await.expect("open temp history db");
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn record_list_roundtrip() {
+        let (store, dir) = temp_store("roundtrip").await;
+        let id = record_galera_event(&store, "c1", "mysql",
+            "local_state", "Node left Synced → Donor/Desynced (donating SST)",
+            "cluster prod_galera · node galera1", false)
+            .await.expect("record")
+            .expect("a new event is recorded");
+
+        let listed = list_galera_events(&store, "c1").await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].event_type, "local_state");
+        assert_eq!(listed[0].summary, "Node left Synced → Donor/Desynced (donating SST)");
+        assert_eq!(listed[0].detail, "cluster prod_galera · node galera1");
+        assert!(!listed[0].ok, "leaving Synced is an incident, not a green row");
+        assert!(!listed[0].created_at.is_empty(), "UTC created_at stamped by the store");
+        // Another connection must not see it.
+        assert!(list_galera_events(&store, "c2").await.expect("list other").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_same_transition_is_not_recorded_twice() {
+        let (store, dir) = temp_store("dedupe").await;
+        let first = record_galera_event(&store, "c", "mysql",
+            "cluster_size", "Cluster size 3 → 2", "", false).await.unwrap();
+        assert!(first.is_some());
+        // A stale-diff re-fire of the identical transition dedupes away.
+        let again = record_galera_event(&store, "c", "mysql",
+            "cluster_size", "Cluster size 3 → 2", "", false).await.unwrap();
+        assert_eq!(again, None, "identical type+summary to the newest event ⇒ nothing new");
+        // A different transition in between breaks the identity…
+        let mid = record_galera_event(&store, "c", "mysql",
+            "local_state", "Node back to Synced", "", true).await.unwrap();
+        assert!(mid.is_some());
+        // …so the same size change happening again IS a new incident.
+        let later = record_galera_event(&store, "c", "mysql",
+            "cluster_size", "Cluster size 3 → 2", "", false).await.unwrap();
+        assert!(later.is_some());
+        assert_eq!(list_galera_events(&store, "c").await.unwrap().len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_oldest_beyond_cap() {
+        let (store, dir) = temp_store("prune").await;
+        let mut first_id = 0;
+        for i in 0..4 {
+            let id = record_galera_event_capped(&store, "c", "mysql",
+                "local_state", &format!("transition {i}"), "", true, 3)
+                .await.unwrap().unwrap();
+            if i == 0 { first_id = id; }
+        }
+        let listed = list_galera_events(&store, "c").await.expect("list");
+        assert_eq!(listed.len(), 3, "cap is 3");
+        assert!(listed.iter().all(|e| e.id != first_id), "the oldest rolled off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 #[cfg(test)]
 mod fingerprint_tests {

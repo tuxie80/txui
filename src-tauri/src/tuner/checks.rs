@@ -75,6 +75,9 @@ pub fn run_checks(d: &TunerData, eol: Option<&EolInfo>) -> Vec<Finding> {
     resilience_checks(d, eol, &mut out);
     schema_checks(d, &mut out);
     config_checks(d, &mut out);
+    // The Galera pack self-gates on data.galera (wsrep_on ON) — a standalone
+    // server gets exactly zero galera.* findings.
+    super::galera_checks::run(d, &mut out);
     out
 }
 

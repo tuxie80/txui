@@ -274,6 +274,45 @@ pub fn get_table_meta_parquet(file: &crate::db::parquet::ParquetFile) -> TableMe
     TableMeta { columns, pk_columns: vec![], total_rows: Some(file.num_rows()) }
 }
 
+/// Dataset "table" metadata — the merged leaf schema (first file wins on a
+/// name conflict) plus the hive partition columns and the source-file column
+/// the DuckDB view adds, tagged as what they are. The row count is the sum of
+/// every file's footer count — exact and free.
+pub fn get_table_meta_parquet_dataset(d: &crate::db::parquet::ParquetDataset) -> TableMeta {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut columns: Vec<TableColumn> = Vec::new();
+    for f in &d.files {
+        for c in get_table_meta_parquet(f).columns {
+            if seen.insert(c.name.clone()) {
+                columns.push(c);
+            }
+        }
+    }
+    for pc in &d.partition_cols {
+        if seen.insert(pc.clone()) {
+            columns.push(TableColumn {
+                name: pc.clone(),
+                type_name: "VARCHAR · partition".into(),
+                nullable: true,
+                primary_key: false,
+                fk_table: None,
+                fk_column: None,
+            });
+        }
+    }
+    if seen.insert("filename".to_string()) {
+        columns.push(TableColumn {
+            name: "filename".into(),
+            type_name: "VARCHAR · source file".into(),
+            nullable: false,
+            primary_key: false,
+            fk_table: None,
+            fk_column: None,
+        });
+    }
+    TableMeta { columns, pk_columns: vec![], total_rows: Some(d.num_rows()) }
+}
+
 pub async fn get_table_meta_clickhouse(
     session: &crate::db::clickhouse::ChSession,
     database: &str,

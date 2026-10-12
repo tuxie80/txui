@@ -173,6 +173,18 @@ function FleetIcon(p: IconProps) {
   );
 }
 
+/** Galera cluster — a ring of nodes (every member watches every member). */
+function ClusterIcon(p: IconProps) {
+  return (
+    <Stroke {...p}>
+      <circle cx="8" cy="2.6" r="1.4" />
+      <circle cx="2.9" cy="11.4" r="1.4" />
+      <circle cx="13.1" cy="11.4" r="1.4" />
+      <path d="M6.9 3.6L3.8 10.2M9.1 3.6l3.1 6.6M4.3 11.4h7.4" />
+    </Stroke>
+  );
+}
+
 /** Playground — circus tent with a flag (a place to make a mess on purpose). */
 function PlaygroundIcon(p: IconProps) {
   return (
@@ -392,7 +404,21 @@ function QueryStoreIcon(p: IconProps) {
   );
 }
 
-// querystore / vacuum / find / compare / binlog / slowlog are ALSO baked to
+/** Incident timeline — a vertical spine with event dots and their labels. */
+function TimelineIcon(p: IconProps) {
+  return (
+    <Stroke {...p}>
+      <path d="M4 2v12" />
+      <circle cx="4" cy="4.5" r="1.3" />
+      <circle cx="4" cy="8" r="1.3" />
+      <circle cx="4" cy="11.5" r="1.3" />
+      <path d="M7 4.5h6M7 8h4.5M7 11.5h5.5" />
+    </Stroke>
+  );
+}
+
+// querystore / vacuum / find / compare / binlog / slowlog / timeline / cluster
+// are ALSO baked to
 // src/assets/icons/plugins/<panel>.png by dev/rasterize_panel_icons.mjs —
 // the native Tools menu (muda IconMenuItem) cannot draw an inline SVG and
 // needs the raster copy. Edit an icon here, edit it there, re-run the script.
@@ -413,6 +439,7 @@ const PANEL_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   maintenance: MaintenanceIcon,
   vacuum: VacuumIcon,
   fleet: FleetIcon,
+  cluster: ClusterIcon,
   playground: PlaygroundIcon,
   erdiagram: ErDiagramIcon,
   designer: DesignerIcon,
@@ -431,6 +458,7 @@ const PANEL_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   quality: QualityIcon,
   saved: SavedIcon,
   history: HistoryIcon,
+  timeline: TimelineIcon,
 };
 
 /**

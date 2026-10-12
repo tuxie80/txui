@@ -52,6 +52,17 @@ const ICONS = {
     '<circle cx="8" cy="9.2" r="4.9"/>'
     + '<path d="M8 6.6v2.6l1.8 1.2"/>'
     + '<path d="M6.3 1.6h3.4M8 1.6v2"/>'),
+  timeline: stroke('#a8b8e0',
+    '<path d="M4 2v12"/>'
+    + '<circle cx="4" cy="4.5" r="1.3"/>'
+    + '<circle cx="4" cy="8" r="1.3"/>'
+    + '<circle cx="4" cy="11.5" r="1.3"/>'
+    + '<path d="M7 4.5h6M7 8h4.5M7 11.5h5.5"/>'),
+  cluster: stroke('#d18eb0',
+    '<circle cx="8" cy="2.6" r="1.4"/>'
+    + '<circle cx="2.9" cy="11.4" r="1.4"/>'
+    + '<circle cx="13.1" cy="11.4" r="1.4"/>'
+    + '<path d="M6.9 3.6L3.8 10.2M9.1 3.6l3.1 6.6M4.3 11.4h7.4"/>'),
   scratch:
     `<svg xmlns="http://www.w3.org/2000/svg" width="${SIZE}" height="${SIZE}" viewBox="0 0 64 64">`
     + '<g fill="#FFD21F">'
