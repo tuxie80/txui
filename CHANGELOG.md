@@ -7,16 +7,20 @@ this project follows semantic versioning.
 
 ### Changed
 
-- **Version lives in exactly one place: `package.json`.** The six other
+- **Version lives in exactly one place: `package.json`.** The seven other
   carriers (`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
-  `src-tauri/tauri.conf.json`, the `README.md` badge, the newest CHANGELOG
-  entry header, the AGENTS.md line) are written by `dev/sync_version.mjs` —
+  `src-tauri/tauri.conf.json`, the `README.md` badge, the website's
+  `site/index.html` badge + footer, the newest CHANGELOG entry header, the
+  AGENTS.md line) are written by `dev/sync_version.mjs` —
   `npm run version:sync -- X.Y.Z` bumps everything in one command (including
   renaming the changelog's `[Unreleased]` section with today's date and
   regenerating `docs/inventory.json`), and a bare `npm run version:sync`
   checks for drift. Enforcement: `tests/versionSync.test.ts` runs the same
   assertions on every `npm test`, so a hand-edit or a forgotten sync fails
-  loudly instead of shipping quietly.
+  loudly instead of shipping quietly. **The website itself**
+  (tuxie.eu/txui) gains the 1.1.0 badge and the Galera cluster suite in the
+  engine and feature cards; the generated docs page already embeds the Galera
+  guide, deep-dive anchors and the new screenshots.
 
 ## [1.1.0] - 2026-10-12
 

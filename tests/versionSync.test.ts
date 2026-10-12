@@ -22,6 +22,8 @@ const CONSUMERS = [
   ['src-tauri/Cargo.lock', t => t.match(/^name = "app"\nversion = "([^"]+)"/m)?.[1] ?? null],
   ['README.md', t => t.match(/version-(\d+\.\d+\.\d+)-blue/)?.[1] ?? null],
   ['AGENTS.md', t => t.match(/^Current version: \*\*([^*]+)\*\*/m)?.[1] ?? null],
+  // The website's brand badge and footer — ">vX.Y.Z<" appears twice.
+  ['site/index.html', t => t.match(/>v(\d+\.\d+\.\d+)</)?.[1] ?? null],
   // The newest VERSIONED entry; [Unreleased] is working state, not a release.
   ['CHANGELOG.md', t => t.match(/^## \[(\d+\.\d+\.\d+)\]/m)?.[1] ?? null],
 ];

@@ -10,7 +10,8 @@
 //
 // Consumers: src-tauri/Cargo.toml, src-tauri/tauri.conf.json (the DMG version
 // comes from it), src-tauri/Cargo.lock (the local `app` package block only),
-// README.md's badge, AGENTS.md's "Current version" line, CHANGELOG.md.
+// README.md's badge, AGENTS.md's "Current version" line, site/index.html's
+// brand badge + footer, CHANGELOG.md.
 // tests/versionSync.test.ts runs the check mode's assertions on every
 // `npm test`, so drift fails loudly even without running this script.
 
@@ -50,6 +51,12 @@ const CONSUMERS = [
     file: 'AGENTS.md',
     read: t => t.match(/^Current version: \*\*([^*]+)\*\*/m)?.[1] ?? null,
     write: (t, v) => t.replace(/^Current version: \*\*[^*]+\*\*/m, `Current version: **${v}**`),
+  },
+  {
+    file: 'site/index.html',
+    // The website's brand badge and footer — ">vX.Y.Z<" appears twice.
+    read: t => t.match(/>v(\d+\.\d+\.\d+)</)?.[1] ?? null,
+    write: (t, v) => t.replaceAll(/>v\d+\.\d+\.\d+</g, `>v${v}<`),
   },
   {
     file: 'CHANGELOG.md',
