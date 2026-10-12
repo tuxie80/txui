@@ -65,6 +65,13 @@ this project follows semantic versioning.
 
 ### Changed
 
+- **Website redesign** (tuxie.eu/txui): one restrained accent instead of
+  per-card coloured borders, ~⅓ tighter layout, the ten screenshots and nine
+  engines are now keyboard-accessible tab groups, the hero carries a
+  dot-particle database icon that reacts to the mouse (reduced-motion and
+  hidden-tab aware), and the install commands sit in terminal-style boxes
+  with working copy buttons.
+
 - **Version lives in exactly one place: `package.json`.** The seven other
   carriers (`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
   `src-tauri/tauri.conf.json`, the `README.md` badge, the website's
