@@ -22,6 +22,14 @@ this project follows semantic versioning.
   engine and feature cards; the generated docs page already embeds the Galera
   guide, deep-dive anchors and the new screenshots.
 
+- **Website deploy is now scripted and part of the release procedure** —
+  `dev/deploy_site.sh` publishes `site/` + `docs/` to the Wedos hosting
+  (tuxie.eu/txui) over plain FTP in one command; additive mirror (server-only
+  files like the demo video survive), markdown sources excluded, password via
+  `TXUI_DEPLOY_PASSWORD` or a hidden prompt — never the repo, never argv.
+  AGENTS.md's release checklist now has the deploy as step 3, before the
+  draft release is published.
+
 ## [1.1.0] - 2026-10-12
 
 ### Added
