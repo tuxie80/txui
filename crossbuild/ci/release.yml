@@ -181,6 +181,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+          # Updater signing (minisign): with these two set, tauri-action
+          # signs each bundle (emits .sig files) and publishes latest.json
+          # into the same draft release. The private key never enters the
+          # repo; losing it means updates are dead forever (see AGENTS.md).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
           # macOS signing is intentionally left unset: with no Apple developer
           # account the bundle is ad-hoc signed by Tauri (no certificate), so it
           # runs but users must right-click → Open the first time. To notarize
@@ -231,7 +238,8 @@ jobs:
           work=$(mktemp -d); cd "$work"
           gh release download "$GITHUB_REF_NAME" \
             --pattern '*.dmg' --pattern '*.app.tar.gz' --pattern '*.AppImage' \
-            --pattern '*.deb' --pattern '*.rpm' --pattern '*.msi' --pattern '*.exe'
+            --pattern '*.deb' --pattern '*.rpm' --pattern '*.msi' --pattern '*.exe' \
+            --pattern 'latest.json' --pattern '*.sig'
           sha256sum * > sha256sums.txt
           gh release upload "$GITHUB_REF_NAME" sha256sums.txt --clobber
           cat sha256sums.txt

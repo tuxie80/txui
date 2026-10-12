@@ -7,6 +7,42 @@ this project follows semantic versioning.
 
 ### Added
 
+- **Self-update, finally: silent check, status-bar progress, restart chip.**
+  The updater returns (removed 2026-08-04 for lack of real signing keys —
+  now generated, minisign, pubkey in `tauri.conf.json`, private key in
+  GitHub secrets + the maintainer's password manager, never the repo). One
+  polite background check 10 s after launch and every 6 h against the
+  release's signed `latest.json`; a pure semver util
+  (`utils/updatePolicy.ts`, fully tested) classifies the delta and two new
+  Settings → Updates checkboxes gate auto-download per class — **patch/minor
+  ON by default, major OFF** (a major can change behaviour, so it waits for a
+  click). An allowed update downloads in the background with a **⇩ chip in
+  the status bar** (percent, popover with notes link + cancel); when done it
+  becomes **↻ Restart to X.Y.Z** via the process plugin's `relaunch()`. A
+  disallowed class gets a passive "⇩ X.Y.Z available" chip opening the
+  release page. A failed check renders nothing and retries next launch — the
+  updater never opens a dialog. Backend: two new commands (`update_check`,
+  `update_download_and_install` — **168 commands**), typed errors, and a
+  `TXUI_UPDATE_ENDPOINT` env override for a staging manifest without
+  rebuilding (https-only in release builds — the local http loop is a
+  debug-build affair, and it must run from inside the built `.app`: the
+  install step derives the bundle root from the executable path and would
+  swap `target/debug/` itself). `bundle.createUpdaterArtifacts` is on, so
+  the bundler emits the `.app.tar.gz` / `.sig` updater artifacts. The download is not abortable mid-flight: the chip's
+  Cancel means "stop telling me", the install still lands for the next
+  natural restart. CI: both `release.yml` copies pass the signing env to
+  tauri-action, which emits `.sig` files and publishes `latest.json` into
+  the same draft — **an update goes live only when the release is
+  published**, the draft gate is the staging mechanism. **Portability:
+  macOS (bundle swap), Windows (passive NSIS) and Linux AppImage
+  auto-install; a deb/rpm install is owned by the package manager and gets
+  the notify-only chip instead** — the fallback is automatic on the
+  backend's typed `not_updatable` error (new `ErrorCode`, wire-spelling
+  tested on both sides). No `platformCaps` entry: the gap is package format,
+  not OS. **Rollout note: 1.1.0 ships no updater, so 1.1.0 → 1.2.0 still
+  happens via brew/curl/manual; auto-update works from the first release
+  carrying it onward.**
+
 - **One-line install: `curl -fsSL https://tuxie.eu/txui/install.sh | bash`.**
   `site/install.sh` (deployed with the site) detects the platform, resolves
   the latest release from the GitHub API (or takes a pinned version),

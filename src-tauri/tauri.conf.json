@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "publisher": "Tuxie",
     "icon": [
       "icons/32x32.png",
@@ -62,6 +63,16 @@
       }
     }
   },
-  "plugins": {},
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0QzA3RjZBQjVFNTY1MUEKUldRYVplVzFhbi9BbFBZZnErbmRteWRlVDFEeVVvVlg1QWEzVWx6cGExNmpJRlJTdFkvN29OMjYK",
+      "endpoints": [
+        "https://github.com/tuxie80/txui/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "mainBinaryName": "TxUI"
 }

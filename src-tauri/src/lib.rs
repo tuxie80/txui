@@ -14,7 +14,7 @@ pub mod secretstore;
 pub mod tuner;
 mod commands;
 
-use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*};
+use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -97,8 +97,13 @@ pub fn run() {
     // History DB is opened during setup once we know the app data dir.
     // We create a placeholder and swap it in via a once-cell pattern.
     tauri::Builder::default()
-        // No updater: plugin, commands and banner were removed together — see
-        // CHANGELOG; reintroduce all three plus real signing keys to re-enable.
+        // Self-update (commands/update.rs): the updater plugin checks the
+        // signed latest.json on the GitHub release; process::relaunch restarts
+        // the app after install. Signing keys live in GitHub secrets +
+        // ~/.tauri, never in the repo — see AGENTS.md.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         // OS notifications: "long query finished" pings when the window is
         // unfocused (utils/notify.ts decides WHEN, this just delivers).
@@ -890,6 +895,10 @@ pub fn run() {
             sqlite_attach,
             sqlite_detach,
             ssh_agent_status,
+            // self-update (check / download+install; relaunch is the process
+            // plugin's own command)
+            update_check,
+            update_download_and_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

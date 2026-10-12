@@ -35,6 +35,7 @@ export type ErrorCode =
   | 'not_found'
   | 'bad_request'
   | 'unsupported'
+  | 'not_updatable'
   | 'local'
   | 'unknown';
 
@@ -56,7 +57,7 @@ export interface AppError {
 const CODES = new Set<string>([
   'cancelled', 'timeout', 'connection_lost', 'connect_failed', 'permission_denied',
   'guard_refused', 'sql_syntax', 'constraint', 'not_found', 'bad_request',
-  'unsupported', 'local', 'unknown',
+  'unsupported', 'not_updatable', 'local', 'unknown',
 ]);
 
 /**

@@ -65,6 +65,10 @@ pub enum ErrorCode {
     BadRequest,
     /// The engine cannot do this — Redis has no transactions, Parquet no DDL.
     Unsupported,
+    /// This INSTALL cannot update itself — a deb/rpm or otherwise
+    /// package-manager-owned install. The frontend's answer is the
+    /// notify-only chip, not a failure (commands/update.rs).
+    NotUpdatable,
     /// Local filesystem, vault, or config failure.
     Local,
     /// Anything not yet classified. A wide net on purpose: better an honest
@@ -87,6 +91,7 @@ impl ErrorCode {
             ErrorCode::NotFound => "not_found",
             ErrorCode::BadRequest => "bad_request",
             ErrorCode::Unsupported => "unsupported",
+            ErrorCode::NotUpdatable => "not_updatable",
             ErrorCode::Local => "local",
             ErrorCode::Unknown => "unknown",
         }
@@ -633,7 +638,8 @@ mod tests {
             ErrorCode::Cancelled, ErrorCode::Timeout, ErrorCode::ConnectionLost,
             ErrorCode::ConnectFailed, ErrorCode::PermissionDenied, ErrorCode::GuardRefused,
             ErrorCode::SqlSyntax, ErrorCode::Constraint, ErrorCode::NotFound,
-            ErrorCode::BadRequest, ErrorCode::Unsupported, ErrorCode::Local, ErrorCode::Unknown,
+            ErrorCode::BadRequest, ErrorCode::Unsupported, ErrorCode::NotUpdatable,
+            ErrorCode::Local, ErrorCode::Unknown,
         ];
         let mut seen = std::collections::HashSet::new();
         for c in all {
@@ -713,6 +719,7 @@ mod wire_shape_tests {
             (ErrorCode::NotFound, "not_found"),
             (ErrorCode::BadRequest, "bad_request"),
             (ErrorCode::Unsupported, "unsupported"),
+            (ErrorCode::NotUpdatable, "not_updatable"),
             (ErrorCode::Local, "local"),
             (ErrorCode::Unknown, "unknown"),
         ] {

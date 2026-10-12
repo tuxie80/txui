@@ -274,6 +274,19 @@ export const PREFS = {
    * re-established before your next query hits a dead socket. On by default.
    */
   keepAlive: bool('dbgui.keepAlive', true),
+
+  // ── Updates ─────────────────────────────────────────────────────────────
+  // Gate AUTO-DOWNLOAD per version class; either way an available update
+  // still gets the passive status-bar chip (utils/updatePolicy.ts). A failed
+  // check just retries on the next launch — never a dialog.
+  /** Auto-download patch/minor updates in the background (restart prompt after). */
+  autoUpdateMinor: bool('dbgui.autoUpdateMinor', true),
+  /**
+   * Auto-download MAJOR updates. Off by default: a major can change behaviour,
+   * so it waits for a click on the status-bar chip instead of downloading
+   * itself.
+   */
+  autoUpdateMajor: bool('dbgui.autoUpdateMajor', false),
 } as const;
 
 const EVT = 'dbgui:prefs-changed';

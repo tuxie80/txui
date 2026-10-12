@@ -39,3 +39,4 @@ pub mod sqlfile;
 pub mod pgcopy;
 pub mod pglisten;
 pub mod pgwait;
+pub mod update;

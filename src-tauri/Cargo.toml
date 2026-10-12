@@ -32,6 +32,14 @@ tauri                = { version = "2.10.3", features = ["image-png"] }
 tauri-plugin-log     = "2"
 tauri-plugin-dialog  = "2"
 tauri-plugin-notification = "2"
+# Self-update (commands/update.rs): check/download/install against the
+# GitHub-release latest.json, signed with minisign (tauri.conf.json
+# plugins.updater.pubkey). `process` provides relaunch() after install.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# Only for `open()` — the status-bar update chip opens the release page in the
+# system browser (capability: shell:allow-open; no command execution).
+tauri-plugin-shell   = "2"
 
 # Async runtime
 # Enumerated instead of "full" (WP-15 15.3): the app uses the multi-thread

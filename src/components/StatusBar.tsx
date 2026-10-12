@@ -1,8 +1,11 @@
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-shell';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { usePoll } from '../hooks/usePoll';
 import { getAllActivities, useActivityVersion } from '../store/tabActivity';
 import { useSchemaScan } from '../store/schemaScan';
+import { useUpdater, cancelDownload, releaseTagUrl } from '../store/updater';
 import { collectRunningTasks } from '../utils/runningTasks';
 
 interface AppMetrics {
@@ -35,6 +38,12 @@ export function StatusBar({ sessions }: Props) {
   // must not be called during render — the 1 s poll tick and the popover-open
   // click refresh it instead (which is also exactly the freshness it needs).
   const [nowMs, setNowMs] = useState(0);
+  const [updateOpen, setUpdateOpen] = useState(false);
+
+  // Self-update chip (store/updater): ⇩ while a download runs, ↻ once the
+  // bundle is swapped and only a relaunch is left. `failed` renders nothing —
+  // the updater never opens a dialog.
+  const update = useUpdater();
 
   // hooks/usePoll with the window-level gate: a minimized window has no
   // status bar to read, so the 1 s app_metrics tick pauses while
@@ -87,6 +96,58 @@ export function StatusBar({ sessions }: Props) {
   return (
     <div className="status-bar">
       {scan && <span className="sb-scan">{scan.text}</span>}
+      {update.kind === 'available' && update.action === 'notify' && (
+        <button
+          className="sb-tasks-btn"
+          title="A new TxUI release is out — click for the release page"
+          onClick={() => { void open(releaseTagUrl(update.info.version)).catch(() => {}); }}
+        >⇩ {update.info.version} available</button>
+      )}
+      {(update.kind === 'downloading' || (update.kind === 'available' && update.action === 'auto')) && (
+        <>
+          <button
+            className="sb-tasks-btn"
+            title="Downloading the update in the background — click for details"
+            onClick={() => setUpdateOpen(o => !o)}
+          >⇩ downloading{update.kind === 'downloading' && update.pct !== null ? ` ${update.pct} %` : '…'}</button>
+          {updateOpen && (
+            <>
+              <div className="sb-tasks-backdrop" onClick={() => setUpdateOpen(false)} />
+              <div className="sb-tasks-pop">
+                <div className="sb-tasks-head">
+                  <span>
+                    Downloading TxUI {update.kind === 'available' ? update.info.version : update.version} in the background
+                  </span>
+                </div>
+                <div className="sb-task">
+                  <div className="sb-task-main">
+                    <div className="sb-task-detail">
+                      Nothing to wait on — keep working. When it is done this turns
+                      into a restart button.
+                    </div>
+                  </div>
+                  <button className="toolbar-btn sb-task-stop"
+                    onClick={() => { void open(releaseTagUrl(
+                      update.kind === 'available' ? update.info.version : update.version)).catch(() => {}); }}>
+                    Notes</button>
+                  {/* Frontend-side only — the backend finishes and installs
+                      anyway (store/updater); the chip just stops telling you. */}
+                  <button className="toolbar-btn sb-task-stop"
+                    onClick={() => { setUpdateOpen(false); cancelDownload(); }}>
+                    Cancel</button>
+                </div>
+              </div>
+            </>
+          )}
+        </>
+      )}
+      {update.kind === 'ready' && (
+        <button
+          className="sb-tasks-btn"
+          title={`Version ${update.version} is installed — restart to run it`}
+          onClick={() => { void relaunch().catch(() => {}); }}
+        >↻ Restart to {update.version}</button>
+      )}
       {rows.length > 0 && (
         <>
           <button

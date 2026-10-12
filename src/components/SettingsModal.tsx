@@ -18,6 +18,8 @@ import {
 } from '../utils/formatProfiles';
 import type { FormatProfile } from '../utils/formatProfiles';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
+import { runUpdateCheck } from '../store/updater';
 import { SecurityPanel } from './SecurityPanel';
 import { SqlTemplatesStore } from '../store/sqlTemplates';
 import type { SqlTemplate } from '../store/sqlTemplates';
@@ -26,7 +28,7 @@ import { defaultEol, shortcuts } from '../utils/platform';
 /** Shortcut labels for this platform — see utils/platform. */
 const SC = shortcuts();
 
-const TABS = ['Appearance', 'Editor', 'Connections', 'AI', 'Security', 'Safety', 'SQL templates', 'Logging'] as const;
+const TABS = ['Appearance', 'Editor', 'Connections', 'AI', 'Security', 'Safety', 'SQL templates', 'Logging', 'Updates'] as const;
 type Tab = typeof TABS[number];
 const TAB_KEY = 'dbgui.settingsTab';
 
@@ -554,9 +556,73 @@ export function SettingsModal({ onClose }: Props) {
             <p className="settings-hint">The per-connection directory is set in the connection editor → Advanced; lines are appended to &lt;dir&gt;/&lt;connection&gt;.log.</p>
           </section>
           )}
+
+          {tab === 'Updates' && <UpdatesSection />}
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Updates — self-update status and the two auto-download gates.
+ *
+ * The version comes from the Tauri runtime (AboutModal pattern), never
+ * hardcoded. "Check now" runs the same cycle the 6 h scheduler runs
+ * (store/updater): an available update lands as the status-bar chip, so the
+ * inline result just says where to look. A failed check is reported inline
+ * here because the user ASKED — the scheduled path stays silent instead.
+ */
+function UpdatesSection() {
+  const [autoMinor, setAutoMinor] = usePreference(PREFS.autoUpdateMinor);
+  const [autoMajor, setAutoMajor] = usePreference(PREFS.autoUpdateMajor);
+  const [version, setVersion] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  useEffect(() => { getVersion().then(setVersion).catch(() => {}); }, []);
+
+  const checkNow = async () => {
+    setChecking(true);
+    setResult(null);
+    try {
+      const outcome = await runUpdateCheck();
+      setResult(
+        outcome.status === 'current' ? `You're up to date (v${outcome.version}).`
+        : outcome.status === 'update' ? `Update v${outcome.version} — see the status bar at the bottom.`
+        : `Check failed: ${outcome.message}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <section className="settings-section">
+      <h3>Updates</h3>
+      <div className="settings-row">
+        <span>Current version</span>
+        <span>{version ? `v${version}` : '…'}</span>
+      </div>
+      <div className="settings-row">
+        <span>Check for updates <em>(also runs automatically after launch and every 6 hours)</em></span>
+        <button className="toolbar-btn" onClick={() => { void checkNow(); }} disabled={checking}>
+          {checking ? 'Checking…' : 'Check now'}
+        </button>
+      </div>
+      {result && <p className="settings-hint">{result}</p>}
+      <label className="settings-check">
+        <input type="checkbox" checked={autoMinor} onChange={e => setAutoMinor(e.target.checked)} />
+        <span>Download minor and patch updates automatically <em>(installed in the background; restart from the status bar)</em></span>
+      </label>
+      <label className="settings-check">
+        <input type="checkbox" checked={autoMajor} onChange={e => setAutoMajor(e.target.checked)} />
+        <span>Download major updates automatically <em>(off by default — a major can change behaviour, so it normally waits for your click)</em></span>
+      </label>
+      <p className="settings-hint">
+        Auto-install works on macOS, Windows and the Linux AppImage. A deb/rpm
+        install is owned by the package manager, so there the status bar just
+        points at the release page instead.
+      </p>
+    </section>
   );
 }
 

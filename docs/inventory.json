@@ -1679,6 +1679,16 @@
       "name": "keepAlive",
       "key": "dbgui.keepAlive",
       "default": true
+    },
+    {
+      "name": "autoUpdateMinor",
+      "key": "dbgui.autoUpdateMinor",
+      "default": true
+    },
+    {
+      "name": "autoUpdateMajor",
+      "key": "dbgui.autoUpdateMajor",
+      "default": false
     }
   ],
   "dbaViews": {
@@ -2877,7 +2887,7 @@
     "commands": 70,
     "engines": 9,
     "capabilities": 32,
-    "prefs": 36,
+    "prefs": 38,
     "dbaViews": 234
   }
 }

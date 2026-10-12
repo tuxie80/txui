@@ -33,6 +33,7 @@ import { getSessionActivities, clearSessionActivities } from './store/tabActivit
 import type { TabActivity } from './store/tabActivity';
 import { stopSessionRuns } from './store/playgroundRuns';
 import { forgetKillPickerState } from './store/killPickerState';
+import { runUpdateCheck } from './store/updater';
 import { withDeadline } from './utils/withDeadline';
 
 // Engine-specific panels split out of the initial bundle — cold start stays lean
@@ -404,6 +405,14 @@ export default function App() {
   // Background Galera cluster watches opted into earlier resume polling
   // without any panel opening (store/galeraWatch; idempotent).
   useEffect(() => { initGaleraWatches(); }, []);
+  // Self-update: one polite background check 10 s after launch, then every
+  // 6 h. Auto-download only when the Settings → Updates prefs allow the
+  // class; failures are silent and retried next cycle (store/updater).
+  useEffect(() => {
+    const first = setTimeout(() => { void runUpdateCheck(); }, 10_000);
+    const every = setInterval(() => { void runUpdateCheck(); }, 6 * 60 * 60 * 1000);
+    return () => { clearTimeout(first); clearInterval(every); };
+  }, []);
 
   // Auto-connect connections flagged auto_connect, once at launch.
   const autoConnectedRef = useRef(false);
