@@ -65,12 +65,13 @@ this project follows semantic versioning.
 
 ### Changed
 
-- **Website redesign** (tuxie.eu/txui): one restrained accent instead of
-  per-card coloured borders, ~⅓ tighter layout, the ten screenshots and nine
-  engines are now keyboard-accessible tab groups, the hero carries a
-  dot-particle database icon that reacts to the mouse (reduced-motion and
-  hidden-tab aware), and the install commands sit in terminal-style boxes
-  with working copy buttons.
+- **Website redesign** (tuxie.eu/txui): brand blue `#0000cd` with an orange
+  contrast secondary; self-hosted Space Grotesk / Inter / JetBrains Mono
+  (OFL, no CDN); the dot-particle database icon is now an ambient full-page
+  background — several glyphs drifting on slow orbits, mouse-reactive — with
+  every card floating over it in blurred glass; gradient buttons throughout.
+  Tabbed engines/screenshots, compact layout and terminal install boxes from
+  the first pass carry over.
 
 - **Version lives in exactly one place: `package.json`.** The seven other
   carriers (`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
