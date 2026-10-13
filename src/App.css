@@ -4677,6 +4677,11 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .chart-tick { fill: var(--text2); font-size: calc(10px * var(--font-scale, 1)); font-family: var(--font-mono); }
 .chart-legend { fill: var(--text); font-size: calc(11px * var(--font-scale, 1)); }
 .chart-empty { color: var(--text2); font-size: calc(13px * var(--font-scale, 1)); padding: 30px; }
+.chart-series { position: relative; }
+.chart-series-backdrop { position: fixed; inset: 0; z-index: 40; }
+.chart-series-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 41; min-width: 160px; max-height: 260px; overflow-y: auto; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 4px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); }
+.chart-series-item { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 4px; white-space: nowrap; cursor: pointer; font-size: calc(12px * var(--font-scale, 1)); color: var(--text); }
+.chart-series-item:hover { background: var(--bg3); }
 .mon-card { cursor: pointer; }
 .mon-card-active { outline: 1px solid var(--accent); }
 .mon-expanded { padding: 8px 12px; border-bottom: 1px solid var(--border); }

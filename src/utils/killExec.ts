@@ -21,12 +21,16 @@ export interface KillOutcome {
   error: string | null;
   /** exactly what the server was asked to run */
   statement: string;
+  /** ClickHouse only: the query_id that was killed (`id` is the poll-local row number) */
+  queryId?: string | null;
 }
 
 export interface KillRequest {
   sessionId: string;
   ids: number[];
   mode: KillMode;
+  /** ClickHouse kills: the query_ids, parallel to `ids`. Other engines leave this undefined. */
+  queryIds?: string[];
   /** Where it came from — ends up in the log line ("via killall") */
   source: string;
   /** Last poll, for victim detail. Threads not in it are logged as such. */
@@ -51,11 +55,12 @@ export async function executeKill(req: KillRequest): Promise<KillOutcome[]> {
   let outcomes: KillOutcome[];
   try {
     outcomes = await invoke<KillOutcome[]>('kill_processes', {
-      sessionId: req.sessionId, ids: req.ids, mode: req.mode,
+      sessionId: req.sessionId, ids: req.ids, mode: req.mode, queryIds: req.queryIds,
     });
   } catch (e) {
     // The command itself failed — log the attempt, then let the caller show it.
-    const detail = `${req.mode === 'query' ? 'KILL QUERY' : 'KILL'} ${req.ids.map(i => `#${i}`).join(',')} · FAILED: ${errorDisplay(e).replace(/\s+/g, ' ')} · via ${req.source}`;
+    const targets = req.queryIds?.length ? req.queryIds.join(',') : req.ids.map(i => `#${i}`).join(',');
+    const detail = `${req.mode === 'query' ? 'KILL QUERY' : 'KILL'} ${targets} · FAILED: ${errorDisplay(e).replace(/\s+/g, ' ')} · via ${req.source}`;
     addLog(req.sessionId, { level: 'err', action: 'KILL', detail });
     logAudit({
       started_at: started, ended_at: isoNow(), duration_ms: Date.now() - t0,

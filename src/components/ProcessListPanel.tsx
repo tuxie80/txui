@@ -58,6 +58,9 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState('');
   const [selectedPid, setSelectedPid] = useState<number | null>(null);
+  // ClickHouse rows are identified by the string query_id, not a numeric pid.
+  const isCh = engine === 'clickhouse';
+  const [selectedQid, setSelectedQid] = useState<string | null>(null);
   // Settings → Safety → Interactive kill. Off makes this a read-only monitor.
   const [interactiveKill] = usePreference(PREFS.interactiveKill);
   const [killErr, setKillErr] = useState<string | null>(null);
@@ -85,10 +88,16 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
     return result.columns.findIndex(c => /^(id|pid)$/i.test(c.name));
   }, [result]);
 
-  // Column index of the elapsed seconds: "Time" in both engines
+  // Column index of the ClickHouse query_id — the kill handle over there.
+  const qidCol = useMemo(() => {
+    if (!result || !isCh) return -1;
+    return result.columns.findIndex(c => /^query_id$/i.test(c.name));
+  }, [result, isCh]);
+
+  // Column index of the elapsed seconds: "Time" in MySQL/PG, "elapsed" in ClickHouse
   const timeCol = useMemo(() => {
     if (!result) return -1;
-    return result.columns.findIndex(c => /^time$/i.test(c.name));
+    return result.columns.findIndex(c => /^(time|elapsed)$/i.test(c.name));
   }, [result]);
 
   // Client-side filter over every cell
@@ -138,39 +147,76 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
   }, []);
 
   const handleSelection = useCallback((sel: SelRect | null) => {
+    if (isCh) {
+      if (!sel || qidCol < 0) { setSelectedQid(null); return; }
+      const row = filteredRows[sel.r1];
+      const qid = row?.[qidCol];
+      setSelectedQid(qid != null && qid !== '' ? String(qid) : null);
+      return;
+    }
     if (!sel || pidCol < 0) { setSelectedPid(null); return; }
     const row = filteredRows[sel.r1];
     const pid = row ? Number(row[pidCol]) : NaN;
     setSelectedPid(Number.isFinite(pid) ? pid : null);
-  }, [filteredRows, pidCol]);
+  }, [filteredRows, pidCol, qidCol, isCh]);
 
   /** The selected grid row as a ProcInfo, so the kill log carries its detail. */
   const selectedProc = useCallback(() => {
-    if (!result || selectedPid === null) return undefined;
-    const idx = result.columns.findIndex(c => /^(id|pid)$/i.test(c.name));
-    const row = filteredRows.find(r => idx >= 0 && Number(r[idx]) === selectedPid);
-    if (!row) return undefined;
-    const col = (re: RegExp) => {
+    if (!result) return undefined;
+    const col = (row: unknown[], re: RegExp) => {
       const i = result.columns.findIndex(c => re.test(c.name));
       return i >= 0 && row[i] != null ? String(row[i]) : '';
     };
+    if (isCh) {
+      if (selectedQid === null || qidCol < 0) return undefined;
+      const row = filteredRows.find(r => String(r[qidCol]) === selectedQid);
+      if (!row) return undefined;
+      // id 0 is unused on the ClickHouse path — the outcome is matched by position.
+      return partialProc({
+        id: 0,
+        user: col(row, /^user(name)?$/i),
+        host: col(row, /^(host|address)$/i),
+        db: col(row, /^(db|datname|database|current_database)$/i),
+        command: 'Query',
+        time: Number(col(row, /^(time|elapsed)$/i)) || 0,
+        info: col(row, /^(info|query)$/i),
+        queryId: selectedQid,
+      });
+    }
+    if (selectedPid === null) return undefined;
+    const idx = result.columns.findIndex(c => /^(id|pid)$/i.test(c.name));
+    const row = filteredRows.find(r => idx >= 0 && Number(r[idx]) === selectedPid);
+    if (!row) return undefined;
     return partialProc({
       id: selectedPid,
-      user: col(/^user(name)?$/i),
-      host: col(/^host$/i),
-      db: col(/^(db|datname|database)$/i),
-      command: col(/^(command|state)$/i),
-      time: Number(col(/^time$/i)) || 0,
-      state: col(/^(state|wait)$/i),
-      info: col(/^(info|query)$/i),
+      user: col(row, /^user(name)?$/i),
+      host: col(row, /^host$/i),
+      db: col(row, /^(db|datname|database)$/i),
+      command: col(row, /^(command|state)$/i),
+      time: Number(col(row, /^time$/i)) || 0,
+      state: col(row, /^(state|wait)$/i),
+      info: col(row, /^(info|query)$/i),
     });
-  }, [result, filteredRows, selectedPid]);
+  }, [result, filteredRows, selectedPid, selectedQid, qidCol, isCh]);
 
   async function kill(terminate: boolean) {
-    if (selectedPid === null) return;
     setKillErr(null);
     const proc = selectedProc();
     try {
+      if (isCh) {
+        if (selectedQid === null) return;
+        // ClickHouse has one kill form — KILL QUERY — so both buttons land
+        // here; the connection button is greyed below with the reason.
+        const [outcome] = await executeKill({
+          sessionId, ids: [], queryIds: [selectedQid], mode: 'query',
+          source: 'Processes panel', procs: proc ? [proc] : [],
+          connectionName, engine,
+        });
+        if (outcome && !outcome.ok) setKillErr(outcome.error ?? 'kill failed');
+        await refresh();
+        return;
+      }
+      if (selectedPid === null) return;
       // executeKill logs one line per thread (session 📓 Log + 📜 Audit).
       const [outcome] = await executeKill({
         sessionId, ids: [selectedPid], mode: terminate ? 'connection' : 'query',
@@ -251,20 +297,33 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
           <>
             <button
               className={`toolbar-btn proc-kill${killBlocked ? ' unavail' : ''}`}
-              disabled={selectedPid === null}
+              disabled={isCh ? selectedQid === null : selectedPid === null}
               aria-disabled={killBlocked ? true : undefined}
               data-tip={killBlocked ?? undefined}
               onClick={() => { if (!killBlocked) kill(false); }}
-              title={killBlocked ?? 'Abort the running statement, keep the connection (KILL QUERY / pg_cancel_backend)'}
-            >Kill query{selectedPid !== null ? ` ${selectedPid}` : ''}</button>
-            <button
-              className={`toolbar-btn proc-kill-hard${killBlocked ? ' unavail' : ''}`}
-              disabled={selectedPid === null}
-              aria-disabled={killBlocked ? true : undefined}
-              data-tip={killBlocked ?? undefined}
-              onClick={() => { if (!killBlocked) kill(true); }}
-              title={killBlocked ?? 'Terminate the whole connection (KILL / pg_terminate_backend)'}
-            >Kill connection</button>
+              title={killBlocked ?? (isCh
+                ? 'Abort the running query (KILL QUERY WHERE query_id = …)'
+                : 'Abort the running statement, keep the connection (KILL QUERY / pg_cancel_backend)')}
+            >Kill query{isCh
+              ? (selectedQid !== null ? ` ${selectedQid.slice(0, 8)}…` : '')
+              : (selectedPid !== null ? ` ${selectedPid}` : '')}</button>
+            {isCh ? (
+              <button
+                className="toolbar-btn proc-kill-hard unavail"
+                aria-disabled
+                data-tip="ClickHouse has no connection to kill: queries arrive over stateless HTTP requests, so KILL QUERY (left) is the only kill form"
+                onClick={() => {}}
+              >Kill connection</button>
+            ) : (
+              <button
+                className={`toolbar-btn proc-kill-hard${killBlocked ? ' unavail' : ''}`}
+                disabled={selectedPid === null}
+                aria-disabled={killBlocked ? true : undefined}
+                data-tip={killBlocked ?? undefined}
+                onClick={() => { if (!killBlocked) kill(true); }}
+                title={killBlocked ?? 'Terminate the whole connection (KILL / pg_terminate_backend)'}
+              >Kill connection</button>
+            )}
           </>
         ) : (
           <span className="proc-monitor-note" title="Interactive kill is off (Settings → Safety)">monitor only</span>

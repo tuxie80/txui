@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::db::connection::get_session_pub;
 use crate::db::types::{LiveSession, QueryResult};
-use crate::db::{mysql, postgres, redis};
+use crate::db::{clickhouse, mysql, postgres, redis};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +45,10 @@ pub struct ProcInfo {
     pub is_self: bool,
     /// Server-internal thread (event scheduler, binlog dump, autovacuum, …)
     pub is_system: bool,
+    /// ClickHouse only: the server-side `query_id` the kill is addressed by.
+    /// `id` above is then only a poll-local row number — the string is the
+    /// real handle, and `kill_processes` wants it back in `queryIds`.
+    pub query_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +59,9 @@ pub struct KillOutcome {
     pub error: Option<String>,
     /// The exact statement issued — the UI logs it verbatim
     pub statement: String,
+    /// ClickHouse only: the query_id that was killed (`id` is the poll-local
+    /// row number the caller passed alongside).
+    pub query_id: Option<String>,
 }
 
 // ── SQL ───────────────────────────────────────────────────────────────────────
@@ -205,6 +212,25 @@ FROM pg_stat_activity a ORDER BY t DESC LIMIT 500";
 // ^ same server-side cap as the MySQL path (PROCS_LIMIT): applied AFTER the
 // ordering, so what arrives is the top of the list, not an arbitrary slice.
 
+/// ClickHouse kill candidates: `system.processes` lists only RUNNING queries
+/// (there are no idle connections over the stateless HTTP interface), so no
+/// idle filter exists here. `elapsed` is fractional seconds; `is_cancelled`
+/// marks a query already killed but not yet gone.
+const CH_CANDIDATES_SQL: &str = "\
+SELECT query_id, user, address, current_database, \
+       toUInt64(elapsed) AS elapsed, is_cancelled, \
+       substring(query, 1, 512) AS query \
+FROM system.processes ORDER BY elapsed DESC LIMIT 500";
+
+/// The displayed form of a ClickHouse kill, for the log/audit line. The
+/// statement actually sent binds the id as a server-side parameter
+/// (`clickhouse::kill_query`) — this literal rendering is what the user is
+/// shown they asked for, so quote it the way ClickHouse would.
+fn ch_kill_statement(query_id: &str) -> String {
+    let escaped = query_id.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("KILL QUERY WHERE query_id = '{escaped}' ASYNC")
+}
+
 // ── value helpers (rows arrive as serde_json values from db::*::execute) ──────
 
 fn v_u64(v: &serde_json::Value) -> u64 {
@@ -331,6 +357,7 @@ pub async fn kill_candidates(
                     blocking: Vec::new(),
                     blocked_by: Vec::new(),
                     is_self: id == self_id,
+                    query_id: None,
                 }
             }).collect();
 
@@ -388,6 +415,7 @@ pub async fn kill_candidates(
                     blocked_by: Vec::new(),
                     is_self,
                     is_system: pg_is_system(&backend_type),
+                    query_id: None,
                 }
             }).collect();
             apply_wait_graph(&mut out, &pairs);
@@ -438,6 +466,7 @@ pub async fn kill_candidates(
                     is_self: id != 0 && id == self_id,
                     // Replica links and AOF/RDB children are not client work.
                     is_system: get(row, "flags").contains('S') || get(row, "flags").contains('M'),
+                    query_id: None,
                 }
             }).collect();
             // Longest-idle first, same ordering contract as the SQL engines.
@@ -482,6 +511,7 @@ pub async fn kill_candidates(
                     is_self: own.contains(&id),
                     // Internal ops have no client address.
                     is_system: get(row, "client").is_empty(),
+                    query_id: None,
                 });
             }
             out.sort_by_key(|p| std::cmp::Reverse(p.time));
@@ -528,16 +558,52 @@ pub async fn kill_candidates(
                     // is_user_process = 1 is filtered in SQL — these are all
                     // client sessions.
                     is_system: false,
+                    query_id: None,
                 }
             }).collect();
             apply_wait_graph(&mut out, &pairs);
             Ok(out)
         }
         // ClickHouse identifies a running query by a STRING query_id, not a
-        // numeric thread id, so it does not fit ProcInfo's u64 id. The
-        // processes panel shows system.processes instead (see ops.rs).
-        LiveSession::Clickhouse(_) => Err(
-            "ClickHouse queries are identified by query_id (a string), not a numeric thread              id — use the processes panel, then KILL QUERY WHERE query_id = '…'".into()),
+        // numeric thread id. The numeric `id` here is only a poll-local row
+        // number so the picker has something to sort and display; the real
+        // handle travels in `query_id`, and `kill_processes` wants it back in
+        // `queryIds`. There is no wait graph: system.processes does not say
+        // who blocks whom.
+        LiveSession::Clickhouse(s) => {
+            let r = clickhouse::execute(s, CH_CANDIDATES_SQL).await?;
+            // TxUI's own in-flight queries (the ones the Stop button cancels)
+            // are marked is_self, same contract as the other engines: killing
+            // them from the picker is refused.
+            let own: std::collections::HashSet<String> =
+                state.ch_kills.read().await.values().cloned().collect();
+            let mut out: Vec<ProcInfo> = Vec::new();
+            for row in &r.rows {
+                let qid = v_str(&cell(row, 0));
+                if qid.is_empty() { continue; }
+                out.push(ProcInfo {
+                    id: (out.len() + 1) as u64,
+                    user: v_str(&cell(row, 1)),
+                    host: v_str(&cell(row, 2)),
+                    db: v_str(&cell(row, 3)),
+                    command: "Query".into(),
+                    time: v_i64(&cell(row, 4)),
+                    state: if v_i64(&cell(row, 5)) != 0 { "cancelling".into() } else { String::new() },
+                    info: v_str(&cell(row, 6)),
+                    trx_age: -1,           // ClickHouse has no transactions
+                    rows_locked: 0,
+                    trx_state: String::new(),
+                    blocking: Vec::new(),
+                    blocked_by: Vec::new(),
+                    is_self: own.contains(&qid),
+                    // system.processes lists client queries; background merges
+                    // and mutations do not appear here.
+                    is_system: false,
+                    query_id: Some(qid),
+                });
+            }
+            Ok(out)
+        }
         // Nothing to enumerate: these run inside this process.
         LiveSession::Sqlite(_) | LiveSession::Parquet(_) | LiveSession::Duckdb(_) => Ok(Vec::new()),
     }
@@ -562,14 +628,20 @@ fn apply_wait_graph(procs: &mut [ProcInfo], pairs: &[(u64, u64)]) {
 /// Kill a batch of backends. `mode` = "query" (abort the statement, keep the
 /// connection: KILL QUERY / pg_cancel_backend) or "connection" (drop it:
 /// KILL / pg_terminate_backend). Never kills the connection doing the killing.
+///
+/// ClickHouse is addressed differently: its queries have string `query_id`s,
+/// passed in `query_ids` (parallel to `ids`, which then carries the
+/// poll-local row numbers the outcomes echo back). Both modes issue the same
+/// KILL QUERY — the HTTP interface has no connection to terminate.
 #[tauri::command]
 pub async fn kill_processes(
     session_id: Uuid,
     ids: Vec<u64>,
     mode: String,
+    query_ids: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<Vec<KillOutcome>, crate::apperror::AppError> {
-    do_kill_processes(&state, session_id, ids, mode).await
+    do_kill_processes(&state, session_id, ids, mode, query_ids).await
 }
 
 /// The kill body, shared with `galera_cluster_kill` — there is ONE kill
@@ -581,6 +653,7 @@ pub(crate) async fn do_kill_processes(
     session_id: Uuid,
     ids: Vec<u64>,
     mode: String,
+    query_ids: Option<Vec<String>>,
 ) -> Result<Vec<KillOutcome>, crate::apperror::AppError> {
     let terminate = mode != "query";
     // Killing a backend is a destructive server-side action, so a read-only
@@ -604,12 +677,13 @@ pub(crate) async fn do_kill_processes(
                 let stmt = if terminate { format!("KILL {}", id) } else { format!("KILL QUERY {}", id) };
                 if id == self_id {
                     out.push(KillOutcome { id, ok: false, statement: stmt,
-                        error: Some("refused: that is TxUI's own connection".into()) });
+                        error: Some("refused: that is TxUI's own connection".into()),
+                        query_id: None });
                     continue;
                 }
                 match sqlx::query(AssertSqlSafe(stmt.clone())).execute(&mut *conn).await {
-                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None, statement: stmt }),
-                    Err(e) => out.push(KillOutcome { id, ok: false, error: Some(e.to_string()), statement: stmt }),
+                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None, statement: stmt, query_id: None }),
+                    Err(e) => out.push(KillOutcome { id, ok: false, error: Some(e.to_string()), statement: stmt, query_id: None }),
                 }
             }
         }
@@ -622,14 +696,15 @@ pub(crate) async fn do_kill_processes(
                 let stmt = format!("SELECT {}({})", func, id);
                 if id == self_pid as u64 {
                     out.push(KillOutcome { id, ok: false, statement: stmt,
-                        error: Some("refused: that is TxUI's own backend".into()) });
+                        error: Some("refused: that is TxUI's own backend".into()),
+                        query_id: None });
                     continue;
                 }
                 match sqlx::query(AssertSqlSafe(format!("SELECT {}($1)", func)))
                     .bind(id as i32).execute(&mut *conn).await
                 {
-                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None, statement: stmt }),
-                    Err(e) => out.push(KillOutcome { id, ok: false, error: Some(e.to_string()), statement: stmt }),
+                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None, statement: stmt, query_id: None }),
+                    Err(e) => out.push(KillOutcome { id, ok: false, error: Some(e.to_string()), statement: stmt, query_id: None }),
                 }
             }
         }
@@ -645,18 +720,19 @@ pub(crate) async fn do_kill_processes(
                 let stmt = format!("CLIENT KILL ID {}", id);
                 if self_id >= 0 && id == self_id as u64 {
                     out.push(KillOutcome { id, ok: false, statement: stmt,
-                        error: Some("refused: that is TxUI's own connection".into()) });
+                        error: Some("refused: that is TxUI's own connection".into()),
+                        query_id: None });
                     continue;
                 }
                 let killed: Result<i64, _> = ::redis::cmd("CLIENT")
                     .arg("KILL").arg("ID").arg(id)
                     .query_async(&mut m).await;
                 match killed {
-                    Ok(1) => out.push(KillOutcome { id, ok: true, error: None, statement: stmt }),
+                    Ok(1) => out.push(KillOutcome { id, ok: true, error: None, statement: stmt, query_id: None }),
                     Ok(_) => out.push(KillOutcome { id, ok: false, statement: stmt,
-                        error: Some("no client with that id (already gone?)".into()) }),
+                        error: Some("no client with that id (already gone?)".into()), query_id: None }),
                     Err(e) => out.push(KillOutcome { id, ok: false,
-                        error: Some(e.to_string()), statement: stmt }),
+                        error: Some(e.to_string()), statement: stmt, query_id: None }),
                 }
             }
             let _ = terminate; // Redis cannot cancel a command, only the client
@@ -672,13 +748,14 @@ pub(crate) async fn do_kill_processes(
                 let stmt = format!("db.killOp({})", id);
                 if own.contains(&id) {
                     out.push(KillOutcome { id, ok: false, statement: stmt,
-                        error: Some("refused: that is TxUI's own operation".into()) });
+                        error: Some("refused: that is TxUI's own operation".into()),
+                        query_id: None });
                     continue;
                 }
                 match crate::db::mongodb::kill_op(client, id).await {
-                    Ok(_)  => out.push(KillOutcome { id, ok: true, error: None, statement: stmt }),
+                    Ok(_)  => out.push(KillOutcome { id, ok: true, error: None, statement: stmt, query_id: None }),
                     Err(e) => out.push(KillOutcome { id, ok: false,
-                        error: Some(e.to_string()), statement: stmt }),
+                        error: Some(e.to_string()), statement: stmt, query_id: None }),
                 }
             }
             let _ = terminate;
@@ -696,19 +773,57 @@ pub(crate) async fn do_kill_processes(
                 let stmt = format!("KILL {}", id);
                 if self_id != 0 && id == self_id {
                     out.push(KillOutcome { id, ok: false, statement: stmt,
-                        error: Some("refused: that is TxUI's own session".into()) });
+                        error: Some("refused: that is TxUI's own session".into()),
+                        query_id: None });
                     continue;
                 }
                 match crate::db::sqlserver::execute(s, &stmt).await {
-                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None, statement: stmt }),
+                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None, statement: stmt, query_id: None }),
                     Err(e) => out.push(KillOutcome { id, ok: false,
-                        error: Some(e.to_string()), statement: stmt }),
+                        error: Some(e.to_string()), statement: stmt, query_id: None }),
                 }
             }
             let _ = terminate;
         }
-        LiveSession::Clickhouse(_) => return Err(
-            "ClickHouse kills are addressed by query_id — run              KILL QUERY WHERE query_id = '…' from the editor".into()),
+        LiveSession::Clickhouse(s) => {
+            // KILL QUERY is addressed by the string query_id — the numeric
+            // `ids` are only the poll-local row numbers `kill_candidates`
+            // assigned, echoed back in the outcomes so the caller can match
+            // them to its rows. When the two lists are parallel (the kill
+            // popup sends both), outcome.id is that row number; otherwise 0.
+            let qids = query_ids.unwrap_or_default();
+            if qids.is_empty() {
+                return Err(
+                    "ClickHouse kills are addressed by query_id — pass queryIds (the Processes panel and kill popup do)".into());
+            }
+            // TxUI's own in-flight queries belong to the editor's Stop
+            // button, which already cancels them — same self-kill refusal
+            // the other engines give their own connection.
+            let own: std::collections::HashSet<String> =
+                state.ch_kills.read().await.values().cloned().collect();
+            for (i, qid) in qids.iter().enumerate() {
+                let id = if ids.len() == qids.len() { ids[i] } else { 0 };
+                let stmt = ch_kill_statement(qid);
+                if own.contains(qid) {
+                    out.push(KillOutcome { id, ok: false, statement: stmt,
+                        error: Some("refused: that is TxUI's own query — use the editor's Stop button".into()),
+                        query_id: Some(qid.clone()) });
+                    continue;
+                }
+                match clickhouse::kill_query(s, qid).await {
+                    Ok(_)  => out.push(KillOutcome { id, ok: true,  error: None,
+                        statement: stmt, query_id: Some(qid.clone()) }),
+                    Err(e) => out.push(KillOutcome { id, ok: false,
+                        error: Some(e.to_string()),
+                        statement: stmt, query_id: Some(qid.clone()) }),
+                }
+            }
+            // Both modes stop the query: the HTTP interface is stateless, so
+            // there is no persistent connection a "connection" kill could
+            // drop. Like Redis and SQL Server, the caller is not offered a
+            // distinction the engine does not have.
+            let _ = terminate;
+        }
         LiveSession::Sqlite(_) | LiveSession::Parquet(_) | LiveSession::Duckdb(_) => return Err(
             "a file-backed engine has no server-side sessions to kill".into()),
     }
@@ -725,7 +840,7 @@ mod tests {
             id, user: "u".into(), host: "h".into(), db: "d".into(), command: "Query".into(),
             time: 1, state: String::new(), info: String::new(), trx_age: -1, rows_locked: 0,
             trx_state: String::new(), blocking: vec![], blocked_by: vec![],
-            is_self: false, is_system: false,
+            is_self: false, is_system: false, query_id: None,
         }
     }
 
@@ -762,6 +877,28 @@ mod tests {
         assert!(pg_is_system("autovacuum worker"));
         assert!(!pg_is_system("client backend"));
         assert!(!pg_is_system(""));
+    }
+
+    #[test]
+    fn ch_candidates_are_capped_server_side_after_the_ordering() {
+        // Same contract as the MySQL processlist: the LIMIT follows the ORDER
+        // BY so the top of the list arrives, not an arbitrary slice.
+        let order = CH_CANDIDATES_SQL.find("ORDER BY").expect("ordered");
+        let limit = CH_CANDIDATES_SQL.find("LIMIT").expect("capped");
+        assert!(order < limit, "{CH_CANDIDATES_SQL}");
+        // The string query_id is the whole point — it is what the kill is
+        // addressed by, so it must be the first column the arm reads.
+        assert!(CH_CANDIDATES_SQL.starts_with("SELECT query_id,"), "{CH_CANDIDATES_SQL}");
+    }
+
+    #[test]
+    fn ch_kill_statement_quotes_the_query_id() {
+        // Display-only (the wire statement binds a parameter), but the log and
+        // audit lines show this verbatim, so it must be valid ClickHouse.
+        assert_eq!(ch_kill_statement("abc-123"),
+            "KILL QUERY WHERE query_id = 'abc-123' ASYNC");
+        assert_eq!(ch_kill_statement("it's \\ tricky"),
+            "KILL QUERY WHERE query_id = 'it\\'s \\\\ tricky' ASYNC");
     }
 }
 

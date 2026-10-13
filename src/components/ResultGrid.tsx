@@ -229,7 +229,7 @@ export function ResultGrid({ result, engine, apiOutRef }: Props) {
         )}
         {showPivot && (
           <div style={{ flex: 1, minWidth: 0, display: 'flex' }}>
-            <ResultPivot columns={result.columns} rows={sortedRows} />
+            <ResultPivot columns={result.columns} rows={sortedRows} engine={engine} />
           </div>
         )}
         <div style={{ flex: 1, minWidth: 0, display: showChart || showPivot ? 'none' : 'flex' }}>

@@ -83,3 +83,61 @@ test('aggLabel names the aggregate', () => {
   assert.equal(aggLabel('sum', 'amount'), 'sum(amount)');
   assert.equal(aggLabel('avg', null), 'count');  // no value column → count
 });
+
+test('decimal-looking strings fold into the arithmetic, not NaN', () => {
+  const data = {
+    columns: ['r', 'v'],
+    rows: [['x', '10.50'], ['x', '0.5'], ['x', null]] as unknown[][],
+  };
+  // DECIMAL arrives as a string from the drivers; NULL stays out of the maths.
+  assert.deepEqual(pivot({ ...data, rowDims: ['r'], colDim: null, valueCol: 'v', agg: 'sum' }).rows, [['x', 11]]);
+  assert.deepEqual(pivot({ ...data, rowDims: ['r'], colDim: null, valueCol: 'v', agg: 'avg' }).rows, [['x', 5.5]]);
+  // count still counts every row, NULL included.
+  assert.deepEqual(pivot({ ...data, rowDims: ['r'], colDim: null, valueCol: 'v', agg: 'count' }).rows, [['x', 3]]);
+});
+
+test('non-numeric values are skipped, not folded in as zero', () => {
+  const data = {
+    columns: ['r', 'v'],
+    rows: [['x', 10], ['x', 'n/a'], ['x', null]] as unknown[][],
+  };
+  const r = pivot({ ...data, rowDims: ['r'], colDim: null, valueCol: 'v', agg: 'avg' });
+  assert.deepEqual(r.rows, [['x', 10]]);   // avg over the one numeric value
+});
+
+test('past maxCols the rarest values fold into (other), totals intact', () => {
+  const data = {
+    columns: ['r', 'c'],
+    rows: [
+      ['x', 'a'], ['x', 'a'], ['x', 'a'],
+      ['x', 'b'], ['x', 'b'],
+      ['x', 'c'],
+      ['x', 'd'],
+    ] as unknown[][],
+  };
+  const r = pivot({ ...data, rowDims: ['r'], colDim: 'c', valueCol: null, agg: 'count', maxCols: 3 });
+  assert.equal(r.foldedCols, 2);
+  assert.deepEqual(r.columns, ['r', 'a', 'b', '(other)']);   // top 2 kept, c+d folded
+  assert.deepEqual(r.rows, [['x', 3, 2, 2]]);                 // 3+2+2 = 7 rows
+});
+
+test('(other) sums the folded cells, and a group without them stays null', () => {
+  const data = {
+    columns: ['r', 'c', 'v'],
+    rows: [
+      ['x', 'a', 1], ['x', 'b', 10], ['x', 'c', 100],
+      ['y', 'a', 2],
+    ] as unknown[][],
+  };
+  const r = pivot({ ...data, rowDims: ['r'], colDim: 'c', valueCol: 'v', agg: 'sum', maxCols: 2 });
+  assert.equal(r.foldedCols, 2);
+  // 'a' is the most frequent (2 rows) and survives; b+c fold into (other).
+  assert.deepEqual(r.columns, ['r', 'a', '(other)']);
+  assert.deepEqual(r.rows, [['x', 1, 110], ['y', 2, null]]);
+});
+
+test('no fold at or under the cap', () => {
+  const r = pivot(spec({ rowDims: ['region'], colDim: 'product', agg: 'sum', maxCols: 2 }));
+  assert.equal(r.foldedCols, 0);
+  assert.deepEqual(r.columns, ['region', 'a', 'b']);
+});

@@ -654,7 +654,9 @@ pub(crate) async fn cluster_kill(
     }
 
     let session_id = super::connections::open_session_for_config(config, state).await?;
-    let result = super::kill::do_kill_processes(state, session_id, vec![id], mode).await;
+    // Galera nodes are MySQL-family: numeric thread ids, no ClickHouse
+    // query_ids, hence the trailing None.
+    let result = super::kill::do_kill_processes(state, session_id, vec![id], mode, None).await;
 
     // Tear down the ephemeral session + tunnel + kill handle + guard — the
     // same four registries poll_one_config cleans, so nothing leaks, kill or

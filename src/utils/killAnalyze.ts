@@ -36,6 +36,12 @@ export interface ProcInfo {
   blockedBy: number[];
   isSelf: boolean;
   isSystem: boolean;
+  /**
+   * ClickHouse only: the server-side query_id the kill is addressed by.
+   * `id` is then only a poll-local row number — this string is the real
+   * handle, passed back to kill_processes as `queryIds`.
+   */
+  queryId?: string;
 }
 
 export type KillMode = 'query' | 'connection';
@@ -224,7 +230,7 @@ export function families(procs: ProcInfo[], hist?: History): Family[] {
   for (const p of procs) {
     const d = digest(p.info);
     if (!d) continue;                                  // no statement = no family
-    const key = `${p.user} ${p.db} ${d}`;
+    const key = `${p.user}\x00${p.db}\x00${d}`;
     let f = map.get(key);
     if (!f) {
       f = { key, user: p.user, db: p.db, digest: d, label: oneLine(p.info, 90),

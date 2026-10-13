@@ -2,13 +2,22 @@
  * 📊 Charts over the current result — dependency-free SVG.
  * - bar / pie: aggregate rows by the X column (sum of Y, or row count),
  *   top-30 categories, the rest folded into "(other)".
- * - line / area: Y series in row order (or against X), sampled to ≤2000 points.
+ * - line / area: one or more Y series in row order (or against X), sampled to
+ *   ≤2000 points per series.
+ * - scatter: two numeric columns, points on a plane; multiple Y series share
+ *   the one X column and are told apart by colour.
+ * The X column and the Y series are explicit pickers; the defaults are only
+ * an inference (first text column for X, first numeric for Y), never a lock.
  * Colors ride the theme's CSS variables, so charts follow every theme.
  * SeriesChart is exported for the Monitor panel's expanded metric view.
+ * The math — inference, aggregation, sampling, ranges — lives in
+ * utils/chartData.ts and is unit-tested; this file keeps the drawing.
  */
 import { useMemo, useRef, useState } from 'react';
 import type { ColumnInfo } from '../types';
-import { cellText } from '../utils/exporters';
+import {
+  COUNT, aggregateCategories, lineSeries, niceRange, numericCols, scatterPoints,
+} from '../utils/chartData';
 import {
   downloadBlob, downloadSvg, liveSvgToString, svgToPng, themeFromDocument,
 } from '../utils/erExport';
@@ -17,11 +26,8 @@ const PALETTE = [
   'var(--accent)', 'var(--green)', 'var(--yellow)', 'var(--red)',
   '#b06ce0', '#50c8c8', '#e07a9e', '#808a9a', '#e0894a', '#7aa0e0',
 ];
-const COUNT = -1;               // pseudo Y column: count rows per category
-const MAX_CATS = 30;
-const MAX_POINTS = 2000;
 
-type ChartType = 'bar' | 'line' | 'area' | 'pie';
+type ChartType = 'bar' | 'line' | 'area' | 'pie' | 'scatter';
 
 const fmt = (n: number): string => {
   if (!Number.isFinite(n)) return '';
@@ -32,31 +38,37 @@ const fmt = (n: number): string => {
   return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 };
 
-function toNum(v: unknown): number | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  const n = Number(String(v));
-  return Number.isFinite(n) && String(v).trim() !== '' ? n : null;
-}
-
-/** Columns where most non-null sampled values parse as numbers. */
-function numericCols(columns: ColumnInfo[], rows: unknown[][]): boolean[] {
-  const sample = rows.slice(0, 200);
-  return columns.map((_, ci) => {
-    let num = 0, seen = 0;
-    for (const r of sample) {
-      const v = r[ci];
-      if (v === null || v === undefined) continue;
-      seen++;
-      if (toNum(v) !== null) num++;
-    }
-    return seen > 0 && num / seen > 0.7;
-  });
-}
-
 // ── Shared series line/area chart (also used by MonitorPanel) ─────────────────
 
 export interface Series { name: string; points: number[]; color?: string }
+
+/** One row of swatches at the top of a chart, left to right, clipped at the
+ *  plot edge. Drawn only when there is more than one series to tell apart. */
+function ChartLegend({ items, marker }: {
+  items: { name: string; color: string }[];
+  marker: 'line' | 'dot';
+}) {
+  let lx = 56;
+  const laid: { name: string; color: string; x: number }[] = [];
+  for (const it of items) {
+    const w = 22 + Math.min(it.name.length, 18) * 6.2;
+    if (lx + w > 848) break;
+    laid.push({ name: it.name.slice(0, 18), color: it.color, x: lx });
+    lx += w;
+  }
+  return (
+    <g>
+      {laid.map((it, i) => (
+        <g key={i}>
+          {marker === 'line'
+            ? <line x1={it.x} x2={it.x + 14} y1={12} y2={12} stroke={it.color} strokeWidth={2.5} />
+            : <circle cx={it.x + 7} cy={12} r={3.5} fill={it.color} />}
+          <text x={it.x + 18} y={15} className="chart-legend">{it.name}</text>
+        </g>
+      ))}
+    </g>
+  );
+}
 
 export function SeriesChart({ series, labels, area, height = 320 }: {
   series: Series[];
@@ -65,13 +77,11 @@ export function SeriesChart({ series, labels, area, height = 320 }: {
   area?: boolean;
   height?: number;
 }) {
-  const W = 860, H = height, padL = 56, padR = 12, padT = 12, padB = 26;
+  const W = 860, H = height, padL = 56, padR = 12, padT = series.length > 1 ? 30 : 12, padB = 26;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const all = series.flatMap(s => s.points).filter(Number.isFinite);
   if (all.length === 0) return <div className="chart-empty">No numeric data to plot.</div>;
-  let min = Math.min(...all), max = Math.max(...all);
-  if (min === max) { min -= 1; max += 1; }
-  if (min > 0 && min / max < 0.35) min = 0; // anchor near-zero ranges at 0
+  const [min, max] = niceRange(Math.min(...all), Math.max(...all));
   const n = Math.max(...series.map(s => s.points.length));
   const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const y = (v: number) => padT + plotH - ((v - min) / (max - min)) * plotH;
@@ -94,6 +104,12 @@ export function SeriesChart({ series, labels, area, height = 320 }: {
           {String(labels[i] ?? '').slice(0, 12)}
         </text>
       ))}
+      {series.length > 1 && (
+        <ChartLegend
+          marker="line"
+          items={series.map((s, si) => ({ name: s.name, color: s.color ?? PALETTE[si % PALETTE.length] }))}
+        />
+      )}
       {series.map((s, si) => {
         const color = s.color ?? PALETTE[si % PALETTE.length];
         const pts = s.points.map((v, i) => `${x(i)},${y(v)}`).join(' ');
@@ -123,42 +139,49 @@ interface Props {
 }
 
 export function ResultChart({ columns, rows }: Props) {
-  const numeric = useMemo(() => numericCols(columns, rows), [columns, rows]);
+  const numeric = useMemo(() => numericCols(columns.length, rows), [columns, rows]);
   const firstText = Math.max(0, columns.findIndex((_, i) => !numeric[i]));
   const firstNum = columns.findIndex((_, i) => numeric[i]);
+  const secondNum = columns.findIndex((_, i) => numeric[i] && i !== firstNum);
 
   const [type, setType] = useState<ChartType>('bar');
   const [xCol, setXCol] = useState(firstText);
   const [yCol, setYCol] = useState(firstNum >= 0 ? firstNum : COUNT);
+  // Explicit series picks, per chart family — line/area and scatter remember
+  // their own lists so switching chart types does not lose a pick.
+  const [lineCols, setLineCols] = useState<number[]>(firstNum >= 0 ? [firstNum] : []);
+  const [sxCol, setSxCol] = useState(firstNum >= 0 ? firstNum : 0);
+  const [scatCols, setScatCols] = useState<number[]>(
+    secondNum >= 0 ? [secondNum] : (firstNum >= 0 ? [firstNum] : []));
 
   // bar/pie: aggregate by category
-  const cats = useMemo(() => {
-    if (type !== 'bar' && type !== 'pie') return null;
-    const agg = new Map<string, number>();
-    for (const r of rows) {
-      const k = cellText(r[xCol]);
-      const v = yCol === COUNT ? 1 : (toNum(r[yCol]) ?? 0);
-      agg.set(k, (agg.get(k) ?? 0) + v);
-    }
-    const sorted = [...agg.entries()].sort((a, b) => b[1] - a[1]);
-    if (sorted.length > MAX_CATS) {
-      const rest = sorted.slice(MAX_CATS - 1).reduce((s, [, v]) => s + v, 0);
-      return [...sorted.slice(0, MAX_CATS - 1), ['(other)', rest] as [string, number]];
-    }
-    return sorted;
-  }, [type, rows, xCol, yCol]);
+  const cats = useMemo(
+    () => (type === 'bar' || type === 'pie' ? aggregateCategories(rows, xCol, yCol) : null),
+    [type, rows, xCol, yCol]);
 
   // line/area: sampled row-order series
-  const lineData = useMemo(() => {
-    if (type !== 'line' && type !== 'area') return null;
-    const stride = Math.max(1, Math.ceil(rows.length / MAX_POINTS));
-    const sampled = stride === 1 ? rows : rows.filter((_, i) => i % stride === 0);
-    const points = sampled.map(r => (yCol === COUNT ? 1 : toNum(r[yCol]) ?? NaN)).filter(Number.isFinite);
-    const labels = sampled.map(r => cellText(r[xCol]));
-    return { points, labels, stride };
-  }, [type, rows, xCol, yCol]);
+  const lineData = useMemo(
+    () => (type === 'line' || type === 'area' ? lineSeries(rows, xCol, lineCols) : null),
+    [type, rows, xCol, lineCols]);
 
-  const yName = yCol === COUNT ? 'count(*)' : columns[yCol]?.name ?? '';
+  // scatter: one point set per picked Y column against the shared numeric X
+  const scatData = useMemo(
+    () => (type === 'scatter'
+      ? scatCols.map((ci, si) => ({
+        name: columns[ci]?.name ?? '',
+        color: PALETTE[si % PALETTE.length],
+        ...scatterPoints(rows, sxCol, ci),
+      }))
+      : null),
+    [type, rows, sxCol, scatCols, columns]);
+
+  const yName = type === 'line' || type === 'area'
+    ? columns[lineCols[0]]?.name ?? ''
+    : yCol === COUNT ? 'count(*)' : columns[yCol]?.name ?? '';
+  const chartTitle = type === 'scatter'
+    ? `${scatCols.map(ci => columns[ci]?.name ?? '').join(', ')} by ${columns[sxCol]?.name ?? ''}`
+    : `${yName} by ${columns[xCol]?.name ?? ''}`;
+  const stride = lineData?.stride ?? scatData?.[0]?.stride ?? 1;
 
   // Export the chart that is currently on screen. The sub-charts each render
   // their own <svg>, so rather than plumb a ref through every one we read the
@@ -175,7 +198,7 @@ export function ResultChart({ columns, rows }: Props) {
     try {
       const svg = liveSvgToString(svgEl as SVGSVGElement, {
         background: themeFromDocument(bodyRef.current).bg,
-        title: `${yName} by ${columns[xCol]?.name ?? ''}`,
+        title: chartTitle,
       });
       if (kind === 'svg') {
         downloadSvg(svg, 'chart.svg');
@@ -191,26 +214,44 @@ export function ResultChart({ columns, rows }: Props) {
   return (
     <div className="chart-wrap">
       <div className="chart-toolbar">
-        {(['bar', 'line', 'area', 'pie'] as ChartType[]).map(t => (
+        {(['bar', 'line', 'area', 'pie', 'scatter'] as ChartType[]).map(t => (
           <button key={t} className={`toolbar-btn ${type === t ? 'active' : ''}`} onClick={() => setType(t)}>
-            {t === 'bar' ? '▮ bar' : t === 'line' ? '╱ line' : t === 'area' ? '◪ area' : '◔ pie'}
+            {t === 'bar' ? '▮ bar' : t === 'line' ? '╱ line' : t === 'area' ? '◪ area' : t === 'pie' ? '◔ pie' : '⋯ scatter'}
           </button>
         ))}
-        <label className="chart-pick">
-          <span>{type === 'line' || type === 'area' ? 'label' : 'category'}</span>
-          <select value={xCol} onChange={e => setXCol(Number(e.target.value))}>
-            {columns.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
-          </select>
-        </label>
-        <label className="chart-pick">
-          <span>value</span>
-          <select value={yCol} onChange={e => setYCol(Number(e.target.value))}>
-            <option value={COUNT}>count(*)</option>
-            {columns.map((c, i) => numeric[i] && <option key={c.name} value={i}>{c.name}</option>)}
-          </select>
-        </label>
-        {lineData && lineData.stride > 1 && (
-          <span className="chart-note">sampled 1:{lineData.stride}</span>
+        {type !== 'scatter' && (
+          <label className="chart-pick">
+            <span>{type === 'line' || type === 'area' ? 'label' : 'category'}</span>
+            <select value={xCol} onChange={e => setXCol(Number(e.target.value))}>
+              {columns.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+            </select>
+          </label>
+        )}
+        {type === 'scatter' && (
+          <label className="chart-pick">
+            <span>x</span>
+            <select value={sxCol} onChange={e => setSxCol(Number(e.target.value))}>
+              {columns.map((c, i) => numeric[i] && <option key={c.name} value={i}>{c.name}</option>)}
+            </select>
+          </label>
+        )}
+        {(type === 'bar' || type === 'pie') && (
+          <label className="chart-pick">
+            <span>value</span>
+            <select value={yCol} onChange={e => setYCol(Number(e.target.value))}>
+              <option value={COUNT}>count(*)</option>
+              {columns.map((c, i) => numeric[i] && <option key={c.name} value={i}>{c.name}</option>)}
+            </select>
+          </label>
+        )}
+        {(type === 'line' || type === 'area') && (
+          <SeriesPicker columns={columns} numeric={numeric} selected={lineCols} onChange={setLineCols} />
+        )}
+        {type === 'scatter' && (
+          <SeriesPicker columns={columns} numeric={numeric} selected={scatCols} onChange={setScatCols} />
+        )}
+        {stride > 1 && (
+          <span className="chart-note">sampled 1:{stride}</span>
         )}
         <div style={{ flex: 1 }} />
         <button className="toolbar-btn" title="Download this chart as an SVG"
@@ -226,13 +267,101 @@ export function ResultChart({ columns, rows }: Props) {
         {type === 'pie' && cats && <PieChart cats={cats} yName={yName} />}
         {(type === 'line' || type === 'area') && lineData && (
           <SeriesChart
-            series={[{ name: yName, points: lineData.points }]}
+            series={lineCols.map((ci, i) => ({
+              name: columns[ci]?.name ?? '',
+              points: lineData.series[i] ?? [],
+            }))}
             labels={lineData.labels}
             area={type === 'area'}
           />
         )}
+        {type === 'scatter' && scatData && (
+          <ScatterChart sets={scatData} xName={columns[sxCol]?.name ?? ''} />
+        )}
       </div>
     </div>
+  );
+}
+
+/** Checkbox popover naming the Y series — the explicit counterpart of the
+ *  inferred default, for line/area and scatter where several series share a
+ *  chart. Selecting nothing is allowed: the chart says so instead of guessing. */
+function SeriesPicker({ columns, numeric, selected, onChange }: {
+  columns: ColumnInfo[];
+  numeric: boolean[];
+  selected: number[];
+  onChange: (cols: number[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const toggle = (i: number) =>
+    onChange(selected.includes(i) ? selected.filter(c => c !== i) : [...selected, i]);
+  const label = selected.length === 0
+    ? 'series ▾'
+    : selected.length === 1
+      ? `${columns[selected[0]]?.name ?? ''} ▾`
+      : `${selected.length} series ▾`;
+  return (
+    <span className="chart-series">
+      <button className="toolbar-btn" title="Choose the Y series to plot"
+        onClick={() => setOpen(o => !o)}>{label}</button>
+      {open && (
+        <>
+          <div className="chart-series-backdrop" onClick={() => setOpen(false)} />
+          <div className="chart-series-pop">
+            {columns.map((c, i) => numeric[i] && (
+              <label key={c.name} className="chart-series-item">
+                <input type="checkbox" checked={selected.includes(i)} onChange={() => toggle(i)} />
+                <span>{c.name}</span>
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
+function ScatterChart({ sets, xName }: {
+  sets: { name: string; color: string; points: { x: number; y: number }[] }[];
+  xName: string;
+}) {
+  const W = 860, H = 360, padL = 56, padR = 12, padT = sets.length > 1 ? 30 : 12, padB = 34;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const all = sets.flatMap(s => s.points);
+  if (all.length === 0) return <div className="chart-empty">No numeric data to plot.</div>;
+  // No zero-anchoring here (niceRange's third arg): the shape of the cloud is
+  // the thing being read, and forcing the origin in can squash it into a corner.
+  const [minX, maxX] = niceRange(Math.min(...all.map(p => p.x)), Math.max(...all.map(p => p.x)), false);
+  const [minY, maxY] = niceRange(Math.min(...all.map(p => p.y)), Math.max(...all.map(p => p.y)), false);
+  const x = (v: number) => padL + ((v - minX) / (maxX - minX)) * plotW;
+  const y = (v: number) => padT + plotH - ((v - minY) / (maxY - minY)) * plotH;
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(t => minY + t * (maxY - minY));
+  const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1].map(t => minX + t * (maxX - minX));
+
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
+      {yTicks.map((v, i) => (
+        <g key={i}>
+          <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} className="chart-grid" />
+          <text x={padL - 6} y={y(v) + 3} className="chart-tick" textAnchor="end">{fmt(v)}</text>
+        </g>
+      ))}
+      {xTicks.map((v, i) => (
+        <text key={i} x={x(v)} y={H - 18} className="chart-tick" textAnchor="middle">{fmt(v)}</text>
+      ))}
+      <text x={padL + plotW / 2} y={H - 4} className="chart-tick" textAnchor="middle">{xName}</text>
+      {sets.length > 1 && <ChartLegend marker="dot" items={sets} />}
+      {sets.map(s => (
+        <g key={s.name}>
+          {s.points.map((p, pi) => (
+            <circle key={pi} cx={x(p.x)} cy={y(p.y)} r={2.5} fill={s.color} opacity={0.75}>
+              <title>{`${s.name}: (${fmt(p.x)}, ${fmt(p.y)})`}</title>
+            </circle>
+          ))}
+        </g>
+      ))}
+    </svg>
   );
 }
 

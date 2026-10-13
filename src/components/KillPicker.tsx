@@ -417,6 +417,9 @@ export function KillPicker({ session, trigger, anchor, onInsertIds, onClose }: P
       const res = await executeKill({
         sessionId: session.sessionId,
         ids: targets.map(t => t.id),
+        // ClickHouse rows carry the real handle in queryId (`id` is only a
+        // poll-local row number there); other engines send undefined.
+        queryIds: targets.some(t => t.queryId) ? targets.map(t => t.queryId ?? '') : undefined,
         mode,
         source: trigger.kind === 'killall' ? 'killall popup' : 'kill popup',
         procs,
