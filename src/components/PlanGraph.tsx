@@ -20,7 +20,7 @@ import type { PlanCostModel, NodeCost } from '../utils/planCost';
 import { formatWeight, formatRows } from '../utils/planCost';
 import { layoutGraph, layoutIcicle, DEFAULT_LAYOUT } from '../utils/planLayout';
 import type { LaidOutNode } from '../utils/planLayout';
-import { OP_GLOSSARY, findingsFor } from '../utils/planGlossary';
+import { OP_GLOSSARY, findingsFor, formatBlocks } from '../utils/planGlossary';
 import type { Finding } from '../utils/planGlossary';
 
 interface Props {
@@ -450,8 +450,22 @@ export function PlanNodeDetail(
         {s.msTotal !== undefined && <Stat label="Total time" value={formatWeight(s.msTotal, 'time')} />}
         {s.rowsEst !== undefined && <Stat label="Rows (est)" value={formatRows(s.rowsEst)} />}
         {s.rowsActual !== undefined && <Stat label="Rows (actual)" value={formatRows(s.rowsActual)} />}
+        {entry.misestimate !== undefined && entry.misestimate >= 2 && (
+          <Stat label="Estimate miss" value={`${Math.round(entry.misestimate)}× off`} />
+        )}
         {s.loops !== undefined && s.loops > 1 && <Stat label="Loops" value={String(s.loops)} />}
         {s.index && <Stat label="Index" value={s.index} />}
+        {s.buffers && (
+          <Stat label="Buffers hit/read"
+                value={`${formatRows(s.buffers.hit)} / ${formatRows(s.buffers.read)}`
+                  + ` (${formatBlocks(s.buffers.read)} from storage)`} />
+        )}
+        {s.workersPlanned !== undefined && (
+          <Stat label="Workers planned/launched"
+                value={s.workersLaunched !== undefined
+                  ? `${s.workersPlanned} / ${s.workersLaunched}`
+                  : String(s.workersPlanned)} />
+        )}
       </dl>
 
       <section className="plan-insp-explain">

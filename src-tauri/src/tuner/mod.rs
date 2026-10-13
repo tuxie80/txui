@@ -159,18 +159,30 @@ pub async fn analyze_redis(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<TunerReport> {
     let data = redis_collectors::collect(mgr).await?;
-    let eol_info = eol::lookup("redis", &data.cycle(), data_dir).await;
+    // A fork (Valkey) gets its own EOL product and cycle — its version line
+    // is not Redis's — while the rules above keep judging it by the Redis
+    // compat baseline it advertises.
+    let (eol_product, eol_cycle) = if data.fork.is_empty() {
+        ("redis", data.cycle())
+    } else {
+        (data.fork.as_str(), data.fork_cycle())
+    };
+    let eol_info = eol::lookup(eol_product, &eol_cycle, data_dir).await;
     let mut findings = redis_checks::run_checks(&data, Some(&eol_info));
     checks::sort_findings(&mut findings);
     let score = checks::compute_score(&findings);
     Ok(TunerReport {
         generated_at: chrono::Local::now().to_rfc3339(),
         server: ServerInfo {
-            version: data.version.clone(),
+            version: if data.fork_version.is_empty() {
+                data.version.clone()
+            } else {
+                data.fork_version.clone()
+            },
             // Redis has no version_comment; the INFO `os` line is the closest
             // equivalent build detail the panel can show.
             version_comment: data.os.clone(),
-            flavor: "redis".to_string(),
+            flavor: if data.fork.is_empty() { "redis".to_string() } else { data.fork.clone() },
             arch: data.i("arch_bits").unwrap_or("").to_string(),
             uptime_secs: data.uptime_secs,
             // Managed Redis providers do not advertise themselves the way the
@@ -864,15 +876,18 @@ mod galera_live_tests {
 
 #[cfg(test)]
 mod redis_live_tests {
-    //! The Redis tuner against the local server (127.0.0.1:6379).
+    //! The Redis tuner against a local server. The port defaults to 6379; set
+    //! TXUI_REDIS_TEST_PORT to point at a throwaway instance instead.
     //!
-    //!   cargo test --lib redis_tuner_live -- --ignored --nocapture
+    //!   TXUI_REDIS_TEST_PORT=7790 cargo test --lib redis_tuner_live -- --ignored --nocapture
     use crate::db::types::{ConnectionConfig, Engine, LiveSession, SslMode};
 
     async fn mgr() -> Option<::redis::aio::ConnectionManager> {
         let mut c = ConnectionConfig::new(Engine::Redis, "redis");
         c.host = Some("127.0.0.1".into());
-        c.port = Some(6379);
+        c.port = Some(std::env::var("TXUI_REDIS_TEST_PORT").ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6379));
         c.ssl_mode = SslMode::Disable;
         match crate::db::redis::open(&c, None, None).await.ok()? {
             LiveSession::Redis(m, _) => Some(m),
@@ -883,10 +898,10 @@ mod redis_live_tests {
     #[tokio::test]
     #[ignore]
     async fn redis_tuner_live_report() {
-        let Some(m) = mgr().await else { println!("no redis on 6379 — skipping"); return };
+        let Some(m) = mgr().await else { println!("no redis on TXUI_REDIS_TEST_PORT/6379 — skipping"); return };
         let report = super::analyze_redis(&m, &std::env::temp_dir()).await.expect("analyze");
 
-        println!("\n=== Redis {} ({}) ===", report.server.version, report.server.flavor);
+        println!("\n=== {} {} ===", report.server.flavor, report.server.version);
         if let Some(e) = &report.eol {
             println!("eol:   {} {} → {} (date {:?}, source {})",
                      e.product, e.cycle, e.status, e.eol_date, e.source);
@@ -912,7 +927,10 @@ mod redis_live_tests {
                 "critical" => 10, "warn" => 5, "advice" => 2, _ => 0,
             }, "points/severity mismatch on {}", f.id);
         }
-        assert_eq!(report.server.flavor, "redis");
+        // Redis itself reports flavor "redis"; a Valkey server is identified
+        // as "valkey" (its INFO server_name), never silently as Redis.
+        assert!(["redis", "valkey"].contains(&report.server.flavor.as_str()),
+                "unexpected flavor {}", report.server.flavor);
         assert!(report.score.total <= 100);
 
         // Collectors must actually have run.

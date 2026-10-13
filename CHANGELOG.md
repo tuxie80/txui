@@ -63,7 +63,124 @@ this project follows semantic versioning.
   with both commands. Windows stays on the NSIS/MSI download from the
   release page (a PowerShell `irm|iex` installer is the noted follow-up).
 
+- **Rename refactoring in the 🔗 Find usages panel — previewed migration
+  scripts, certain-hits-only.** "✏ Rename…" builds a deterministic script —
+  drop dependents → the rename → recreate dependents — opened in an editor
+  buffer, so running it goes through the normal write path (sqlguard, prod
+  ack); no in-place rewrite, no second execution path, no new commands. Only
+  `certain` usages are rewritten; `likely`/`possible` hits are listed with
+  line numbers and never touched, and an object is dropped only when its full
+  CREATE text was fetched AND the rewrite located the reference in it.
+  MySQL/MariaDB: views/routines/triggers/events recreated from `SHOW CREATE`
+  with quote style preserved, compound bodies wrapped in `DELIMITER //`,
+  `RENAME COLUMN` gated on server version (old servers get a warning, not a
+  synthesized `CHANGE COLUMN`). PostgreSQL: catalog-referenced objects
+  (views, constraints, indexes, trigger bindings) follow the rename by
+  themselves — verified live and listed as informational; only routine bodies
+  are recreated via `pg_get_functiondef`. Pure core `utils/renameScript.ts`
+  (66 tests) over a refactored shared `classifyHits()` in `utils/findUsages.ts`
+  so search and rewrite can never drift. Live-verified end to end on MySQL
+  8.4 and PostgreSQL 17 — including a planted `likely` hit left unchanged and
+  failing loudly at call time exactly as its review item predicted. Engine
+  scope: MySQL-family + PostgreSQL; other engines greyed with the reason.
+  Portability: identical on all three desktops (pure util + existing query
+  paths).
+
+- **PostgreSQL plan depth: BUFFERS / WAL / SETTINGS, per-loop estimation
+  error, parallel-worker findings.** EXPLAIN for PG now requests
+  `(ANALYZE, BUFFERS, WAL, SETTINGS)` on both the plan view and the SQL
+  Quality guarded path, with automatic fallback to the old option set on
+  PG < 12. The plan view gains: a **"Worst estimate"** banner callout and a
+  per-node Estimate-miss stat — now computed **per loop**, so a
+  well-estimated 2000-loop inner node no longer reads as a 2500× miss;
+  **parallel-worker degradation** findings (`Workers Planned` vs `Launched`
+  per Gather node, critical at 0 launched) with a banner chip and a Workers
+  tree column; per-node **buffer stats** (hit/read blocks + MB from storage)
+  with a `disk reads` finding on self-attributable read-heavy nodes; and a
+  `.plan-meta` strip rendering non-default planner settings (overrides like
+  `enable_seqscan=off` highlighted) and WAL totals. Live-verified against a
+  throwaway PG 17 cluster (settings captured verbatim, degraded-worker plan
+  produced exactly the finding, WAL-generating INSERT plan parsed). MySQL
+  explain untouched. Portability: identical everywhere.
+
+- **Kill other sessions' ClickHouse queries through the one audited kill
+  path.** `kill_processes` gains an optional `queryIds` arm: the Processes
+  panel now lists ClickHouse `system.processes` rows (selectable by
+  `query_id`, long-query tinting works via `elapsed`), and "Kill query" issues
+  a parameter-bound `KILL QUERY … ASYNC` per id — TxUI's own in-flight queries
+  are refused ("use the editor's Stop button"). "Kill connection" is greyed
+  with the reason (HTTP is stateless; there is no connection to terminate).
+  Audit logging, the read-only gate and outcome reporting ride the unchanged
+  existing path. Live-verified against ClickHouse 26.9 (listed, killed, victim
+  exited `QUERY_WAS_CANCELLED`). No new command.
+
+- **Result charts: scatter type + explicit multi-Y series picker.**
+  `ResultChart` gains a scatter plot (numeric X picker, per-point hover,
+  ≤2000 points/series sampling with the stride reported) and a series-picker
+  popover for line/area/scatter (checkbox list of numeric columns, remembered
+  per chart type; inference remains the default). All chart math extracted to
+  pure `utils/chartData.ts` (17 tests). PNG/SVG/clipboard export covers the
+  new types automatically via the existing ER-export path.
+
+- **Render-smoke harness: every component now mounts in `npm test`.**
+  `dev/render-smoke/` (rolldown bundling — this repo's Vite 8 has no esbuild —
+  with a programmable Tauri stub, a hand-rolled DOM shim with real event
+  bubbling, canvas/ResizeObserver/CodeMirror support, prop auto-probing) plus
+  `tests/renderSmoke.test.ts`: **all 120 component files mount with effects
+  running, zero failures**, including the previously never-rendered surfaces
+  (Map view with painted canvas, Security panel in both vault states, vault
+  gate, all 9 Settings tabs clicked through, pre-flight/write-confirm,
+  chart presets, native-menu event paths). Wave 6 §1 closed; CLI:
+  `node dev/render_smoke.mjs`. Found zero shipping bugs — every failure was a
+  fixture or shim gap.
+
 ### Changed
+
+- **Pivot hardening**: pivot columns capped at 100 — past the cap the most
+  frequent values stay columns and the rest fold into an exact-totals
+  `(other)` column with an on-screen note (previously a 100k-distinct-value
+  column rendered ~100k `<th>`s and froze the webview); grouped/pivoted
+  results gain copy/export in all grid formats (export emits ALL groups, not
+  just the 5,000 displayed); DECIMAL-string/NULL aggregate semantics pinned
+  by tests. 500k rows group in ~94 ms.
+- **Redis live-test seam**: `redis_browser.rs` commands factored into
+  `pub(crate)` bodies (the codebase convention) so `#[ignore]`d live tests
+  can drive them against standalone/cluster/sentinel fixtures via
+  `TXUI_REDIS_TEST_PORT` / `_CLUSTER_PORT` / `_SENTINEL_PORT`.
+- **Docs re-aligned with code**: docs/BACKLOG.md is now empty of open items
+  (#6 pivot, #7 rename, #8 MySQL debugger all closed — 7 and 8 had partly
+  shipped already); docs/NEXT.md Wave 3 object tree, Wave 5 SQLite/ClickHouse
+  tuner + Parquet + Redis items, Wave 6 §1 and charting #3 marked done with
+  verification notes.
+
+### Fixed
+
+- **Find-usages under-reporting**: a quoted name directly after a keyword
+  (`FROM \`orders\``) misclassified as `likely` — `keywordBefore` didn't step
+  over the opening quote. Now `certain` (this also feeds rename rewriting).
+- **Redis Sentinel status column always blank** — live Redis 8.x Sentinel has
+  no `status` field in `SENTINEL MASTERS`/`REPLICAS`; the state lives in
+  `flags`. Fixed with a flags fallback, live-verified (master + replica).
+- **Cluster MOVED/ASK errors classified as `Unknown`** — now typed
+  `Unsupported` (a capability gap, correctly non-retryable). True
+  redirect-following needs the redis crate's cluster client — a deliberate
+  feature decision, reported not built.
+- **Valkey misidentified as "Redis 7.2.4"** — the tuner read only
+  `redis_version` (Valkey's compat baseline); it now detects
+  `server_name: valkey` + `valkey_version`, reports flavor `valkey`, and does
+  the EOL lookup against the valkey product. Live-verified against Valkey
+  9.1.2 (the full browser/tuner/write-guard matrix is green; cluster and
+  Sentinel topologies verified on Redis 8.10 — see docs/NEXT.md Wave 5).
+- **Two literal NUL bytes in `utils/killAnalyze.ts`** (meant to be `\x00`
+  escapes in a template literal) — replaced; the bytes blocked text tooling
+  on the file.
+- **Plan findings silently dropped from zero-self-time nodes** (a Gather with
+  0 self time never surfaced its worker findings) and **PG buffer counts
+  double-counted up the tree** (per-ancestor findings on cumulative counts;
+  findings now judge self-attributable blocks). Both exposed by the new
+  live PG 17 plan captures.
+
+### Website & tooling
 
 - **Website redesign** (tuxie.eu/txui): brand blue `#0000cd` with an orange
   contrast secondary; self-hosted Space Grotesk / Inter / JetBrains Mono

@@ -144,6 +144,8 @@ test('flavorLabel', () => {
   assert.equal(flavorLabel('mysql'), 'MySQL');
   assert.equal(flavorLabel('mariadb'), 'MariaDB');
   assert.equal(flavorLabel('percona'), 'Percona');
+  assert.equal(flavorLabel('redis'), 'Redis');
+  assert.equal(flavorLabel('valkey'), 'Valkey');
 });
 
 test('reportFileName from generated_at', () => {

@@ -163,3 +163,74 @@ test('a clean plan produces no findings at all', () => {
     { msSelf: 2, rowsEst: 800, rowsActual: 812, relation: 'customers', index: 'customers_pkey' });
   assert.deepEqual(allFindings(buildCostModel(plan(root))), []);
 });
+
+// ── PostgreSQL parallel-worker degradation ──────────────────────────────────
+
+test('fewer launched workers than planned is a finding', () => {
+  const f = findings(node('Gather', 'other',
+    { rowsActual: 900_000, workersPlanned: 4, workersLaunched: 2 }));
+  const w = f.find(x => x.badge === 'workers short');
+  assert.ok(w, `got ${JSON.stringify(f.map(x => x.badge))}`);
+  assert.equal(w.level, 'warn');
+  assert.match(w.observed, /planned for 4/i);
+  assert.match(w.action, /max_parallel_workers_per_gather/);
+});
+
+test('no workers at all on a multi-worker plan is critical', () => {
+  const f = findings(node('Gather', 'other',
+    { rowsActual: 900_000, workersPlanned: 4, workersLaunched: 0 }));
+  const w = f.find(x => x.badge === 'no workers');
+  assert.ok(w, `got ${JSON.stringify(f.map(x => x.badge))}`);
+  assert.equal(w.level, 'critical');
+  assert.match(w.observed, /ran entirely on the leader/);
+});
+
+test('a fully-staffed gather stays silent', () => {
+  const f = findings(node('Gather', 'other',
+    { rowsActual: 900_000, workersPlanned: 4, workersLaunched: 4 }));
+  assert.deepEqual(f.filter(x => x.badge.includes('worker')), []);
+});
+
+// ── PostgreSQL buffer traffic (EXPLAIN BUFFERS) ──────────────────────────────
+
+test('a node reading mostly from storage is flagged', () => {
+  const f = findings(node('Seq Scan', 'scan-seq',
+    { rowsActual: 2_000_000, relation: 'orders', buffers: { hit: 10_000, read: 60_000 } }));
+  const b = f.find(x => x.badge === 'disk reads');
+  assert.ok(b, `got ${JSON.stringify(f.map(x => x.badge))}`);
+  assert.match(b.observed, /from storage/);
+  assert.match(b.action, /shared_buffers/);
+});
+
+test('cache-served buffer traffic is not a finding', () => {
+  const f = findings(node('Index Scan', 'scan-index',
+    { rowsActual: 200_000, buffers: { hit: 500_000, read: 2_000 } }));
+  assert.deepEqual(f.filter(x => x.badge === 'disk reads'), []);
+});
+
+test('a few hundred read blocks is noise, not a finding', () => {
+  const f = findings(node('Index Scan', 'scan-index',
+    { rowsActual: 50_000, buffers: { hit: 0, read: 400 } }));
+  assert.deepEqual(f.filter(x => x.badge === 'disk reads'), []);
+});
+
+// ── loop-aware mis-estimation ────────────────────────────────────────────────
+
+test('a well-estimated looped node is not reported as a massive miss', () => {
+  // 15 actual per loop × 2000 loops = 30k total vs an estimate of 12/loop —
+  // comparing totals would invent a 2500× error.
+  assert.deepEqual(
+    badges(node('Index Scan', 'scan-index', { rowsEst: 12, rowsActual: 30_000, loops: 2000 }))
+      .filter(b => b.includes('off')),
+    [],
+  );
+});
+
+test('a genuinely mis-estimated looped node still is', () => {
+  // 1500 actual per loop vs 12 estimated: 125× off per loop, loops or no loops.
+  const f = findings(node('Index Scan', 'scan-index',
+    { rowsEst: 12, rowsActual: 3_000_000, loops: 2000 }));
+  const miss = f.find(x => x.badge.includes('off'));
+  assert.ok(miss, 'the per-loop miss must survive the loop division');
+  assert.match(miss.badge, /^125× off$/);
+});

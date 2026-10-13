@@ -6692,6 +6692,14 @@ button.primary:disabled { opacity: .5; cursor: default; }
   border: 1px solid var(--red); border-radius: 10px; padding: 0 8px;
 }
 
+.plan-meta {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px;
+  padding: 5px 12px; font-size: calc(11px * var(--font-scale, 1));
+  line-height: 1.5; color: var(--text2); border-bottom: 1px solid var(--border);
+}
+.plan-meta code { font-size: calc(11px * var(--font-scale, 1)); }
+.plan-meta-hot { color: var(--yellow); font-weight: 600; }
+
 .plan-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 .plan-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -8601,6 +8609,32 @@ tr.cmp-same td { opacity: .62; }
   padding: 9px 12px; border-top: 1px solid var(--border); color: var(--text2);
   font-size: calc(11px * var(--font-scale, 1)); line-height: 1.55;
 }
+
+/* ── rename script builder (FindUsagesPanel) ─────────────────────────────────
+   The script is the deliverable, so it reads like the editor it will open in. */
+.fu-rename {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  font-size: calc(12px * var(--font-scale, 1));
+}
+.fu-rename-what { color: var(--text2); }
+.fu-rename input {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); font-family: var(--font-mono);
+  font-size: calc(12px * var(--font-scale, 1)); padding: 4px 6px; min-width: 180px;
+}
+.fu-rename-script {
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.fu-rename-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: calc(11.5px * var(--font-scale, 1)); color: var(--text2);
+}
+.fu-rename-warning {
+  color: var(--red); font-size: calc(11.5px * var(--font-scale, 1));
+}
+.fu-rename-review { display: flex; flex-direction: column; }
 
 /* ── sequence editor (components/SequencePanel) ────────────────────────────
    The statements are the point of the screen, so they sit below the form at

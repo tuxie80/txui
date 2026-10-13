@@ -395,16 +395,19 @@ mod tests {
 
 #[cfg(test)]
 mod live_tests {
-    //! Against the local Redis (127.0.0.1:6379) loaded with
-    //! `sh dev/redis_fixture.sh`. Skipped when nothing is listening.
+    //! Against a local Redis loaded with `sh dev/redis_fixture.sh [host] [port]`.
+    //! Skipped when nothing is listening. The port defaults to 6379; set
+    //! TXUI_REDIS_TEST_PORT to point at a throwaway instance instead.
     //!
-    //!   cargo test --lib redis_live -- --ignored --nocapture
+    //!   TXUI_REDIS_TEST_PORT=7790 cargo test --lib redis_live -- --ignored --nocapture
     use crate::db::types::{ConnectionConfig, Engine, SchemaNode, SslMode};
 
     fn config(db: Option<&str>) -> ConnectionConfig {
         let mut c = ConnectionConfig::new(Engine::Redis, "redis");
         c.host = Some("127.0.0.1".into());
-        c.port = Some(6379);
+        c.port = Some(std::env::var("TXUI_REDIS_TEST_PORT").ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6379));
         c.ssl_mode = SslMode::Disable;
         c.database = db.map(String::from);
         c

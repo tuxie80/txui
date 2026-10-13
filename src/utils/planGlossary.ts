@@ -158,6 +158,18 @@ export interface Finding {
 /** A node is "big" when it is worth caring about the row count at all. */
 const BIG_ROWS = 10_000;
 
+/** Readers think in bytes, not in counts. */
+export function formatByteSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+  return `${(bytes / 1e3).toFixed(0)} kB`;
+}
+
+/** Buffer counts arrive in 8 kB blocks; readers think in bytes. */
+export function formatBlocks(blocks: number): string {
+  return formatByteSize(blocks * 8192);
+}
+
 /**
  * Findings for one node, given its cost context.
  *
@@ -241,6 +253,43 @@ export function findingsFor(entry: NodeCost, model: PlanCostModel): Finding[] {
     });
   }
 
+  // ── parallel-worker degradation (PostgreSQL Gather / Gather Merge) ──
+  if (typeof s.workersPlanned === 'number' && s.workersPlanned > 0
+      && typeof s.workersLaunched === 'number' && s.workersLaunched < s.workersPlanned) {
+    const none = s.workersLaunched === 0;
+    out.push({
+      level: none && s.workersPlanned >= 2 ? 'critical' : 'warn',
+      badge: none ? 'no workers' : 'workers short',
+      observed: none
+        ? `Planned for ${s.workersPlanned} parallel workers, but none were launched — the gather ran entirely on the leader.`
+        : `Planned for ${s.workersPlanned} parallel workers, only ${s.workersLaunched} launched.`,
+      why: 'The planner priced this node assuming the work would be split across workers. Running with fewer — or none — takes proportionally longer than the chosen plan assumed, and the serial plan that lost the costing may have been the faster one in reality.',
+      action: 'Worker slots were exhausted or capped at execution time. Check max_parallel_workers, max_worker_processes and max_parallel_workers_per_gather, and what else was running concurrently. If the shortage is chronic, lowering the planned degree produces plans that stop counting on workers they will not get.',
+    });
+  }
+
+  // ── buffer traffic coming from storage, not cache (PostgreSQL BUFFERS) ──
+  if (s.buffers) {
+    // PG block counts INCLUDE the children, so the same I/O shows on every
+    // ancestor — judging by the raw totals would flag the whole branch for
+    // one scan's reads. Only the node's OWN blocks (its counts minus its
+    // children's) say where the storage traffic actually happens.
+    const childRead = n.children.reduce((sum, c) => sum + (c.stats.buffers?.read ?? 0), 0);
+    const childHit = n.children.reduce((sum, c) => sum + (c.stats.buffers?.hit ?? 0), 0);
+    const read = Math.max(0, s.buffers.read - childRead);
+    const hit = Math.max(0, s.buffers.hit - childHit);
+    const total = hit + read;
+    if (read >= 1_000 && total > 0 && read / total >= 0.5) {
+      out.push({
+        level: read >= 100_000 || entry.severity === 'critical' ? 'critical' : 'warn',
+        badge: 'disk reads',
+        observed: `This step itself read ${formatRows(read)} blocks (${formatBlocks(read)}) from storage — only ${Math.round((hit / total) * 100)}% of its buffer traffic was served from cache.`,
+        why: 'Cache hits cost nanoseconds, storage reads cost milliseconds, and none of that difference shows up in row counts. A plan can look cheap and still be I/O bound here.',
+        action: 'If this data should be cached, shared_buffers may be too small for the working set. Otherwise reduce what the node reads: a more selective index, a covering index (index-only scan), or partitioning the cold data away.',
+      });
+    }
+  }
+
   // ── nested loop over a large outer input ──
   if (n.kind === 'join-nested') {
     const outer = n.children[0]?.stats;
@@ -261,8 +310,14 @@ export function findingsFor(entry: NodeCost, model: PlanCostModel): Finding[] {
 
 /** Every finding in the plan, hottest node first. */
 export function allFindings(model: PlanCostModel): Array<{ entry: NodeCost; finding: Finding }> {
+  // `ranked` holds only nodes with weight > 0 — but a Gather coordinating
+  // workers has zero SELF time by definition, and its worker-shortage finding
+  // must not vanish because the wall clock sits in its children.
+  const entries = model.ranked.length
+    ? [...model.ranked, ...model.nodes.filter(e => e.weight === 0)]
+    : model.nodes;
   const out: Array<{ entry: NodeCost; finding: Finding }> = [];
-  for (const entry of model.ranked.length ? model.ranked : model.nodes) {
+  for (const entry of entries) {
     for (const finding of findingsFor(entry, model)) out.push({ entry, finding });
   }
   const rank: Record<FindingLevel, number> = { critical: 0, warn: 1, info: 2 };

@@ -128,8 +128,15 @@ pub async fn explain_analyze_guarded(
             }
             postgres::execute(&mut conn, &format!("SET statement_timeout = {}", timeout_ms))
                 .await?;
-            let stmt = format!("EXPLAIN (ANALYZE, BUFFERS) {}", sql);
-            let res = postgres::execute(&mut conn, &stmt).await;
+            let stmt = format!("EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS) {}", sql);
+            // WAL and SETTINGS are PG 12+ options — retry without them when an
+            // older server rejects the option list rather than returning nothing.
+            let res = match postgres::execute(&mut conn, &stmt).await {
+                Err(e) if e.to_string().contains("EXPLAIN option") => {
+                    postgres::execute(&mut conn, &format!("EXPLAIN (ANALYZE, BUFFERS) {}", sql)).await
+                }
+                other => other,
+            };
             res.map(|r| plan_text(&r)).map_err(Into::into)
         }
         _ => Err("EXPLAIN ANALYZE is only available for MySQL and PostgreSQL".into()),

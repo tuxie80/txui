@@ -284,6 +284,10 @@ function qualifierAt(masked: string, at: number): string | null {
 /** The word immediately before an offset — `FROM`, `JOIN`, `UPDATE`, … */
 function keywordBefore(masked: string, at: number): string {
   let i = at - 1;
+  // Step over the name's own opening quote, exactly as qualifierAt does:
+  // `FROM `orders`` is unambiguously a table position, and without this the
+  // quote hid the keyword and every carefully-quoted reference read `likely`.
+  if (i >= 0 && (masked[i] === '`' || masked[i] === '"')) i--;
   while (i >= 0 && /[\s(]/.test(masked[i])) i--;
   const end = i + 1;
   while (i >= 0 && IDENT.test(masked[i])) i--;
@@ -356,6 +360,152 @@ const KIND_ORDER: SourceKind[] = [
   'constraint', 'index', 'default', 'computed', 'buffer', 'saved',
 ];
 
+/** One classified occurrence, as offsets into the ORIGINAL sql. */
+export interface ClassifiedHit {
+  /** Offsets of the bare name — surrounding quotes, when quoted, excluded. */
+  from: number;
+  to: number;
+  confidence: Confidence;
+  /** Why it is not `certain`, when it is not. */
+  note?: string;
+}
+
+export interface ClassifyOptions {
+  /**
+   * Extra keywords after which a name can only be the table, merged over
+   * TABLE_POSITION. The one caller is the rename rewriter: a trigger's CREATE
+   * text carries `ON <table>`, and `on` is far too common a word to promote
+   * for every search — but in that one text it names the table.
+   */
+  tableKeywords?: ReadonlySet<string>;
+  /**
+   * Treat `<name>.column` — the table used as a qualifier — as certain. Off
+   * for searching (there the bare name might be a schema or an alias, and
+   * `likely` is the honest verdict), on for a table RENAME: when the table is
+   * being renamed, its use as a qualifier must move with it or the recreated
+   * definition still points at the old name. A three-part `<name>.x.y` is
+   * excluded — there `<name>` is a schema.
+   */
+  qualifierIsTable?: boolean;
+}
+
+/**
+ * Is the name ending at `to` used as a qualifier — `<name>.column`, but not
+ * the schema part of `<name>.x.y`? The name may be quoted (`` `name`.col ``),
+ * so `to` may point at a closing quote before the dot.
+ */
+function followedByColumn(masked: string, to: number): boolean {
+  const m = /^[`"]?\s*\.\s*[`"]?[A-Za-z_][\w$]*/.exec(masked.slice(to));
+  if (!m) return false;
+  return !/^[`"]?\s*\./.test(masked.slice(to + m[0].length));
+}
+
+/**
+ * Every occurrence of the query's symbol in ONE piece of SQL, classified.
+ *
+ * This is the classification core of `findUsages`, exported with offsets so the
+ * rename rewriter (utils/renameScript.ts) can rewrite exactly the `certain`
+ * occurrences instead of ranking them for display. One implementation, two
+ * consumers — a rename whose certainty rules drifted from the find-usages
+ * panel's would rewrite text the panel just called unsafe.
+ */
+export function classifyHits(
+  sql: string, query: UsageQuery, engine: Engine,
+  ownerTable?: string, opts?: ClassifyOptions,
+): ClassifiedHit[] {
+  const masked = maskLiterals(sql, engine);
+  const table = query.table ? unquote(query.table) : undefined;
+  const column = query.column ? unquote(query.column) : undefined;
+  const tablePos = opts?.tableKeywords
+    ? new Set([...TABLE_POSITION, ...opts.tableKeywords])
+    : TABLE_POSITION;
+  const out: ClassifiedHit[] = [];
+
+  if (column) {
+    // Does this source mention the table at all? That decides whether a bare
+    // column reference is `likely` or merely `possible`.
+    const mentionsTable = !!table && positionsOf(masked, table).length > 0;
+    const aliases = table ? aliasesFor(masked, table) : new Set<string>();
+
+    for (const at of positionsOf(masked, column)) {
+      const qual = qualifierAt(masked, at);
+      let confidence: Confidence;
+      let note: string | undefined;
+
+      if (qual && table && (qual.toLowerCase() === table.toLowerCase()
+          || aliases.has(qual.toLowerCase()))) {
+        confidence = 'certain';
+      } else if (TRIGGER_ROWS.has(qual?.toLowerCase() ?? '')) {
+        // `NEW.amount` / `OLD.amount` in a trigger body is a column of the
+        // table the trigger fires on. Dropping these as "qualified by
+        // something else" lost every trigger reference in the schema, which
+        // is a false negative in the one place a silent break is most likely.
+        if (ownerTable && table
+            && ownerTable.toLowerCase() === table.toLowerCase()) {
+          confidence = 'certain';
+        } else {
+          confidence = 'possible';
+          note = `${qual!.toUpperCase()} refers to whichever table this trigger fires on, `
+            + 'which is not recorded here';
+        }
+      } else if (qual) {
+        // Qualified by something else — `customers.id` is not `orders.id`.
+        continue;
+      } else if (ownerTable && table
+          && ownerTable.toLowerCase() === table.toLowerCase()) {
+        // The definition belongs to the table, so a bare column name in it
+        // is that table's column — there is nothing else it could be.
+        confidence = 'certain';
+      } else if (mentionsTable) {
+        confidence = 'likely';
+        note = `unqualified, but this statement references ${table}`;
+      } else {
+        confidence = 'possible';
+        note = table
+          ? `unqualified and ${table} is not referenced here — probably another table's column`
+          : 'no table given, so any column of this name matches';
+      }
+      out.push({ from: at, to: at + column.length, confidence, note });
+    }
+    return out;
+  }
+
+  if (table) {
+    // `orders o` binds the word to our table; `FROM other orders` binds it to
+    // ANOTHER table — and then `orders.col` is that table's column, so the
+    // qualifierIsTable promotion must not fire anywhere in this text. One
+    // conservative boolean: a single shadow disables the promotion wholesale,
+    // degrading those occurrences to review items rather than wrong rewrites.
+    let shadowed = false;
+    if (opts?.qualifierIsTable) {
+      const esc = table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(
+        `\\b(?:from|join|update|into)\\s+[\`"]?([A-Za-z_]\\w*)[\`"]?\\s+(?:as\\s+)?[\`"]?${esc}[\`"]?\\b`,
+        'gi');
+      for (;;) {
+        const m = re.exec(masked);
+        if (!m) break;
+        if (m[1].toLowerCase() !== table.toLowerCase()) { shadowed = true; break; }
+      }
+    }
+    for (const at of positionsOf(masked, table)) {
+      const kw = keywordBefore(masked, at);
+      const qual = qualifierAt(masked, at);
+      let confidence: Confidence;
+      let note: string | undefined;
+      if (tablePos.has(kw) || qual
+          || (opts?.qualifierIsTable && !shadowed && followedByColumn(masked, at + table.length))) {
+        confidence = 'certain';
+      } else {
+        confidence = 'likely';
+        note = 'the name matches but is not in a table position — check it is not a column or alias';
+      }
+      out.push({ from: at, to: at + table.length, confidence, note });
+    }
+  }
+  return out;
+}
+
 /**
  * Find every usage of the query's symbol across the given sources.
  *
@@ -366,79 +516,12 @@ export function findUsages(
 ): UsageReport {
   const usages: Usage[] = [];
   const hit = new Set<string>();
-  const table = query.table ? unquote(query.table) : undefined;
-  const column = query.column ? unquote(query.column) : undefined;
 
   for (const src of sources) {
-    const masked = maskLiterals(src.sql, engine);
-
-    if (column) {
-      // Does this source mention the table at all? That decides whether a bare
-      // column reference is `likely` or merely `possible`.
-      const mentionsTable = !!table && positionsOf(masked, table).length > 0;
-      const aliases = table ? aliasesFor(masked, table) : new Set<string>();
-
-      for (const at of positionsOf(masked, column)) {
-        const qual = qualifierAt(masked, at);
-        let confidence: Confidence;
-        let note: string | undefined;
-
-        if (qual && table && (qual.toLowerCase() === table.toLowerCase()
-            || aliases.has(qual.toLowerCase()))) {
-          confidence = 'certain';
-        } else if (TRIGGER_ROWS.has(qual?.toLowerCase() ?? '')) {
-          // `NEW.amount` / `OLD.amount` in a trigger body is a column of the
-          // table the trigger fires on. Dropping these as "qualified by
-          // something else" lost every trigger reference in the schema, which
-          // is a false negative in the one place a silent break is most likely.
-          if (src.ownerTable && table
-              && src.ownerTable.toLowerCase() === table.toLowerCase()) {
-            confidence = 'certain';
-          } else {
-            confidence = 'possible';
-            note = `${qual!.toUpperCase()} refers to whichever table this trigger fires on, `
-              + 'which is not recorded here';
-          }
-        } else if (qual) {
-          // Qualified by something else — `customers.id` is not `orders.id`.
-          continue;
-        } else if (src.ownerTable && table
-            && src.ownerTable.toLowerCase() === table.toLowerCase()) {
-          // The definition belongs to the table, so a bare column name in it
-          // is that table's column — there is nothing else it could be.
-          confidence = 'certain';
-        } else if (mentionsTable) {
-          confidence = 'likely';
-          note = `unqualified, but this statement references ${table}`;
-        } else {
-          confidence = 'possible';
-          note = table
-            ? `unqualified and ${table} is not referenced here — probably another table's column`
-            : 'no table given, so any column of this name matches';
-        }
-        const pos = lineColOf(src.sql, at);
-        usages.push({ sourceId: src.id, ...pos, confidence, note });
-        hit.add(src.id);
-      }
-      continue;
-    }
-
-    if (table) {
-      for (const at of positionsOf(masked, table)) {
-        const kw = keywordBefore(masked, at);
-        const qual = qualifierAt(masked, at);
-        let confidence: Confidence;
-        let note: string | undefined;
-        if (TABLE_POSITION.has(kw) || qual) {
-          confidence = 'certain';
-        } else {
-          confidence = 'likely';
-          note = 'the name matches but is not in a table position — check it is not a column or alias';
-        }
-        const pos = lineColOf(src.sql, at);
-        usages.push({ sourceId: src.id, ...pos, confidence, note });
-        hit.add(src.id);
-      }
+    for (const h of classifyHits(src.sql, query, engine, src.ownerTable)) {
+      const pos = lineColOf(src.sql, h.from);
+      usages.push({ sourceId: src.id, ...pos, confidence: h.confidence, note: h.note });
+      hit.add(src.id);
     }
   }
 

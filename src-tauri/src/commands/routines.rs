@@ -1008,6 +1008,16 @@ mod mysql_debug_tests {
     // against a real server is dev/probe_mysql_debugger.mjs's job.
 
     async fn live_pool() -> Option<sqlx::MySqlPool> {
+        // Preferred: a saved connection — the password comes from the same
+        // store as the GUI, never a literal (the TXUI_TEST_CONN convention).
+        //   TXUI_TEST_CONN=Lo80 cargo test --lib mysql_debug_live -- --ignored --nocapture
+        if let Ok(name) = std::env::var("TXUI_TEST_CONN") {
+            let dir = crate::storage::default_data_dir();
+            let configs = crate::storage::load(&dir).expect("read connections.json");
+            let c = configs.values().find(|c| c.name == name).expect("connection not found").clone();
+            let password = crate::secretstore::get(&dir, &c.keychain_key());
+            return Some(crate::db::mysql::open_pool(&c, password, None, 2).await.expect("open pool"));
+        }
         let password = std::env::var("TXUI_MY_PASSWORD").ok()?;
         let mut c = crate::db::types::ConnectionConfig::new(Engine::Mysql, "my-debug-live");
         c.host = Some(std::env::var("TXUI_MY_HOST").unwrap_or_else(|_| "127.0.0.1".into()));

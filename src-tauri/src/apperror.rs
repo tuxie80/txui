@@ -436,6 +436,11 @@ impl From<redis::RedisError> for AppError {
             // and retrying is exactly right.
             Some("LOADING") | Some("BUSY") | Some("MASTERDOWN") => ErrorCode::ConnectionLost,
             Some("CLUSTERDOWN") | Some("TRYAGAIN") => ErrorCode::ConnectionLost,
+            // MOVED/ASK: the key's slot lives on another cluster node and
+            // this client follows no redirects (a single-node
+            // ConnectionManager — no cluster routing). A capability gap,
+            // never transient: retrying the same node cannot succeed.
+            Some("MOVED") | Some("ASK") => ErrorCode::Unsupported,
             _ if e.is_timeout() => ErrorCode::Timeout,
             _ if e.is_connection_dropped() => ErrorCode::ConnectionLost,
             _ if e.is_connection_refusal() => ErrorCode::ConnectFailed,
@@ -581,6 +586,24 @@ mod tests {
     fn a_cancellation_is_user_intent_and_a_timeout_is_not() {
         assert!(ErrorCode::Cancelled.is_user_intent());
         assert!(!ErrorCode::Timeout.is_user_intent());
+    }
+
+    #[test]
+    fn redis_cluster_redirects_are_unsupported_not_transient() {
+        // Live-verified against a Redis 8.10 cluster: a cross-slot access on
+        // the single-node ConnectionManager comes back as MOVED (db_code
+        // "MOVED"). Retrying the same node can never succeed — it must not
+        // classify as ConnectionLost, and `Unsupported` is not retryable.
+        let moved: AppError = redis::RedisError::from((
+            redis::ErrorKind::Moved, "key moved", "12822 127.0.0.1:7302".to_string())).into();
+        assert_eq!(moved.code, ErrorCode::Unsupported);
+        assert_eq!(moved.db_code.as_deref(), Some("MOVED"));
+        assert!(!moved.code.retryable());
+
+        let ask: AppError = redis::RedisError::from((
+            redis::ErrorKind::Ask, "key moved (ask)", "7000 127.0.0.1:7301".to_string())).into();
+        assert_eq!(ask.code, ErrorCode::Unsupported);
+        assert_eq!(ask.db_code.as_deref(), Some("ASK"));
     }
 
     #[test]

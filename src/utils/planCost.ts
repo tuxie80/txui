@@ -113,11 +113,18 @@ const MISESTIMATE_FLOOR = 10;
 export function misestimateOf(n: PlanNode): number | undefined {
   const { rowsEst, rowsActual } = n.stats;
   if (typeof rowsEst !== 'number' || typeof rowsActual !== 'number') return undefined;
-  if (rowsEst < MISESTIMATE_FLOOR && rowsActual < MISESTIMATE_FLOOR) return undefined;
+  // Every engine's plan JSON reports the ESTIMATE per loop and the ACTUAL
+  // totalled over all loops (the parsers multiply per-loop actual rows by the
+  // loop count). Comparing the totals directly would report a perfectly
+  // estimated inner side of a 10k-loop nested loop as a 10k× miss, so the
+  // actual is brought back to per-loop before the comparison.
+  const loops = typeof n.stats.loops === 'number' && n.stats.loops > 1 ? n.stats.loops : 1;
+  const actPerLoop = rowsActual / loops;
+  if (rowsEst < MISESTIMATE_FLOOR && actPerLoop < MISESTIMATE_FLOOR) return undefined;
   // Guard the divide: an estimate of 0 rows happens and is not a divide-by-zero
   // story, it is simply a large miss.
   const est = Math.max(rowsEst, 1);
-  const act = Math.max(rowsActual, 1);
+  const act = Math.max(actPerLoop, 1);
   return act >= est ? act / est : est / act;
 }
 

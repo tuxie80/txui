@@ -19,8 +19,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { parsePlan } from '../utils/planParse';
 import type { PlanNode, ParsedPlan } from '../utils/planParse';
 import { buildCostModel } from '../utils/planCost';
-import { formatWeight } from '../utils/planCost';
-import { allFindings } from '../utils/planGlossary';
+import { formatWeight, MISESTIMATE_ALERT } from '../utils/planCost';
+import type { NodeCost } from '../utils/planCost';
+import { allFindings, formatByteSize } from '../utils/planGlossary';
 import { analyseStability, rankRisks } from '../utils/planStability';
 import {
   parseProfile, profileTotal, profileFindings, meaningOf, formatSeconds,
@@ -267,6 +268,35 @@ export function ExplainView({ data, onAnalyze, onMode, sessionId, runs, onRecord
   const instability = useMemo(() => detectInstability(series), [series]);
 
   const findings = useMemo(() => (model ? allFindings(model) : []), [model]);
+
+  // The single worst cardinality miss in the plan, called out in the banner —
+  // the per-node findings list it, but "estimating 10 rows and scanning 2M"
+  // is the thing people opened the plan for and it should not wait for a click.
+  const worstMiss = useMemo<NodeCost | null>(() => {
+    if (!model?.measured) return null;
+    let best: NodeCost | null = null;
+    for (const e of model.nodes) {
+      if (e.misestimate !== undefined
+          && e.misestimate >= MISESTIMATE_ALERT
+          && e.misestimate > (best?.misestimate ?? 0)) best = e;
+    }
+    return best;
+  }, [model]);
+
+  // Planned-vs-launched parallel workers, totalled over the Gather nodes —
+  // launched below planned is execution-time resource pressure, invisible in
+  // every timing number until the query is suddenly slow under load.
+  const workerShort = useMemo(() => {
+    if (!parsed) return null;
+    let planned = 0, launched = 0;
+    const walk = (n: PlanNode) => {
+      if (n.stats.workersPlanned !== undefined) planned += n.stats.workersPlanned;
+      if (n.stats.workersLaunched !== undefined) launched += n.stats.workersLaunched;
+      n.children.forEach(walk);
+    };
+    walk(parsed.root);
+    return planned > 0 && launched < planned ? { planned, launched } : null;
+  }, [parsed]);
   // Plan STABILITY is a property of the query's shape, not of this run — so it
   // is computed from the SQL and shown even when the plan itself looks fine.
   // The plan you are looking at is not the one that will page you.
@@ -414,6 +444,19 @@ export function ExplainView({ data, onAnalyze, onMode, sessionId, runs, onRecord
               {worst.share > 0.005 && ` (${Math.round(worst.share * 100)}%)`}
             </span>
           )}
+          {worstMiss && (
+            <span className="plan-basis-worst">
+              Worst estimate: <b>{worstMiss.node.op}</b>
+              {worstMiss.node.stats.relation ? ` on ${worstMiss.node.stats.relation}` : ''}
+              {' — '}{Math.round(worstMiss.misestimate!)}× off
+            </span>
+          )}
+          {workerShort && (
+            <span className="plan-basis-alert"
+                  title="The plan was costed for more parallel workers than the server could start">
+              parallel workers: {workerShort.launched}/{workerShort.planned} launched
+            </span>
+          )}
           {criticals > 0 && (
             <span className="plan-basis-alert">
               {criticals} critical finding{criticals === 1 ? '' : 's'}
@@ -423,6 +466,38 @@ export function ExplainView({ data, onAnalyze, onMode, sessionId, runs, onRecord
             <span className="plan-basis-alert plan-basis-unstable"
                   title="This plan can change on a data or parameter shift">
               unstable plan risk
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* PostgreSQL SETTINGS / WAL: the plan above was made under THESE
+          non-default settings and generated THIS much WAL. Neither shows up in
+          the tree, and both explain "same query, different plan / different
+          load" better than any node does. PG-only — the other engines do not
+          report either. */}
+      {parsed && (parsed.settings || parsed.wal) && (
+        <div className="plan-meta">
+          {parsed.settings && (
+            <span className="plan-meta-item">
+              Non-default planner settings:{' '}
+              {Object.entries(parsed.settings).map(([k, v], i) => (
+                <span key={k}>
+                  {i > 0 && ' · '}
+                  <code className={k.startsWith('enable_') || k === 'jit' ? 'plan-meta-hot' : undefined}>
+                    {k}={v}
+                  </code>
+                </span>
+              ))}
+              {' '}— this plan was made under these settings; reproducing it
+              elsewhere needs the same values.
+            </span>
+          )}
+          {parsed.wal && (
+            <span className="plan-meta-item">
+              WAL: <b>{(parsed.wal.records ?? 0).toLocaleString()}</b> records
+              {parsed.wal.fpi !== undefined && <> · {parsed.wal.fpi.toLocaleString()} full-page images</>}
+              {parsed.wal.bytes !== undefined && <> · {formatByteSize(parsed.wal.bytes)}</>}
             </span>
           )}
         </div>

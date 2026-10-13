@@ -14,7 +14,7 @@ export type TunerCategory = 'performance' | 'security' | 'resilience' | 'schema'
  * section. See src-tauri/src/tuner/galera_checks.rs.
  */
 export type TunerGroupCategory = TunerCategory | 'galera';
-export type TunerFlavor = 'mysql' | 'mariadb' | 'percona' | 'postgres' | 'redis' | 'clickhouse' | 'sqlite';
+export type TunerFlavor = 'mysql' | 'mariadb' | 'percona' | 'postgres' | 'redis' | 'valkey' | 'clickhouse' | 'sqlite';
 
 export interface TunerFinding {
   id: string;
@@ -162,6 +162,7 @@ export function flavorLabel(flavor: TunerFlavor): string {
     case 'percona': return 'Percona';
     case 'postgres': return 'PostgreSQL';
     case 'redis': return 'Redis';
+    case 'valkey': return 'Valkey';
     case 'clickhouse': return 'ClickHouse';
     case 'sqlite': return 'SQLite';
     default: return 'MySQL';

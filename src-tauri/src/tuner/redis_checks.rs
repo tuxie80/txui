@@ -54,7 +54,7 @@ pub fn run_checks(d: &RedisTunerData, eol: Option<&EolInfo>) -> Vec<Finding> {
 
 fn check_version(d: &RedisTunerData, eol: Option<&EolInfo>, out: &mut Vec<Finding>) {
     out.push(f("r-version", "config", Sev::Info,
-        format!("Redis {} ({})", d.version, d.mode),
+        format!("{} ({})", d.display_name(), d.mode),
         format!("{}\nUptime {}.", d.os, fmt_uptime(d.uptime_secs)),
         None, vec![], vec![]));
 
@@ -68,14 +68,18 @@ fn check_version(d: &RedisTunerData, eol: Option<&EolInfo>, out: &mut Vec<Findin
     }
 
     if let Some(e) = eol {
+        // The product label is the fork's own when a fork was detected —
+        // "Valkey 9.1 reaches end-of-life", not "Redis 9.1".
+        let product = if d.fork.is_empty() { "Redis" } else { e.product.as_str() };
+        let product = match product { "valkey" => "Valkey", other => other };
         match e.status.as_str() {
             "eol" => out.push(f("r-eol", "resilience", Sev::Critical,
-                format!("Redis {} is end-of-life", e.cycle),
+                format!("{product} {} is end-of-life", e.cycle),
                 format!("Support ended {}. No further fixes are published, including security \
                          fixes.", e.eol_date.clone().unwrap_or_else(|| "(date unknown)".into())),
                 Some("Upgrade to a supported release.".into()), vec![], vec![])),
             "eol-soon" => out.push(f("r-eol-soon", "resilience", Sev::Warn,
-                format!("Redis {} reaches end-of-life soon", e.cycle),
+                format!("{product} {} reaches end-of-life soon", e.cycle),
                 format!("Support ends {}.", e.eol_date.clone().unwrap_or_default()),
                 Some("Plan the upgrade.".into()), vec![], vec![])),
             _ => {}

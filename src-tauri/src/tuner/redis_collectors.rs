@@ -32,6 +32,14 @@ pub struct RedisTunerData {
     /// (major, minor) — the endoflife.date cycle is "major.minor".
     pub major: u32,
     pub minor: u32,
+    /// A Redis-compatible fork's `server_name` ("valkey"); empty on Redis
+    /// itself (which reports `server_name:redis` or nothing). `fork_version`
+    /// is the fork's OWN version (Valkey's `valkey_version:9.1.2`) —
+    /// `version`/`major`/`minor` deliberately stay the Redis-compat baseline
+    /// the fork advertises (`redis_version:7.2.4`), because the
+    /// version-gated rules are written against Redis semantics.
+    pub fork: String,
+    pub fork_version: String,
     /// "standalone" | "sentinel" | "cluster"
     pub mode: String,
     pub uptime_secs: u64,
@@ -80,6 +88,24 @@ impl RedisTunerData {
     }
 
     pub fn is_replica(&self) -> bool { self.i("role") == Some("slave") }
+
+    /// The fork's own release cycle for the endoflife.date lookup ("9.1" for
+    /// Valkey 9.1.2); falls back to the compat cycle when unparseable.
+    pub fn fork_cycle(&self) -> String {
+        let (maj, min) = parse_version(&self.fork_version);
+        if maj == 0 { self.cycle() } else { format!("{maj}.{min}") }
+    }
+
+    /// The server as a person knows it: "Valkey 9.1.2 (Redis 7.2.4
+    /// compatible)" on a fork, "Redis 8.10.0" on Redis itself.
+    pub fn display_name(&self) -> String {
+        match self.fork.as_str() {
+            "" => format!("Redis {}", self.version),
+            "valkey" if !self.fork_version.is_empty() =>
+                format!("Valkey {} (Redis {} compatible)", self.fork_version, self.version),
+            other => format!("{} {} (Redis compatible)", other, self.version),
+        }
+    }
 }
 
 /// Parse the `INFO` text format: `# Section` headers, then `key:value` lines.
@@ -104,6 +130,18 @@ fn parse_version(v: &str) -> (u32, u32) {
     )
 }
 
+/// Identify a Redis-compatible fork from its INFO server section. Valkey
+/// reports `server_name:valkey` + `valkey_version`; Redis itself reports
+/// `server_name:redis` (7.4+) or no such field at all.
+fn detect_fork(info: &HashMap<String, String>) -> (String, String) {
+    match info.get("server_name").map(String::as_str) {
+        None | Some("") | Some("redis") => (String::new(), String::new()),
+        Some("valkey") =>
+            ("valkey".into(), info.get("valkey_version").cloned().unwrap_or_default()),
+        Some(other) => (other.to_string(), String::new()),
+    }
+}
+
 pub async fn collect(mgr: &ConnectionManager) -> anyhow::Result<RedisTunerData> {
     let mut m = mgr.clone();
     let mut d = RedisTunerData::default();
@@ -116,6 +154,9 @@ pub async fn collect(mgr: &ConnectionManager) -> anyhow::Result<RedisTunerData> 
     let (maj, min) = parse_version(&d.version);
     d.major = maj;
     d.minor = min;
+    let (fork, fork_version) = detect_fork(&d.info);
+    d.fork = fork;
+    d.fork_version = fork_version;
     d.mode = d.i("redis_mode").unwrap_or("standalone").to_string();
     d.uptime_secs = d.iu("uptime_in_seconds").unwrap_or(0);
     d.os = d.i("os").unwrap_or("").to_string();
@@ -257,5 +298,36 @@ mod tests {
         d.major = 8; d.minor = 10;
         assert_eq!(d.cycle(), "8.10");
         assert!(d.at_least(8, 0) && d.at_least(8, 10) && !d.at_least(8, 11));
+    }
+
+    #[test]
+    fn valkey_is_identified_by_server_name_not_redis_version() {
+        // Live-verified against Valkey 9.1.2: it advertises the Redis 7.2
+        // compat baseline as redis_version and its own version separately.
+        let info = parse_info("# Server\r\nredis_version:7.2.4\r\nserver_name:valkey\r\nvalkey_version:9.1.2\r\n");
+        let (fork, fork_version) = detect_fork(&info);
+        assert_eq!(fork, "valkey");
+        assert_eq!(fork_version, "9.1.2");
+
+        let mut d = data(&[("server_name", "valkey"), ("valkey_version", "9.1.2")], &[]);
+        d.version = "7.2.4".into();
+        d.major = 7; d.minor = 2;
+        d.fork = fork; d.fork_version = fork_version;
+        // The EOL lookup needs the fork's own cycle…
+        assert_eq!(d.fork_cycle(), "9.1");
+        // …while version-gated rules keep the Redis-compat baseline.
+        assert!(d.at_least(6, 0) && !d.at_least(8, 0));
+        assert_eq!(d.display_name(), "Valkey 9.1.2 (Redis 7.2.4 compatible)");
+    }
+
+    #[test]
+    fn redis_itself_is_not_a_fork() {
+        assert_eq!(detect_fork(&parse_info("redis_version:8.10.0\r\nserver_name:redis\r\n")),
+                   (String::new(), String::new()));
+        // A pre-7.4 Redis has no server_name at all.
+        assert_eq!(detect_fork(&parse_info("redis_version:7.2.4\r\n")),
+                   (String::new(), String::new()));
+        let d = { let mut d = data(&[], &[]); d.version = "8.10.0".into(); d };
+        assert_eq!(d.display_name(), "Redis 8.10.0");
     }
 }

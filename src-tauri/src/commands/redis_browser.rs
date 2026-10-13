@@ -2,6 +2,11 @@
 /// redis_scan, redis_key_info, redis_get_value, redis_set_string,
 /// redis_set_ttl, redis_delete_keys, redis_server_info,
 /// redis_key_audit, redis_sentinel_overview
+///
+/// Every command is a thin `tauri::command` shell (session lookup, read-only
+/// guard) over a `pub(crate)` body taking the ConnectionManager — the same
+/// factored-body convention as `do_kill_processes`, and what makes the bodies
+/// drivable from the live tests at the bottom of this file.
 use tauri::State;
 use uuid::Uuid;
 use serde::Serialize;
@@ -19,7 +24,7 @@ pub struct RedisScanResult {
     pub keys:   Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct RedisKeyInfo {
     pub key:      String,
     pub key_type: String,   // "string" | "list" | "hash" | "set" | "zset" | "stream" | "none"
@@ -30,14 +35,14 @@ pub struct RedisKeyInfo {
     pub encoding: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct HashField   { pub field:  String, pub value: String }
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ZsetEntry   { pub member: String, pub score: f64 }
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct StreamEntry { pub id: String, pub fields: std::collections::HashMap<String, String> }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RedisValue {
     String { value: Option<String> },
@@ -56,7 +61,7 @@ pub enum RedisValue {
 /// `transaction_read_only` and PostgreSQL's `default_transaction_read_only`),
 /// so this client-side check is the only thing standing between a read-only
 /// connection and a DEL.
-async fn guard_read_only(session_id: Uuid, state: &State<'_, AppState>, action: &str) -> Result<(), crate::apperror::AppError> {
+pub(crate) async fn guard_read_only(session_id: Uuid, state: &AppState, action: &str) -> Result<(), crate::apperror::AppError> {
     if state.is_read_only(&session_id).await {
         return Err(format!("Connection is read-only — {action} is blocked.").into());
     }
@@ -97,12 +102,20 @@ pub async fn redis_scan(
     state:      State<'_, AppState>,
 ) -> Result<RedisScanResult, crate::apperror::AppError> {
     let mut mgr = get_mgr(session_id, &state).await?;
+    scan_body(&mut mgr, &pattern, cursor, count).await
+}
 
+pub(crate) async fn scan_body(
+    mgr:        &mut redis::aio::ConnectionManager,
+    pattern:    &str,
+    cursor:     u64,
+    count:      u64,
+) -> Result<RedisScanResult, crate::apperror::AppError> {
     let raw: redis::Value = redis::cmd("SCAN")
         .arg(cursor)
-        .arg("MATCH").arg(&pattern)
+        .arg("MATCH").arg(pattern)
         .arg("COUNT").arg(count)
-        .query_async(&mut mgr)
+        .query_async(mgr)
         .await
         ?;
 
@@ -158,21 +171,27 @@ pub async fn redis_key_info(
     state:      State<'_, AppState>,
 ) -> Result<RedisKeyInfo, crate::apperror::AppError> {
     let mut mgr = get_mgr(session_id, &state).await?;
+    key_info_body(&mut mgr, &key).await
+}
 
-    let type_str: String = redis::cmd("TYPE").arg(&key)
-        .query_async(&mut mgr).await?;
-    let ttl: i64 = redis::cmd("TTL").arg(&key)
-        .query_async(&mut mgr).await?;
+pub(crate) async fn key_info_body(
+    mgr: &mut redis::aio::ConnectionManager,
+    key: &str,
+) -> Result<RedisKeyInfo, crate::apperror::AppError> {
+    let type_str: String = redis::cmd("TYPE").arg(key)
+        .query_async(mgr).await?;
+    let ttl: i64 = redis::cmd("TTL").arg(key)
+        .query_async(mgr).await?;
 
     let size: i64 = match size_command(&type_str) {
-        Some(cmd) => redis::cmd(cmd).arg(&key)
-            .query_async(&mut mgr).await.unwrap_or(0),
+        Some(cmd) => redis::cmd(cmd).arg(key)
+            .query_async(mgr).await.unwrap_or(0),
         None => 0,
     };
 
-    let encoding = object_encoding(&mut mgr, &key).await;
+    let encoding = object_encoding(mgr, key).await;
 
-    Ok(RedisKeyInfo { key, key_type: type_str, ttl, size, encoding })
+    Ok(RedisKeyInfo { key: key.to_string(), key_type: type_str, ttl, size, encoding })
 }
 
 /// Type-aware value fetch (up to 100 / 200 items for collections).
@@ -183,18 +202,24 @@ pub async fn redis_get_value(
     state:      State<'_, AppState>,
 ) -> Result<RedisValue, crate::apperror::AppError> {
     let mut mgr = get_mgr(session_id, &state).await?;
+    get_value_body(&mut mgr, &key).await
+}
 
-    let type_str: String = redis::cmd("TYPE").arg(&key)
-        .query_async(&mut mgr).await?;
+pub(crate) async fn get_value_body(
+    mgr: &mut redis::aio::ConnectionManager,
+    key: &str,
+) -> Result<RedisValue, crate::apperror::AppError> {
+    let type_str: String = redis::cmd("TYPE").arg(key)
+        .query_async(mgr).await?;
 
     let val = match type_str.as_str() {
         "string" => {
-            let v: Option<String> = mgr.get(&key).await?;
+            let v: Option<String> = mgr.get(key).await?;
             RedisValue::String { value: v }
         }
 
         "list" => {
-            let items: Vec<String> = mgr.lrange(&key, 0, 199).await?;
+            let items: Vec<String> = mgr.lrange(key, 0, 199).await?;
             RedisValue::List { items }
         }
 
@@ -207,8 +232,8 @@ pub async fn redis_get_value(
             let mut cursor: u64 = 0;
             loop {
                 let (next, flat): (u64, Vec<String>) = redis::cmd("HSCAN")
-                    .arg(&key).arg(cursor).arg("COUNT").arg(200i64)
-                    .query_async(&mut mgr).await?;
+                    .arg(key).arg(cursor).arg("COUNT").arg(200i64)
+                    .query_async(mgr).await?;
                 for c in flat.chunks(2) {
                     if c.len() == 2 && fields.len() < 200 {
                         fields.push(HashField { field: c[0].clone(), value: c[1].clone() });
@@ -227,8 +252,8 @@ pub async fn redis_get_value(
             let mut cursor: u64 = 0;
             loop {
                 let (next, batch): (u64, Vec<String>) = redis::cmd("SSCAN")
-                    .arg(&key).arg(cursor).arg("COUNT").arg(200i64)
-                    .query_async(&mut mgr).await?;
+                    .arg(key).arg(cursor).arg("COUNT").arg(200i64)
+                    .query_async(mgr).await?;
                 for m in batch {
                     if members.len() < 200 { members.push(m); }
                 }
@@ -241,8 +266,8 @@ pub async fn redis_get_value(
 
         "zset" => {
             let raw: redis::Value = redis::cmd("ZRANGE")
-                .arg(&key).arg(0i64).arg(199i64).arg("WITHSCORES")
-                .query_async(&mut mgr).await?;
+                .arg(key).arg(0i64).arg(199i64).arg("WITHSCORES")
+                .query_async(mgr).await?;
             let flat: Vec<String> = match raw {
                 redis::Value::Array(arr) =>
                     arr.iter().filter_map(bulk_to_string).collect(),
@@ -258,8 +283,8 @@ pub async fn redis_get_value(
 
         "stream" => {
             let raw: redis::Value = redis::cmd("XRANGE")
-                .arg(&key).arg("-").arg("+").arg("COUNT").arg(50i64)
-                .query_async(&mut mgr).await?;
+                .arg(key).arg("-").arg("+").arg("COUNT").arg(50i64)
+                .query_async(mgr).await?;
             let entries = parse_stream_entries(raw);
             RedisValue::Stream { entries }
         }
@@ -295,15 +320,24 @@ pub async fn redis_set_string(
     ttl_secs:   Option<i64>,
     state:      State<'_, AppState>,
 ) -> Result<(), crate::apperror::AppError> {
-    guard_read_only(session_id, &state, "writing keys").await?;
+    guard_read_only(session_id, state.inner(), "writing keys").await?;
     let mut mgr = get_mgr(session_id, &state).await?;
+    set_string_body(&mut mgr, &key, &value, ttl_secs).await
+}
+
+pub(crate) async fn set_string_body(
+    mgr:      &mut redis::aio::ConnectionManager,
+    key:      &str,
+    value:    &str,
+    ttl_secs: Option<i64>,
+) -> Result<(), crate::apperror::AppError> {
     match ttl_secs {
         Some(secs) if secs > 0 => {
-            let _: () = mgr.set_ex(&key, &value, secs as u64)
+            let _: () = mgr.set_ex(key, value, secs as u64)
                 .await?;
         }
         _ => {
-            let _: () = mgr.set(&key, &value)
+            let _: () = mgr.set(key, value)
                 .await?;
         }
     }
@@ -318,13 +352,21 @@ pub async fn redis_set_ttl(
     ttl_secs:   i64,
     state:      State<'_, AppState>,
 ) -> Result<(), crate::apperror::AppError> {
-    guard_read_only(session_id, &state, "changing TTLs").await?;
+    guard_read_only(session_id, state.inner(), "changing TTLs").await?;
     let mut mgr = get_mgr(session_id, &state).await?;
+    set_ttl_body(&mut mgr, &key, ttl_secs).await
+}
+
+pub(crate) async fn set_ttl_body(
+    mgr:      &mut redis::aio::ConnectionManager,
+    key:      &str,
+    ttl_secs: i64,
+) -> Result<(), crate::apperror::AppError> {
     if ttl_secs < 0 {
-        let _: i64 = redis::cmd("PERSIST").arg(&key)
-            .query_async(&mut mgr).await?;
+        let _: i64 = redis::cmd("PERSIST").arg(key)
+            .query_async(mgr).await?;
     } else {
-        let _: i64 = mgr.expire(&key, ttl_secs)
+        let _: i64 = mgr.expire(key, ttl_secs)
             .await?;
     }
     Ok(())
@@ -337,11 +379,18 @@ pub async fn redis_delete_keys(
     keys:       Vec<String>,
     state:      State<'_, AppState>,
 ) -> Result<i64, crate::apperror::AppError> {
-    guard_read_only(session_id, &state, "deleting keys").await?;
+    guard_read_only(session_id, state.inner(), "deleting keys").await?;
     let mut mgr = get_mgr(session_id, &state).await?;
+    delete_keys_body(&mut mgr, &keys).await
+}
+
+pub(crate) async fn delete_keys_body(
+    mgr:  &mut redis::aio::ConnectionManager,
+    keys: &[String],
+) -> Result<i64, crate::apperror::AppError> {
     let mut cmd = redis::cmd("DEL");
-    for k in &keys { cmd.arg(k); }
-    let n: i64 = cmd.query_async(&mut mgr).await?;
+    for k in keys { cmd.arg(k); }
+    let n: i64 = cmd.query_async(mgr).await?;
     Ok(n)
 }
 
@@ -353,9 +402,16 @@ pub async fn redis_server_info(
     state:      State<'_, AppState>,
 ) -> Result<String, crate::apperror::AppError> {
     let mut mgr = get_mgr(session_id, &state).await?;
+    server_info_body(&mut mgr, section.as_deref()).await
+}
+
+pub(crate) async fn server_info_body(
+    mgr:     &mut redis::aio::ConnectionManager,
+    section: Option<&str>,
+) -> Result<String, crate::apperror::AppError> {
     let mut cmd = redis::cmd("INFO");
     if let Some(s) = section { cmd.arg(s); }
-    let info: String = cmd.query_async(&mut mgr).await?;
+    let info: String = cmd.query_async(mgr).await?;
     Ok(info)
 }
 
@@ -385,6 +441,13 @@ pub async fn redis_key_audit(
     state:      State<'_, AppState>,
 ) -> Result<Vec<RedisKeyAudit>, crate::apperror::AppError> {
     let mut mgr = get_mgr(session_id, &state).await?;
+    key_audit_body(&mut mgr, keys).await
+}
+
+pub(crate) async fn key_audit_body(
+    mgr:  &mut redis::aio::ConnectionManager,
+    keys: Vec<String>,
+) -> Result<Vec<RedisKeyAudit>, crate::apperror::AppError> {
     let keys: Vec<String> = keys.into_iter().take(AUDIT_MAX_KEYS).collect();
     if keys.is_empty() { return Ok(vec![]); }
 
@@ -395,7 +458,7 @@ pub async fn redis_key_audit(
             .cmd("TTL").arg(k)
             .cmd("OBJECT").arg("ENCODING").arg(k);
     }
-    let raw: Vec<redis::Value> = pipe.query_async(&mut mgr).await?;
+    let raw: Vec<redis::Value> = pipe.query_async(mgr).await?;
 
     let mut rows: Vec<RedisKeyAudit> = Vec::with_capacity(keys.len());
     for (i, k) in keys.iter().enumerate() {
@@ -418,7 +481,7 @@ pub async fn redis_key_audit(
         }
     }
     if !size_idx.is_empty() {
-        let sizes: Vec<redis::Value> = pipe.query_async(&mut mgr).await?;
+        let sizes: Vec<redis::Value> = pipe.query_async(mgr).await?;
         for (j, i) in size_idx.into_iter().enumerate() {
             if let Some(redis::Value::Int(n)) = sizes.get(j) {
                 rows[i].size = *n;
@@ -431,14 +494,14 @@ pub async fn redis_key_audit(
 
 // ── Sentinel awareness ────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct SentinelReplica {
     pub ip:     String,
     pub port:   String,
     pub status: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct SentinelMaster {
     pub name:     String,
     pub ip:       String,
@@ -511,16 +574,21 @@ pub async fn redis_sentinel_overview(
     state:      State<'_, AppState>,
 ) -> Result<RedisSentinelOverview, crate::apperror::AppError> {
     let mut mgr = get_mgr(session_id, &state).await?;
+    sentinel_overview_body(&mut mgr).await
+}
 
+pub(crate) async fn sentinel_overview_body(
+    mgr: &mut redis::aio::ConnectionManager,
+) -> Result<RedisSentinelOverview, crate::apperror::AppError> {
     let info: String = redis::cmd("INFO").arg("server")
-        .query_async(&mut mgr).await?;
+        .query_async(mgr).await?;
     let mode = parse_redis_mode(&info);
     if mode != "sentinel" {
         return Ok(RedisSentinelOverview { mode, masters: vec![] });
     }
 
     let raw: redis::Value = redis::cmd("SENTINEL").arg("MASTERS")
-        .query_async(&mut mgr).await?;
+        .query_async(mgr).await?;
     let entries = match raw { redis::Value::Array(a) => a, _ => vec![] };
 
     let mut masters = Vec::new();
@@ -533,10 +601,10 @@ pub async fn redis_sentinel_overview(
         // SLAVES. A failure on both leaves the replica list empty rather than
         // failing the whole overview.
         let replicas_raw: redis::Value = match redis::cmd("SENTINEL").arg("REPLICAS").arg(&name)
-            .query_async(&mut mgr).await {
+            .query_async(mgr).await {
             Ok(v) => v,
             Err(_) => redis::cmd("SENTINEL").arg("SLAVES").arg(&name)
-                .query_async(&mut mgr).await.unwrap_or(redis::Value::Array(vec![])),
+                .query_async(mgr).await.unwrap_or(redis::Value::Array(vec![])),
         };
         let replica_entries = match replicas_raw { redis::Value::Array(a) => a, _ => vec![] };
         let replicas = replica_entries.iter().map(|r| {
@@ -544,7 +612,7 @@ pub async fn redis_sentinel_overview(
             SentinelReplica {
                 ip:     rm.get("ip").cloned().unwrap_or_default(),
                 port:   rm.get("port").cloned().unwrap_or_default(),
-                status: rm.get("status").cloned().unwrap_or_default(),
+                status: entry_status(&rm),
             }
         }).collect();
 
@@ -552,12 +620,20 @@ pub async fn redis_sentinel_overview(
             name,
             ip:     m.get("ip").cloned().unwrap_or_default(),
             port:   m.get("port").cloned().unwrap_or_default(),
-            status: m.get("status").cloned().unwrap_or_default(),
+            status: entry_status(&m),
             replicas,
         });
     }
 
     Ok(RedisSentinelOverview { mode, masters })
+}
+
+/// The health/role word of a SENTINEL MASTERS / REPLICAS entry. Modern
+/// Sentinels have no `status` field at all — the state lives in `flags`
+/// ("master", "slave", "master,o_down", "slave,disconnected") — so a reply
+/// without `status` falls back to `flags` rather than rendering blank.
+fn entry_status(m: &std::collections::HashMap<String, String>) -> String {
+    m.get("status").or_else(|| m.get("flags")).cloned().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -622,5 +698,253 @@ mod tests {
         }
         assert_eq!(size_command("none"), None);
         assert_eq!(size_command("module-type"), None);
+    }
+
+    #[test]
+    fn entry_status_falls_back_to_flags() {
+        // A modern Sentinel (live-verified against Redis 8.10) has no
+        // `status` field; its flags word carries role + health.
+        let mut m = std::collections::HashMap::new();
+        m.insert("flags".to_string(), "master,o_down".to_string());
+        assert_eq!(entry_status(&m), "master,o_down");
+        m.insert("status".to_string(), "ok".to_string());
+        assert_eq!(entry_status(&m), "ok", "an explicit status wins");
+        assert_eq!(entry_status(&std::collections::HashMap::new()), "");
+    }
+
+    /// The read-only guard consults only session_meta, so it provably fires
+    /// before any server round trip — no Redis needed for this one.
+    #[tokio::test]
+    async fn read_only_guard_blocks_writes_before_any_server() {
+        let dir = std::env::temp_dir()
+            .join(format!("txui-redis-guard-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let history = crate::history::open_in_memory().await.unwrap();
+        let state = AppState::new(history, dir.clone(), std::collections::HashMap::new());
+
+        let id = Uuid::new_v4();
+        state.session_meta.write().await.insert(id, crate::state::SessionGuard {
+            read_only: true,
+            engine: crate::db::types::Engine::Redis,
+            environment: None,
+            log_dir: None,
+            prod_allow_ddl: false,
+            prod_allow_unfiltered_write: false,
+            autocommit: true,
+            query_timeout_secs: None,
+        });
+        let err = guard_read_only(id, &state, "deleting keys").await.unwrap_err();
+        assert!(crate::apperror::AppError::display(&err).contains("read-only"), "{err:?}");
+
+        state.session_meta.write().await.get_mut(&id).unwrap().read_only = false;
+        assert!(guard_read_only(id, &state, "deleting keys").await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    //! Drive the real command bodies against real servers. Every test skips
+    //! silently when its env var is unset or nothing is listening there.
+    //!
+    //!   TXUI_REDIS_TEST_PORT           standalone/Valkey with the fixture
+    //!                                  (`sh dev/redis_fixture.sh 127.0.0.1 <port>`)
+    //!   TXUI_REDIS_TEST_CLUSTER_PORT   any node of a Redis cluster
+    //!                                  (`redis-server --cluster-enabled yes` × N
+    //!                                   + `redis-cli --cluster create …`)
+    //!   TXUI_REDIS_TEST_SENTINEL_PORT  a Sentinel monitoring a master/replica
+    //!                                  pair named "mymaster"
+    //!
+    //!   TXUI_REDIS_TEST_PORT=7790 cargo test --lib redis_browser -- --ignored --nocapture
+    use super::*;
+    use crate::db::types::{ConnectionConfig, Engine, SslMode};
+
+    fn env_port(name: &str) -> Option<u16> {
+        std::env::var(name).ok()?.parse().ok()
+    }
+
+    async fn open_on(port: u16) -> Option<(redis::aio::ConnectionManager, redis::Client)> {
+        let mut c = ConnectionConfig::new(Engine::Redis, "live");
+        c.host = Some("127.0.0.1".into());
+        c.port = Some(port);
+        c.ssl_mode = SslMode::Disable;
+        match crate::db::redis::open(&c, None, None).await.ok()? {
+            LiveSession::Redis(m, client) => Some((m, client)),
+            _ => None,
+        }
+    }
+
+    /// The full browse path the key browser drives, against the fixture.
+    #[tokio::test]
+    #[ignore]
+    async fn live_standalone_browse_round_trip() {
+        let Some(port) = env_port("TXUI_REDIS_TEST_PORT") else { return };
+        let Some((mut mgr, _)) = open_on(port).await else { println!("nothing on {port} — skipping"); return };
+
+        // SCAN with MATCH pages the keyspace.
+        let scan = scan_body(&mut mgr, "session:*", 0, 100).await.expect("scan");
+        assert!(!scan.keys.is_empty(), "fixture session:* keys not found");
+        assert!(scan.keys.iter().all(|k| k.starts_with("session:")));
+        println!("  scan: {} keys, cursor {}", scan.keys.len(), scan.cursor);
+
+        // Single-key info: type, TTL, size, encoding all real.
+        let info = key_info_body(&mut mgr, "user:1").await.expect("key info");
+        assert_eq!(info.key_type, "hash");
+        assert_eq!(info.ttl, -1, "fixture user:1 is persistent");
+        assert_eq!(info.size, 3, "name/email/age");
+        assert!(info.encoding.is_some());
+        println!("  key info: {} {} size={} encoding={:?}", info.key, info.key_type, info.size, info.encoding);
+
+        // Type-aware fetch across the fixture's types.
+        match get_value_body(&mut mgr, "user:1").await.expect("hash value") {
+            RedisValue::Hash { fields } =>
+                assert!(fields.iter().any(|f| f.field == "name" && f.value == "Ada Lovelace")),
+            other => panic!("user:1 not a hash: {other:?}"),
+        }
+        match get_value_body(&mut mgr, "queue:jobs").await.expect("list value") {
+            RedisValue::List { items } => assert_eq!(items.len(), 4),
+            other => panic!("queue:jobs not a list: {other:?}"),
+        }
+        match get_value_body(&mut mgr, "leaderboard").await.expect("zset value") {
+            RedisValue::Zset { entries } =>
+                assert!(entries.iter().any(|e| e.member == "alice" && e.score == 100.0)),
+            other => panic!("leaderboard not a zset: {other:?}"),
+        }
+        println!("  get_value: hash/list/zset decode");
+
+        // Write path: SET with TTL → info reflects it → PERSIST → DEL.
+        set_string_body(&mut mgr, "dbgui:browser:live", "v", Some(60)).await.expect("set");
+        let info = key_info_body(&mut mgr, "dbgui:browser:live").await.expect("info after set");
+        assert_eq!(info.key_type, "string");
+        assert!(info.ttl > 0 && info.ttl <= 60, "ttl {} not in 1..=60", info.ttl);
+        set_ttl_body(&mut mgr, "dbgui:browser:live", -1).await.expect("persist");
+        let info = key_info_body(&mut mgr, "dbgui:browser:live").await.expect("info after persist");
+        assert_eq!(info.ttl, -1);
+        let n = delete_keys_body(&mut mgr, &["dbgui:browser:live".to_string()]).await.expect("del");
+        assert_eq!(n, 1);
+        println!("  set/ttl/persist/del round trip");
+
+        // Key audit pipelines TYPE+TTL+ENCODING then the size command.
+        let audit = key_audit_body(&mut mgr, vec!["user:1".into(), "counter".into(), "gone".into()])
+            .await.expect("audit");
+        assert_eq!(audit.len(), 3);
+        assert_eq!(audit[0].key_type, "hash");
+        assert_eq!(audit[0].size, 3);
+        assert_eq!(audit[1].key_type, "string");
+        assert_eq!(audit[1].size, 2, "STRLEN of \"42\"");
+        assert_eq!(audit[2].key_type, "none", "a missing key audits as none");
+        println!("  key audit: {:?}", audit.iter().map(|a| (&a.key, &a.key_type, a.size)).collect::<Vec<_>>());
+
+        // INFO is the server panel's source.
+        let info = server_info_body(&mut mgr, Some("server")).await.expect("info");
+        assert!(info.contains("redis_version:"), "INFO server has no version");
+    }
+
+    /// Cluster topology through a single-node connection: browse works for
+    /// what the node owns, cross-slot access fails loudly with MOVED (the
+    /// client follows no redirects), and only db0 exists.
+    #[tokio::test]
+    #[ignore]
+    async fn live_cluster_node_browse_and_moved() {
+        let Some(port) = env_port("TXUI_REDIS_TEST_CLUSTER_PORT") else { return };
+        let Some((mut mgr, client)) = open_on(port).await else { println!("no cluster node on {port} — skipping"); return };
+
+        // The node knows it is in cluster mode.
+        let info = server_info_body(&mut mgr, Some("server")).await.expect("info");
+        assert!(info.contains("redis_mode:cluster"), "not a cluster node:\n{info}");
+
+        // Seed keys until at least one lands on THIS node's slots and at
+        // least one is refused with MOVED — the split is the finding.
+        let mut local_key: Option<String> = None;
+        let mut moved_key: Option<String> = None;
+        for i in 0..64 {
+            let key = format!("dbgui:cluster:probe:{i}");
+            match set_string_body(&mut mgr, &key, "v", None).await {
+                Ok(()) => { local_key = local_key.or(Some(key)); }
+                Err(e) => {
+                    let msg = crate::apperror::AppError::display(&e);
+                    assert!(msg.contains("MOVED"), "unexpected cluster error: {msg}");
+                    moved_key = moved_key.or(Some(key));
+                }
+            }
+        }
+        let local_key = local_key.expect("64 keys, none local — is this really a cluster?");
+        let moved_key = moved_key.expect("64 keys, no MOVED — single-node cluster?");
+        println!("  local key: {local_key} · cross-slot write refused (MOVED): {moved_key}");
+
+        // Browse works for keys the connected node owns…
+        let info = key_info_body(&mut mgr, &local_key).await.expect("local key info");
+        assert_eq!(info.key_type, "string");
+        // …and fails loudly with MOVED, never silently wrong, for a key whose
+        // slot lives on another node — the client follows no redirects.
+        let err = key_info_body(&mut mgr, &moved_key).await.unwrap_err();
+        assert!(crate::apperror::AppError::display(&err).contains("MOVED"),
+                "cross-slot read must surface MOVED: {err:?}");
+        println!("  cross-slot read: {}", crate::apperror::AppError::display(&err));
+
+        // SCAN only ever sees the connected node's own slots.
+        let scan = scan_body(&mut mgr, "dbgui:cluster:probe:*", 0, 100).await.expect("scan");
+        assert!(scan.keys.contains(&local_key));
+
+        // Cluster mode has exactly one logical database: INFO keyspace shows
+        // db0 only, so the tree never offers a db3 for SELECT to fail on.
+        let dbs = crate::db::redis::list_schema(mgr.clone()).await.expect("list_schema");
+        let names: Vec<String> = dbs.iter().filter_map(|n| match n {
+            crate::db::types::SchemaNode::Database { name } => Some(name.clone()),
+            _ => None,
+        }).collect();
+        assert!(names.iter().all(|n| n.starts_with("db0")), "cluster must expose db0 only: {names:?}");
+
+        // Belt and braces: if a db>0 label ever arrives, SELECT must fail
+        // rather than silently reading the wrong database.
+        let err = crate::db::redis::list_prefixes(&client, "db3 (1 keys)").await.unwrap_err();
+        println!("  SELECT 3 in cluster mode: {err}");
+
+        // Cleanup: DEL is single-slot per key; delete only the local probe.
+        delete_keys_body(&mut mgr, &[local_key]).await.ok();
+    }
+
+    /// Sentinel: connecting to the Sentinel PORT (not through it — there is
+    /// no master-discovery client path) gives the monitored topology; data
+    /// commands fail cleanly instead of hanging.
+    #[tokio::test]
+    #[ignore]
+    async fn live_sentinel_overview_lists_topology() {
+        let Some(port) = env_port("TXUI_REDIS_TEST_SENTINEL_PORT") else { return };
+        let Some((mut mgr, _)) = open_on(port).await else { println!("no sentinel on {port} — skipping"); return };
+
+        let ov = sentinel_overview_body(&mut mgr).await.expect("overview");
+        assert_eq!(ov.mode, "sentinel");
+        assert_eq!(ov.masters.len(), 1, "expected the mymaster entry: {:?}", ov.masters.len());
+        let m = &ov.masters[0];
+        assert_eq!(m.name, "mymaster");
+        assert_eq!(m.ip, "127.0.0.1");
+        assert!(m.port.parse::<u16>().is_ok(), "master port {m:?}");
+        // Redis ≥ 6-era Sentinels have no `status` field — the state is the
+        // `flags` word; either way the banner must not render blank.
+        assert!(!m.status.is_empty(), "master status/flags missing: {m:?}");
+        assert_eq!(m.replicas.len(), 1, "the replica must be listed");
+        assert_eq!(m.replicas[0].ip, "127.0.0.1");
+        assert!(!m.replicas[0].status.is_empty(), "replica status/flags missing");
+        println!("  sentinel: master {}:{} status={} + replica :{}",
+                 m.ip, m.port, m.status, m.replicas[0].port);
+
+        // A Sentinel is not a data node: GET must error, not hang or pretend.
+        let err = crate::db::redis::execute(mgr.clone(), "GET anything").await.unwrap_err();
+        println!("  GET on a sentinel port: {err}");
+    }
+
+    /// On a non-sentinel server the overview is just the mode — the frontend
+    /// uses it to decide whether the Sentinel card renders at all.
+    #[tokio::test]
+    #[ignore]
+    async fn live_standalone_overview_reports_mode_only() {
+        let Some(port) = env_port("TXUI_REDIS_TEST_PORT") else { return };
+        let Some((mut mgr, _)) = open_on(port).await else { println!("nothing on {port} — skipping"); return };
+        let ov = sentinel_overview_body(&mut mgr).await.expect("overview");
+        assert!(ov.masters.is_empty());
+        assert!(ov.mode == "standalone" || ov.mode == "cluster", "unexpected mode {}", ov.mode);
+        println!("  mode-only overview: {}", ov.mode);
     }
 }

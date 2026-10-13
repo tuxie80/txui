@@ -722,9 +722,19 @@ pub async fn explain_query(
                 postgres::execute(&mut *conn, &format!("SET search_path TO \"{}\"", d.replace('"', "\"\""))).await
                     .map_err(|e| format!("could not set search_path to \"{d}\": {e:#}"))?;
             }
-            let opts = if analyze { "FORMAT JSON, ANALYZE true, BUFFERS true" } else { "FORMAT JSON" };
+            let opts = if analyze { "FORMAT JSON, ANALYZE true, BUFFERS true, WAL true, SETTINGS true" } else { "FORMAT JSON" };
             let stmt = format!("EXPLAIN ({}) {}", opts, sql);
-            let r = postgres::execute(&mut *conn, &stmt).await?;
+            let r = match postgres::execute(&mut *conn, &stmt).await {
+                Ok(r) => r,
+                // WAL and SETTINGS are PG 12+ options; on an older server the
+                // whole EXPLAIN is a syntax error, so retry with the pre-12
+                // option set rather than returning no plan at all.
+                Err(e) if analyze && e.to_string().contains("EXPLAIN option") => {
+                    postgres::execute(&mut *conn,
+                        &format!("EXPLAIN (FORMAT JSON, ANALYZE true, BUFFERS true) {}", sql)).await?
+                }
+                Err(e) => return Err(e.into()),
+            };
             Ok(ExplainResult { format: "json".into(), engine: "postgres".into(), content: plan_text(&r) })
         }
         // ClickHouse EXPLAIN returns a plain-text plan (PLAN / PIPELINE /
