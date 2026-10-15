@@ -419,7 +419,7 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
 /// zero. `.123456700` → `.1234567`, `.120000000` → `.12`, `.000000000` → ``.
 ///
 /// The round trip is exact either way — this is a rendering decision, recorded
-/// in plan-sqlserver.md §1.1 rather than left to whoever reads the grid.
+/// in the SQL Server rollout's decoding table rather than left to whoever reads the grid.
 fn trim_frac(rendered: String) -> String {
     let Some(dot) = rendered.find('.') else { return rendered };
     // The fraction runs to the first non-digit (the " +02:30" of an offset).
@@ -436,8 +436,26 @@ fn trim_frac(rendered: String) -> String {
 
 /// Decode one cell to its JSON value. `ColumnData<'static>` because a `Row`
 /// owns its data (and `FromSql` requires the 'static form).
-fn cell_to_json(data: &ColumnData<'static>) -> serde_json::Value {
+///
+/// `is_udt` marks a CLR UDT column (geometry, geography, hierarchyid, custom
+/// types). The vendored tiberius decodes the wire value as Binary — the raw
+/// MS-SSCLRT serialization, which nothing client-side can parse — so the grid
+/// gets an explicit placeholder with the escape hatch, never a wall of hex,
+/// never a fake NULL, and (the landmine this replaces) never a process crash.
+fn cell_to_json(is_udt: bool, data: &ColumnData<'static>) -> serde_json::Value {
     use serde_json::Value as J;
+    if is_udt {
+        return match data {
+            // NULL stays NULL — the placeholder is for actual values only.
+            ColumnData::Binary(None) => J::Null,
+            ColumnData::Binary(Some(b)) => J::String(format!(
+                "<udt: {} bytes — not decodable; wrap with .ToString()>", b.len())),
+            // Defensive: the vendored decode only ever yields Binary for a
+            // UDT, but a decode surprise must fall through to a string,
+            // never masquerade as NULL.
+            other => J::String(format!("{other:?}")),
+        };
+    }
     match data {
         ColumnData::U8(v) => v.map_or(J::Null, J::from),
         ColumnData::I16(v) => v.map_or(J::Null, J::from),
@@ -574,7 +592,9 @@ async fn collect_stream(
                 if sets.is_empty() {
                     sets.push((row.columns().iter().map(column_info).collect(), Vec::new()));
                 }
-                let cells: Row = row.cells().map(|(_, d)| cell_to_json(d)).collect();
+                let cells: Row = row.cells()
+                    .map(|(c, d)| cell_to_json(c.column_type() == ColumnType::Udt, d))
+                    .collect();
                 if let Some(last) = sets.last_mut() {
                     last.1.push(cells);
                 }
@@ -616,6 +636,7 @@ fn result_from_sets(
                 fetch_ms: total_ms - execution_ms,
                 warnings: vec![],
                 truncated,
+                geo_bbox: None,
             }
         }
         None => QueryResult {
@@ -626,6 +647,7 @@ fn result_from_sets(
             fetch_ms: total_ms - execution_ms,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         },
     }
 }
@@ -915,6 +937,7 @@ pub async fn list_columns(
             nullable: col_bool(row, 5),
             primary_key: col_bool(row, 6),
             name,
+            spatial: None,
         });
     }
 
@@ -1344,6 +1367,30 @@ mod tests {
         assert_eq!(column_type_name(ColumnType::Numericn), "decimal");
         assert_eq!(column_type_name(ColumnType::DatetimeOffsetn), "datetimeoffset");
         assert_eq!(column_type_name(ColumnType::NVarchar), "nvarchar");
+    }
+
+    /// The CLR-UDT landmine (geometry/geography/hierarchyid): tiberius 0.12.3
+    /// hit `todo!()`/`unimplemented!()` decoding these columns, and the
+    /// release profile is panic=abort — one SELECT took the whole backend
+    /// down. The vendored tiberius patch (src-tauri/vendor/tiberius) decodes
+    /// the wire value as Binary; this pins what the grid gets for it.
+    #[test]
+    fn udt_cells_render_a_placeholder_never_null_never_panic() {
+        use std::borrow::Cow;
+        let v = cell_to_json(true, &ColumnData::Binary(Some(Cow::Borrowed(&[0u8; 5][..]))));
+        let s = v.as_str().expect("a UDT value must render as a placeholder string");
+        assert!(s.starts_with("<udt:"), "placeholder should name the type: {s}");
+        assert!(s.contains('5'), "placeholder should carry the byte count: {s}");
+        // NULL stays NULL — the placeholder is for values, and a UDT NULL
+        // must not masquerade as data (nor data as NULL).
+        assert_eq!(cell_to_json(true, &ColumnData::Binary(None)), serde_json::Value::Null);
+        // The ordinary varbinary path is untouched: SSMS-style 0x… uppercase.
+        let b = cell_to_json(false, &ColumnData::Binary(Some(Cow::Borrowed(&[0xde, 0xad][..]))));
+        assert_eq!(b.as_str().unwrap(), "0xDEAD");
+        // A decode surprise (non-Binary in a UDT column) falls through to a
+        // string, per the row-decoding doctrine.
+        let surprise = cell_to_json(true, &ColumnData::I32(Some(7)));
+        assert!(surprise.as_str().unwrap().contains("I32"), "{surprise}");
     }
 
     use crate::db::types::FilterOp;
@@ -1926,5 +1973,87 @@ pub(crate) mod live_tests {
         // Whatever the representation, it must not be silently NULL and must
         // not have lost the magnitude.
         assert!(v.len() >= 20, "wide decimal lost its magnitude: {v}");
+    }
+
+    /// The CLR-UDT landmine, live: `geometry`/`geography`/`hierarchyid`
+    /// columns made tiberius 0.12.3 hit `todo!()` while decoding the result
+    /// METADATA — before any row arrived — and with `panic=abort` in the
+    /// release profile that was the whole backend gone on one SELECT. The
+    /// fixture has carried these columns (`dbo.type_matrix.c_geography` /
+    /// `c_geometry` / `c_hierarchyid`) since the rollout and no test ever
+    /// SELECTed them; this one does, and asserts the placeholder contract.
+    ///
+    /// The proof is structural: with panic=abort a decode panic aborts the
+    /// test process itself, so reaching any assertion at all means the panic
+    /// path is closed.
+    #[tokio::test]
+    #[ignore = "needs TXUI_MSSQL_HOST and a live SQL Server"]
+    async fn udt_columns_decode_to_placeholders_not_panics() {
+        skip_unless!(s);
+        let r = execute(&s, "SELECT c_geography, c_geometry, c_hierarchyid \
+                             FROM dbo.type_matrix WHERE c_geography IS NOT NULL")
+            .await.expect("SELECT over UDT columns must not crash the backend");
+        assert_eq!(r.columns.len(), 3, "columns: {:?}", r.columns);
+        for c in &r.columns {
+            assert_eq!(c.type_name, "udt", "UDT column labelled: {c:?}");
+        }
+        let row = r.rows.first().expect("the fixture's valued row");
+        for cell in row {
+            let v = cell.as_str().expect("a UDT value must be a placeholder string");
+            assert!(v.starts_with("<udt:"), "unexpected UDT rendering: {v}");
+        }
+
+        // The all-NULL fixture row exercises the NBCROW null-bitmap path
+        // (null_value()), the second panic site: NULL must stay NULL.
+        let n = execute(&s, "SELECT c_geography FROM dbo.type_matrix \
+                             WHERE c_geography IS NULL")
+            .await.expect("NULL UDT row");
+        assert_eq!(n.rows[0][0], serde_json::Value::Null,
+                   "a NULL UDT must not become a placeholder");
+
+        // And the escape hatch the placeholder advertises really works.
+        let t = execute(&s, "SELECT c_geometry.ToString() FROM dbo.type_matrix \
+                             WHERE c_geometry IS NOT NULL")
+            .await.expect("ToString() escape hatch");
+        assert_eq!(t.rows[0][0].as_str().unwrap(), "LINESTRING (0 0, 10 10)");
+    }
+
+    /// Wave-2 derived display, live: the query shape
+    /// `src/utils/mssqlUdt.ts#buildUdtDerivedQuery` emits in wkb mode —
+    /// subselect wrap, `STAsBinary()` under the original alias. The derived
+    /// column comes back varbinary → `0x…` hex, which the frontend's
+    /// `parseWkbHex` (0x prefix accepted) feeds straight to the geometry
+    /// badge / cell viewer / map: the whole existing geo stack lights up
+    /// with no new decode code. hierarchyid rides the wkt mode (`ToString`).
+    #[tokio::test]
+    #[ignore = "needs TXUI_MSSQL_HOST and a live SQL Server"]
+    async fn udt_derived_stasbinary_query_returns_wkb_hex() {
+        skip_unless!(s);
+        let r = execute(&s,
+            "SELECT txui_geo.[c_geometry].STAsBinary() AS [c_geometry], \
+                    txui_geo.[c_hierarchyid].ToString() AS [c_hierarchyid] \
+             FROM (\n\
+               SELECT c_geometry, c_hierarchyid FROM dbo.type_matrix \
+               WHERE c_geometry IS NOT NULL\n\
+             ) AS txui_geo")
+            .await.expect("derived STAsBinary/ToString wrap");
+        assert_eq!(r.columns[0].type_name, "varbinary",
+                   "STAsBinary() returns varbinary(max): {:?}", r.columns);
+        let hex = r.rows[0][0].as_str().expect("WKB cell renders as 0x-hex");
+        // LINESTRING (0 0, 10 10) → little-endian WKB, type 2.
+        assert!(hex.starts_with("0x0102000000"), "not WKB for a linestring: {hex}");
+        let hid = r.rows[0][1].as_str().expect("hierarchyid ToString renders text");
+        assert_eq!(hid, "/1/2/", "fixture hierarchyid");
+
+        // And pin WHY wkt mode exists: hierarchyid has no STAsBinary — the
+        // wkb wrap over one fails at compile time (Msg 195), and the caller
+        // offers .ToString() instead.
+        let err = execute(&s,
+            "SELECT txui_geo.[c_hierarchyid].STAsBinary() AS [c_hierarchyid] \
+             FROM (SELECT c_hierarchyid FROM dbo.type_matrix) AS txui_geo")
+            .await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("STAsBinary"), "unhelpful error: {msg}");
+        println!("  hierarchyid + STAsBinary refused by the server: {msg}");
     }
 }

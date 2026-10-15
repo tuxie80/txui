@@ -95,7 +95,7 @@ sqlx             = { version = "0.9", default-features = false, features = [
 ] }
 redis            = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
 
-# MongoDB driver (plan-dba-focus.md WS4: connect + tree + find editor + JSON
+# MongoDB driver (DBA-first push, workstream 4: connect + tree + find editor + JSON
 # grid; read-only by design — see db/mongodb.rs). 3.8 is the line whose MSRV
 # (1.88) fits the pinned toolchain (1.97.1). mongodb 3.x needs a bson line
 # chosen explicitly: `bson-2` is the bson 2.x crate, re-exported as
@@ -110,7 +110,7 @@ redis            = { version = "0.26", features = ["tokio-comp", "connection-man
 # Re-check on each driver upgrade whether a native-roots feature has appeared.
 mongodb          = { version = "3.8", default-features = false, features = ["rustls-tls", "bson-2", "compat-3-3-0"] }
 
-# SQL Server (TDS) driver — spike phase (plan-dba-focus.md WS1 Phase 1.0).
+# SQL Server (TDS) driver — spike phase (DBA-first workstream 1, phase 1.0).
 # `default-features = false` drops the default `native-tls` + `winauth`: the
 # house TLS stance is rustls everywhere, and `winauth` (Windows SSPI) is a
 # cfg-gated auth nicety we are not committing to in the spike.
@@ -132,7 +132,16 @@ mongodb          = { version = "3.8", default-features = false, features = ["rus
 # no upstream fix exists to take, and vendoring a hand-rolled TLS patch is
 # off the table. Re-check this on every tiberius upgrade; when a rustls-0.23
 # release (or a maintained fork) appears, take it and delete this note.
-tiberius         = { version = "0.12.3", default-features = false, features = [
+#
+# VENDORED (vendor/tiberius, verbatim 0.12.3 + one decode patch): upstream hits
+# todo!()/unimplemented!() on CLR UDT columns (geometry, geography,
+# hierarchyid) — in the metadata token decode, before any row — and the
+# release profile is panic=abort, so one SELECT crashed the whole backend.
+# The patch (marked "TxUI vendored patch" in three files) decodes UDT type
+# info per MS-TDS 2.2.5.4.2, carries the value as Binary, and turns the
+# remaining unsupported-type panics into Protocol errors. Drop the path
+# override only when an upstream release decodes UDT without panicking.
+tiberius         = { version = "0.12.3", path = "vendor/tiberius", default-features = false, features = [
     "tds73",
     "rustls",
     "chrono",

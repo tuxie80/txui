@@ -241,7 +241,7 @@ test('SQL Server draws ER diagrams', () => {
 });
 
 test('SQL Server lights panels one at a time, never via sqlDba', () => {
-  // Phase 2 of plan-sqlserver.md. `sqlDba` gates fifteen panels that hardcode
+  // Phase 2 of the SQL Server rollout. `sqlDba` gates fifteen panels that hardcode
   // MySQL/PG catalog SQL, so flipping it would surface fifteen panels that
   // error on connect — worse than fifteen hidden ones. Each panel gets its own
   // capability as its T-SQL lands.

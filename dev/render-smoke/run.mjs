@@ -192,6 +192,10 @@ export function standardProps(fixtures) {
     relCols: [],
     drift: null,
     request: { sql: 'DELETE FROM t WHERE id = 1', statementKind: 'delete', table: 't', where: false, rowsAffected: null },
+    // MapView/GraphicsView round-2 geo props
+    columnTypes: ['varchar', 'float8', 'float8'],
+    initialBbox: null,
+    sourceSql: null,
     // FastGrid's wider vocabulary
     sort: [], filteredCols: new Set(), meta: [], pkColumns: [],
     pendingKeys: new Set(), apiRef: { current: null }, rowClass: undefined,

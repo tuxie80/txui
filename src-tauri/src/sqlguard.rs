@@ -11,7 +11,9 @@
 /// bodies and comments with spaces, preserving overall structure (parens,
 /// keywords, statement separators). Operates on `char`s so UTF-8 identifiers
 /// are handled safely.
-fn blank(sql: &str) -> String {
+/// `pub(crate)`: commands/duckdb.rs's GeoParquet export uses it to reject a
+/// comment-only "statement" as effectively empty.
+pub(crate) fn blank(sql: &str) -> String {
     let cs: Vec<char> = sql.chars().collect();
     let n = cs.len();
     let mut out = String::with_capacity(n);
@@ -759,7 +761,7 @@ mod tests {
 
 #[cfg(test)]
 mod guard_bypass_tests {
-    //! Regression tests for the 2026-08 guard-hardening review (findings.md
+    //! Regression tests for the 2026-08 guard-hardening review (the findings
     //! WP-01): each test asserts both that a bypass is now blocked and that
     //! its legitimate neighbor still passes.
     use super::{is_dangerous_ddl, is_unfiltered_write, is_write};

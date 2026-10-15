@@ -628,6 +628,130 @@ pub(crate) async fn sentinel_overview_body(
     Ok(RedisSentinelOverview { mode, masters })
 }
 
+// ── "View as geo" (GEO indexes are zsets) ────────────────────────────────────
+
+#[derive(Serialize, Debug)]
+pub struct RedisGeoPoint {
+    pub member: String,
+    pub lon:    f64,
+    pub lat:    f64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct RedisGeoResult {
+    pub key:       String,
+    /// ZCARD — how many members the key holds in total.
+    pub total:     i64,
+    /// How many members GEOPOS was asked about (≤ total when capped).
+    pub scanned:   usize,
+    /// GEOPOS answered nil for these (member gone between ZRANGE and GEOPOS,
+    /// or an undecodable score). points.len() = scanned - missing.
+    pub missing:   usize,
+    /// total > scanned — the view shows a prefix of the key, capped at
+    /// GEO_MAX_POINTS like the app map caps its layers.
+    pub truncated: bool,
+    pub points:    Vec<RedisGeoPoint>,
+}
+
+/// Server-side ceiling on one geo resolution, mirroring the map's point cap.
+pub const GEO_MAX_POINTS: usize = 5_000;
+/// GEOPOS takes a variadic member list; batch it so a 5 000-member page is
+/// ten round trips, not one 5 000-argument command.
+const GEOPOS_BATCH: usize = 500;
+
+/// Resolve a zset's members to coordinates with GEOPOS — user-initiated from
+/// the key browser's "view as geo" action, never a guess from the scores
+/// (a leaderboard's scores ARE decodable geohash52 bits; GEOPOS happily
+/// returns corner-clustered garbage for them, so detection is the user's
+/// click and honesty is the missing/truncated counters).
+///
+/// Read-only: TYPE + ZCARD + ZRANGE + GEOPOS are all reads, safe on a
+/// read-only connection.
+#[tauri::command]
+pub async fn redis_geo_points(
+    session_id: Uuid,
+    key:        String,
+    limit:      Option<u32>,
+    state:      State<'_, AppState>,
+) -> Result<RedisGeoResult, crate::apperror::AppError> {
+    let mut mgr = get_mgr(session_id, &state).await?;
+    geo_points_body(&mut mgr, &key, limit).await
+}
+
+pub(crate) async fn geo_points_body(
+    mgr:   &mut redis::aio::ConnectionManager,
+    key:   &str,
+    limit: Option<u32>,
+) -> Result<RedisGeoResult, crate::apperror::AppError> {
+    let type_str: String = redis::cmd("TYPE").arg(key)
+        .query_async(mgr).await?;
+    if type_str != "zset" {
+        return Err(format!(
+            "\"{key}\" is a {type_str} — Redis geo indexes are zsets; only a zset can be viewed as geo."
+        ).into());
+    }
+
+    let total: i64 = redis::cmd("ZCARD").arg(key)
+        .query_async(mgr).await?;
+    let cap = limit.unwrap_or(GEO_MAX_POINTS as u32).clamp(1, GEO_MAX_POINTS as u32) as usize;
+    // ZRANGE by rank, not ZSCAN: the page is deterministic (a zset's rank
+    // order is stable) and one command, and GEOPOS needs the member NAMES,
+    // which a cursor scan would hand us just the same.
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg(key).arg(0i64).arg(cap.saturating_sub(1) as i64)
+        .query_async(mgr).await?;
+
+    let mut points: Vec<RedisGeoPoint> = Vec::new();
+    let mut missing = 0usize;
+    for chunk in members.chunks(GEOPOS_BATCH) {
+        let mut cmd = redis::cmd("GEOPOS");
+        cmd.arg(key);
+        for m in chunk { cmd.arg(m); }
+        let raw: redis::Value = cmd.query_async(mgr).await?;
+        let (mut pts, miss) = parse_geopos_reply(raw, chunk);
+        points.append(&mut pts);
+        missing += miss;
+    }
+
+    Ok(RedisGeoResult {
+        key: key.to_string(),
+        total,
+        scanned: members.len(),
+        missing,
+        truncated: total > members.len() as i64,
+        points,
+    })
+}
+
+/// One GEOPOS reply against the member chunk that produced it: an array
+/// parallel to `members`, each entry nil (member not found) or a two-element
+/// [lon, lat] array of bulk strings. A reply whose shape does not match the
+/// request (a module answer, a protocol surprise) resolves nothing rather
+/// than misaligning members with coordinates.
+fn parse_geopos_reply(raw: redis::Value, members: &[String]) -> (Vec<RedisGeoPoint>, usize) {
+    let entries = match raw {
+        redis::Value::Array(a) => a,
+        _ => return (vec![], members.len()),
+    };
+    let mut points = Vec::new();
+    let mut missing = 0usize;
+    for (i, member) in members.iter().enumerate() {
+        let coord = entries.get(i).and_then(|e| match e {
+            redis::Value::Array(pair) if pair.len() == 2 => {
+                let lon = bulk_to_string(&pair[0])?.parse::<f64>().ok()?;
+                let lat = bulk_to_string(&pair[1])?.parse::<f64>().ok()?;
+                Some((lon, lat))
+            }
+            _ => None,
+        });
+        match coord {
+            Some((lon, lat)) => points.push(RedisGeoPoint { member: member.clone(), lon, lat }),
+            None => missing += 1,
+        }
+    }
+    (points, missing)
+}
+
 /// The health/role word of a SENTINEL MASTERS / REPLICAS entry. Modern
 /// Sentinels have no `status` field at all — the state lives in `flags`
 /// ("master", "slave", "master,o_down", "slave,disconnected") — so a reply
@@ -698,6 +822,67 @@ mod tests {
         }
         assert_eq!(size_command("none"), None);
         assert_eq!(size_command("module-type"), None);
+    }
+
+    #[test]
+    fn geopos_reply_resolves_coordinates_and_counts_nils() {
+        let members = vec!["Palermo".to_string(), "gone".to_string(), "Paris".to_string()];
+        let raw = redis::Value::Array(vec![
+            redis::Value::Array(vec![bulk("13.361389"), bulk("38.115556")]),
+            redis::Value::Nil,
+            redis::Value::Array(vec![bulk("2.349014"), bulk("48.864716")]),
+        ]);
+        let (points, missing) = parse_geopos_reply(raw, &members);
+        assert_eq!(missing, 1);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].member, "Palermo");
+        assert!((points[0].lon - 13.361389).abs() < 1e-6);
+        assert!((points[0].lat - 38.115556).abs() < 1e-6);
+        assert_eq!(points[1].member, "Paris");
+    }
+
+    #[test]
+    fn geopos_all_nil_is_the_not_a_geo_key_case() {
+        // Members vanished (or scores undecodable): every entry nil → zero
+        // points, every member counted missing. The frontend reads this exact
+        // combination as "not a geo key".
+        let members = vec!["a".to_string(), "b".to_string()];
+        let raw = redis::Value::Array(vec![redis::Value::Nil, redis::Value::Nil]);
+        let (points, missing) = parse_geopos_reply(raw, &members);
+        assert!(points.is_empty());
+        assert_eq!(missing, 2);
+    }
+
+    #[test]
+    fn geopos_shape_surprises_resolve_nothing_rather_than_misalign() {
+        let members = vec!["a".to_string(), "b".to_string()];
+        // A non-array reply must not align member[0] with whatever it holds.
+        let (points, missing) = parse_geopos_reply(redis::Value::Nil, &members);
+        assert!(points.is_empty());
+        assert_eq!(missing, 2);
+        // A short reply (server answered fewer entries than asked) counts the
+        // uncovered tail as missing, never shifts coordinates onto the wrong
+        // member.
+        let short = redis::Value::Array(vec![
+            redis::Value::Array(vec![bulk("1.5"), bulk("2.5")]),
+        ]);
+        let (points, missing) = parse_geopos_reply(short, &members);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].member, "a");
+        assert_eq!(missing, 1);
+        // An unparsable coordinate pair counts as missing, not as (0, 0).
+        let junk = redis::Value::Array(vec![
+            redis::Value::Array(vec![bulk("not-a-number"), bulk("2.5")]),
+            redis::Value::Array(vec![bulk("1.5")]),  // one-element pair
+        ]);
+        let (points, missing) = parse_geopos_reply(junk, &members);
+        assert!(points.is_empty());
+        assert_eq!(missing, 2);
+    }
+
+    #[test]
+    fn geo_point_cap_matches_the_map_doctrine() {
+        assert_eq!(GEO_MAX_POINTS, 5_000);
     }
 
     #[test]
@@ -933,6 +1118,64 @@ mod live_tests {
         // A Sentinel is not a data node: GET must error, not hang or pretend.
         let err = crate::db::redis::execute(mgr.clone(), "GET anything").await.unwrap_err();
         println!("  GET on a sentinel port: {err}");
+    }
+
+    /// "View as geo" end to end: GEOADD real members, resolve them through
+    /// geo_points_body, verify coordinates round-trip within geohash52
+    /// precision, then prove the leaderboard trap is reported, not hidden —
+    /// GEOPOS decodes ANY zset score, so a plain zset yields garbage points
+    /// clustered at the (-180, -85) corner and the counters are the honesty.
+    #[tokio::test]
+    #[ignore]
+    async fn live_geo_points_round_trip() {
+        let Some(port) = env_port("TXUI_REDIS_TEST_PORT") else { return };
+        let Some((mut mgr, _)) = open_on(port).await else { println!("nothing on {port} — skipping"); return };
+
+        let key = "dbgui:geo:live";
+        let _: i64 = redis::cmd("GEOADD").arg(key)
+            .arg(13.361389).arg(38.115556).arg("Palermo")
+            .arg(15.087269).arg(37.502669).arg("Catania")
+            .arg(2.349014).arg(48.864716).arg("Paris")
+            .query_async(&mut mgr).await.expect("GEOADD");
+
+        let r = geo_points_body(&mut mgr, key, None).await.expect("geo points");
+        assert_eq!(r.total, 3);
+        assert_eq!(r.scanned, 3);
+        assert_eq!(r.missing, 0);
+        assert!(!r.truncated);
+        assert_eq!(r.points.len(), 3);
+        let palermo = r.points.iter().find(|p| p.member == "Palermo").expect("Palermo");
+        // geohash52 quantizes to well under a metre — 1e-4° (~11 m) is generous.
+        assert!((palermo.lon - 13.361389).abs() < 1e-4, "lon {}", palermo.lon);
+        assert!((palermo.lat - 38.115556).abs() < 1e-4, "lat {}", palermo.lat);
+        println!("  geo round trip: {:?}", r.points.iter()
+            .map(|p| (&p.member, p.lon, p.lat)).collect::<Vec<_>>());
+
+        // The cap: limit 2 of 3 → truncated, and the result says so.
+        let capped = geo_points_body(&mut mgr, key, Some(2)).await.expect("capped");
+        assert!(capped.truncated);
+        assert_eq!(capped.total, 3);
+        assert_eq!(capped.scanned, 2);
+
+        // The trap: a leaderboard IS a zset and GEOPOS decodes its scores
+        // into corner garbage. The action is user-initiated, the counters
+        // stay honest, and this test pins that no "not geo" refusal fires.
+        let lb = "dbgui:geo:leaderboard";
+        let _: i64 = redis::cmd("ZADD").arg(lb).arg(100.0).arg("alice")
+            .query_async(&mut mgr).await.expect("ZADD");
+        let r = geo_points_body(&mut mgr, lb, None).await.expect("leaderboard geopos");
+        assert_eq!(r.missing, 0, "GEOPOS decodes any score — no nils here");
+        assert_eq!(r.points.len(), 1);
+        assert!(r.points[0].lat < -85.0 && r.points[0].lon < -179.0,
+                "score 100 decodes to the corner: {:?}", r.points[0]);
+        println!("  leaderboard decode (garbage, honestly counted): {:?}", r.points[0]);
+
+        // Not a zset at all is refused with an honest reason.
+        let err = geo_points_body(&mut mgr, "user:1", None).await.unwrap_err();
+        assert!(crate::apperror::AppError::display(&err).contains("geo indexes are zsets"),
+                "{err:?}");
+
+        delete_keys_body(&mut mgr, &[key.to_string(), lb.to_string()]).await.ok();
     }
 
     /// On a non-sentinel server the overview is just the mode — the frontend

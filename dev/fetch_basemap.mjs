@@ -65,11 +65,44 @@ function simplify(points, tolerance) {
   ];
 }
 
+/**
+ * Simplify a CLOSED ring. Plain RDP cannot run on one directly: a ring's first
+ * and last points are identical, so the baseline has zero length and every
+ * vertex measures as "on the line" — the whole ring collapses to a point.
+ * Split the ring at the vertex farthest from the anchor and simplify the two
+ * halves as open polylines.
+ */
+function simplifyRing(r, tolerance) {
+  if (r.length <= 4) return r;
+  const [ax, ay] = r[0];
+  let far = 0, farD = -1;
+  for (let i = 1; i < r.length; i++) {
+    const d = (r[i][0] - ax) ** 2 + (r[i][1] - ay) ** 2;
+    if (d > farD) { farD = d; far = i; }
+  }
+  const a = simplify(r.slice(0, far + 1), tolerance);
+  const b = simplify(r.slice(far), tolerance);
+  return [...a, ...b.slice(1)];   // a ends at `far`, b restarts there
+}
+
+/** Round to ~1 km — far finer than the simplify tolerance, pure byte savings. */
+const round = r => r.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]);
+
+function simplifyPolygon(rings, tolerance) {
+  // Fewer than 4 points is not a ring; a polygon that loses its outer ring is
+  // gone (a pinhead island at 1:110m, honestly absent rather than a dot).
+  const out = rings.map(r => simplifyRing(r, tolerance)).filter(r => r.length >= 4).map(round);
+  return out.length ? out : null;
+}
+
 function simplifyGeometry(geom, tolerance) {
-  const ring = r => (r.length > 4 ? simplify(r, tolerance) : r);
-  if (geom.type === 'Polygon') return { ...geom, coordinates: geom.coordinates.map(ring) };
+  if (geom.type === 'Polygon') {
+    const rings = simplifyPolygon(geom.coordinates, tolerance);
+    return rings ? { ...geom, coordinates: rings } : null;
+  }
   if (geom.type === 'MultiPolygon') {
-    return { ...geom, coordinates: geom.coordinates.map(p => p.map(ring)) };
+    const polys = geom.coordinates.map(p => simplifyPolygon(p, tolerance)).filter(Boolean);
+    return polys.length ? { ...geom, coordinates: polys } : null;
   }
   return geom;
 }
@@ -99,7 +132,7 @@ async function main() {
   // weight in an asset that exists to be drawn as an outline.
   const features = (raw.features ?? [])
     .map(f => simplifyGeometry(f.geometry, TOLERANCE))
-    .filter(Boolean);
+    .filter(Boolean);   // geometries that simplified away entirely are dropped
 
   mkdirSync(dirname(OUT), { recursive: true });
   const out = JSON.stringify({

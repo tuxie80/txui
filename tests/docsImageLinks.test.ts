@@ -26,7 +26,7 @@ function markdownFiles(root: string): string[] {
   return out;
 }
 
-const docs = [...markdownFiles('docs'), 'README.md', 'AGENTS.md', 'CHANGELOG.md', 'HANDOVER.md'];
+const docs = [...markdownFiles('docs'), 'README.md', 'AGENTS.md', 'CHANGELOG.md'];
 
 describe('documentation image links', () => {
   test('every referenced image file exists', () => {

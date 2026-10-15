@@ -26,7 +26,7 @@ fn col(name: &str) -> ColumnInfo {
 }
 
 fn result(columns: Vec<ColumnInfo>, rows: Vec<Vec<J>>, execution_ms: u64) -> QueryResult {
-    QueryResult { columns, rows, rows_affected: None, execution_ms, fetch_ms: 0, warnings: vec![], truncated: false }
+    QueryResult { columns, rows, rows_affected: None, execution_ms, fetch_ms: 0, warnings: vec![], truncated: false , geo_bbox: None }
 }
 
 /// Command name in the "CONFIG GET" / "GET" form, uppercase.

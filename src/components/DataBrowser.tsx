@@ -55,6 +55,9 @@ interface Props {
   txOpen?: boolean;
   onBeginTx?: () => Promise<void> | void;
   onEndTx?: (cmd: 'commit_transaction' | 'rollback_transaction') => Promise<void> | void;
+  /** Runs a derived query in a new tab (the map's "View in WGS 84" action);
+   *  without it the action stays hidden on this surface. */
+  onRunDerived?: (sql: string, label: string) => void;
 }
 
 const PAGE = 100;   // rows per fetch; the row cap (default 100) is user-raisable below
@@ -64,11 +67,15 @@ const dbOf = (t: string) => (t.includes('.') ? t.slice(0, t.indexOf('.')) : '');
 
 export function DataBrowser({
   sessionId, table, engine, connectionName, connectionId, dbUser, resultLabel, onClose, onFkNavigate,
-  txOpen, onBeginTx, onEndTx,
+  txOpen, onBeginTx, onEndTx, onRunDerived,
 }: Props) {
   const [meta, setMeta]     = useState<TableMeta | null>(null);
   const [rows, setRows]     = useState<unknown[][]>([]);
   const [cols, setCols]     = useState<QueryResult['columns']>([]);
+  // The GeoParquet footer bbox (map's first-fit hint) and the browse SQL that
+  // produced the rows (what a derived transform query wraps) — set on page 1.
+  const [geoBbox, setGeoBbox] = useState<[number, number, number, number] | null>(null);
+  const [browseSql, setBrowseSql] = useState<string | null>(null);
   const [loadedAll, setLoadedAll] = useState(false);
   const [filters, setFilters] = useState<FilterClause[]>([]);
   const [colFilters, setColFilters] = useState<ColumnFilter[]>([]);
@@ -280,8 +287,13 @@ export function DataBrowser({
         // Column shape is stable across pages of one browse (same SELECT, only
         // LIMIT/OFFSET change), so skip setCols when appending: a fresh array
         // identity would reset FastGrid's selection/width state and re-run the
-        // width-measure memo, re-rendering every visible row per page.
-        if (!append) setCols(r.columns);
+        // width-measure memo, re-rendering every visible row per page. The
+        // GeoParquet viewport hint and the browse SQL are stable the same way.
+        if (!append) {
+          setCols(r.columns);
+          setGeoBbox(r.geo_bbox ?? null);
+          setBrowseSql(sqlText);
+        }
         setRows(prev => append ? [...prev, ...r.rows] : r.rows);
         offsetRef.current = offset + n;
         if (n < fetchLimit || offsetRef.current >= limit) setLoadedAll(true);
@@ -564,6 +576,10 @@ export function DataBrowser({
             columns={cols}
             rows={rows}
             onSelectRow={row => apiRef.current?.selectRow(row)}
+            initialBbox={geoBbox}
+            engine={engine}
+            sourceSql={browseSql}
+            onRunDerived={onRunDerived}
           />
         </div>
       )}
@@ -614,6 +630,7 @@ export function DataBrowser({
         <CellViewer
           column={viewer.column}
           value={viewer.value}
+          engine={engine}
           onClose={() => setViewer(null)}
         />
       )}

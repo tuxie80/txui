@@ -452,6 +452,15 @@ pub struct QueryResult {
     /// partial result would be worse than no cap at all.
     #[serde(default)]
     pub truncated:    bool,
+    /// GeoParquet footer bbox of the primary geometry column, RFC 7946 order
+    /// [west, south, east, north] — the file's full extent, known from the
+    /// footer without scanning a row, so the map can fit its FIRST viewport to
+    /// it rather than to whichever page happens to be loaded. Only the Parquet
+    /// row paths supply it (datasets: the union over member files); every
+    /// other engine leaves it None, and None is skipped on the wire so older
+    /// frontends see a byte-identical payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo_bbox:     Option<[f64; 4]>,
 }
 
 fn default_true() -> bool {
@@ -520,6 +529,30 @@ impl LiveSession {
             LiveSession::SqlServer(_) => "sqlserver",
         }
     }
+}
+
+/// PostGIS spatial metadata for one column (PostgreSQL only).
+///
+/// Comes from the PostGIS catalog views `geometry_columns` / `geography_columns`
+/// (probed in db/postgres.rs::list_columns), NOT from decoding cells — so it is
+/// known before a single row is read, and it carries the one fact a cell never
+/// can: whether a GiST/SP-GiST index covers the column. `None` on every other
+/// engine, and on PostgreSQL without PostGIS (the views do not exist, the probe
+/// returns nothing, and the badge layer simply does not appear).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SpatialColumn {
+    /// Which catalog reported it: "geometry" | "geography".
+    pub family: String,
+    /// Declared type as the catalog reports it ("POINT", "MULTIPOLYGON", …;
+    /// "GEOMETRY" when the column is unconstrained).
+    pub geom_type: String,
+    /// Declared SRID; 0 means unconstrained (the catalog's own convention).
+    pub srid: i32,
+    /// Coordinate dimension (2/3/4) from the catalog.
+    pub dims: i32,
+    /// A GiST or SP-GiST index covers this column — without one, every
+    /// ST_Intersects / ST_DWithin on it is a sequential scan.
+    pub has_spatial_index: bool,
 }
 
 /// Rich column metadata for the data browser (extends ColumnInfo).
@@ -698,7 +731,10 @@ pub enum SchemaNode {
     /// layer, so the tree groups by the separator convention everyone uses
     /// instead of inventing SQL-shaped nodes.
     KeyPrefix { name: String, schema: Option<String>, count: i64, sampled: bool },
-    Column   { name: String, type_name: String, nullable: bool, primary_key: bool },
+    Column   { name: String, type_name: String, nullable: bool, primary_key: bool,
+               /// PostGIS spatial metadata (PostgreSQL only, `None` elsewhere and
+               /// whenever PostGIS is absent) — see SpatialColumn.
+               #[serde(default)] spatial: Option<SpatialColumn> },
     /// A nested (struct / list-of-struct) column that expands to child fields.
     /// `path` is the full dotted path from the table root (e.g. "addr.geo"),
     /// used to fetch its children — Parquet only, so it never goes through the
@@ -710,6 +746,60 @@ pub enum SchemaNode {
 #[cfg(test)]
 mod tests {
     use super::Engine;
+
+    /// `spatial` is Postgres/PostGIS-only; every other engine — and every
+    /// payload serialized before the field existed — must round-trip without
+    /// it. A missing key deserializes to None (serde default), and None
+    /// serializes as an explicit null the TS `spatial?: … | null` accepts.
+    #[test]
+    fn column_spatial_defaults_to_none_and_round_trips() {
+        use super::{SchemaNode, SpatialColumn};
+
+        let plain: SchemaNode = serde_json::from_str(
+            r#"{"kind":"column","name":"id","type_name":"int8","nullable":false,"primary_key":true}"#
+        ).unwrap();
+        assert!(matches!(&plain, SchemaNode::Column { spatial: None, .. }));
+
+        let geo = SchemaNode::Column {
+            name: "geom".into(), type_name: "geometry".into(),
+            nullable: true, primary_key: false,
+            spatial: Some(SpatialColumn {
+                family: "geometry".into(), geom_type: "POINT".into(),
+                srid: 4326, dims: 2, has_spatial_index: true,
+            }),
+        };
+        let json = serde_json::to_value(&geo).unwrap();
+        assert_eq!(json["spatial"]["family"], "geometry");
+        assert_eq!(json["spatial"]["srid"], 4326);
+        assert_eq!(json["spatial"]["has_spatial_index"], true);
+        let back: SchemaNode = serde_json::from_value(json).unwrap();
+        assert!(matches!(&back, SchemaNode::Column { spatial: Some(s), .. }
+            if s.geom_type == "POINT" && s.srid == 4326 && s.has_spatial_index));
+    }
+
+
+    /// `geo_bbox` is Parquet-only metadata: every payload serialized before the
+    /// field existed (and every other engine's payload today) must still
+    /// deserialize, and a None must not add a key to the wire shape at all.
+    #[test]
+    fn query_result_geo_bbox_is_optional_on_the_wire() {
+        use super::{ColumnInfo, QueryResult};
+        let bare = r#"{"columns":[],"rows":[],"rows_affected":null,"execution_ms":1,"fetch_ms":0,"warnings":[],"truncated":false}"#;
+        let r: QueryResult = serde_json::from_str(bare).unwrap();
+        assert_eq!(r.geo_bbox, None);
+        // None skips serialization entirely — other engines' payloads are unchanged.
+        assert_eq!(serde_json::to_string(&r).unwrap(), bare);
+
+        let mut r = r;
+        r.geo_bbox = Some([14.2, 49.9, 14.8, 50.2]);
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["geo_bbox"], serde_json::json!([14.2, 49.9, 14.8, 50.2]));
+        let back: QueryResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.geo_bbox, Some([14.2, 49.9, 14.8, 50.2]));
+
+        // A column payload carries no geo_bbox either way (construction sanity).
+        let _ = ColumnInfo { name: "g".into(), type_name: "text".into(), nullable: true };
+    }
 
     /// The frontend, the connUrl scheme and saved connections.json all use
     /// single-token engine names. The enum is snake_case, which turns a

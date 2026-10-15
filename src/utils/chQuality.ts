@@ -1,5 +1,5 @@
 /**
- * The ClickHouse SQL Quality rulebook (plan-clickhouse.md: "real work, not a
+ * The ClickHouse SQL Quality rulebook (the ClickHouse plan: "real work, not a
  * flag").
  *
  * The MySQL/PG analyzer does not translate: ClickHouse has no cost optimizer,

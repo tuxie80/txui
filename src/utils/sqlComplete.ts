@@ -357,6 +357,12 @@ export interface CompletionOptions {
    */
   flavor?: 'mysql' | 'mariadb' | 'percona';
   /**
+   * The DuckDB `spatial` extension is loaded on this session (via the
+   * duckdb_enable_spatial affordance) — unlocks the ST_* completions. Gated
+   * because the extension is on-demand: before LOAD, ST_* is a catalog error.
+   */
+  duckdbSpatial?: boolean;
+  /**
    * Recency/frequency boost for a completion label (utils/usageRank). Refines
    * ordering within a category by what the user actually runs; returns 0 by
    * default so ranking is unchanged when it isn't supplied.
@@ -375,7 +381,8 @@ export function buildCompletionSource(
   // the structural boost each call site passes.
   const opt = (c: SchemaCompletion, base = 0): Completion => toOption(c, base + usage(c.label));
   const kwItems = applyKeywordCase(
-    keywordCatalog(engine, options.flavor), options.upperCaseKeywords !== false);
+    keywordCatalog(engine, options.flavor, { duckdbSpatial: options.duckdbSpatial }),
+    options.upperCaseKeywords !== false);
   const kwOptions = (boost: number): Completion[] =>
     kwItems.map(k => k.snippet
       ? snippetCompletion(k.snippet, { label: k.label, detail: k.detail, type: k.type, boost })

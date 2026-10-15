@@ -112,6 +112,19 @@ export interface ColumnInfo {
   nullable: boolean;
 }
 
+/** PostGIS spatial metadata for one column — mirrors Rust `SpatialColumn`.
+ *  `srid` 0 is the catalog's own "unconstrained" marker. */
+export interface SpatialColumn {
+  /** Which PostGIS catalog reported it: "geometry" | "geography". */
+  family: string;
+  /** Declared type as the catalog reports it ("POINT", "MULTIPOLYGON", …). */
+  geom_type: string;
+  srid: number;
+  /** Coordinate dimension (2/3/4). */
+  dims: number;
+  has_spatial_index: boolean;
+}
+
 export interface QueryResult {
   columns: ColumnInfo[];
   rows: unknown[][];
@@ -124,6 +137,14 @@ export interface QueryResult {
   warnings: string[];
   /** True when the backend row cap cut the result — more rows existed. */
   truncated?: boolean;
+  /**
+   * GeoParquet footer bbox of the primary geometry column, RFC 7946 order
+   * [west, south, east, north] — the file's full extent from the footer, so
+   * the map's first fit is the whole file rather than the loaded page.
+   * Supplied by the Parquet row paths only; absent on every other engine and
+   * on old backends (the key is skipped entirely when None).
+   */
+  geo_bbox?: [number, number, number, number] | null;
 }
 
 export type SchemaNode =
@@ -191,7 +212,14 @@ export type SchemaNode =
   /** PostgreSQL foreign table — backed by a foreign server. */
   | { kind: 'foreign_table'; name: string; schema: string | null; server: string }
   | { kind: 'key_prefix'; name: string; schema: string | null; count: number; sampled: boolean }
-  | { kind: 'column';   name: string; type_name: string; nullable: boolean; primary_key: boolean }
+  | { kind: 'column';   name: string; type_name: string; nullable: boolean; primary_key: boolean;
+      /**
+       * PostGIS spatial metadata (PostgreSQL only). From the geometry_columns /
+       * geography_columns catalog views — known before any row is read, and the
+       * only place that says whether a GiST/SP-GiST index covers the column.
+       * Absent on every other engine and on PostgreSQL without PostGIS.
+       */
+      spatial?: SpatialColumn | null }
   | { kind: 'struct_column'; name: string; type_name: string; nullable: boolean; path: string }
   | { kind: 'index';    name: string; unique: boolean; columns: string[] };
 

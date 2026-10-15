@@ -482,6 +482,7 @@ fn empty_result(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>) -> QueryResult 
         fetch_ms: 0,
         warnings: Vec::new(),
         truncated: false,
+        geo_bbox: None,
     }
 }
 
@@ -605,6 +606,7 @@ mod tests {
             fetch_ms: 0,
             warnings: Vec::new(),
             truncated: false,
+            geo_bbox: None,
         }
     }
 

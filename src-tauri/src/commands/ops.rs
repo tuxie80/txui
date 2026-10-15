@@ -263,6 +263,7 @@ async fn redis_config(mgr: ::redis::aio::ConnectionManager) -> Result<QueryResul
         ],
         rows, rows_affected: None, execution_ms: 0, fetch_ms: 0, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -300,6 +301,7 @@ async fn redis_info(mgr: ::redis::aio::ConnectionManager) -> Result<QueryResult,
         ],
         rows, rows_affected: None, execution_ms: 0, fetch_ms: 0, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 

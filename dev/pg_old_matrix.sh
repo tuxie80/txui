@@ -3,7 +3,7 @@
 #
 # The local fixtures (dbctl) cover 14 / 16 / 17 / 18. PostgreSQL 12 and 13 are
 # still in the field, Homebrew no longer ships them, and every catalog query
-# added to the panel multiplies the exposure — `plan-postgresql.md` §5.1 has
+# added to the panel multiplies the exposure — the PostgreSQL plan's §5.1 has
 # been carrying "covered by reading rather than running" for those two for
 # months. This closes it with containers, which need no permanent install.
 #

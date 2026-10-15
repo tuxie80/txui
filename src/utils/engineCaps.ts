@@ -95,7 +95,8 @@ export interface EngineCaps {
    * three with blocking chains, so the old separate `deadlocks` flag could
    * only ever echo this one and was folded into it.
    *
-   * Expect more of these as SQL Server gains the rest — see plan-sqlserver.md
+   * Expect more of these as SQL Server gains the rest — each one is added only
+   * when the panel behind it actually works.
    * Phase 2. Each one is added when the panel behind it actually works.
    */
   lockWaits: boolean;

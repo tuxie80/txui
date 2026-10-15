@@ -188,6 +188,7 @@ where
             fetch_ms: 0,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         });
     }
 
@@ -199,6 +200,7 @@ where
         fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
         warnings: vec![],
         truncated,
+        geo_bbox: None,
     })
 }
 
@@ -232,9 +234,19 @@ fn json_from_sqlite_row(row: &SqliteRow, i: usize) -> serde_json::Value {
         return Value::String(v);
     }
     // BLOB: never rendered as text — the bytes may not be UTF-8, and a lossy
-    // conversion would show something that is not what is stored.
+    // conversion would show something that is not what is stored. Up to 64 KiB
+    // the honest rendering is the bytes themselves, lowercase hex like the
+    // PostGIS/BYTEA path — that is what lets the client-side WKB parser reach
+    // SpatiaLite/GeoPackage geometry blobs. Past the cap the grid would be
+    // hauling megabytes of hex for a value nobody reads, so it keeps the
+    // placeholder — with the size, so it is never mistaken for data loss.
     if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
-        return Value::String(format!("<BLOB {} bytes>", v.len()));
+        const BLOB_HEX_CAP: usize = 64 * 1024;
+        return if v.len() <= BLOB_HEX_CAP {
+            Value::String(hex::encode(v))
+        } else {
+            Value::String(format!("<BLOB {} bytes>", v.len()))
+        };
     }
     Value::Null
 }
@@ -356,6 +368,7 @@ pub async fn list_columns(
             },
             nullable: notnull == 0,
             primary_key: pk > 0,
+            spatial: None,
         });
     }
 
@@ -470,6 +483,27 @@ mod tests {
         let under = execute_capped(&pool, "SELECT n FROM t LIMIT 5", Some(100)).await.unwrap();
         assert_eq!(under.rows.len(), 5);
         assert!(!under.truncated, "an under-cap result must not claim truncation");
+    }
+
+    /// BLOBs render as lowercase hex up to 64 KiB — that is what makes
+    /// SpatiaLite/GeoPackage WKB reachable by the client-side parser — and
+    /// keep the sized placeholder past the cap. NULL stays NULL.
+    #[tokio::test]
+    async fn blobs_render_as_hex_up_to_the_cap() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let r = execute(&pool,
+            "SELECT x'01010000000000000000003E400000000000002440' AS small, \
+                    zeroblob(65537) AS big, \
+                    CAST(NULL AS BLOB) AS null_blob").await.unwrap();
+        let small = r.rows[0][0].as_str().expect("a small blob must be hex");
+        assert_eq!(small, "01010000000000000000003e400000000000002440");
+        assert_eq!(small, &small.to_lowercase(), "hex casing matches the PostGIS path");
+        let big = r.rows[0][1].as_str().expect("a huge blob keeps the placeholder");
+        assert_eq!(big, "<BLOB 65537 bytes>");
+        assert_eq!(r.rows[0][2], serde_json::Value::Null);
+        // Exactly at the cap is still hex.
+        let at_cap = execute(&pool, "SELECT zeroblob(65536)").await.unwrap();
+        assert_eq!(at_cap.rows[0][0].as_str().unwrap().len(), 65536 * 2);
     }
 
     #[tokio::test]

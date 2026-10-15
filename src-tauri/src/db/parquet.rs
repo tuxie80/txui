@@ -47,6 +47,18 @@
 //! is re-expanded per query, so files added after open appear in the browser
 //! automatically; the footer forensics are from open time — reconnect to
 //! re-walk.
+//!
+//! ## GeoParquet
+//!
+//! A GeoParquet file (spec 1.x) carries a `geo` key in the file-level
+//! key/value metadata — a JSON object naming the primary geometry column and
+//! describing each geometry column's encoding, geometry types, CRS and bbox.
+//! That key is parsed (tolerantly: unknown fields are ignored), surfaced
+//! parsed in FILEINFO — the raw value still shows verbatim under KEYVALUE —
+//! and used to annotate geometry columns in the tree and the grid headers.
+//! WKB is the encoding the row path renders (cells reach the frontend as hex
+//! strings, which it parses); the 1.1 native GeoArrow encodings are labelled
+//! honestly as not renderable yet.
 
 use anyhow::{anyhow, bail, Result};
 use arrow_array::ArrayRef;
@@ -351,11 +363,16 @@ fn ping_file(file: &ParquetFile) -> PingResult {
         .created_by()
         .unwrap_or("unknown writer")
         .to_string();
+    let geo = match geo_state(file) {
+        GeoState::Parsed(m) if !m.version.is_empty() => format!(" · GeoParquet {}", m.version),
+        GeoState::Parsed(_) => " · GeoParquet".to_string(),
+        _ => String::new(),
+    };
     PingResult {
         ok: true,
         latency_ms: start.elapsed().as_millis() as u64,
         server_version: Some(format!(
-            "Parquet v{} · {created}",
+            "Parquet v{} · {created}{geo}",
             file.metadata.file_metadata().version()
         )),
         error: None,
@@ -416,15 +433,22 @@ fn field_to_node(t: &parquet::schema::types::Type, parent_path: &str) -> SchemaN
             type_name: t.get_physical_type().to_string(),
             nullable,
             primary_key: false,
+            spatial: None,
         }
     }
 }
 
 /// Top-level columns of the file — nested groups appear as expandable
-/// StructColumns rather than being flattened to dotted leaves.
+/// StructColumns rather than being flattened to dotted leaves. Columns the
+/// GeoParquet metadata names are re-labelled as geometry (see geo_type_label).
 fn file_columns(file: &ParquetFile) -> Vec<SchemaNode> {
     let root = file.metadata.file_metadata().schema_descr().root_schema();
-    root.get_fields().iter().map(|c| field_to_node(c, "")).collect()
+    let mut nodes: Vec<SchemaNode> =
+        root.get_fields().iter().map(|c| field_to_node(c, "")).collect();
+    if let Some(meta) = geo_meta(file) {
+        annotate_geo_nodes(&mut nodes, &meta);
+    }
+    nodes
 }
 
 fn node_name(n: &SchemaNode) -> &str {
@@ -458,6 +482,7 @@ pub fn list_columns(src: &ParquetSource) -> Vec<SchemaNode> {
                         type_name: "VARCHAR · partition".into(),
                         nullable: true,
                         primary_key: false,
+                        spatial: None,
                     });
                 }
             }
@@ -467,6 +492,7 @@ pub fn list_columns(src: &ParquetSource) -> Vec<SchemaNode> {
                     type_name: "VARCHAR · source file".into(),
                     nullable: false,
                     primary_key: false,
+                    spatial: None,
                 });
             }
             out
@@ -597,6 +623,10 @@ fn execute_dataset(d: &ParquetDataset, command: &str) -> Result<QueryResult> {
                 &[],
             )?;
             r.execution_ms = start.elapsed().as_millis() as u64;
+            // The DuckDB view knows nothing of the GeoParquet footers, so the
+            // map's viewport hint is attached here from the union of the
+            // member files' bboxes.
+            r.geo_bbox = dataset_geo_bbox(d);
             return Ok(r);
         }
         other if is_sql_ish(other) => bail!(
@@ -615,6 +645,7 @@ fn execute_dataset(d: &ParquetDataset, command: &str) -> Result<QueryResult> {
         fetch_ms: 0,
         warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -646,7 +677,7 @@ fn per_file(
 fn dataset_file_info(d: &ParquetDataset) -> (Vec<ColumnInfo>, Vec<Row>) {
     let total_size: u64 = d.files.iter().map(|f| f.file_size).sum();
     let total_groups: usize = d.files.iter().map(|f| f.metadata.num_row_groups()).sum();
-    let rows: Vec<Row> = vec![
+    let mut rows: Vec<Row> = vec![
         vec![s("root"), s(d.root.to_string_lossy())],
         vec![s("files"), n(d.files.len() as i64)],
         vec![s("rows"), n(d.num_rows())],
@@ -661,6 +692,15 @@ fn dataset_file_info(d: &ParquetDataset) -> (Vec<ColumnInfo>, Vec<Row>) {
             }),
         ],
     ];
+    // A member file's GeoParquet headline, named by its path relative to the
+    // root — the same naming the per-file views use.
+    for f in &d.files {
+        if let GeoState::Parsed(meta) = geo_state(f) {
+            let mut geo_rows = geo_info_rows(&meta);
+            geo_rows[0][0] = s(format!("geo · {}", d.relative_path(f)));
+            rows.extend(geo_rows);
+        }
+    }
     (cols(&["property", "value"]), rows)
 }
 
@@ -710,6 +750,7 @@ fn execute_file(file: &ParquetFile, command: &str) -> Result<QueryResult> {
         fetch_ms: 0,
         warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -741,7 +782,7 @@ fn file_info(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
     let fm = f.metadata.file_metadata();
     let total_compressed: i64 = f.metadata.row_groups().iter().map(|rg| rg.compressed_size()).sum();
     let total_raw: i64 = f.metadata.row_groups().iter().map(|rg| rg.total_byte_size()).sum();
-    let rows: Vec<Row> = vec![
+    let mut rows: Vec<Row> = vec![
         vec![s("path"), s(f.path.to_string_lossy())],
         vec![s("file size"), s(human_bytes(f.file_size as i64))],
         vec![s("format version"), s(fm.version().to_string())],
@@ -761,6 +802,14 @@ fn file_info(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
             s(if f.metadata.offset_index().is_some() { "present" } else { "absent" }),
         ],
     ];
+    match geo_state(f) {
+        GeoState::Absent => {}
+        GeoState::Parsed(meta) => rows.extend(geo_info_rows(&meta)),
+        GeoState::Invalid(e) => rows.push(vec![
+            s("geo"),
+            s(format!("present but not valid GeoParquet JSON ({e}) — the raw value is under KEYVALUE")),
+        ]),
+    }
     (cols(&["property", "value"]), rows)
 }
 
@@ -904,6 +953,249 @@ fn key_value(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
     (cols(&["key", "value"]), rows)
 }
 
+// ── GeoParquet ───────────────────────────────────────────────────────────────
+
+/// The parsed `geo` metadata (spec 1.x). Unknown fields are ignored, so a
+/// newer producer's extras never break the read, and the spec version string
+/// is captured verbatim so 1.0 and 1.1 files both read.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct GeoMeta {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    primary_column: String,
+    #[serde(default)]
+    columns: std::collections::BTreeMap<String, GeoColumnMeta>,
+}
+
+/// The CRS statement of one geometry column. The spec keeps three cases apart
+/// and so do we: the field ABSENT means OGC:CRS84 (lon/lat WGS 84 — the
+/// default drawable case), an explicit null means the producer does not know,
+/// and an object is PROJJSON.
+#[derive(Debug, Clone, Default)]
+enum Crs {
+    #[default]
+    DefaultCrs84,
+    Unknown,
+    Projjson(serde_json::Value),
+}
+
+/// `deserialize_with` runs whenever the key is present — including when its
+/// value is null — while the `Default` covers absence. That pairing is what
+/// keeps null and absent distinct (a plain Option cannot).
+fn deserialize_crs<'de, D>(d: D) -> std::result::Result<Crs, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match <Option<serde_json::Value> as serde::Deserialize>::deserialize(d)? {
+        Some(v) => Crs::Projjson(v),
+        None => Crs::Unknown,
+    })
+}
+
+/// One entry of the `geo` columns map. Keys are top-level column names.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct GeoColumnMeta {
+    /// "WKB", or a 1.1 native GeoArrow encoding ("point", "linestring", …).
+    #[serde(default)]
+    encoding: String,
+    /// May be empty when the writer did not record them.
+    #[serde(default)]
+    geometry_types: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_crs")]
+    crs: Crs,
+    /// RFC 7946 order: [west, south, east, north], plus an optional z pair.
+    #[serde(default)]
+    bbox: Option<Vec<f64>>,
+    #[serde(default)]
+    orientation: Option<String>,
+    #[serde(default)]
+    edges: Option<String>,
+    /// 1.1: pointer to a per-row bbox struct column.
+    #[serde(default)]
+    covering: Option<serde_json::Value>,
+}
+
+/// The `geo` key, parsed. A present-but-unparseable value is reported as such
+/// rather than silently treated as absent — its raw string stays readable
+/// under KEYVALUE.
+enum GeoState {
+    Absent,
+    Parsed(GeoMeta),
+    Invalid(String),
+}
+
+fn geo_state(f: &ParquetFile) -> GeoState {
+    let Some(kv) = f.metadata.file_metadata().key_value_metadata() else {
+        return GeoState::Absent;
+    };
+    let Some(raw) = kv.iter().find(|e| e.key == "geo").and_then(|e| e.value.as_deref()) else {
+        return GeoState::Absent;
+    };
+    match serde_json::from_str::<GeoMeta>(raw) {
+        Ok(m) => GeoState::Parsed(m),
+        Err(e) => GeoState::Invalid(e.to_string()),
+    }
+}
+
+/// The parsed metadata, or None when the key is absent or invalid.
+fn geo_meta(f: &ParquetFile) -> Option<GeoMeta> {
+    match geo_state(f) {
+        GeoState::Parsed(m) => Some(m),
+        _ => None,
+    }
+}
+
+/// The CRS as one human phrase, honouring the absent/null/object distinction.
+fn crs_summary(crs: &Crs) -> String {
+    match crs {
+        Crs::DefaultCrs84 => "WGS 84 lon/lat (OGC:CRS84 — GeoParquet default)".into(),
+        Crs::Unknown => "unknown CRS".into(),
+        Crs::Projjson(v) => projjson_name(v),
+    }
+}
+
+/// A short name for a PROJJSON object: its authority id when it carries one
+/// ("EPSG:4326"), else its own name, else an honest fallback.
+fn projjson_name(v: &serde_json::Value) -> String {
+    if let Some(id) = v.get("id") {
+        let code = id
+            .get("code")
+            .and_then(|c| c.as_u64().map(|n| n.to_string()).or_else(|| c.as_str().map(String::from)));
+        let authority = id.get("authority").and_then(|a| a.as_str());
+        match (authority, code) {
+            (Some(a), Some(c)) => return format!("{a}:{c}"),
+            (None, Some(c)) => return format!("code {c}"),
+            _ => {}
+        }
+    }
+    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+        return format!("{name} (PROJJSON)");
+    }
+    "custom CRS (PROJJSON)".into()
+}
+
+/// The type label a geometry column carries in the tree and the grid headers.
+/// WKB is the encoding the row path renders — cells reach the frontend as hex
+/// strings it parses. The 1.1 native GeoArrow encodings are nested structs the
+/// map cannot draw yet, and the label says so rather than promising.
+fn geo_type_label(col: &GeoColumnMeta) -> String {
+    if col.encoding.eq_ignore_ascii_case("wkb") {
+        "GEOMETRY · GeoParquet WKB".into()
+    } else if col.encoding.is_empty() {
+        "GEOMETRY · GeoParquet".into()
+    } else {
+        format!("GEOMETRY · GeoParquet {} — not renderable yet", col.encoding)
+    }
+}
+
+/// One-line summary of a geometry column for FILEINFO: encoding, geometry
+/// types, CRS, bbox and covering, in that order, omitting what is absent.
+fn geo_column_summary(col: &GeoColumnMeta) -> String {
+    let mut parts = vec![if col.encoding.is_empty() {
+        "(encoding not recorded)".to_string()
+    } else {
+        col.encoding.clone()
+    }];
+    if !col.geometry_types.is_empty() {
+        parts.push(col.geometry_types.join(", "));
+    }
+    parts.push(crs_summary(&col.crs));
+    if let Some(bbox) = &col.bbox {
+        let nums = bbox.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+        parts.push(format!("bbox [{nums}]"));
+    }
+    if let Some(o) = &col.orientation {
+        parts.push(format!("orientation: {o}"));
+    }
+    if let Some(e) = &col.edges {
+        parts.push(format!("{e} edges"));
+    }
+    if col.covering.is_some() {
+        parts.push("has covering bbox column".into());
+    }
+    parts.join(" · ")
+}
+
+/// The primary column's bbox as [west, south, east, north] — what a map view
+/// would take as its initial viewport. RFC 7946 order; a 3D bbox (six
+/// numbers) contributes its first four. Non-finite values reject the hint:
+/// a viewport fit must never see NaN.
+pub fn geo_bbox(f: &ParquetFile) -> Option<[f64; 4]> {
+    let meta = geo_meta(f)?;
+    let col = meta.columns.get(&meta.primary_column)?;
+    let b = col.bbox.as_ref()?;
+    if b.len() >= 4 && b[..4].iter().all(|v| v.is_finite()) {
+        Some([b[0], b[1], b[2], b[3]])
+    } else {
+        None
+    }
+}
+
+/// A dataset's viewport hint: the union of every member file's bbox. Cheap by
+/// construction — the footers are already in memory from open time. A member
+/// without a bbox contributes nothing; a dataset with none returns None.
+pub fn dataset_geo_bbox(d: &ParquetDataset) -> Option<[f64; 4]> {
+    let mut out: Option<[f64; 4]> = None;
+    for f in &d.files {
+        let Some(b) = geo_bbox(f) else { continue };
+        out = Some(match out {
+            None => b,
+            Some(acc) => [
+                acc[0].min(b[0]),
+                acc[1].min(b[1]),
+                acc[2].max(b[2]),
+                acc[3].max(b[3]),
+            ],
+        });
+    }
+    out
+}
+
+/// Re-label geometry columns per the parsed `geo` metadata, in place. Both
+/// plain leaves (WKB is a BYTE_ARRAY) and struct columns (the 1.1 native
+/// encodings) are covered.
+fn annotate_geo_nodes(nodes: &mut [SchemaNode], meta: &GeoMeta) {
+    for node in nodes.iter_mut() {
+        let name = node_name(node).to_string();
+        if let Some(col) = meta.columns.get(&name) {
+            let label = geo_type_label(col);
+            match node {
+                SchemaNode::Column { type_name, .. } | SchemaNode::StructColumn { type_name, .. } => {
+                    *type_name = label;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The same annotation for a result grid's column headers.
+fn annotate_geo_columns(columns: &mut [ColumnInfo], meta: &GeoMeta) {
+    for c in columns.iter_mut() {
+        if let Some(col) = meta.columns.get(&c.name) {
+            c.type_name = geo_type_label(col);
+        }
+    }
+}
+
+/// The FILEINFO rows a GeoParquet file adds: one headline (version + primary
+/// column) plus one row per geometry column.
+fn geo_info_rows(meta: &GeoMeta) -> Vec<Row> {
+    let mut rows = vec![vec![
+        s("geo"),
+        s(format!(
+            "GeoParquet {} · primary column: {}",
+            if meta.version.is_empty() { "(version not recorded)" } else { &meta.version },
+            if meta.primary_column.is_empty() { "(none named)" } else { &meta.primary_column },
+        )),
+    ]];
+    for (name, col) in &meta.columns {
+        rows.push(vec![s(format!("geo · {name}")), s(geo_column_summary(col))]);
+    }
+    rows
+}
+
 // ── Row reading ──────────────────────────────────────────────────────────────
 
 /// Does this type need [`cell_json`] rather than the plain Arrow formatter?
@@ -1023,7 +1315,9 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
         .with_batch_size(1024.min(limit.max(1) + within).max(1))
         .build()?;
 
-    let columns: Vec<ColumnInfo> = schema
+    // Geometry columns carry their GeoParquet label into the grid header,
+    // not the bare arrow type (Binary) — same annotation as the schema tree.
+    let mut columns: Vec<ColumnInfo> = schema
         .fields()
         .iter()
         .map(|fld| ColumnInfo {
@@ -1032,6 +1326,9 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
             nullable: fld.is_nullable(),
         })
         .collect();
+    if let Some(meta) = geo_meta(f) {
+        annotate_geo_columns(&mut columns, &meta);
+    }
     let nested: Vec<bool> = schema.fields().iter().map(|f| is_nested(f.data_type())).collect();
 
     let opts = FormatOptions::default().with_null("");
@@ -1080,6 +1377,9 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
         fetch_ms: 0,
         warnings: vec![],
         truncated: false,
+        // The footer knows the file's whole extent; the page we just read
+        // does not. The map fits its first viewport to this.
+        geo_bbox: geo_bbox(f),
     })
 }
 
@@ -1239,11 +1539,14 @@ pub fn preview_filtered(
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let schema = builder.schema().clone();
 
-    let columns: Vec<ColumnInfo> = schema.fields().iter().map(|fld| ColumnInfo {
+    let mut columns: Vec<ColumnInfo> = schema.fields().iter().map(|fld| ColumnInfo {
         name: fld.name().clone(),
         type_name: fld.data_type().to_string(),
         nullable: fld.is_nullable(),
     }).collect();
+    if let Some(meta) = geo_meta(f) {
+        annotate_geo_columns(&mut columns, &meta);
+    }
     let nested: Vec<bool> = schema.fields().iter().map(|f| is_nested(f.data_type())).collect();
     let col_index = |name: &str| columns.iter().position(|c| c.name == name);
 
@@ -1324,6 +1627,7 @@ pub fn preview_filtered(
         fetch_ms: 0,
         warnings,
         truncated: capped,
+        geo_bbox: geo_bbox(f),
     })
 }
 
@@ -1758,6 +2062,335 @@ mod tests {
         assert_eq!(ratio(1000, 0), "");
         assert_eq!(pct(25, 100), "25.0%");
         assert_eq!(pct(1, 0), "");
+    }
+}
+
+/// GeoParquet (spec 1.x): the `geo` key-value metadata parsed, surfaced parsed
+/// in FILEINFO (the raw value still verbatim under KEYVALUE), and used to
+/// annotate geometry columns. Fixtures are generated with the parquet crate —
+/// hand-built `geo` JSON through WriterProperties, no external files.
+#[cfg(test)]
+mod geoparquet_tests {
+    use super::*;
+    use arrow_array::{ArrayRef, BinaryArray, Float64Array, Int64Array, RecordBatch, StructArray};
+    use arrow_schema::{DataType, Field, Fields, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::metadata::KeyValue;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("txui-pqgeo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// A little-endian WKB POINT(1 2) — what GeoPandas/GDAL would write.
+    const WKB_POINT: [u8; 21] = [
+        0x01, 0x01, 0x00, 0x00, 0x00, // byte order LE, type Point
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // x = 1.0
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, // y = 2.0
+    ];
+
+    /// One file with `id` + a Binary `geom` column and the given `geo`
+    /// key/value metadata (None = a plain file with no geo key at all).
+    fn geo_fixture(name: &str, geo_json: Option<&str>) -> PathBuf {
+        let path = tmp(name);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("geom", DataType::Binary, true),
+        ]));
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(geo_json.map(|j| {
+                vec![KeyValue::new("geo".to_string(), Some(j.to_string()))]
+            }))
+            .build();
+        let file = File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+        w.write(&RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(vec![1i64, 2])) as ArrayRef,
+            Arc::new(BinaryArray::from(vec![Some(&WKB_POINT[..]), None])) as ArrayRef,
+        ]).unwrap()).unwrap();
+        w.close().unwrap();
+        path
+    }
+
+    /// The value column of a FILEINFO-style property/value grid.
+    fn prop(rows: &[Row], key: &str) -> Option<String> {
+        rows.iter()
+            .find(|r| r[0] == serde_json::json!(key))
+            .map(|r| r[1].as_str().unwrap_or("").to_string())
+    }
+
+    /// Full 1.1 metadata: version, primary column, WKB encoding, geometry
+    /// types, a PROJJSON CRS with an EPSG id, bbox, orientation, edges and a
+    /// covering pointer — plus made-up fields a newer spec might add, which
+    /// must be ignored rather than breaking the parse.
+    const FULL_GEO: &str = r#"{
+        "version": "1.1.0",
+        "primary_column": "geom",
+        "made_up_future_field": {"anything": true},
+        "columns": {
+            "geom": {
+                "encoding": "WKB",
+                "geometry_types": ["Point", "Polygon"],
+                "crs": {
+                    "$schema": "https://proj.org/schemas/v0.7/projjson.json",
+                    "type": "GeographicCRS",
+                    "name": "WGS 84",
+                    "id": {"authority": "EPSG", "code": 4979}
+                },
+                "orientation": "counterclockwise",
+                "edges": "spherical",
+                "bbox": [-10.5, 41.0, 30.25, 71.9],
+                "epoch": 2015,
+                "covering": {"bbox": {"xmin": ["bbox", "xmin"], "ymin": ["bbox", "ymin"],
+                                      "xmax": ["bbox", "xmax"], "ymax": ["bbox", "ymax"]}},
+                "future_extra": 42
+            }
+        }
+    }"#;
+
+    #[test]
+    fn full_1_1_metadata_parses_and_surfaces_in_fileinfo_and_the_tree() {
+        let path = geo_fixture("geo-full.parquet", Some(FULL_GEO));
+        let f = open_path(&path).unwrap();
+
+        // Parsed: version captured verbatim, unknown fields ignored.
+        let meta = geo_meta(&f).expect("geo metadata must parse");
+        assert_eq!(meta.version, "1.1.0");
+        assert_eq!(meta.primary_column, "geom");
+        assert_eq!(meta.columns["geom"].geometry_types, vec!["Point", "Polygon"]);
+
+        // FILEINFO shows the parsed headline and the per-column summary…
+        let fi = execute_file(&f, "FILEINFO").unwrap();
+        let headline = prop(&fi.rows, "geo").expect("FILEINFO must have a geo row");
+        assert!(headline.contains("GeoParquet 1.1.0"), "{headline}");
+        assert!(headline.contains("primary column: geom"), "{headline}");
+        let col = prop(&fi.rows, "geo · geom").expect("per-column geo row");
+        assert!(col.contains("WKB"), "{col}");
+        assert!(col.contains("Point, Polygon"), "{col}");
+        assert!(col.contains("EPSG:4979"), "{col}");
+        assert!(col.contains("bbox [-10.5, 41, 30.25, 71.9]"), "{col}");
+        assert!(col.contains("counterclockwise"), "{col}");
+        assert!(col.contains("spherical edges"), "{col}");
+        assert!(col.contains("covering"), "{col}");
+
+        // …while the raw JSON stays verbatim under KEYVALUE.
+        let kv = execute_file(&f, "KEYVALUE").unwrap();
+        let raw = prop(&kv.rows, "geo").expect("KEYVALUE must keep the raw geo row");
+        assert!(raw.contains("made_up_future_field"), "raw value must be untouched: {raw}");
+
+        // The tree and the grid headers call the column a geometry, not BYTE_ARRAY.
+        let cols = list_columns(&ParquetSource::Single(open_path(&path).unwrap()));
+        assert!(cols.iter().any(|c| matches!(c,
+            SchemaNode::Column { name, type_name, .. }
+                if name == "geom" && type_name == "GEOMETRY · GeoParquet WKB")),
+            "{cols:?}");
+        let page = preview(&f, 5, 0).unwrap();
+        let geom = page.columns.iter().find(|c| c.name == "geom").unwrap();
+        assert_eq!(geom.type_name, "GEOMETRY · GeoParquet WKB");
+        // …and the WKB cell still arrives as the hex string the frontend parses.
+        assert_eq!(page.rows[0][1], serde_json::json!(hex(&WKB_POINT)));
+        assert_eq!(page.rows[1][1], serde_json::Value::Null);
+
+        // The primary column's bbox is the map's initial viewport hint.
+        assert_eq!(geo_bbox(&f), Some([-10.5, 41.0, 30.25, 71.9]));
+
+        // Ping names the format, so the connect log does too.
+        let p = ping_file(&f);
+        assert!(p.server_version.unwrap().contains("GeoParquet 1.1.0"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn crs_absent_means_crs84_and_crs_null_means_unknown() {
+        // Absent field: the spec default — OGC:CRS84, lon/lat WGS 84.
+        let absent = r#"{"version":"1.1.0","primary_column":"geom",
+            "columns":{"geom":{"encoding":"WKB","bbox":[0,0,1,1,2,3]}}}"#;
+        let path = geo_fixture("geo-crs-absent.parquet", Some(absent));
+        let f = open_path(&path).unwrap();
+        let fi = execute_file(&f, "FILEINFO").unwrap();
+        let col = prop(&fi.rows, "geo · geom").unwrap();
+        assert!(col.contains("WGS 84 lon/lat (OGC:CRS84"), "{col}");
+        // A 3D bbox (six numbers, RFC 7946) contributes its first four.
+        assert_eq!(geo_bbox(&f), Some([0.0, 0.0, 1.0, 1.0]));
+        let _ = std::fs::remove_file(&path);
+
+        // Explicit null: the producer does NOT know — a different statement.
+        let null = r#"{"version":"1.1.0","primary_column":"geom",
+            "columns":{"geom":{"encoding":"WKB","crs":null}}}"#;
+        let path = geo_fixture("geo-crs-null.parquet", Some(null));
+        let f = open_path(&path).unwrap();
+        let fi = execute_file(&f, "FILEINFO").unwrap();
+        let col = prop(&fi.rows, "geo · geom").unwrap();
+        assert!(col.contains("unknown CRS"), "{col}");
+        let _ = std::fs::remove_file(&path);
+
+        // Same distinction at the parse level, no file involved.
+        let meta: GeoMeta = serde_json::from_str(absent).unwrap();
+        assert!(matches!(meta.columns["geom"].crs, Crs::DefaultCrs84));
+        let meta: GeoMeta = serde_json::from_str(null).unwrap();
+        assert!(matches!(meta.columns["geom"].crs, Crs::Unknown));
+        let meta: GeoMeta = serde_json::from_str(FULL_GEO).unwrap();
+        assert!(matches!(meta.columns["geom"].crs, Crs::Projjson(_)));
+    }
+
+    /// The row paths carry the footer bbox on the result itself — the map's
+    /// first viewport fit must not depend on which page happens to be loaded.
+    #[test]
+    fn row_paths_carry_the_footer_bbox() {
+        let path = geo_fixture("geo-bbox-channel.parquet", Some(FULL_GEO));
+        let f = open_path(&path).unwrap();
+        let page = preview(&f, 5, 0).unwrap();
+        assert_eq!(page.geo_bbox, Some([-10.5, 41.0, 30.25, 71.9]));
+        let filtered = preview_filtered(&f, 5, 0, &[], &[]).unwrap();
+        assert_eq!(filtered.geo_bbox, Some([-10.5, 41.0, 30.25, 71.9]));
+        let _ = std::fs::remove_file(&path);
+
+        // No geo key → no hint, and the field stays off the wire (serde skip).
+        let path = geo_fixture("no-geo-bbox-channel.parquet", None);
+        let f = open_path(&path).unwrap();
+        let page = preview(&f, 5, 0).unwrap();
+        assert_eq!(page.geo_bbox, None);
+        assert!(!serde_json::to_string(&page).unwrap().contains("geo_bbox"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A dataset's hint is the union of its member bboxes — a page of one
+    /// member would otherwise fit the map to a fraction of the data.
+    #[test]
+    fn a_dataset_bbox_is_the_union_of_its_members() {
+        let dir = std::env::temp_dir().join(format!("txui-pqgeo-union-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two members with disjoint extents; one with geo metadata but NO bbox.
+        // (geometry_types is required: DuckDB's reader refuses a geo column
+        // without it. And a member with NO geo key at all breaks DuckDB's
+        // union-by-name cast — BLOB vs GEOMETRY('OGC:CRS84') — so "no bbox"
+        // is the honest stand-in for "contributes nothing".)
+        for (name, geo) in [
+            ("a.parquet", Some(r#"{"version":"1.1.0","primary_column":"geom",
+                "columns":{"geom":{"encoding":"WKB","geometry_types":["Point"],"bbox":[0,0,10,10]}}}"#)),
+            ("b.parquet", Some(r#"{"version":"1.1.0","primary_column":"geom",
+                "columns":{"geom":{"encoding":"WKB","geometry_types":["Point"],"bbox":[-5,20,1,30]}}}"#)),
+            ("c.parquet", Some(r#"{"version":"1.1.0","primary_column":"geom",
+                "columns":{"geom":{"encoding":"WKB","geometry_types":["Point"]}}}"#)),
+        ] {
+            let path = dir.join(name);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("geom", DataType::Binary, true),
+            ]));
+            let props = WriterProperties::builder()
+                .set_key_value_metadata(geo.map(|j| {
+                    vec![KeyValue::new("geo".to_string(), Some(j.to_string()))]
+                }))
+                .build();
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+            w.write(&RecordBatch::try_new(schema, vec![
+                Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+                Arc::new(BinaryArray::from(vec![Some(&WKB_POINT[..])])) as ArrayRef,
+            ]).unwrap()).unwrap();
+            w.close().unwrap();
+        }
+        let d = open_dataset(&dir).unwrap();
+        assert_eq!(dataset_geo_bbox(&d), Some([-5.0, 0.0, 10.0, 30.0]));
+        // (No PREVIEW-through-DuckDB assertion here: when the spatial
+        // extension is present, DuckDB casts the WKB column to
+        // GEOMETRY('OGC:CRS84') — the decode of that type is the DuckDB
+        // spatial wave's story, not this channel's.)
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_without_the_geo_key_is_untouched() {
+        let path = geo_fixture("no-geo.parquet", None);
+        let f = open_path(&path).unwrap();
+        assert!(matches!(geo_state(&f), GeoState::Absent));
+
+        // No geo rows in FILEINFO, no annotation anywhere, ping unchanged.
+        let fi = execute_file(&f, "FILEINFO").unwrap();
+        assert!(prop(&fi.rows, "geo").is_none());
+        let cols = list_columns(&ParquetSource::Single(open_path(&path).unwrap()));
+        assert!(cols.iter().any(|c| matches!(c,
+            SchemaNode::Column { name, type_name, .. } if name == "geom" && type_name == "BYTE_ARRAY")));
+        let page = preview(&f, 5, 0).unwrap();
+        assert_eq!(page.columns.iter().find(|c| c.name == "geom").unwrap().type_name, "Binary");
+        assert!(!ping_file(&f).server_version.unwrap().contains("GeoParquet"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_native_encoding_column_is_labelled_honestly_not_promised_as_renderable() {
+        // GeoParquet 1.1 native encodings are nested structs (point = {x, y}),
+        // which the map cannot draw yet — the label must say so.
+        let path = tmp("geo-native.parquet");
+        let pt_fields = Fields::from(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("geom", DataType::Struct(pt_fields.clone()), true),
+        ]));
+        let geo = r#"{"version":"1.1.0","primary_column":"geom",
+            "columns":{"geom":{"encoding":"point","geometry_types":["Point"]}}}"#;
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new("geo".to_string(), Some(geo.to_string()))]))
+            .build();
+        let pts = StructArray::new(
+            pt_fields,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(1.5), None])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![Some(2.5), None])) as ArrayRef,
+            ],
+            None,
+        );
+        let batch = RecordBatch::try_new(schema.clone(), vec![
+            Arc::new(Int64Array::from(vec![1i64, 2])) as ArrayRef,
+            Arc::new(pts) as ArrayRef,
+        ]).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let f = open_path(&path).unwrap();
+        let cols = list_columns(&ParquetSource::Single(open_path(&path).unwrap()));
+        let label = cols.iter().find_map(|c| match c {
+            SchemaNode::StructColumn { name, type_name, .. } if name == "geom" => Some(type_name.clone()),
+            _ => None,
+        }).expect("geom must be a struct column");
+        assert!(label.contains("GeoParquet point"), "{label}");
+        assert!(label.contains("not renderable yet"), "{label}");
+
+        // The grid header carries the same honest label; the cell itself is
+        // the nested-JSON the struct path already produces.
+        let page = preview(&f, 5, 0).unwrap();
+        let geom = page.columns.iter().find(|c| c.name == "geom").unwrap();
+        assert!(geom.type_name.contains("not renderable yet"), "{}", geom.type_name);
+        assert_eq!(page.rows[0][1], serde_json::json!({"x": "1.5", "y": "2.5"}));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_malformed_geo_key_is_reported_not_silently_dropped() {
+        let path = geo_fixture("geo-bad.parquet", Some("not json {"));
+        let f = open_path(&path).unwrap();
+        assert!(matches!(geo_state(&f), GeoState::Invalid(_)));
+
+        let fi = execute_file(&f, "FILEINFO").unwrap();
+        let row = prop(&fi.rows, "geo").expect("the malformed key must be surfaced");
+        assert!(row.contains("not valid GeoParquet JSON"), "{row}");
+        // Nothing is annotated off a value we could not parse.
+        let cols = list_columns(&ParquetSource::Single(open_path(&path).unwrap()));
+        assert!(cols.iter().any(|c| matches!(c,
+            SchemaNode::Column { name, type_name, .. } if name == "geom" && type_name == "BYTE_ARRAY")));
+        let _ = std::fs::remove_file(&path);
     }
 }
 

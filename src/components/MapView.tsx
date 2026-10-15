@@ -17,16 +17,16 @@
  * your data is. For a DBA looking at customer addresses that is a data-egress
  * event, and it must never happen because someone opened a tab.
  *
- * So the default background is drawn locally — a **graticule and a scale
- * bar** — enough to answer "how big is this" and "which way is north", which
- * is what a track needs. The tile basemaps (Wikimedia-OSM / OSM / Esri) exist
- * but are
+ * So the default background is drawn locally — a **bundled Natural Earth
+ * coastline** (`src/assets/basemap.json`, public domain, fetched once at
+ * development time by `dev/fetch_basemap.mjs`), plus a **graticule and a
+ * scale bar** — enough to answer "where is this", "how big is this" and
+ * "which way is north", which is what a track needs. The tile basemaps
+ * (Wikimedia-OSM / OSM / Esri) exist but are
  * gated: the first time a user selects one, a dialog names the host and says
  * plainly that the viewport's coordinates leave the machine; only after that
  * one-time acknowledgment (persisted as `dbgui.mapTilesAck`) do tiles load,
- * and only for the basemap the user picked. A coastline outline remains the
- * planned zero-egress upgrade: `dev/fetch_basemap.mjs` fetches public-domain
- * Natural Earth data once, at development time, into `src/assets/basemap.json`.
+ * and only for the basemap the user picked.
  *
  * ## Playback
  *
@@ -38,12 +38,18 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  buildTrack, columnFacts, factsLabel, fitViewport, hitTest, indexAtTime,
+  buildTrack, columnFacts, factsLabel, fitViewport, graticuleStep, hitTest, indexAtTime,
   step as stepIndex, toScreen, trackLength, tilesInView, zoomViewport,
 } from '../utils/geoTrack';
 import type { Track, Viewport } from '../utils/geoTrack';
-import { bbox as geomBbox, isLonLat, parseWkbHex } from '../utils/wkb';
-import type { Geometry } from '../utils/wkb';
+import { bbox as geomBbox, isLonLat } from '../utils/wkb';
+import type { Geometry, Position } from '../utils/wkb';
+import { cellGeometry, detectGeoColumns } from '../utils/geoDetect';
+import { wireBboxToBounds } from '../utils/geoParquet';
+import { buildTransformQuery } from '../utils/geoTransform';
+import { loadBasemap } from '../utils/basemap';
+import type { BasemapPolygon } from '../utils/basemap';
+import { hitTestGeometry } from '../utils/geoHit';
 import { fmtDuration } from '../utils/fmtDuration';
 import { downloadBlob } from '../utils/erExport';
 import { PREFS, usePreference } from '../store/preferences';
@@ -52,8 +58,24 @@ import { confirmDialog } from '../utils/appDialog';
 interface Props {
   columns: string[];
   rows: unknown[][];
+  /** Server-reported column types, aligned with `columns` — ClickHouse geo
+   *  columns (Point/Ring/Polygon) are detected ONLY through this. */
+  columnTypes?: string[];
   /** Selecting a point selects the row in the grid. */
   onSelectRow?: (rowIndex: number) => void;
+  /** GeoParquet footer bbox [west, south, east, north] — the file's whole
+   *  extent. Used for the FIRST fit when a geometry column is drawn, so a
+   *  paged view does not zoom into the page that happened to load. Pan/zoom
+   *  afterwards is untouched; with no hint the decoded rows' bbox fits, as
+   *  before. */
+  initialBbox?: [number, number, number, number] | null;
+  /** Session engine — the "View in WGS 84" action exists on PostgreSQL only. */
+  engine?: string;
+  /** The query text that produced this result — what the derived
+   *  ST_Transform query wraps. Absent → the action is not offered. */
+  sourceSql?: string | null;
+  /** Runs a derived query (a new tab, through the normal execute path). */
+  onRunDerived?: (sql: string, label: string) => void;
 }
 
 /** Milliseconds between frames at each speed. */
@@ -96,7 +118,7 @@ const BASEMAPS: Record<BaseMapId, {
     url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png` },
   satellite: { label: 'Satellite', dark: true, attr: '© Esri',
     url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}` },
-  none: { label: 'Grid only', dark: false, attr: '', url: null },
+  none: { label: 'Offline', dark: false, attr: '', url: null },
 };
 
 /**
@@ -166,7 +188,66 @@ const GEOMETRY_CAP = 5000;
  */
 const POINT_DOT_CAP = GEOMETRY_CAP;
 
-export function MapView({ columns, rows, onSelectRow }: Props) {
+/**
+ * Trace one geometry onto a canvas in Web Mercator screen space.
+ *
+ * Shared by the static layer (every shape), the per-frame hover highlight
+ * (one shape) and geometry-first mode — one tracing implementation, so a
+ * polygon reads the same whether it is context under a track or the subject
+ * of the map. Fills use even-odd across all of a polygon's rings at once, so
+ * holes (a lake in a district) stay holes.
+ */
+function paintGeometry(
+  ctx: CanvasRenderingContext2D, v: Viewport, g: Geometry,
+  style: { stroke?: string; fill?: string; width?: number; dotRadius?: number },
+): void {
+  if (style.stroke) { ctx.strokeStyle = style.stroke; ctx.lineWidth = style.width ?? 1; }
+  const ring = (pts: Position[], close: boolean) => {
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const s = toScreen(v, p.x, p.y);
+      if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+    });
+    if (close) ctx.closePath();
+    if (style.stroke) ctx.stroke();
+  };
+  const polygon = (rings: Position[][]) => {
+    ctx.beginPath();
+    for (const r of rings) {
+      r.forEach((p, i) => {
+        const s = toScreen(v, p.x, p.y);
+        if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+      });
+      ctx.closePath();
+    }
+    if (style.fill) { ctx.fillStyle = style.fill; ctx.fill('evenodd'); }
+    if (style.stroke) ctx.stroke();
+  };
+  const draw = (geom: Geometry): void => {
+    switch (geom.type) {
+      case 'Point':
+      case 'MultiPoint': {
+        const pts = geom.type === 'Point' ? [geom.coordinates] : geom.coordinates;
+        ctx.fillStyle = style.fill ?? style.stroke ?? '#2b6cb0';
+        for (const p of pts) {
+          const s = toScreen(v, p.x, p.y);
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, style.dotRadius ?? 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        return;
+      }
+      case 'LineString': ring(geom.coordinates, false); return;
+      case 'MultiLineString': geom.coordinates.forEach(l => ring(l, false)); return;
+      case 'Polygon': polygon(geom.coordinates); return;
+      case 'MultiPolygon': geom.coordinates.forEach(polygon); return;
+      case 'GeometryCollection': geom.geometries.forEach(draw); return;
+    }
+  };
+  draw(g);
+}
+
+export function MapView({ columns, rows, columnTypes, onSelectRow, initialBbox, engine, sourceSql, onRunDerived }: Props) {
   // `-1` is "none": a timestamp is optional (a track with no time is still a
   // path), the two coordinates are not.
   const [timeCol, setTimeCol] = useState(-1);
@@ -175,6 +256,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
   // Split the result into one track per value of this column (e.g. car_id), so
   // a fleet reads as one coloured path per vehicle rather than one zigzag.
   const [groupCol, setGroupCol] = useState(-1);
+  const [geoCol, setGeoCol] = useState(-1);
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<number>(5);
@@ -185,19 +267,42 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
 
   const facts = useMemo(() => columnFacts(columns, rows), [columns, rows]);
 
+  /**
+   * Columns that decode as geometry.
+   *
+   * Unlike the coordinate columns, this one *is* detected rather than picked —
+   * because it is not a guess: a cell either decodes as valid geometry or it
+   * does not. Three wire forms decode (utils/geoDetect): WKB/EWKB hex strings
+   * (PostGIS, MySQL, GeoParquet), GeoJSON objects and JSON strings (MongoDB),
+   * and ClickHouse Point/Ring/Polygon arrays — the last gated on the column's
+   * declared type, because a bare `[x, y]` array proves nothing. The user
+   * still chooses which of them to draw.
+   */
+  const geoColumns = useMemo(() => detectGeoColumns(
+    columns.map((name, i) => ({ name, typeName: columnTypes?.[i] })),
+    rows,
+  ), [columns, columnTypes, rows]);
+
   // Auto-pick columns by name so a coordinate table draws on open instead of a
   // blank canvas that reads as "no map". Adjusted during render (React's
   // endorsed pattern) whenever the result's columns change; only unambiguous
   // names are taken, and every choice stays overridable in the pickers above.
   // (This replaces the earlier "nothing is auto-detected" stance: requiring a
   // manual pick first made the whole view look broken on a plain lat/lon table.)
+  //
+  // Geometry-first: a result with a geometry column but no recognizable
+  // latitude/longitude pair opens directly on the shapes — a spatial table IS
+  // the map, not a context layer under a track that does not exist.
   const colSig = columns.join('');
   const [autoSig, setAutoSig] = useState('');
   if (autoSig !== colSig) {
     setAutoSig(colSig);
     const byName = (re: RegExp) => facts.find(f => re.test(f.name.trim().toLowerCase()))?.index ?? -1;
-    setLatCol(byName(/^(lat|latitude|lat_deg)$/));
-    setLonCol(byName(/^(lon|lng|long|longitude|lon_deg)$/));
+    const lat = byName(/^(lat|latitude|lat_deg)$/);
+    const lon = byName(/^(lon|lng|long|longitude|lon_deg)$/);
+    setLatCol(lat);
+    setLonCol(lon);
+    setGeoCol(lat < 0 || lon < 0 ? (geoColumns[0]?.index ?? -1) : -1);
     setTimeCol(facts.find(f =>
       f.timeLike >= Math.max(1, f.sampled * 0.6)
       && /(_at$|_ts$|time|date|timestamp|captured|recorded)/.test(f.name.trim().toLowerCase()))?.index ?? -1);
@@ -207,48 +312,49 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     })?.index ?? -1);
   }
 
-  /**
-   * Columns that decode as geometry.
-   *
-   * Unlike the coordinate columns, this one *is* detected rather than picked —
-   * because it is not a guess: a cell either decodes as valid EWKB or it does
-   * not, and nothing else in a database looks like one by accident. The user
-   * still chooses which of them to draw.
-   */
-  const geoColumns = useMemo(() => {
-    const probe = rows.slice(0, 20);
-    return columns
-      .map((name, index) => ({ name, index }))
-      .filter(({ index }) =>
-        probe.some(r => typeof r[index] === 'string' && parseWkbHex(r[index] as string) !== null));
-  }, [columns, rows]);
-  const [geoCol, setGeoCol] = useState(-1);
-
-  /** The decoded geometries of the chosen column, capped so a large result
-   *  cannot lock the canvas. The cap is stated, never silent. */
+  /** The decoded geometries of the chosen column, each with its row index so a
+   *  click or hover on a shape can find the row in the grid. Capped so a large
+   *  result cannot lock the canvas. The cap is stated, never silent. */
   const geometries = useMemo(() => {
-    if (geoCol < 0) return { shapes: [] as Geometry[], shown: 0, total: 0 };
-    const out: Geometry[] = [];
+    if (geoCol < 0) return { shapes: [] as { g: Geometry; row: number }[], shown: 0, total: 0 };
+    const typeName = columnTypes?.[geoCol];
+    const out: { g: Geometry; row: number }[] = [];
     let total = 0;
-    for (const r of rows) {
-      const v = r[geoCol];
-      if (typeof v !== 'string') continue;
-      const g = parseWkbHex(v);
-      if (!g) continue;
+    rows.forEach((r, row) => {
+      const g = cellGeometry(r[geoCol], typeName);
+      if (!g) return;
       total += 1;
-      if (out.length < GEOMETRY_CAP) out.push(g);
-    }
+      if (out.length < GEOMETRY_CAP) out.push({ g, row });
+    });
     return { shapes: out, shown: out.length, total };
-  }, [rows, geoCol]);
+  }, [rows, geoCol, columnTypes]);
 
   /** Geometry only joins the viewport when it is actually longitude/latitude —
    *  projected metres drawn as degrees would put Prague off the coast of
    *  Africa and take the whole view with it. */
   const geoDrawable = useMemo(() => {
     if (geometries.shapes.length === 0) return false;
-    const box = geomBbox(geometries.shapes);
-    return isLonLat(geometries.shapes[0].srid, box);
+    const box = geomBbox(geometries.shapes.map(s => s.g));
+    return isLonLat(geometries.shapes[0].g.srid, box);
   }, [geometries]);
+
+  /**
+   * The escape hatch for the refusal below, PostgreSQL only: a derived query
+   * that wraps the CURRENT query text and transforms just the detected
+   * geometry column to WGS 84 (utils/geoTransform). Explicitly a user action —
+   * the user's SQL is never silently rewritten; the derived query opens as a
+   * new tab where it can be read, and it is labelled in the log as derived.
+   * A geography column never reaches this path (PostGIS stores it lon/lat).
+   */
+  const transform = useMemo(() => {
+    if (geoDrawable || geometries.total === 0 || geoCol < 0) return null;
+    if (engine !== 'postgres' || !sourceSql || !onRunDerived) return null;
+    return buildTransformQuery(sourceSql, columns, columns[geoCol]);
+  }, [geoDrawable, geometries.total, geoCol, engine, sourceSql, onRunDerived, columns]);
+
+  /** Geometry-first mode: the shapes are the subject, not context under a
+   *  track. On when a geometry column is drawn and no lat/lon pair is picked. */
+  const geometryFirst = geoCol >= 0 && geoDrawable && (latCol < 0 || lonCol < 0);
 
   const track: Track | null = useMemo(() => {
     if (latCol < 0 || lonCol < 0) return null;
@@ -301,18 +407,28 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
           { minLat: 90, maxLat: -90, minLon: 180, maxLon: -180 })
         : (track?.bounds ?? null);
     if (geoDrawable) {
-      const gb = geomBbox(geometries.shapes);
+      // The GeoParquet footer hint, when present, is the FILE's whole extent —
+      // the decoded rows are one page of it, so the hint wins the first fit.
+      // (Pan/zoom lives in manualView and is untouched by this; the Fit button
+      // returns here, to the full-file extent — which is the honest fit.)
+      const hint = wireBboxToBounds(initialBbox);
+      const gb = hint ?? (() => {
+        const dec = geomBbox(geometries.shapes.map(s => s.g));
+        return dec
+          ? { minLat: dec.minY, maxLat: dec.maxY, minLon: dec.minX, maxLon: dec.maxX }
+          : null;
+      })();
       if (gb) {
         b = b
           ? {
-            minLat: Math.min(b.minLat, gb.minY), maxLat: Math.max(b.maxLat, gb.maxY),
-            minLon: Math.min(b.minLon, gb.minX), maxLon: Math.max(b.maxLon, gb.maxX),
+            minLat: Math.min(b.minLat, gb.minLat), maxLat: Math.max(b.maxLat, gb.maxLat),
+            minLon: Math.min(b.minLon, gb.minLon), maxLon: Math.max(b.maxLon, gb.maxLon),
           }
-          : { minLat: gb.minY, maxLat: gb.maxY, minLon: gb.minX, maxLon: gb.maxX };
+          : gb;
       }
     }
     return b;
-  }, [track, focusGroup, geoDrawable, geometries]);
+  }, [track, focusGroup, geoDrawable, geometries, initialBbox]);
 
   const fitView = useMemo(
     () => (boundsForFit ? fitViewport(boundsForFit, size.w, size.h) : null),
@@ -336,6 +452,27 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
   const [tileOpacity, setTileOpacity] = useState(0.85);   // dim the map so data pops
   const showTiles = basemap !== 'none';
   const base = BASEMAPS[basemap];
+
+  // The bundled Natural Earth coastline — the offline basemap. null while
+  // loading or when the asset is absent (the graticule-only map of old is the
+  // graceful fallback, not an error).
+  const [land, setLand] = useState<BasemapPolygon[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void loadBasemap().then(polys => { if (alive && polys) setLand(polys); });
+    return () => { alive = false; };
+  }, []);
+
+  // Geometry-first interaction state: which shape is under the cursor, and
+  // which was clicked (its row selected in the grid). Refs feed the canvas
+  // frame so hover never re-allocates composeFrame; state feeds the tooltip.
+  const [hoverRow, setHoverRow] = useState<number | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  const [selectedRow, setSelectedRow] = useState<number | null>(null);
+  const hoverRowRef = useRef<number | null>(null);
+  hoverRowRef.current = hoverRow;
+  const selectedRowRef = useRef<number | null>(null);
+  selectedRowRef.current = selectedRow;
 
   /** Switch basemaps; the first-ever switch to an online basemap discloses
    *  the egress (naming the host) and requires an explicit confirm, persisted
@@ -456,6 +593,28 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (!viewport) return;
 
+    // Geometry-first: the hovered and grid-selected shapes are re-painted in
+    // accent on top of the blitted static layer — one shape per frame, so a
+    // hover never repaints the world.
+    if (geometryFirst) {
+      const hot: number[] = [];
+      if (selectedRowRef.current !== null) hot.push(selectedRowRef.current);
+      if (hoverRowRef.current !== null && hoverRowRef.current !== selectedRowRef.current) {
+        hot.push(hoverRowRef.current);
+      }
+      for (const row of hot) {
+        const shape = geometries.shapes.find(s => s.row === row);
+        if (!shape) continue;
+        ctx.globalAlpha = row === selectedRowRef.current ? 0.95 : 0.8;
+        paintGeometry(ctx, viewport, shape.g, {
+          stroke: '#7aa7e8', width: 2, dotRadius: 4.5,
+          fill: row === selectedRowRef.current
+            ? 'rgba(122,167,232,0.32)' : 'rgba(122,167,232,0.20)',
+        });
+        ctx.globalAlpha = 1;
+      }
+    }
+
     const mapDark = showTiles ? base.dark : true;
     const ink = mapDark ? '#e8e8ec' : '#1c1c22';
     const accent = '#2b6cb0';
@@ -529,7 +688,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
       ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(s.x, s.y, 9, 0, Math.PI * 2); ctx.stroke();
     }
-  }, [viewport, points, track, timeCol, focusGroup, showTiles, base]);
+  }, [viewport, points, track, timeCol, focusGroup, showTiles, base, geometryFirst, geometries]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -544,7 +703,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     const css = getComputedStyle(canvas);
     // Drawing colours are chosen against the BASEMAP, not the app theme — the
     // track has to read over whichever map the user picked, light or dark.
-    const mapDark = showTiles ? base.dark : true;   // grid-only sits on the app's dark panel
+    const mapDark = showTiles ? base.dark : true;   // the offline map sits on the app's dark panel
     const ink = mapDark ? '#e8e8ec' : '#1c1c22';
     const faint = mapDark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)';
     const accent = '#2b6cb0';                         // muted blue, not neon
@@ -557,6 +716,30 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     ctx.globalAlpha = showTiles ? 1 : 0.6;
     ctx.fillRect(0, 0, size.w, size.h);
     ctx.globalAlpha = 1;
+
+    // ── Offline basemap ──
+    // The bundled Natural Earth landmasses, drawn under everything else. This
+    // is the default map: real geography with zero network. Online tiles
+    // (opt-in) replace it rather than stack on it.
+    if (!showTiles && land && viewport) {
+      ctx.fillStyle = mapDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.08)';
+      ctx.strokeStyle = faint;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const poly of land) {
+        for (const ringPts of poly.rings) {
+          ringPts.forEach(([lon, lat], i) => {
+            const s = toScreen(viewport, lon, lat);
+            if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+          });
+          ctx.closePath();
+        }
+      }
+      ctx.fill('evenodd');
+      ctx.globalAlpha = 0.55;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
 
     if (!viewport) {
       ctx.fillStyle = muted;
@@ -587,7 +770,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     // A map with no reference lines gives no sense of scale at all, and this
     // is the reference that needs no network.
     const grid = showTiles ? null : (track?.bounds ?? (() => {
-      const gb = geomBbox(geometries.shapes);
+      const gb = geomBbox(geometries.shapes.map(s => s.g));
       return gb ? { minLat: gb.minY, maxLat: gb.maxY, minLon: gb.minX, maxLon: gb.maxX } : null;
     })());
     if (grid) {
@@ -616,42 +799,23 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     }
     ctx.globalAlpha = 1;
 
-    // Geometry underneath the track: it is context (a district, a route, a
-    // service area), and the track is the thing being read.
+    // Geometry. In track mode it is context underneath — a district, a route,
+    // a service area — and the track is the thing being read. In
+    // geometry-first mode the shapes ARE the subject: filled, brighter, and
+    // the hover/click layer (composeFrame) accentuates individual ones.
     if (geoDrawable) {
-      ctx.strokeStyle = accent;
-      ctx.globalAlpha = 0.55;
-      ctx.lineWidth = 1;
-      const ring = (pts: { x: number; y: number }[], close: boolean) => {
-        ctx.beginPath();
-        pts.forEach((p, i) => {
-          const s2 = toScreen(viewport, p.x, p.y);
-          if (i === 0) ctx.moveTo(s2.x, s2.y); else ctx.lineTo(s2.x, s2.y);
-        });
-        if (close) ctx.closePath();
-        ctx.stroke();
-      };
-      const drawGeom = (g: Geometry) => {
-        switch (g.type) {
-          case 'Point':
-          case 'MultiPoint': {
-            const pts = g.type === 'Point' ? [g.coordinates] : g.coordinates;
-            ctx.fillStyle = accent;
-            for (const p of pts) {
-              const s2 = toScreen(viewport, p.x, p.y);
-              ctx.beginPath(); ctx.arc(s2.x, s2.y, 3, 0, Math.PI * 2); ctx.fill();
-            }
-            return;
-          }
-          case 'LineString': ring(g.coordinates, false); return;
-          case 'MultiLineString': g.coordinates.forEach(l => ring(l, false)); return;
-          case 'Polygon': g.coordinates.forEach(r => ring(r, true)); return;
-          case 'MultiPolygon': g.coordinates.forEach(p => p.forEach(r => ring(r, true))); return;
-          case 'GeometryCollection': g.geometries.forEach(drawGeom); return;
+      if (geometryFirst) {
+        for (const s of geometries.shapes) {
+          paintGeometry(ctx, viewport, s.g,
+            { stroke: accent, fill: 'rgba(43,108,176,0.16)', width: 1.5 });
         }
-      };
-      geometries.shapes.forEach(drawGeom);
-      ctx.globalAlpha = 1;
+      } else {
+        ctx.globalAlpha = 0.55;
+        for (const s of geometries.shapes) {
+          paintGeometry(ctx, viewport, s.g, { stroke: accent, width: 1 });
+        }
+        ctx.globalAlpha = 1;
+      }
     }
 
     const drawGroups = focusGroup ? [focusGroup] : (track?.groups ?? []);
@@ -712,10 +876,11 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     progressUpTo.current = -1;
     composeFrame();
   }, [viewport, points, size, track, timeCol, focusGroup, geoDrawable, geometries,
-    geoColumns.length, showTiles, base, tileOpacity, tileTick, getTile, composeFrame]);
+    geometryFirst, land, geoColumns.length, showTiles, base, tileOpacity, tileTick, getTile, composeFrame]);
 
   // Playback / scrub frames: blit the static layer and move the marker(s).
-  useEffect(() => { composeFrame(); }, [index, current, composeFrame]);
+  // Hover/selection in geometry-first mode rides the same frame path.
+  useEffect(() => { composeFrame(); }, [index, current, hoverRow, selectedRow, composeFrame]);
 
   // ── interaction: drag to pan, wheel to zoom, click to select a point ──
   const drag = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
@@ -726,11 +891,29 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
   };
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const d = drag.current;
-    if (!d || !viewport) return;
-    const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.moved = true;
-    // Absolute from the drag start, so it never drifts as the view re-renders.
-    setManualView({ scale: viewport.scale, offsetX: d.ox + dx, offsetY: d.oy + dy });
+    if (d && viewport) {
+      const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.moved = true;
+      // Absolute from the drag start, so it never drifts as the view re-renders.
+      setManualView({ scale: viewport.scale, offsetX: d.ox + dx, offsetY: d.oy + dy });
+      return;
+    }
+    // Geometry-first hover: which shape is under the cursor. Bbox-gated
+    // (utils/geoHit), so even the 5000-shape cap costs a few cheap rejects per
+    // mousemove; the highlight itself rides the per-frame canvas layer.
+    if (!geometryFirst || !viewport) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    let hit: number | null = null;
+    // Reverse order: shapes drawn later sit on top, so they answer first.
+    for (let i = geometries.shapes.length - 1; i >= 0; i--) {
+      if (hitTestGeometry(geometries.shapes[i].g, viewport, px, py)) {
+        hit = geometries.shapes[i].row;
+        break;
+      }
+    }
+    if (hit !== hoverRowRef.current) setHoverRow(hit);
+    if (hit !== null) setHoverPos({ x: px, y: py });
   };
   const onMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const d = drag.current;
@@ -738,7 +921,22 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
     // A real drag pans; only a click (no movement) selects the point under it.
     if (!d || d.moved || !viewport) return;
     const r = e.currentTarget.getBoundingClientRect();
-    const hit = hitTest(points, viewport, e.clientX - r.left, e.clientY - r.top);
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    // Geometry-first: a click selects the shape's row in the grid — the same
+    // two-way link a track point has.
+    if (geometryFirst) {
+      for (let i = geometries.shapes.length - 1; i >= 0; i--) {
+        if (hitTestGeometry(geometries.shapes[i].g, viewport, px, py)) {
+          const row = geometries.shapes[i].row;
+          setSelectedRow(row);
+          onSelectRow?.(row);
+          return;
+        }
+      }
+      setSelectedRow(null);
+      return;
+    }
+    const hit = hitTest(points, viewport, px, py);
     if (hit !== null) {
       setPlaying(false);
       setIndex(hit);
@@ -844,7 +1042,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
         )}
         <button className="toolbar-btn" data-tip="Zoom in (or scroll)" onClick={() => zoomBy(1.3)}>＋</button>
         <button className="toolbar-btn" data-tip="Zoom out (or scroll)" onClick={() => zoomBy(1 / 1.3)}>－</button>
-        <button className="toolbar-btn" data-tip="Fit the track to the view"
+        <button className="toolbar-btn" data-tip="Fit the data to the view"
           onClick={() => setManualView(null)}>⤢ Fit</button>
         <button className="toolbar-btn" data-tip="Download the map as a PNG"
           onClick={exportPng}>PNG</button>
@@ -853,6 +1051,9 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
       {geoCol >= 0 && (
         <div className="map-status">
           <span>{geometries.total.toLocaleString()} geometries</span>
+          {geometryFirst && (
+            <span>· hover a shape for its row, click to select it in the grid</span>
+          )}
           {geometries.shown < geometries.total && (
             <span className="map-warn">
               · showing the first {geometries.shown.toLocaleString()} — the rest are not drawn
@@ -860,8 +1061,16 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
           )}
           {!geoDrawable && geometries.total > 0 && (
             <span className="map-warn">
-              · not longitude/latitude (SRID {geometries.shapes[0]?.srid ?? 'none'}) — not drawn,
+              · not longitude/latitude (SRID {geometries.shapes[0]?.g.srid ?? 'none'}) — not drawn,
               because projected coordinates plotted as degrees would put this somewhere it is not
+              {transform?.ok && (
+                <button
+                  className="toolbar-btn"
+                  data-tip={`View transformed to WGS 84 — runs a derived query in a new tab: the current query wrapped as a subselect, ${columns[geoCol]} replaced by ST_AsEWKB(ST_Transform(${columns[geoCol]}, 4326)). Your SQL is not changed.`}
+                  onClick={() => { if (transform.ok) onRunDerived?.(transform.sql, 'WGS 84'); }}
+                >🌐 View in WGS 84</button>
+              )}
+              {transform && !transform.ok && <span> · {transform.reason}</span>}
             </span>
           )}
         </div>
@@ -919,12 +1128,42 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
       <div className="map-canvas-box" ref={boxRef}>
         <canvas
           ref={canvasRef}
-          style={{ width: size.w, height: size.h, cursor: drag.current ? 'grabbing' : 'grab' }}
+          style={{
+            width: size.w, height: size.h,
+            cursor: drag.current ? 'grabbing'
+              : geometryFirst && hoverRow !== null ? 'pointer' : 'grab',
+          }}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
-          onMouseLeave={() => { drag.current = null; }}
+          onMouseLeave={() => { drag.current = null; setHoverRow(null); }}
         />
+        {/* Geometry-first hover card: the shape's row, minus the geometry
+            itself (its hex wall is what the badge and this map replace). */}
+        {geometryFirst && hoverRow !== null && hoverPos && rows[hoverRow] && (
+          <div
+            className="map-geo-tip"
+            style={{
+              left: Math.min(hoverPos.x + 14, Math.max(0, size.w - 240)),
+              top: Math.min(hoverPos.y + 14, Math.max(0, size.h - 120)),
+            }}
+          >
+            <div className="map-geo-tip-head">row {hoverRow + 1}</div>
+            {columns.map((name, ci) => {
+              if (ci === geoCol) return null;
+              const v = rows[hoverRow][ci];
+              const s = v === null || v === undefined ? 'NULL' : String(v);
+              return (
+                <div key={ci} className="map-geo-tip-row">
+                  <span className="map-geo-tip-key">{name}</span>
+                  <span className="map-geo-tip-val">
+                    {s.length > 80 ? `${s.slice(0, 80)}…` : s}
+                  </span>
+                </div>
+              );
+            }).slice(0, 8)}
+          </div>
+        )}
       </div>
 
       {points.length > 0 && (
@@ -983,9 +1222,7 @@ export function MapView({ columns, rows, onSelectRow }: Props) {
 
 /** Graticule spacing that puts roughly 4–10 lines across the view. */
 function pickGraticule(b: { minLat: number; maxLat: number; minLon: number; maxLon: number }): number {
-  const span = Math.max(b.maxLat - b.minLat, b.maxLon - b.minLon, 1e-6);
-  const steps = [10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.001];
-  return steps.find(s => span / s >= 3) ?? 0.0005;
+  return graticuleStep(Math.max(b.maxLat - b.minLat, b.maxLon - b.minLon));
 }
 
 /**

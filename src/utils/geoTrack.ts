@@ -249,6 +249,13 @@ export function buildTrack(rows: unknown[][], spec: TrackSpec): Track {
 
 // ── projection ──────────────────────────────────────────────────────────────
 
+/** Graticule spacing that puts roughly 4–10 lines across a span of degrees. */
+export function graticuleStep(spanDeg: number): number {
+  const span = Math.max(spanDeg, 1e-6);
+  const steps = [10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.001];
+  return steps.find(s => span / s >= 3) ?? 0.0005;
+}
+
 /**
  * Web Mercator, normalised to 0–1.
  *

@@ -318,6 +318,7 @@ fn run(conn: &duckdb::Connection, sql: &str, params: &[String], max_rows: Option
         fetch_ms: total_ms - execution_ms,
         warnings: vec![],
         truncated,
+        geo_bbox: None,
     })
 }
 
@@ -338,9 +339,19 @@ fn collect_rows(
     let columns: Vec<ColumnInfo> = (0..ncols)
         .map(|i| {
             let field = schema.field(i);
+            // GEOMETRY rides the arrow Binary carrier — indistinguishable from
+            // BLOB at the arrow level (duckdb-rs maps LogicalTypeId::Geometry
+            // to Binary with no extension metadata), so the column's DuckDB
+            // logical type is the only place that still says GEOMETRY.
+            let type_name =
+                if stmt.column_logical_type(i).id() == duckdb::core::LogicalTypeId::Geometry {
+                    "GEOMETRY".to_string()
+                } else {
+                    duckdb_type_name(field.data_type())
+                };
             ColumnInfo {
                 name: field.name().clone(),
-                type_name: duckdb_type_name(field.data_type()),
+                type_name,
                 nullable: field.is_nullable(),
             }
         })
@@ -373,7 +384,11 @@ fn collect_rows(
 /// input — executing intermediates and returning the final statement's
 /// result. Degraded (intermediate result sets are discarded, and DML there
 /// shows its `Count` row) but functional.
-fn split_statements(sql: &str) -> Vec<(String, bool)> {
+///
+/// `pub(crate)` for commands/duckdb.rs's GeoParquet export, which needs the
+/// same string/comment/dollar-quote-aware counting to enforce its
+/// one-statement rule.
+pub(crate) fn split_statements(sql: &str) -> Vec<(String, bool)> {
     use sqlparser::ast::Statement;
     let dialect = sqlparser::dialect::DuckDbDialect {};
     split_on_semicolons(sql)
@@ -516,8 +531,9 @@ fn json_from_valueref(vr: duckdb::types::ValueRef<'_>) -> serde_json::Value {
         },
         // BLOB: hex, matching PostgreSQL's bytea rendering. Never lossy text.
         ValueRef::Blob(bytes) => J::String(hex::encode(bytes)),
-        // GEOMETRY is WKB bytes; hex like a blob, and the type_name column
-        // metadata says GEOMETRY so the grid can explain it.
+        // GEOMETRY is WKB bytes; hex like a blob. The column metadata carries
+        // the GEOMETRY type name (collect_rows reads the logical type — the
+        // arrow carrier alone would call it BLOB), so the grid can explain it.
         ValueRef::Geometry(wkb) => J::String(hex::encode(wkb)),
         ValueRef::Date32(days) => J::String(format_date32(days)),
         ValueRef::Time64(unit, v) => J::String(format_time64(unit, v)),
@@ -888,6 +904,7 @@ pub async fn list_columns(
             type_name: col_str(row, 1),
             nullable: col_bool(row, 2),
             primary_key: pk_cols.iter().any(|c| c == &name),
+            spatial: None,
         });
     }
 
@@ -1174,6 +1191,33 @@ mod tests {
         assert_eq!(tname("txt"), "VARCHAR");
         assert_eq!(tname("bin"), "BLOB");
         assert_eq!(tname("st"), "STRUCT");
+    }
+
+    /// GEOMETRY columns must report GEOMETRY in ColumnInfo.type_name, not
+    /// BLOB: the arrow carrier is Binary for both, so the label comes from the
+    /// column's DuckDB logical type. GEOMETRY is a core type since DuckDB 1.5,
+    /// so declaring such a column works offline with no spatial extension —
+    /// but CONSTRUCTING a geometry value does not (measured: BLOB→GEOMETRY is
+    /// an "unimplemented type for cast" in core; the constructors are all in
+    /// the extension), so this pins the label on an empty column and the
+    /// cell decode is covered by the live extension test in commands/duckdb.rs.
+    #[tokio::test]
+    async fn geometry_columns_report_geometry_not_blob() {
+        let s = mem().await;
+        execute(&s, "CREATE TABLE geo (g GEOMETRY)").await.unwrap();
+        let r = execute(&s, "SELECT g FROM geo").await.unwrap();
+        assert_eq!(r.columns[0].type_name, "GEOMETRY", "{:?}", r.columns);
+        // A BLOB column next to it stays BLOB — the two share the arrow
+        // carrier, so this is the discrimination that matters.
+        let r = execute(&s, "SELECT g, unhex('DEADBEEF') AS b FROM geo").await.unwrap();
+        assert_eq!(r.columns[0].type_name, "GEOMETRY");
+        assert_eq!(r.columns[1].type_name, "BLOB");
+        // …and the schema tree reports the catalog's own type string.
+        execute(&s, "INSERT INTO geo VALUES (NULL)").await.unwrap();
+        let cols = list_columns(&s, "memory", "main.geo").await.unwrap();
+        assert!(cols.iter().any(|n| matches!(n,
+            SchemaNode::Column { name, type_name, .. } if name == "g" && type_name == "GEOMETRY")),
+            "{cols:?}");
     }
 
     /// A failed typed decode must fall through to a string, never NULL. For

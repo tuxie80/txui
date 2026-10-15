@@ -338,6 +338,7 @@ where
             fetch_ms: 0,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         });
     }
 
@@ -349,6 +350,7 @@ where
         fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
         warnings: vec![],
         truncated,
+        geo_bbox: None,
     })
 }
 
@@ -390,7 +392,7 @@ pub fn json_value_from_row_class(row: &sqlx::mysql::MySqlRow, i: usize, class: M
 /// cell: the type name is identical across every row, and uppercasing plus
 /// substring-scanning it for each of rows×cols cells was the decoder's hottest
 /// allocation. Check order mirrors the old per-cell chain exactly.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MySqlTypeClass {
     Bool,
     Int,
@@ -401,12 +403,22 @@ pub enum MySqlTypeClass {
     Time,
     Json,
     Binary,
+    Geometry,
     Other,
 }
 
 pub fn classify_mysql_type(type_name: &str) -> MySqlTypeClass {
     use MySqlTypeClass::*;
     let tn = type_name.to_ascii_uppercase();
+    // Spatial first and EXACT: "POINT" contains "INT", so a substring check
+    // below would swallow it. sqlx reports every spatial column as GEOMETRY
+    // (one protocol type code for the whole family); the named forms are for
+    // metadata sources that use the DDL spelling.
+    if matches!(tn.as_str(), "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON"
+        | "MULTIPOINT" | "MULTILINESTRING" | "MULTIPOLYGON" | "GEOMETRYCOLLECTION")
+    {
+        return Geometry;
+    }
     if tn == "BOOLEAN" || tn == "BOOL" { return Bool; }
     if tn.contains("INT") || tn == "YEAR" || tn == "BIT" { return Int; }
     if tn.contains("DECIMAL") || tn.contains("NUMERIC") { return Decimal; }
@@ -622,6 +634,20 @@ fn json_value_from_mysql_row(row: &sqlx::mysql::MySqlRow, i: usize, class: MySql
                 };
             }
         }
+        MySqlTypeClass::Geometry => {
+            // sqlx's compatible() refuses GEOMETRY for both str and Vec<u8>,
+            // so every typed decode fails and the cell would fall through to
+            // NULL — indistinguishable from data loss. Go straight for the
+            // raw bytes with the compatibility check skipped (the same rescue
+            // the zero-date path uses; Vec<u8>'s decode just copies the
+            // payload). Both protocols deliver MySQL's internal framing:
+            // 4-byte little-endian SRID prefix + WKB. Emitted as lowercase
+            // hex — exactly how PostGIS EWKB reaches the frontend — and
+            // wkb.ts detects and strips the SRID prefix client-side.
+            if let Ok(v) = row.try_get_unchecked::<Vec<u8>, _>(i) {
+                return Value::String(hex::encode(v));
+            }
+        }
         MySqlTypeClass::Other => {}
     }
 
@@ -774,6 +800,7 @@ pub async fn list_columns(pool: &MySqlPool, database: &str, table: &str) -> Resu
             type_name: lossy_str(r, 1),
             nullable: lossy_str(r, 2) == "YES",
             primary_key: lossy_str(r, 3) == "PRI",
+            spatial: None,
         }
     }).collect();
 
@@ -927,6 +954,23 @@ mod tests {
     use super::valid_session_param;
 
     #[test]
+    fn spatial_type_names_classify_as_geometry() {
+        use super::{classify_mysql_type, MySqlTypeClass};
+        // sqlx reports the whole spatial family under one protocol type code,
+        // so GEOMETRY is the name the decoder actually sees; the DDL spellings
+        // are pinned for metadata sources that use them.
+        for tn in ["GEOMETRY", "geometry", "POINT", "LINESTRING", "POLYGON",
+                   "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION"] {
+            assert_eq!(classify_mysql_type(tn), MySqlTypeClass::Geometry, "{tn}");
+        }
+        // The reason the check is exact, not substring: POINT contains INT.
+        // These must NOT drift back to Int.
+        assert_ne!(classify_mysql_type("POINT"), MySqlTypeClass::Int);
+        assert_eq!(classify_mysql_type("INT"), MySqlTypeClass::Int);
+        assert_eq!(classify_mysql_type("BIGINT UNSIGNED"), MySqlTypeClass::Int);
+    }
+
+    #[test]
     fn accepts_plain_identifiers() {
         assert!(valid_session_param("sql_mode", "STRICT_ALL_TABLES"));
         assert!(valid_session_param("wait_timeout", "600"));
@@ -1039,6 +1083,65 @@ mod tests {
                 .unwrap_or_else(|e| panic!("get_ddl {obj}: {e}"));
             assert!(ddl.to_uppercase().contains(needle), "get_ddl {obj} missing {needle}: {ddl}");
         }
+
+        super::execute(&pool, &format!("DROP DATABASE `{db}`")).await.unwrap();
+    }
+
+    /// Live: a GEOMETRY column must come back as hex — the 4-byte
+    /// little-endian SRID prefix followed by WKB — never NULL. sqlx's
+    /// compatible() refuses GEOMETRY for both str and Vec<u8>, so without the
+    /// dedicated decode arm the cell fell through to NULL, indistinguishable
+    /// from data loss. Self-contained: creates + drops its own fixture schema.
+    ///   TXUI_TEST_CONN=Lo80 cargo test --lib geometry_decodes_to_hex -- --ignored --nocapture
+    /// or against a throwaway fixture with no saved connection (sqlserver.rs's
+    /// live tests use the same env pattern):
+    ///   TXUI_MYSQL_HOST=127.0.0.1 [TXUI_MYSQL_PORT=3306] [TXUI_MYSQL_USER=root] \
+    ///     cargo test --lib geometry_decodes_to_hex -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn geometry_decodes_to_hex_not_null() {
+        let pool = if let Ok(name) = std::env::var("TXUI_TEST_CONN") {
+            let dir = crate::storage::default_data_dir();
+            let configs = crate::storage::load(&dir).expect("read connections.json");
+            let config = configs.values().find(|c| c.name == name).expect("connection not found").clone();
+            let password = crate::secretstore::get(&dir, &config.keychain_key());
+            super::open_pool(&config, password, None, 2).await.unwrap()
+        } else if let Ok(host) = std::env::var("TXUI_MYSQL_HOST") {
+            use crate::db::types::{ConnectionConfig, Engine};
+            let mut config = ConnectionConfig::new(Engine::Mysql, "live-geometry-test");
+            config.host = Some(host);
+            config.port = std::env::var("TXUI_MYSQL_PORT").ok().and_then(|p| p.parse().ok());
+            config.user = std::env::var("TXUI_MYSQL_USER").ok().or(Some("root".into()));
+            super::open_pool(&config, None, None, 2).await.unwrap()
+        } else {
+            println!("no endpoint configured — set TXUI_TEST_CONN or TXUI_MYSQL_HOST");
+            return;
+        };
+
+        let db = "txui_geometry_test";
+        for stmt in [
+            format!("DROP DATABASE IF EXISTS `{db}`"),
+            format!("CREATE DATABASE `{db}`"),
+            format!("CREATE TABLE `{db}`.geo (id INT PRIMARY KEY AUTO_INCREMENT, \
+                     p POINT SRID 4326 NOT NULL, q POINT NULL)"),
+            format!("INSERT INTO `{db}`.geo (p, q) VALUES \
+                     (ST_PointFromText('POINT(1 2)', 4326), NULL)"),
+        ] {
+            super::execute(&pool, &stmt).await.unwrap();
+        }
+
+        let r = super::execute(&pool, &format!("SELECT p, q FROM `{db}`.geo")).await.unwrap();
+        assert_eq!(r.columns[0].type_name.to_uppercase(), "GEOMETRY",
+                   "spatial columns share one protocol type: {:?}", r.columns);
+        let hex_cell = r.rows[0][0].as_str().expect("geometry must decode to a hex string, not NULL");
+        // 4-byte SRID (4326 = 0x10E6 little-endian) + 1-byte order + 4-byte
+        // type (point) + two f64 = 25 bytes = 50 hex chars, lowercase to match
+        // the PostGIS hex the frontend already parses.
+        assert_eq!(hex_cell.len(), 50, "SRID-prefixed WKB length: {hex_cell}");
+        assert!(hex_cell.starts_with("e61000000101000000"), "SRID prefix + WKB header: {hex_cell}");
+        assert_eq!(hex_cell, &hex_cell.to_lowercase(), "hex casing matches the PostGIS path");
+        // A NULL geometry stays NULL — the arm must not manufacture data.
+        assert_eq!(r.rows[0][1], serde_json::Value::Null);
 
         super::execute(&pool, &format!("DROP DATABASE `{db}`")).await.unwrap();
     }

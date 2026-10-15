@@ -953,6 +953,7 @@ fn decode_json_compact(body: String, start: Instant) -> Result<QueryResult> {
             fetch_ms: 0,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         });
     }
 
@@ -994,6 +995,7 @@ fn decode_json_compact(body: String, start: Instant) -> Result<QueryResult> {
         fetch_ms: total.saturating_sub(execution_ms),
         warnings,
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -1231,6 +1233,7 @@ pub async fn list_columns(session: &ChSession, database: &str, table: &str) -> R
             // ClickHouse columns are NOT NULL unless wrapped in Nullable().
             nullable: r.get(1).map(|t| t.contains("Nullable(")).unwrap_or(false),
             primary_key: in_pk,
+            spatial: None,
         })
     }).collect();
 

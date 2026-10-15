@@ -65,6 +65,7 @@ import type { ConnectionConfig, Engine, Session, QueryResult } from './types';
 import { ConnectionsStore } from './store/connections';
 import { replayApi, type ReplayProbe } from './lib/replay';
 import { forgetPrivileges } from './store/sessionPrivileges';
+import { forgetDuckdbSpatial } from './store/duckdbSpatial';
 import { forgetFlavor } from './store/serverFlavors';
 import { clearSchemaScan } from './store/schemaScan';
 import { restoreRunLog } from './store/logStore';
@@ -1056,6 +1057,9 @@ export default function App() {
       // re-probed rather than inheriting a stale verdict that greys panels the
       // new session can use.
       forgetPrivileges(session.sessionId);
+      // The DuckDB spatial-extension state is likewise per session id (LOAD is
+      // session-local in DuckDB) — a reconnect must re-enable, not inherit.
+      forgetDuckdbSpatial(session.sessionId);
       // Same for the MySQL-vs-MariaDB flavour probe (also cached per session
       // id): a reconnect re-probes, and dead session ids stop accumulating in
       // the module-level cache.

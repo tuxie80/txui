@@ -3,6 +3,71 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added — geospatial, end to end
+
+- **Geometry is now a first-class citizen: grid badges, cell mini-maps, and a
+  real map view.** What used to be a wall of hex in a cell is decoded,
+  labelled `⬡ Polygon · 4326`, previewed in the cell viewer, and drawn on a
+  vendored 55 KiB Natural Earth basemap (`src/assets/basemap.json`, canvas,
+  no tiles, no network). MapView gained a geometry-first mode with hover
+  hit-testing; FastGrid badges are header-sniffs (WeakMap-cached), never full
+  parses. **Portability: pure canvas — identical on all three desktops.**
+- **Decoders for every wire shape the fleet actually emits.** Plain/extended
+  WKB, PostGIS EWKB, MySQL's SRID-prefixed framing (now with the **axis swap**
+  — MySQL stores geographic SRIDs lat-first per EPSG; 4326/4269/4258 are
+  swapped to lon/lat for display, projected SRIDs never touched), GeoPackage
+  `GP`-magic blobs, and SpatiaLite GaiaBinary (uncompressed classes only;
+  compressed encodings honestly return null rather than decode wrong).
+- **GeoParquet, read and write.** The Parquet engine parses the `geo` footer
+  (CRS 3-way: absent = CRS84, null = unknown, PROJJSON honoured), labels
+  columns `GEOMETRY · GeoParquet WKB`, and ships the footer **bbox through
+  `QueryResult.geo_bbox`** so the map opens fit to the whole file — including
+  partitioned datasets (union of member footers) — not to page one of the
+  rows. New command **`duckdb_export_geoparquet`** writes real GeoParquet 1.1
+  server-side via `COPY … (FORMAT PARQUET)` (sqlguard read-guard, write-once
+  paths, spatial probed server-side); the Copy/Export menu entry is
+  greyed-with-reason when spatial is off. Verified by reopening the produced
+  file through the Parquet engine.
+- **DuckDB spatial support.** GEOMETRY columns labelled via logical type; new
+  command **`duckdb_enable_spatial`** (LOAD first — free and offline when
+  cached — INSTALL only if absent; `networkError` classifies download
+  failures); 58 `ST_*` completions gated on the spatial state so they appear
+  only when they would run.
+- **PostgreSQL/PostGIS: "View in WGS 84".** A projected geometry result gets
+  a button that opens a `ST_Transform(..., 4326)` **derived query in a new
+  tab** — the original SQL is wrapped verbatim, quoted per identifier, and
+  refused with a named reason for anything it cannot wrap safely (multiple
+  statements, non-SELECT families, ambiguous column names). Live-verified
+  against PostGIS 3.6 / PG 17. SchemaTree badges spatial columns with SRID
+  and GiST/no-index from `geometry_columns`/`geography_columns`.
+- **MongoDB GeoJSON and ClickHouse geo arrays on the map.** Strict RFC 7946
+  GeoJSON detection (objects and JSON strings; Feature wrappers deliberately
+  out of scope) and ClickHouse `Point`/`Ring`/`Polygon`/`MultiPolygon`
+  decoding gated solely on the server-reported `type_name`.
+- **Redis "view as geo".** New command **`redis_geo_points`** (capped at
+  5,000 members, GEOPOS in batches, missing coordinates counted honestly) and
+  a `⬡ View as geo` toggle in the Redis browser with its own graticule
+  scatter canvas. The UI carries the caveat the server does not: GEOPOS
+  decodes *any* zset score as a geohash, so a leaderboard answers with edge
+  coordinates — detection stays user-initiated.
+- **SQL Server UDT groundwork.** `buildUdtDerivedQuery` (pure, 24 tests)
+  wraps a result's geometry/geography columns as `STAsBinary()` hex — feeding
+  the existing WKB stack — with T-SQL-legal wrapping (TOP/OPTION/ORDER BY
+  handled, `wkt` fallback for hierarchyid). Live test written, pending the
+  next MSSQL container session. tiberius is now **vendored**
+  (`src-tauri/vendor/tiberius/`) with UDT and sql_variant panic guards.
+
+Two new Tauri commands — **171 total**. Frontend 4,572 tests, backend 795.
+
+### Fixed
+
+- MySQL geographic columns displayed transposed (lat/lon swapped) — see the
+  axis swap above.
+- The grid badge now recognises GeoPackage and GaiaBinary containers, not
+  just bare WKB/EWKB headers.
+
 ## [1.2.0] - 2026-10-13
 
 ### Added
@@ -1331,5 +1396,5 @@ table is its own statement, with a live progress line and per-table timing.
   generated statement shape for the progress line. Audit gets one row per
   table too, which is the honest accounting.
 
-_Older releases (0.64.0 and earlier) live in `CHANGELOG_FULL.md` — kept local, not part of this repo._
+_Older releases (0.64.0 and earlier) are kept in the maintainer's local full-history file, not part of this repo._
 

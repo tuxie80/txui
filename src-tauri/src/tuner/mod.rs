@@ -964,7 +964,7 @@ mod redis_live_tests {
 #[cfg(test)]
 mod bloat_live_tests {
     //! Live validation of the index-fragmentation & bloat advisor
-    //! (plan-priorities.md #25 / plan-dba-focus.md Workstream 3 Part A) against
+    //! (priorities item #25 / DBA-focus Workstream 3 Part A) against
     //! the local dev servers: MySQL 8.4 on 3307, PostgreSQL 18 on 5432,
     //! PostgreSQL 13 on 55423, PostgreSQL 12 on 55422 (all root/root).
     //! Every test PROVOKES the state its rule detects and asserts the finding;

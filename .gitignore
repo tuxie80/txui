@@ -30,7 +30,7 @@ database.png
 # ...except the root README, which describes the project and must ship with it.
 !/README.md
 # ...and the small two-version CHANGELOG.md (GitHub release notes are
-# auto-extracted from it). CHANGELOG_FULL.md keeps the full history, local.
+# auto-extracted from it). The full history lives in a local-only file.
 !/CHANGELOG.md
 
 # OS / editor noise

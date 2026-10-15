@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod replay;
 pub mod srvlog;
 pub mod sqlite;
+pub mod duckdb;
 pub mod ssh;
 pub mod tuner;
 pub mod routines;

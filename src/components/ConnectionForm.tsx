@@ -18,7 +18,7 @@ import { ParquetSchemaDialog } from './ParquetSchemaDialog';
 const ENGINE_LABELS: Record<Engine, string> = {
   mysql:    'MySQL / MariaDB / Percona',
   postgres: 'PostgreSQL',
-  // Forks are protocol-compatible but untested (plan-redis.md §4.4) — the
+  // Forks are protocol-compatible but untested — the
   // label says what is verified, the hint below says the rest.
   redis:    'Redis',
   clickhouse: 'ClickHouse (HTTP)',

@@ -1,4 +1,5 @@
 import type { TreeEntry } from '../utils/treeGrouping';
+import { spatialBadge } from '../utils/treeGrouping';
 import { Spinner } from './Spinner';
 import { OBJECT_ICON_URL } from './iconAssets';
 
@@ -237,6 +238,16 @@ export function ColumnIcon({ className }: SvgProps) {
   );
 }
 
+/** Spatial (PostGIS geometry/geography) column — a map pin. */
+export function SpatialIcon({ className }: SvgProps) {
+  return (
+    <Stroke className={className}>
+      <path d="M8 14.4c-2.7-3-4.4-5-4.4-7.2A4.4 4.4 0 018 2.8a4.4 4.4 0 014.4 4.4c0 2.2-1.7 4.2-4.4 7.2z" />
+      <circle cx="8" cy="7.2" r="1.5" />
+    </Stroke>
+  );
+}
+
 /** Index — b-tree nodes. */
 export function IndexIcon({ className }: SvgProps) {
   return (
@@ -360,10 +371,15 @@ export function ObjectIcon({ entry }: { entry: TreeEntry }) {
     // index hue/glyph is the closest existing "structure over columns" read.
     case 'statistic_ext':
       return <TIcon hue="ti-index" title={`extended statistics on ${entry.table} (${entry.kinds.join(', ')})`} fallback={<IndexIcon />} />;
-    case 'column':
-      return entry.primary_key
-        ? <TIcon hue="ti-pk" title={entry.type_name} tabler="pk" fallback={<KeyIcon />} />
-        : <TIcon hue="ti-column" title={entry.type_name} tabler="column" fallback={<ColumnIcon />} />;
+    case 'column': {
+      if (entry.primary_key)
+        return <TIcon hue="ti-pk" title={entry.type_name} tabler="pk" fallback={<KeyIcon />} />;
+      // PostGIS spatial column: a pin glyph, and the tooltip carries the
+      // catalog facts (family · type · SRID · GiST coverage).
+      const badge = spatialBadge(entry.spatial);
+      if (badge) return <TIcon hue="ti-column" title={badge.tip} fallback={<SpatialIcon />} />;
+      return <TIcon hue="ti-column" title={entry.type_name} tabler="column" fallback={<ColumnIcon />} />;
+    }
     case 'index':
       return <TIcon hue="ti-index" title={entry.unique ? 'unique index' : 'index'} tabler="index" fallback={<IndexIcon />} />;
     case 'struct_column':

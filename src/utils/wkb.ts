@@ -20,8 +20,36 @@
  * `ST_Transform`, `ST_SimplifyPreserveTopology` and `ST_IsValidReason` still
  * belong to the server — those need PostGIS itself, not a byte reader.
  *
+ * ## The four wire shapes, and the ONE axis swap
+ *
+ * `parseWkbHex` sniffs, in order (details on its docstring):
+ *
+ *  1. plain WKB/EWKB (PostGIS, DuckDB, Parquet, SQLite blobs);
+ *  2. GeoPackage (`GP` magic — header + optional envelope, then standard WKB);
+ *  3. MySQL framing (4-byte little-endian SRID prefix, then plain WKB);
+ *  4. SpatiaLite GaiaBinary (`0x00 … 0x7C … 0xFE` — see gaiaBinary.ts).
+ *
+ * **Axis order — read this before touching branch 3.** MySQL/MariaDB store
+ * WKB coordinates in EPSG axis order, which for *geographic* SRSs is
+ * (latitude, longitude) — LAT FIRST. Everything else TxUI decodes (PostGIS
+ * EWKB, GeoPackage, SpatiaLite, GeoParquet, DuckDB) stores (x, y) =
+ * (longitude, latitude). So a MySQL `POINT` in SRID 4326 arrives lat-first
+ * and would plot transposed (Prague in the Gulf of Guinea). Branch 3 — and
+ * ONLY branch 3 — swaps every position to (lon, lat) when the prefix SRID is
+ * a known geographic one (`MYSQL_GEOGRAPHIC_SRIDS`), so every Geometry this
+ * module returns is x=lon, y=lat regardless of source, and downstream (map,
+ * bbox, GeoJSON export) never has to care where the bytes came from.
+ * SRID 0 never swaps (undefined/projected — the axes are just x, y);
+ * projected SRIDs never swap (metres are x, y in both camps). The known set
+ * is deliberately small: adding a geographic SRID only ever *fixes* a
+ * transposed map, while swapping a projected one would *corrupt* it — so the
+ * asymmetry fails in the safe direction. PostGIS EWKB 4326 does NOT swap:
+ * PostGIS already sends lon/lat.
+ *
  * Pure and dependency-free — driven by `node --test`.
  */
+
+import { parseGaiaBytes } from './gaiaBinary.ts';
 
 export type GeometryType =
   | 'Point' | 'LineString' | 'Polygon'
@@ -197,18 +225,138 @@ function readGeometry(r: Reader, inheritedSrid: number | null): Geometry {
 }
 
 /**
- * Parse hex EWKB/WKB, or `null` when the text is not geometry.
+ * Parse hex geometry in any of the four wire shapes, or `null` when the text
+ * is not geometry.
  *
  * Returning `null` rather than throwing is the point: this is called
  * speculatively on every cell of a result set to decide whether a Map tab
  * should exist at all, so "not geometry" has to be cheap and quiet.
+ *
+ * The framings are tried in a fixed order:
+ *
+ *  1. plain WKB/EWKB (PostGIS hex, DuckDB/Parquet blobs, SQLite blobs);
+ *  2. GeoPackage — `GP` magic, header + optional envelope, then standard WKB;
+ *  3. MySQL framing — a 4-byte little-endian SRID prefix, then plain WKB;
+ *  4. SpatiaLite GaiaBinary (gaiaBinary.ts).
+ *
+ * Disambiguation is by full consumption: a real encoding consumes every byte,
+ * so a reading that leaves a tail loses to one that does not. That is what
+ * keeps the overlap case honest — a MySQL SRID-0 buffer starts `00 00 00 00`
+ * and reads as a big-endian Point with garbage coordinates under the plain
+ * framing, but that reading stops 4 bytes short, so the MySQL framing wins.
+ * A plain reading that merely leaves a tail (bytes the old parser already
+ * tolerated) is still accepted when no other framing applies — speculative
+ * probing must not reject encodings it accepted before.
+ *
+ * The MySQL branch — and only it — applies the geographic axis swap; see the
+ * module header for why MySQL is the odd one out.
  */
 export function parseWkbHex(hex: string): Geometry | null {
   if (!/^(0x)?[0-9a-fA-F]+$/.test(hex.trim()) || hex.trim().length < 18) return null;
+  let bytes: Uint8Array;
   try {
-    const bytes = hexToBytes(hex);
+    bytes = hexToBytes(hex);
+  } catch {
+    return null;
+  }
+  // 1. plain WKB/EWKB.
+  const plain = readGeometryPref(bytes, null);
+  if (plain?.done) return plain.g;
+  // 2. GeoPackage: `GP` magic, header + envelope, then standard WKB.
+  const gpkg = parseGeoPackageBytes(bytes);
+  if (gpkg) return gpkg;
+  // 3. MySQL framing: skip the SRID prefix, adopt it, parse the rest as WKB.
+  if (bytes.length >= 4 + 9) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    return readGeometry(new Reader(bytes, view), null);
+    const srid = view.getUint32(0, true);
+    const mysql = readGeometryPref(bytes.subarray(4), srid || null);
+    if (mysql?.done) return normalizeMysqlAxes(mysql.g, srid);
+  }
+  // 4. SpatiaLite GaiaBinary (self-validating: markers + exact consumption).
+  const gaia = parseGaiaBytes(bytes);
+  if (gaia) return gaia;
+  // No framing consumed everything: accept a plain parse with a tail
+  // (the pre-MySQL behaviour), else it is not geometry.
+  return plain ? plain.g : null;
+}
+
+/**
+ * The SRIDs MySQL/MariaDB treat as lat-lon ordered — i.e. the geographic
+ * SRSs where MySQL stores (lat, lon) per the EPSG axis order while everyone
+ * else stores (lon, lat). MySQL 8 ships the whole EPSG catalogue of
+ * geographic SRSs and orders *all* of them lat-first, but the pragmatic
+ * decoder rule is "SRID ≠ 0 and known-geographic": the set stays small
+ * (4326 = WGS 84 is the overwhelming case; 4269 = NAD 83 and 4258 = ETRS89
+ * are the other two that dominate in the wild and match what `isLonLat`
+ * treats as degrees), because wrongly swapping a projected SRID corrupts
+ * data while wrongly not swapping an exotic geographic one only misplots it.
+ */
+export const MYSQL_GEOGRAPHIC_SRIDS: ReadonlySet<number> = new Set([4326, 4269, 4258]);
+
+/**
+ * Swap every position of a MySQL-framed geometry from (lat, lon) to
+ * (lon, lat) when — and only when — the prefix SRID is a known geographic
+ * one. Mutates the freshly-parsed geometry; z/m are untouched. See the
+ * module header for the full reasoning.
+ */
+function normalizeMysqlAxes(g: Geometry, srid: number): Geometry {
+  if (!MYSQL_GEOGRAPHIC_SRIDS.has(srid)) return g;
+  for (const p of positions(g)) {
+    const lat = p.x;
+    p.x = p.y;
+    p.y = lat;
+  }
+  return g;
+}
+
+/** Envelope sizes by GeoPackage envelope-contents code (flags bits 1–3). */
+const GPKG_ENVELOPE_BYTES = [0, 32, 48, 48, 64];
+
+/**
+ * GeoPackage geometry BLOB: magic `GP`, version 0, a flags byte (bit 0 =
+ * little-endian header, bits 1–3 = envelope kind), a signed srs_id, an
+ * optional envelope, then STANDARD WKB. Returns null unless the blob is a
+ * complete, fully-consumed GeoPackage geometry — this runs speculatively on
+ * every hex cell, so "not a GeoPackage blob" must be cheap and quiet.
+ *
+ * srs_id 4326 is lon/lat like everywhere except MySQL — NO axis swap here.
+ * srs_id 0 and -1 are GeoPackage's "undefined" SRSs; both map to a null SRID
+ * so `isLonLat` falls back to range inference.
+ */
+export function parseGeoPackageBytes(bytes: Uint8Array): Geometry | null {
+  try {
+    // 8-byte header, then at least byte-order + type + one coordinate pair.
+    if (bytes.length < 8 + 9) return null;
+    if (bytes[0] !== 0x47 || bytes[1] !== 0x50) return null; // 'GP'
+    if (bytes[2] !== 0x00) return null; // version
+    const flags = bytes[3];
+    if ((flags & 0xc0) !== 0) return null; // reserved bits must be zero
+    const envelope = (flags >> 1) & 0x07;
+    if (envelope > 4) return null; // codes 5–7 are not defined
+    const offset = 8 + GPKG_ENVELOPE_BYTES[envelope];
+    if (bytes.length < offset + 9) return null;
+    const little = (flags & 0x01) === 1;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const rawSrid = view.getInt32(4, little);
+    const srid = rawSrid > 0 ? rawSrid : null;
+    // The body is standard WKB; the header srs_id is inherited by every
+    // geometry in it (plain WKB carries no SRID of its own).
+    const body = readGeometryPref(bytes.subarray(offset), srid);
+    return body?.done ? body.g : null;
+  } catch {
+    return null;
+  }
+}
+
+interface ReadAttempt { g: Geometry; done: boolean }
+
+/** Read one geometry, reporting whether it consumed every byte. */
+function readGeometryPref(bytes: Uint8Array, srid: number | null): ReadAttempt | null {
+  try {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const r = new Reader(bytes, view);
+    const g = readGeometry(r, srid);
+    return { g, done: r.done };
   } catch {
     return null;
   }
@@ -217,6 +365,12 @@ export function parseWkbHex(hex: string): Geometry | null {
 /**
  * MySQL's spatial columns are a 4-byte little-endian SRID followed by plain
  * WKB — *not* EWKB. Given the bytes, this reads either.
+ *
+ * This is a raw wire reader: it returns coordinates in WIRE order and does
+ * NOT apply the geographic axis swap. Display normalization
+ * (`normalizeMysqlAxes`, lat-first → lon/lat for `MYSQL_GEOGRAPHIC_SRIDS`)
+ * lives in `parseWkbHex`, the speculative entry point every display path
+ * (grid badge, CellViewer, MapView) actually uses.
  */
 export function parseMysqlGeometry(bytes: Uint8Array): Geometry | null {
   try {

@@ -341,6 +341,91 @@ const DUCKDB_FUNCTIONS: FnDef[] = [
 ];
 
 /**
+ * DuckDB spatial (ST_*) — the `spatial` EXTENSION's vocabulary, not core.
+ * GEOMETRY is a core type since DuckDB 1.5, but every function below requires
+ * `INSTALL spatial; LOAD spatial;` (TxUI offers that on demand per session),
+ * so these complete only when the session reports the extension loaded —
+ * offering them earlier is offering a catalog error. Curated from the
+ * extension's function index to the calls that actually show up: the file
+ * readers (the payoff — shapefiles/GeoJSON in, GeoParquet out via COPY),
+ * construct, serialize, measure, relate, reproject. `_GEOS` variants and the
+ * coverage/MVT internals deliberately absent. Note ST_Transform takes CRS
+ * NAMES here (source, target), not PostGIS's bare srid.
+ */
+const DUCKDB_SPATIAL_FUNCTIONS: FnDef[] = [
+  // file readers — GeoParquet/Shapefile/GeoJSON in
+  ['ST_Read', "ST_Read('file.shp' | 'file.geojson' [, …])"],
+  ['ST_Read_Meta', "ST_Read_Meta('file.shp') — file metadata incl. CRS"],
+  ['ST_ReadSHP', "ST_ReadSHP('file.shp') — no GDAL"],
+  ['ST_ReadOSM', "ST_ReadOSM('file.osm.pbf')"],
+  ['ST_Drivers', 'ST_Drivers() — readable geodata formats'],
+  // construct
+  ['ST_GeomFromText', "ST_GeomFromText('WKT')"],
+  ['ST_GeomFromWKB', 'ST_GeomFromWKB(wkb)'],
+  ['ST_GeomFromHEXWKB', 'ST_GeomFromHEXWKB(hex)'],
+  ['ST_GeomFromGeoJSON', "ST_GeomFromGeoJSON('json')"],
+  ['ST_Point', 'ST_Point(x, y)'],
+  ['ST_MakeEnvelope', 'ST_MakeEnvelope(xmin, ymin, xmax, ymax)'],
+  // serialize
+  ['ST_AsText', 'ST_AsText(geom)'],
+  ['ST_AsWKB', 'ST_AsWKB(geom)'],
+  ['ST_AsHEXWKB', 'ST_AsHEXWKB(geom)'],
+  ['ST_AsGeoJSON', 'ST_AsGeoJSON(geom)'],
+  // accessors
+  ['ST_GeometryType', 'ST_GeometryType(geom)'],
+  ['ST_X', 'ST_X(point)'],
+  ['ST_Y', 'ST_Y(point)'],
+  ['ST_XMin', 'ST_XMin(geom)'],
+  ['ST_YMin', 'ST_YMin(geom)'],
+  ['ST_XMax', 'ST_XMax(geom)'],
+  ['ST_YMax', 'ST_YMax(geom)'],
+  ['ST_NPoints', 'ST_NPoints(geom)'],
+  ['ST_NumGeometries', 'ST_NumGeometries(collection)'],
+  ['ST_StartPoint', 'ST_StartPoint(line)'],
+  ['ST_EndPoint', 'ST_EndPoint(line)'],
+  // measure
+  ['ST_Area', 'ST_Area(geom)'],
+  ['ST_Area_Spheroid', 'ST_Area_Spheroid(geom) — m² on the ellipsoid'],
+  ['ST_Length', 'ST_Length(geom)'],
+  ['ST_Length_Spheroid', 'ST_Length_Spheroid(geom) — m on the ellipsoid'],
+  ['ST_Perimeter', 'ST_Perimeter(geom)'],
+  ['ST_Distance', 'ST_Distance(a, b)'],
+  ['ST_Distance_Sphere', 'ST_Distance_Sphere(a, b) — haversine m'],
+  ['ST_Distance_Spheroid', 'ST_Distance_Spheroid(a, b) — m on the ellipsoid'],
+  ['ST_DWithin', 'ST_DWithin(a, b, distance)'],
+  // relate
+  ['ST_Intersects', 'ST_Intersects(a, b)'],
+  ['ST_Contains', 'ST_Contains(a, b)'],
+  ['ST_Within', 'ST_Within(a, b)'],
+  ['ST_Covers', 'ST_Covers(a, b)'],
+  ['ST_CoveredBy', 'ST_CoveredBy(a, b)'],
+  ['ST_Crosses', 'ST_Crosses(a, b)'],
+  ['ST_Touches', 'ST_Touches(a, b)'],
+  ['ST_Overlaps', 'ST_Overlaps(a, b)'],
+  ['ST_Equals', 'ST_Equals(a, b)'],
+  ['ST_Disjoint', 'ST_Disjoint(a, b)'],
+  // process
+  ['ST_Buffer', 'ST_Buffer(geom, radius)'],
+  ['ST_Centroid', 'ST_Centroid(geom)'],
+  ['ST_PointOnSurface', 'ST_PointOnSurface(geom)'],
+  ['ST_Envelope', 'ST_Envelope(geom)'],
+  ['ST_ConvexHull', 'ST_ConvexHull(geom)'],
+  ['ST_Intersection', 'ST_Intersection(a, b)'],
+  ['ST_Union', 'ST_Union(a, b)'],
+  ['ST_Union_Agg', 'ST_Union_Agg(geom) — aggregate'],
+  ['ST_Difference', 'ST_Difference(a, b)'],
+  ['ST_Simplify', 'ST_Simplify(geom, tolerance)'],
+  ['ST_SimplifyPreserveTopology', 'ST_SimplifyPreserveTopology(geom, tolerance)'],
+  ['ST_IsValid', 'ST_IsValid(geom)'],
+  ['ST_MakeValid', 'ST_MakeValid(geom)'],
+  ['ST_Collect', 'ST_Collect(list_of_geoms)'],
+  ['ST_Dump', 'ST_Dump(geom) — explode into parts'],
+  // reproject — CRS names, not PostGIS's bare srid
+  ['ST_Transform', "ST_Transform(geom, 'EPSG:3035', 'EPSG:4326')"],
+  ['ST_FlipCoordinates', 'ST_FlipCoordinates(geom) — lat/lon swap'],
+];
+
+/**
  * T-SQL (SQL Server) — the vocabulary that simply does not exist on the other
  * engines: TOP instead of LIMIT, the OUTPUT clause, CROSS/OUTER APPLY, MERGE,
  * TRY/CATCH blocks, and the identity/temp-table idioms.
@@ -572,9 +657,14 @@ export function applyKeywordCase(items: KeywordItem[], upper: boolean): KeywordI
  * know it yet: it comes from an async probe. Defaulting the other way would
  * offer MariaDB-only syntax on MySQL for the first render, which is the more
  * expensive mistake of the two.
+ *
+ * `opts.duckdbSpatial` adds the DuckDB spatial extension's ST_* set. It is
+ * gated because the extension is loaded on demand per session — completing
+ * ST_* before `LOAD spatial` is offering a catalog error.
  */
 export function keywordCatalog(
   engine: Engine | string, flavor: 'mysql' | 'mariadb' | 'percona' = 'mysql',
+  opts: { duckdbSpatial?: boolean } = {},
 ): KeywordItem[] {
   const maria = engine === 'mysql' && flavor === 'mariadb';
   const kws = [...CORE_KEYWORDS,
@@ -588,8 +678,9 @@ export function keywordCatalog(
     ...(engine === 'mysql'
       ? [...MYSQL_FUNCTIONS, ...(maria ? MARIADB_FUNCTIONS : [])]
       : engine === 'postgres' ? PG_FUNCTIONS
-      : engine === 'duckdb' ? DUCKDB_FUNCTIONS
-      : engine === 'sqlserver' ? TSQL_FUNCTIONS : [])];
+      : engine === 'duckdb'
+        ? [...DUCKDB_FUNCTIONS, ...(opts.duckdbSpatial ? DUCKDB_SPATIAL_FUNCTIONS : [])]
+        : engine === 'sqlserver' ? TSQL_FUNCTIONS : [])];
   const items: KeywordItem[] = kws.map(k => ({ label: k, type: 'keyword' as const }));
   for (const [name, sig] of fns) {
     items.push({ label: name, detail: sig, snippet: fnSnippet(name), type: 'function' });

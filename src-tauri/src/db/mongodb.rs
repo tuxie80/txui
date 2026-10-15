@@ -1,4 +1,4 @@
-//! MongoDB driver (plan-dba-focus.md WS4) — **read-only by design**.
+//! MongoDB driver (DBA-first push, workstream 4) — **read-only by design**.
 //!
 //! Scope of the v1 engine: connect, the database/collection tree, the find
 //! editor (`mongo_find`), the data browser over collections, a processlist
@@ -304,7 +304,7 @@ pub async fn list_columns(
     }
     Ok(keys.into_iter().map(|(name, type_name)| SchemaNode::Column {
         primary_key: name == "_id",
-        name, type_name, nullable: true,
+        name, type_name, nullable: true, spatial: None,
     }).collect())
 }
 
@@ -417,6 +417,7 @@ pub async fn find(
     Ok(QueryResult {
         columns, rows, rows_affected: None, execution_ms, fetch_ms, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -585,6 +586,7 @@ pub async fn aggregate(
     Ok(QueryResult {
         columns, rows, rows_affected: None, execution_ms, fetch_ms, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -633,6 +635,7 @@ pub async fn coll_stats(client: &mongodb::Client, db: &str, coll: &str) -> Resul
         ],
         rows, rows_affected: None, execution_ms: ms, fetch_ms: 0, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -673,6 +676,7 @@ pub async fn current_ops(client: &mongodb::Client) -> Result<QueryResult> {
         columns, rows, rows_affected: None,
         execution_ms: ms, fetch_ms: 0, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 
@@ -734,6 +738,7 @@ pub async fn server_info(client: &mongodb::Client, kind: &str) -> Result<QueryRe
         ],
         rows, rows_affected: None, execution_ms: 0, fetch_ms: 0, warnings: vec![],
         truncated: false,
+        geo_bbox: None,
     })
 }
 

@@ -33,6 +33,8 @@ import type { TableColumn, SortClause, RowChange } from '../types/browser';
 import { useGridSettings, gridRowHeight } from '../store/gridSettings';
 import { measureText } from '../utils/measure';
 import { toTsv, cellText } from '../utils/exporters';
+import { geometryBadge, geometryBadgeLabel } from '../utils/geometryBadge';
+import type { GeometryBadgeInfo } from '../utils/geometryBadge';
 import { copyToClipboard } from '../utils/exportersIo';
 import { getPref, PREFS } from '../store/preferences';
 import { readFontScale } from '../utils/fontScale';
@@ -126,6 +128,8 @@ interface RowProps {
   rowCls: string;               // extra row class from Props.rowClass, '' for none
   /** Formatted-cell cache shared by every row of this grid — see FastGrid body. */
   textCache: WeakMap<unknown[], (string | undefined)[]>;
+  /** Geometry-badge cache, same keying and lifetime as textCache. */
+  geoCache: WeakMap<unknown[], (GeometryBadgeInfo | null | undefined)[]>;
 }
 
 function cellsEqual(a: RowProps, b: RowProps): boolean {
@@ -139,6 +143,7 @@ function cellsEqual(a: RowProps, b: RowProps): boolean {
     && a.zebra === b.zebra
     && a.rowCls === b.rowCls
     && a.textCache === b.textCache
+    && a.geoCache === b.geoCache
     && selEq(a.sel, b.sel)
     && a.active === b.active
     && pendingEq(a.pendingCols, b.pendingCols);
@@ -159,6 +164,8 @@ const GridRow = memo(function GridRow(p: RowProps) {
   const cells = [];
   let texts = p.textCache.get(p.row);
   if (!texts) { texts = new Array(p.row.length); p.textCache.set(p.row, texts); }
+  let geos = p.geoCache.get(p.row);
+  if (!geos) { geos = new Array(p.row.length); p.geoCache.set(p.row, geos); }
   for (let c = p.colStart; c < p.colEnd; c++) {
     const v = p.row[c];
     const isNull = v === null || v === undefined;
@@ -166,6 +173,15 @@ const GridRow = memo(function GridRow(p: RowProps) {
     const isActive = p.active === c;
     const isPending = p.pendingCols !== null && p.pendingCols.includes(c);
     const fk = p.fkCols[c];
+    // Geometry announces itself once per cell value, then the badge answer is
+    // cached per row array — the sniff itself is a regex plus a 9-byte header
+    // read (utils/geometryBadge), never a full vertex walk.
+    let geo: GeometryBadgeInfo | null = null;
+    if (!isNull) {
+      const cached = geos[c];
+      if (cached !== undefined) geo = cached;
+      else { geo = geometryBadge(v); geos[c] = geo; }
+    }
     const cls = [
       'fg-cell',
       isNull ? 'fg-null' : '',
@@ -183,7 +199,16 @@ const GridRow = memo(function GridRow(p: RowProps) {
         data-r={p.rowIdx}
         data-c={c}
       >
-        {isNull ? 'NULL' : (texts[c] ??= cellText(v))}
+        {isNull ? 'NULL' : geo
+          ? (
+            <span
+              className="fg-geo"
+              title={`${geo.type}${geo.srid !== null ? ` · SRID ${geo.srid}` : ''} — double-click to inspect the full value`}
+            >
+              {geometryBadgeLabel(geo)}
+            </span>
+          )
+          : (texts[c] ??= cellText(v))}
       </div>
     );
   }
@@ -317,6 +342,9 @@ export function FastGrid({
   // refetch), so a WeakMap needs no eviction — entries die with the data.
   // Lazy per cell: only columns that are actually rendered get formatted.
   const [textCache] = useState(() => new WeakMap<unknown[], (string | undefined)[]>());
+  // Same WeakMap-by-row-array trick for the geometry badge: a cell's hex is
+  // sniffed at most once per result, however often the row remounts.
+  const [geoCache] = useState(() => new WeakMap<unknown[], (GeometryBadgeInfo | null | undefined)[]>());
   const measured = useMemo(() => {
     const r0 = rowsRef.current;
     const sample = Math.min(r0.length, SAMPLE_ROWS);
@@ -325,7 +353,11 @@ export function FastGrid({
       for (let r = 0; r < sample; r++) {
         const v = r0[r][ci];
         if (v === null || v === undefined) continue;
-        const t = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        // A geometry cell is drawn as its badge (`⬡ Polygon · 4326`), not the
+        // hex — measure what is shown, or every spatial column eats 480px.
+        const geo = geometryBadge(v);
+        const t = geo ? geometryBadgeLabel(geo)
+          : typeof v === 'object' ? JSON.stringify(v) : String(v);
         const tw = measureText(t.length > 80 ? t.slice(0, 80) : t, font);
         if (tw > w) w = tw;
       }
@@ -844,6 +876,7 @@ export function FastGrid({
         pendingCols={pendingByRow?.get(r) ?? null}
         rowCls={rowClass?.(r) ?? ''}
         textCache={textCache}
+        geoCache={geoCache}
       />
     );
   }

@@ -1429,6 +1429,7 @@ mod tests {
             fetch_ms: 0,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         }
     }
 
@@ -1492,6 +1493,7 @@ mod tests {
             fetch_ms: 0,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         };
         let (columns, rows) = pack_rows_strings(&r);
         assert_eq!(columns, vec!["Id", "User", "Info"]);

@@ -14,7 +14,7 @@ pub mod secretstore;
 pub mod tuner;
 mod commands;
 
-use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -794,6 +794,7 @@ pub fn run() {
             redis_server_info,
             redis_key_audit,
             redis_sentinel_overview,
+            redis_geo_points,
             // mongo browser (find editor, pipeline runner, stats)
             mongo_find,
             mongo_explain,
@@ -894,6 +895,8 @@ pub fn run() {
             tuner_analyze,
             sqlite_attach,
             sqlite_detach,
+            duckdb_enable_spatial,
+            duckdb_export_geoparquet,
             ssh_agent_status,
             // self-update (check / download+install; relaunch is the process
             // plugin's own command)

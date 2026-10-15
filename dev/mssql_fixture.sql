@@ -85,7 +85,7 @@ CREATE TABLE sales.audit_raw (
 GO
 
 -- ── The type matrix ──────────────────────────────────────────────────
--- One row per decoding decision in plan-sqlserver.md §1.1. Every column here
+-- One row per decoding decision from the SQL Server rollout notes. Every column here
 -- is a case the row decoder has to get right, and several have no MySQL or
 -- PostgreSQL analogue at all.
 CREATE TABLE dbo.type_matrix (

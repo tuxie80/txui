@@ -35,6 +35,13 @@ interface Props {
   result: QueryResult;
   /** Dialect for the INSERT export — the active connection's engine. */
   engine?: string;
+  /**
+   * The session + the statement that produced `result` — the server-side
+   * GeoParquet export (CopyExportMenu) re-runs it as COPY (<sql>) TO ….
+   * Absent on surfaces without an originating statement; the entry stays away.
+   */
+  sessionId?: string;
+  sourceSql?: string;
 }
 
 interface Aggregates { count: number; sum: number | null; avg: number | null; min: number | null; max: number | null }
@@ -71,7 +78,7 @@ function fmtNum(n: number): string {
   return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-export function ResultGrid({ result, engine, apiOutRef }: Props) {
+export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql }: Props) {
   const [sort, setSort] = useState<SortClause[]>([]);
   const [filters, setFilters] = useState<ColumnFilter[]>([]);
   const [filterPop, setFilterPop] = useState<{ column: string; anchor: { x: number; y: number } } | null>(null);
@@ -197,7 +204,9 @@ export function ResultGrid({ result, engine, apiOutRef }: Props) {
             ✕ {filters.length} filter{filters.length > 1 ? 's' : ''}
           </button>
         )}
-        <CopyExportMenu getData={getData} engine={engine} hasSelection={hasSel} onNote={note} />
+        <CopyExportMenu getData={getData} engine={engine} hasSelection={hasSel} onNote={note}
+          sessionId={sessionId} sourceSql={sourceSql}
+          columnTypes={result.columns.map(c => c.type_name)} />
         <GridSettingsPopover />
         {flash && <span className="result-flash">{flash}</span>}
         <button className={`toolbar-btn ${showRecord ? 'active' : ''}`}
@@ -270,6 +279,7 @@ export function ResultGrid({ result, engine, apiOutRef }: Props) {
         <CellViewer
           column={viewer.column}
           value={viewer.value}
+          engine={engine}
           onClose={() => setViewer(null)}
         />
       )}

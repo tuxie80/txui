@@ -21,6 +21,10 @@ import { buildRedisKeyTree, autoExpandedPrefixes, type RedisKeyNode } from '../u
 import {
   auditRedisKeys, summarizeFindings, type AuditFinding, type RedisKeyAuditRow,
 } from '../utils/redisAudit';
+import {
+  GEO_DERIVATION_NOTE, geoExtent, geoSummary, graticuleLines, projectPoints,
+  type RedisGeoResult,
+} from '../utils/redisGeo';
 import { PanelIcon } from './panelIcons';
 import { ProcessListPanel } from './ProcessListPanel';
 import { ServerInfoPanel } from './ServerInfoPanel';
@@ -277,6 +281,8 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
         {!value && <div className="rb-loading">Loading…</div>}
         {value && <ValueViewer
           value={value}
+          sessionId={sessionId}
+          keyName={keyInfo.key}
           strEdit={strEdit}
           onStrEdit={setStrEdit}
           onSaveString={handleSaveString}
@@ -287,8 +293,10 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
   );
 }
 
-function ValueViewer({ value, strEdit, onStrEdit, onSaveString, saving }: {
+function ValueViewer({ value, sessionId, keyName, strEdit, onStrEdit, onSaveString, saving }: {
   value: RedisValue;
+  sessionId: string;
+  keyName: string;
   strEdit: string | null;
   onStrEdit: (v: string) => void;
   onSaveString: () => void;
@@ -347,17 +355,7 @@ function ValueViewer({ value, strEdit, onStrEdit, onSaveString, saving }: {
   );
 
   if (value.type === 'zset')   return (
-    <table className="rb-table">
-      <thead><tr><th>Score</th><th>Member</th></tr></thead>
-      <tbody>
-        {value.entries.map((e, i) => (
-          <tr key={i}>
-            <td className="rb-score">{e.score}</td>
-            <td>{e.member}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <ZsetValue entries={value.entries} sessionId={sessionId} keyName={keyName} />
   );
 
   if (value.type === 'stream') {
@@ -378,6 +376,150 @@ function ValueViewer({ value, strEdit, onStrEdit, onSaveString, saving }: {
   }
 
   return null;
+}
+
+// ── Zset viewer + "view as geo" ───────────────────────────────────────────────
+
+/**
+ * The zset table plus the opt-in geo view. Detection is deliberately NOT
+ * automatic: any zset's scores decode as geohash52, so a leaderboard would
+ * light up too — the user asks ("⬡ View as geo"), GEOPOS answers, and the
+ * summary line reports exactly what came back (located / no coordinates /
+ * capped).
+ */
+function ZsetValue({ entries, sessionId, keyName }: {
+  entries: ZsetEntry[]; sessionId: string; keyName: string;
+}) {
+  const [geo, setGeo]         = useState<RedisGeoResult | null>(null);
+  const [geoOpen, setGeoOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [geoErr, setGeoErr]   = useState<string | null>(null);
+
+  async function viewAsGeo() {
+    if (geoOpen) { setGeoOpen(false); return; }
+    if (geo) { setGeoOpen(true); return; }   // re-open the already-resolved view
+    setLoading(true); setGeoErr(null);
+    try {
+      const r = await invoke<RedisGeoResult>('redis_geo_points', { sessionId, key: keyName, limit: null });
+      setGeo(r);
+      setGeoOpen(true);
+    } catch (e) { setGeoErr(errorDisplay(e)); }
+    finally { setLoading(false); }
+  }
+
+  return (
+    <div>
+      <table className="rb-table">
+        <thead><tr><th>Score</th><th>Member</th></tr></thead>
+        <tbody>
+          {entries.map((e, i) => (
+            <tr key={i}>
+              <td className="rb-score">{e.score}</td>
+              <td>{e.member}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="rb-geo-toolbar">
+        <button
+          className="rb-small-btn"
+          onClick={viewAsGeo}
+          disabled={loading}
+          title="Resolve members to coordinates with GEOPOS and draw them (read-only)"
+        >
+          {loading ? 'Resolving…' : geoOpen ? '⬡ Hide geo view' : '⬡ View as geo'}
+        </button>
+        {geoErr && <span className="rb-err">{geoErr}</span>}
+      </div>
+      {geoOpen && geo && <GeoPointsView result={geo} />}
+    </div>
+  );
+}
+
+const GEO_CV_W = 620;
+const GEO_CV_H = 260;
+const GEO_CV_PAD = 24;
+
+function GeoPointsView({ result }: { result: RedisGeoResult }) {
+  const ext = geoExtent(result.points);
+  return (
+    <div className="rb-geo-panel">
+      <div className="rb-geo-summary">{geoSummary(result)}</div>
+      <div className="rb-geo-note">{GEO_DERIVATION_NOTE}</div>
+      {result.points.length > 0 && ext && (
+        <>
+          <GeoCanvas points={result.points} />
+          <div className="rb-geo-extent">
+            lon {ext.minLon.toFixed(5)} … {ext.maxLon.toFixed(5)} ·
+            lat {ext.minLat.toFixed(5)} … {ext.maxLat.toFixed(5)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Lat/lon scatter with a graticule — self-contained; the app map stays out of it. */
+function GeoCanvas({ points }: { points: RedisGeoResult['points'] }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv) return;
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = GEO_CV_W * dpr;
+    cv.height = GEO_CV_H * dpr;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, GEO_CV_W, GEO_CV_H);
+
+    const css = getComputedStyle(cv);
+    const grid = css.getPropertyValue('--text2').trim() || '#888';
+    const dot  = css.getPropertyValue('--accent').trim() || '#3b82f6';
+
+    const ext = geoExtent(points);
+    if (!ext) return;
+    const projected = projectPoints(points, GEO_CV_W, GEO_CV_H, GEO_CV_PAD);
+
+    // Graticule: nice-degree lines through the data extent.
+    ctx.strokeStyle = grid;
+    ctx.globalAlpha = 0.25;
+    ctx.lineWidth = 1;
+    const lonLines = graticuleLines(ext.minLon, ext.maxLon);
+    const latLines = graticuleLines(ext.minLat, ext.maxLat);
+    for (const lon of lonLines) {
+      const [a, b] = projectPoints(
+        [{ member: '', lon, lat: ext.minLat }, { member: '', lon, lat: ext.maxLat }],
+        GEO_CV_W, GEO_CV_H, GEO_CV_PAD);
+      if (ext.minLat === ext.maxLat) { a.y = GEO_CV_PAD; b.y = GEO_CV_H - GEO_CV_PAD; }
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    for (const lat of latLines) {
+      const [a, b] = projectPoints(
+        [{ member: '', lon: ext.minLon, lat }, { member: '', lon: ext.maxLon, lat }],
+        GEO_CV_W, GEO_CV_H, GEO_CV_PAD);
+      if (ext.minLon === ext.maxLon) { a.x = GEO_CV_PAD; b.x = GEO_CV_W - GEO_CV_PAD; }
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = dot;
+    for (const p of projected) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }, [points]);
+
+  return (
+    <canvas
+      ref={ref}
+      className="rb-geo-canvas"
+      style={{ width: '100%', height: GEO_CV_H }}
+      title={`${points.length.toLocaleString()} points (equirectangular)`}
+    />
+  );
 }
 
 // ── INFO Tab ──────────────────────────────────────────────────────────────────

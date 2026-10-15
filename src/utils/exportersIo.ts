@@ -108,3 +108,37 @@ export async function exportParquet(
   await invoke<number>('write_parquet_file', { path, columns, rows });
   return path;
 }
+
+
+/** What the backend reports after a server-side GeoParquet export. */
+export interface GeoParquetExportOutcome {
+  path: string;
+  rowsWritten: number;
+  bytes: number;
+}
+
+/**
+ * GeoParquet via the engine, not the grid: `duckdb_export_geoparquet`
+ * re-runs the result's source statement as `COPY (<sql>) TO '…' (FORMAT
+ * PARQUET)` on the session's own DuckDB connection, so GEOMETRY columns keep
+ * their type and the spatial extension writes the GeoParquet 1.1 `geo`
+ * footer — where `exportParquet` above would persist the hex-text cells the
+ * grid received. Re-running also exports the FULL result, not the row-capped
+ * preview the grid holds. Availability is the caller's job — the predicate is
+ * utils/duckdbGeoExport.geoParquetVerdict, and the backend re-checks it
+ * (write rejection, one statement, spatial probed from the engine catalog).
+ *
+ * Returns the outcome, or null if the save dialog was cancelled.
+ */
+export async function exportGeoParquetServer(
+  sessionId: string,
+  sql: string,
+  baseName = 'result',
+): Promise<GeoParquetExportOutcome | null> {
+  const path = await save({
+    defaultPath: `${baseName}.parquet`,
+    filters: [{ name: 'GeoParquet', extensions: ['parquet'] }],
+  });
+  if (!path) return null;
+  return invoke<GeoParquetExportOutcome>('duckdb_export_geoparquet', { sessionId, sql, outPath: path });
+}

@@ -234,7 +234,15 @@ pub async fn browse_table(
                                      params.limit, params.offset, true, &Default::default());
                 executed = inline_params(&q.sql, &q.values, LitStyle::Standard);
                 crate::db::duckdb::execute_params(&d.duck, &q.sql, &q.values)
-                    .await.map_err(Into::into)
+                    .await
+                    .map(|mut r| {
+                        // Rows come from the DuckDB view, which knows nothing
+                        // of the GeoParquet footers — attach the map's viewport
+                        // hint here as the union of the member bboxes.
+                        r.geo_bbox = crate::db::parquet::dataset_geo_bbox(d);
+                        r
+                    })
+                    .map_err(Into::into)
             }
             crate::db::parquet::ParquetSource::Single(_) => {
                 executed = if params.filters.is_empty() && params.sort.is_empty() {
@@ -481,6 +489,7 @@ macro_rules! browse_runner {
             #[allow(clippy::redundant_closure_call)]
             let data: Vec<crate::db::types::Row> = ($decode)(&columns, &rows);
             Ok(QueryResult { columns, rows: data, rows_affected: None, truncated: false,
+                             geo_bbox: None,
                              execution_ms, fetch_ms, warnings: vec![] })
         }
     };

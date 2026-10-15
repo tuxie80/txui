@@ -7,9 +7,14 @@
 import { errorDisplay } from '../utils/appError';
 import { useEffect, useRef, useState } from 'react';
 import { serialize, FORMAT_LABELS } from '../utils/exporters';
-import { exportAs, copyToClipboard, copyForExcel, exportXlsx, exportParquet } from '../utils/exportersIo';
+import { exportAs, copyToClipboard, copyForExcel, exportXlsx, exportParquet, exportGeoParquetServer } from '../utils/exportersIo';
 import type { ExportFormat } from '../utils/exporters';
 import { basename } from '../utils/platform';
+import { geoParquetVerdict } from '../utils/duckdbGeoExport';
+import { useDuckdbSpatial } from '../store/duckdbSpatial';
+import { addLog } from '../store/logStore';
+import { redactSecrets } from '../utils/redactSecrets';
+import { fmtBytes } from '../utils/syncLog';
 import { GSheetsModal } from './GSheetsModal';
 
 const FORMATS: ExportFormat[] = [
@@ -25,12 +30,24 @@ interface Props {
   engine?: string;
   hasSelection?: boolean;
   onNote?: (msg: string) => void;
+  /**
+   * Server-side GeoParquet export (DuckDB + spatial only) needs three things
+   * a bare grid does not have: the session, the statement that produced this
+   * result (it is RE-RUN as `COPY (<sql>) TO …` — so the export is the full
+   * result, not the row-capped preview), and the result's column type names
+   * (to know a GEOMETRY column is present). Absent → the entry stays away.
+   */
+  sessionId?: string;
+  sourceSql?: string;
+  columnTypes?: string[];
 }
 
-export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql', hasSelection, onNote }: Props) {
+export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql', hasSelection, onNote,
+  sessionId, sourceSql, columnTypes }: Props) {
   const [open, setOpen] = useState<'copy' | 'export' | null>(null);
   const [gsheetsOpen, setGsheetsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const duckdbSpatial = useDuckdbSpatial(sessionId ?? '');
 
   /**
    * File → Export Results… opens this dropdown rather than exporting.
@@ -82,6 +99,47 @@ export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql'
       if (path) onNote?.(`Saved ${basename(path)}`);
     } catch (e) {
       onNote?.(`Export failed: ${errorDisplay(e)}`);
+    }
+  }
+
+  /**
+   * The one predicate both the rendering and the handler use — the house rule
+   * (greyed + explained, handler guarded by the same check, never `disabled`).
+   */
+  const geoVerdict = geoParquetVerdict({
+    engine, sourceSql, columnTypes: columnTypes ?? [], spatial: duckdbSpatial,
+  });
+
+  /**
+   * GeoParquet via the engine: the source statement is re-run server-side as
+   * COPY (<sql>) TO …, so GEOMETRY columns keep their type and the file gets
+   * the GeoParquet 1.1 `geo` footer — the client-side Parquet export above
+   * can only persist the hex-text cells the grid received.
+   */
+  async function handleGeoParquet() {
+    if (!geoVerdict.ok) { onNote?.(geoVerdict.tip); return; }
+    if (!sessionId || !sourceSql) return; // the verdict's ok implies both
+    setOpen(null);
+    // Redacted copy for LOG output only — the executed SQL is the original.
+    const oneLine = redactSecrets(sourceSql).replace(/\s+/g, ' ').trim();
+    const t0 = performance.now();
+    try {
+      const r = await exportGeoParquetServer(sessionId, sourceSql, tableName);
+      if (!r) return; // save dialog cancelled — nothing happened, nothing to say
+      addLog(sessionId, {
+        level: 'info', action: 'EXPORT', detail: oneLine,
+        line: `> COPY (${oneLine}) TO '${r.path}' (FORMAT PARQUET) — GeoParquet export`,
+      });
+      addLog(sessionId, {
+        level: 'ok', action: 'EXPORT', detail: r.path, rows: r.rowsWritten,
+        ms: Math.round(performance.now() - t0),
+        line: `${r.rowsWritten} row${r.rowsWritten === 1 ? '' : 's'} written to ${basename(r.path)} (${fmtBytes(r.bytes)}, GeoParquet)`,
+      });
+      onNote?.(`Wrote ${basename(r.path)} — ${r.rowsWritten} row${r.rowsWritten === 1 ? '' : 's'}, ${fmtBytes(r.bytes)}`);
+    } catch (e) {
+      const msg = errorDisplay(e);
+      addLog(sessionId, { level: 'err', action: 'EXPORT', detail: msg, line: `! GeoParquet export failed: ${msg}` });
+      onNote?.(`Export failed: ${msg}`);
     }
   }
 
@@ -139,6 +197,22 @@ export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql'
                 if (path) onNote?.(`Wrote ${basename(path)} — ${rows.length} row${rows.length === 1 ? '' : 's'}`);
               } catch (e) { onNote?.(`Export failed: ${errorDisplay(e)}`); }
             }}>Parquet (.parquet)</button>
+          )}
+          {/* GeoParquet needs the engine, not the grid rows — DuckDB sessions
+              only, and blocked states are shown greyed with the reason on
+              hover (never hidden, never `disabled`). */}
+          {open === 'export' && engine === 'duckdb' && sessionId && (
+            geoVerdict.ok ? (
+              <button
+                className="cem-item"
+                title="Re-runs this result's query server-side as COPY (<sql>) TO … (FORMAT PARQUET) — the file keeps the GEOMETRY type and the GeoParquet 1.1 footer, and holds the full result, not the row-capped preview"
+                onClick={handleGeoParquet}
+              >GeoParquet (server-side)…</button>
+            ) : (
+              <span className="unavail" style={{ display: 'contents' }} data-tip={geoVerdict.tip}>
+                <button className="cem-item" tabIndex={-1} onClick={handleGeoParquet}>GeoParquet (server-side)…</button>
+              </span>
+            )
           )}
           {open === 'export' && (
             <button className="cem-item" onClick={() => {

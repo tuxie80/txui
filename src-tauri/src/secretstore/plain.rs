@@ -14,7 +14,8 @@
 //! backup, does not show passwords in the clear. It is **not** real protection:
 //! anyone with this code running on this machine can derive the same key. The
 //! vault (Argon2id + a password you know) remains the real-security option; this
-//! is the honest "common" default the user asked for. See `plan-vault-optional.md`.
+//! is the honest "common" default the user asked for (the vault-optional design
+//! notes live in the maintainer's local docs).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

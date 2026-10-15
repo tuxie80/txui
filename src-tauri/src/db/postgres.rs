@@ -4,7 +4,8 @@ use sqlx::{PgPool, Row as SqlxRow, Column, TypeInfo};
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use std::time::Instant;
 
-use super::types::{ColumnInfo, ConnectionConfig, LiveSession, PingResult, QueryResult, Row, SchemaNode, SslMode};
+use super::types::{ColumnInfo, ConnectionConfig, LiveSession, PingResult, QueryResult, Row, SchemaNode, SpatialColumn, SslMode};
+use std::collections::HashMap;
 
 fn build_options(
     config:   &ConnectionConfig,
@@ -236,6 +237,7 @@ where
             fetch_ms: 0,
             warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         });
     }
 
@@ -247,6 +249,7 @@ where
         fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
         warnings: vec![],
         truncated,
+        geo_bbox: None,
     })
 }
 
@@ -333,6 +336,9 @@ fn json_from_pg_row(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> s
                .unwrap_or_else(|_| fallback()),
         "JSON" | "JSONB" =>
             row.try_get::<serde_json::Value, _>(i).unwrap_or_else(|_| fallback()),
+        _ if type_name.eq_ignore_ascii_case("geometry")
+            || type_name.eq_ignore_ascii_case("geography") =>
+            pg_geometry_hex(row, i).unwrap_or_else(fallback),
         // Default: TEXT-compatible decode, then the raw wire text — the
         // simple-query protocol carries the literal server rendering, so
         // arrays, enums, intervals, inet, ranges and extension types display
@@ -340,6 +346,33 @@ fn json_from_pg_row(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> s
         _ =>
             row.try_get::<String, _>(i).map(Value::String)
                .unwrap_or_else(|_| fallback()),
+    }
+}
+
+/// PostGIS geometry/geography as the hex EWKB string the editor path shows.
+///
+/// The two protocols carry the same value differently: the simple protocol
+/// (editor, `raw_sql`) delivers the server's hex EWKB *text*, which the
+/// default arm already surfaces through the raw-text fallback; the extended
+/// protocol (data browser, which binds filter values) delivers raw EWKB
+/// *bytes*, which have no typed decode and used to fall to the `<geometry>`
+/// placeholder. Hex-encoding the bytes gives the browser exactly the
+/// editor's rendering — lowercase, like the BYTEA arm — and lets the
+/// client-side WKB parser reach browser results too.
+///
+/// The type-name check is case-insensitive because PostGIS type names come
+/// from pg_type lowercased ("geometry"), unlike sqlx's builtin table.
+fn pg_geometry_hex(row: &sqlx::postgres::PgRow, i: usize) -> Option<serde_json::Value> {
+    use sqlx::ValueRef;
+    let raw = row.try_get_raw(i).ok()?;
+    if raw.is_null() {
+        return Some(serde_json::Value::Null);
+    }
+    match raw.format() {
+        sqlx::postgres::PgValueFormat::Binary =>
+            raw.as_bytes().ok().map(|b| serde_json::Value::String(hex::encode(b))),
+        sqlx::postgres::PgValueFormat::Text =>
+            raw.as_str().ok().map(|s| serde_json::Value::String(s.to_string())),
     }
 }
 
@@ -727,9 +760,44 @@ pub async fn list_columns(pool: &PgPool, schema: &str, table: &str) -> Result<Ve
     .bind(table)
     .fetch_all(pool).await.unwrap_or_default();
 
+    let spatial = spatial_columns(pool, schema, table).await;
+
+    // GiST/SP-GiST coverage per column — only probed when the table actually
+    // has spatial columns, so a non-spatial table pays nothing. The spatial
+    // operators (&&, ST_Intersects, ST_DWithin, …) only use these access
+    // methods, so a geometry column without one turns every spatial predicate
+    // into a sequential scan. indkey sliced to indnkeyatts keeps INCLUDE-d
+    // columns from counting as indexed.
+    let gist_cols: Vec<String> = if spatial.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar(
+            "SELECT DISTINCT a.attname \
+             FROM pg_catalog.pg_index ix \
+             JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid \
+             JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_catalog.pg_am am ON am.oid = i.relam \
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid \
+               AND a.attnum = ANY (ix.indkey[0 : ix.indnkeyatts - 1]) \
+             WHERE n.nspname = $1 AND t.relname = $2 \
+               AND am.amname IN ('gist', 'spgist')"
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool).await.unwrap_or_default()
+    };
+
     let mut nodes: Vec<SchemaNode> = cols.into_iter().map(|(name, type_name, nullable)| {
         let pk = pk_cols.contains(&name);
-        SchemaNode::Column { name, type_name, nullable, primary_key: pk }
+        let spatial = spatial.get(&name).map(|s| SpatialColumn {
+            family: s.family.to_string(),
+            geom_type: s.geom_type.clone(),
+            srid: s.srid,
+            dims: s.dims,
+            has_spatial_index: gist_cols.contains(&name),
+        });
+        SchemaNode::Column { name, type_name, nullable, primary_key: pk, spatial }
     }).collect();
 
     // ── Indexes ─────────────────────────────────────────────────────────
@@ -780,6 +848,58 @@ pub async fn list_columns(pool: &PgPool, schema: &str, table: &str) -> Result<Ve
     // else is version-gated here.
     let _ = ver;
     Ok(nodes)
+}
+
+/// One PostGIS catalog row for a column of the relation being listed.
+struct SpatialRow {
+    family:    &'static str,
+    geom_type: String,
+    srid:      i32,
+    dims:      i32,
+}
+
+/// PostGIS catalog read for one relation: column name → declared spatial
+/// metadata. Empty when PostGIS is not installed (or unreadable) — absence of
+/// badges, never an error.
+///
+/// `geometry_columns` / `geography_columns` are VIEWS the PostGIS extension
+/// creates in whatever schema it was installed into — usually `public`, but
+/// not necessarily, and the session's search_path cannot be trusted to reach
+/// it, so the extension schema is resolved from pg_extension and the views are
+/// addressed schema-qualified. The two probes are independent: an install
+/// without `geography_columns` (PostGIS < 1.5, long out of support but cheap
+/// to tolerate) must not cost the geometry half. Both views and their
+/// `f_*_column` / `srid` / `coord_dimension` / `type` columns are stable
+/// across every PostGIS 2.x/3.x on any supported PostgreSQL (12–18).
+async fn spatial_columns(pool: &PgPool, schema: &str, table: &str) -> HashMap<String, SpatialRow> {
+    let ext_schema: Option<String> = sqlx::query_scalar(
+        "SELECT n.nspname \
+         FROM pg_catalog.pg_extension e \
+         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+         WHERE e.extname = 'postgis'"
+    )
+    .fetch_optional(pool).await.ok().flatten();
+    let Some(ns) = ext_schema else { return HashMap::new(); };
+
+    let mut out = HashMap::new();
+    for (view, col_field, family) in [
+        ("geometry_columns",  "f_geometry_column",  "geometry"),
+        ("geography_columns", "f_geography_column", "geography"),
+    ] {
+        let sql = format!(
+            "SELECT {col_field}, srid, coord_dimension, type \
+             FROM {}.{view} \
+             WHERE f_table_schema = $1 AND f_table_name = $2",
+            quote_ident(&ns),
+        );
+        let rows: Vec<(String, i32, i32, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(schema).bind(table)
+            .fetch_all(pool).await.unwrap_or_default();
+        for (col, srid, dims, ty) in rows {
+            out.insert(col, SpatialRow { family, geom_type: ty, srid, dims });
+        }
+    }
+    out
 }
 
 /// Quote an identifier for DDL output, matching PostgreSQL's own rules: bare
@@ -1508,6 +1628,98 @@ mod live_tests {
             assert_eq!(cols, vec!["id", "name", "orders", "cents"], "{port}");
         }
     }
+
+    #[tokio::test]
+    #[ignore]
+    async fn pg_live_spatial_columns_are_badged_from_the_postgis_catalog() {
+        // PostGIS awareness in list_columns. The fixture servers may or may not
+        // have the extension, so the test brings its own fixture and is
+        // self-cleaning; on a server WITHOUT PostGIS it asserts the tolerant
+        // path instead — list_columns succeeds and every column is non-spatial.
+        // (Verified first against PostGIS 3.6.4 on PostgreSQL 17, 2026-10-14.)
+        for port in PORTS {
+            let Ok(p) = super::open_pool(&config(port), Some("root".into()), None, 2).await
+            else { println!("  {port}: not running, skipped"); continue };
+
+            let has_postgis: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'postgis')")
+                .fetch_one(&p).await.expect("extension probe");
+
+            if !has_postgis {
+                // No extension → the catalog views do not exist → no badges,
+                // and the listing must still succeed.
+                let nodes = super::list_columns(&p, "txui_demo", "customers").await
+                    .expect("list_columns without PostGIS");
+                assert!(nodes.iter().all(|n| matches!(n, SchemaNode::Column { spatial: None, .. }
+                    | SchemaNode::Index { .. } | SchemaNode::StructColumn { .. })),
+                    "{port}: spatial badge without PostGIS?");
+                println!("  {port}: no PostGIS — tolerant path OK");
+                continue;
+            }
+
+            // Fixture: indexed + unindexed geometry, geography, unconstrained.
+            sqlx::raw_sql(AssertSqlSafe(
+                "DROP SCHEMA IF EXISTS txui_spatial_probe CASCADE; \
+                 CREATE SCHEMA txui_spatial_probe; \
+                 CREATE TABLE txui_spatial_probe.places ( \
+                   id   bigint PRIMARY KEY, \
+                   name text, \
+                   geom geometry(Point, 4326), \
+                   area geometry(Polygon, 3857), \
+                   raw  geometry \
+                 ); \
+                 CREATE INDEX places_geom_gix ON txui_spatial_probe.places USING gist (geom); \
+                 CREATE TABLE txui_spatial_probe.routes ( \
+                   id   int PRIMARY KEY, \
+                   path geography(LineString, 4326) \
+                 ); \
+                 CREATE INDEX routes_path_gix ON txui_spatial_probe.routes USING gist (path)"))
+                .execute(&p).await.expect("spatial fixture");
+
+            let nodes = super::list_columns(&p, "txui_spatial_probe", "places").await
+                .expect("list_columns places");
+            let badge = |col: &str| nodes.iter().find_map(|n| match n {
+                SchemaNode::Column { name, spatial, .. } if name == col => spatial.clone(),
+                _ => None,
+            });
+
+            let geom = badge("geom").unwrap_or_else(|| panic!("{port}: geom not badged"));
+            assert_eq!(geom.family, "geometry");
+            assert_eq!(geom.geom_type.to_uppercase(), "POINT");
+            assert_eq!(geom.srid, 4326, "{port}");
+            assert!(geom.has_spatial_index, "{port}: gist index on geom missed");
+
+            let area = badge("area").expect("area badged");
+            assert_eq!(area.srid, 3857);
+            assert!(!area.has_spatial_index, "{port}: area has no gist index and must say so");
+
+            // Unconstrained column: the catalog's srid 0 must pass through
+            // unchanged (the frontend renders it as "SRID unconstrained").
+            let raw = badge("raw").expect("raw badged");
+            assert_eq!(raw.geom_type.to_uppercase(), "GEOMETRY");
+            assert_eq!(raw.srid, 0, "{port}");
+
+            // Plain columns are never badged.
+            assert!(badge("id").is_none() && badge("name").is_none(), "{port}");
+
+            // Geography parity: geography_columns, not geometry_columns.
+            let routes = super::list_columns(&p, "txui_spatial_probe", "routes").await
+                .expect("list_columns routes");
+            let path = routes.iter().find_map(|n| match n {
+                SchemaNode::Column { name, spatial: Some(s), .. } if name == "path" => Some(s.clone()),
+                _ => None,
+            }).expect("path badged");
+            assert_eq!(path.family, "geography");
+            assert_eq!(path.geom_type.to_uppercase(), "LINESTRING");
+            assert_eq!(path.srid, 4326);
+            assert!(path.has_spatial_index, "{port}: gist index on geography missed");
+
+            sqlx::query("DROP SCHEMA txui_spatial_probe CASCADE")
+                .execute(&p).await.expect("drop spatial fixture");
+            println!("  {port}: geometry + geography badges OK");
+        }
+    }
+
 
     #[tokio::test]
     #[ignore]

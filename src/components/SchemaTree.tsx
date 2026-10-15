@@ -19,7 +19,7 @@ import { extensionCreateSql, extensionDropSql, AVAILABLE_EXTENSIONS_SQL, type Av
 import { createSchemaSql, dropSchemaSql, createDatabaseSql, dropDatabaseSql } from '../utils/schemaObjSql';
 import { QueryStore } from '../store/query';
 import { can } from '../utils/engineCaps';
-import { groupSchemaObjects, isGroupNode, parentPath, type PathNode, type TreeEntry } from '../utils/treeGrouping';
+import { groupSchemaObjects, isGroupNode, parentPath, spatialBadge, type PathNode, type TreeEntry } from '../utils/treeGrouping';
 import { splitQualifiedName, nameMatches, qualifierCandidates, REVEALABLE_KINDS } from '../utils/revealObject';
 import { ChevronIcon, ObjectIcon, SpinnerIcon } from './treeIcons';
 
@@ -215,7 +215,10 @@ function nodeName(node: TreeEntry): string {
 
 function nodeSubtext(node: TreeEntry): string | null {
   if (isGroupNode(node)) return `(${node.count})`;
-  if (node.kind === 'column') return node.type_name + (node.nullable ? '' : ' NN');
+  // Spatial columns keep the declared type and gain the catalog facts:
+  // SRID and — the finding that matters — whether a GiST index covers them.
+  if (node.kind === 'column') return node.type_name + (node.nullable ? '' : ' NN')
+    + (spatialBadge(node.spatial)?.sub ?? '');
   if (node.kind === 'struct_column') return node.type_name + (node.nullable ? '' : ' NN');
   if (node.kind === 'index')  return node.columns.join(', ');
   if (node.kind === 'routine') return node.routine_type.toLowerCase();
@@ -260,8 +263,10 @@ function nodeSubtext(node: TreeEntry): string | null {
   return null;
 }
 
-/** Row tooltip — richer than the bare name for the CH proxy kinds. */
+/** Row tooltip — richer than the bare name for the CH proxy kinds and for
+ *  PostGIS spatial columns (family · type · SRID · index coverage). */
 function nodeTitle(node: TreeEntry): string {
+  if (node.kind === 'column' && node.spatial) return spatialBadge(node.spatial)!.tip;
   if (node.kind === 'distributed') {
     return `Distributed table on cluster '${node.cluster}' → local table ${node.target_db}.${node.target_table}`;
   }
@@ -456,9 +461,11 @@ const TreeRow = memo(function TreeRow({ tn, highlighted, top, api }: {
       onDoubleClick={() => api.open(tn)}
       onContextMenu={e => api.ctx(e, tn)}
       // No hover tooltip on ordinary rows — it only ever repeated the label.
-      // The two kinds whose title carries real information (where a
-      // Distributed / MV storage table actually lives) keep it.
-      title={(tn.node.kind === 'distributed' || tn.node.kind === 'mat_view_target')
+      // The rows whose title carries real information keep it: where a
+      // Distributed / MV storage table actually lives, and a spatial column's
+      // family, declared type, SRID and index coverage.
+      title={(tn.node.kind === 'distributed' || tn.node.kind === 'mat_view_target'
+          || (tn.node.kind === 'column' && !!tn.node.spatial))
         ? nodeTitle(tn.node)
         : undefined}
     >

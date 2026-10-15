@@ -1,4 +1,4 @@
-import type { SchemaNode } from '../types';
+import type { SchemaNode, SpatialColumn } from '../types';
 
 // ── Object-type grouping for the schema tree ─────────────────────────────────
 //
@@ -148,4 +148,65 @@ export function parentPath(chain: PathNode[]): string {
   if (real.length === 0) return '';
   if (real.length === 1) return real[0].name;
   return `${real[1].name}.${real[0].name}`;
+}
+
+// ── PostGIS spatial column badges ─────────────────────────────────────────────
+//
+// list_columns() (PostgreSQL) annotates geometry/geography columns with a
+// `spatial` payload read from the PostGIS catalog views — see
+// SpatialColumn in src/types. These helpers turn that payload into the tree
+// row's subtext suffix and hover tooltip. A column without the payload (every
+// other engine, and PostgreSQL without PostGIS) gets null and renders exactly
+// as before: there is no "greyed" state for data that does not exist.
+
+/** Catalog type token → display label: "MULTIPOLYGON" → "MultiPolygon". */
+const SPATIAL_TYPE_LABELS: Record<string, string> = {
+  GEOMETRY: 'Geometry', GEOGRAPHY: 'Geography',
+  POINT: 'Point', LINESTRING: 'LineString', POLYGON: 'Polygon',
+  MULTIPOINT: 'MultiPoint', MULTILINESTRING: 'MultiLineString',
+  MULTIPOLYGON: 'MultiPolygon', GEOMETRYCOLLECTION: 'GeometryCollection',
+  CIRCULARSTRING: 'CircularString', COMPOUNDCURVE: 'CompoundCurve',
+  CURVEPOLYGON: 'CurvePolygon', MULTICURVE: 'MultiCurve',
+  MULTISURFACE: 'MultiSurface', POLYHEDRALSURFACE: 'PolyhedralSurface',
+  TIN: 'Tin', TRIANGLE: 'Triangle',
+};
+
+/**
+ * Human-readable geometry type: "POINTZ" → "Point Z",
+ * "MULTIPOLYGON" → "MultiPolygon", unknown tokens title-cased.
+ */
+export function spatialTypeLabel(raw: string): string {
+  const up = raw.trim().toUpperCase();
+  // PostGIS may suffix the dimensionality onto the type name (POINTZ / POINTM /
+  // POINTZM) instead of carrying it only in coord_dimension.
+  const m = up.match(/^(.*?)(ZM|Z|M)$/);
+  const base = m && SPATIAL_TYPE_LABELS[m[1]] ? m[1] : up;
+  const suffix = m && SPATIAL_TYPE_LABELS[m[1]] ? ` ${m[2]}` : '';
+  const label = SPATIAL_TYPE_LABELS[base]
+    ?? base.charAt(0).toUpperCase() + base.slice(1).toLowerCase();
+  return label + suffix;
+}
+
+export interface SpatialBadge {
+  /** Subtext suffix for the tree row: " · SRID 4326 · GiST" / " · no spatial index". */
+  sub: string;
+  /** Full hover line: "geometry · Point · SRID 4326 · GiST". */
+  tip: string;
+}
+
+/**
+ * The spatial annotation for a column node, or null when the column is not
+ * spatial. The index clause is the finding that matters: a geometry column
+ * with no GiST/SP-GiST index turns every ST_Intersects into a sequential scan,
+ * so its absence is stated, not omitted.
+ */
+export function spatialBadge(s: SpatialColumn | null | undefined): SpatialBadge | null {
+  if (!s) return null;
+  // srid 0 is the catalog's own marker for "no declared spatial reference".
+  const srid = s.srid > 0 ? `SRID ${s.srid}` : 'SRID unconstrained';
+  const idx = s.has_spatial_index ? 'GiST' : 'no spatial index';
+  return {
+    sub: ` · ${srid} · ${idx}`,
+    tip: `${s.family} · ${spatialTypeLabel(s.geom_type)} · ${srid} · ${idx}`,
+  };
 }

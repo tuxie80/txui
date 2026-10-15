@@ -383,7 +383,7 @@
       "detail": [
         "Split out of `sqlDba` because that flag gates fifteen panels at once, and those panels are not one feature — they are fifteen, each needing its own catalog queries per engine. SQL Server can do blocking chains today (`sys.dm_os_waiting_tasks`) while it still cannot do, say, the documenter, so a single flag could only be wrong in one direction or the other: fifteen hidden panels, or fifteen broken ones.",
         "This also gates the Locks & Deadlocks panel's deadlock tab (wait-for graph + incident history): the three engines that publish anything about deadlocks — SQL Server's system_health graph history, MySQL's latest detected deadlock, PostgreSQL's per-database counters — are exactly the three with blocking chains, so the old separate `deadlocks` flag could only ever echo this one and was folded into it.",
-        "Expect more of these as SQL Server gains the rest — see plan-sqlserver.md Phase 2. Each one is added when the panel behind it actually works."
+        "Expect more of these as SQL Server gains the rest — each one is added only when the panel behind it actually works. Phase 2. Each one is added when the panel behind it actually works."
       ]
     },
     "sequences": {

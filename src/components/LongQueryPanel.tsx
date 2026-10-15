@@ -411,7 +411,7 @@ export function LongQueryPanel({ session, pinnedThread, onUnpin, onClose }: Prop
    */
   const explainEntry = useCallback(async (e: WatchEntry) => {
     // SQL Server has no EXPLAIN. Its plan comes from SET SHOWPLAN_XML, which
-    // needs session state and returns XML — plan-sqlserver.md Phase 5. Falling
+    // needs session state and returns XML — deferred from the SQL Server rollout. Falling
     // through to the PostgreSQL prefix would send `EXPLAIN (COSTS ON) …` to a
     // T-SQL parser and surface a syntax error that says nothing useful.
     if (isMssql) {

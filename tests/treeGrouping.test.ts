@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupSchemaObjects, isGroupNode, parentPath } from '../src/utils/treeGrouping.ts';
-import type { SchemaNode } from '../src/types/index.ts';
+import { groupSchemaObjects, isGroupNode, parentPath, spatialBadge, spatialTypeLabel } from '../src/utils/treeGrouping.ts';
+import type { SchemaNode, SpatialColumn } from '../src/types/index.ts';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -363,4 +363,69 @@ test('a MySQL root grows none of the PG-global groups', () => {
   ]);
   assert.deepEqual(groups, []);
   assert.equal(ungrouped.length, 2);
+});
+
+// ── PostGIS spatial column badges ─────────────────────────────────────────────
+// list_columns() (PostgreSQL) annotates geometry/geography columns from the
+// PostGIS catalog views; these pin the subtext/tooltip wording the tree shows.
+
+function spatial(over: Partial<SpatialColumn> = {}): SpatialColumn {
+  return {
+    family: 'geometry', geom_type: 'POINT', srid: 4326, dims: 2,
+    has_spatial_index: true, ...over,
+  };
+}
+
+test('spatialBadge: indexed geometry column — full tooltip + subtext suffix', () => {
+  const b = spatialBadge(spatial());
+  assert.ok(b);
+  assert.equal(b.tip, 'geometry · Point · SRID 4326 · GiST');
+  assert.equal(b.sub, ' · SRID 4326 · GiST');
+});
+
+test('spatialBadge: the finding that matters is an UNINDEXED spatial column', () => {
+  // No GiST/SP-GiST index → every ST_Intersects on the column is a sequential
+  // scan; the badge must state the absence, not omit it.
+  const b = spatialBadge(spatial({ geom_type: 'MULTIPOLYGON', has_spatial_index: false }));
+  assert.equal(b?.tip, 'geometry · MultiPolygon · SRID 4326 · no spatial index');
+  assert.equal(b?.sub, ' · SRID 4326 · no spatial index');
+});
+
+test('spatialBadge: geography columns get the same treatment', () => {
+  // Geography lives in geography_columns, not geometry_columns — parity is the
+  // family word in the tooltip, nothing else changes.
+  const b = spatialBadge(spatial({ family: 'geography', srid: 4326 }));
+  assert.ok(b?.tip.startsWith('geography · '));
+});
+
+test('spatialBadge: srid 0 is the catalog marker for unconstrained, said plainly', () => {
+  const b = spatialBadge(spatial({ geom_type: 'GEOMETRY', srid: 0 }));
+  assert.equal(b?.sub, ' · SRID unconstrained · GiST');
+  assert.ok(b?.tip.includes('SRID unconstrained'));
+});
+
+test('spatialBadge: null/undefined payload → no badge (non-spatial column)', () => {
+  assert.equal(spatialBadge(null), null);
+  assert.equal(spatialBadge(undefined), null);
+});
+
+test('spatialTypeLabel: catalog tokens title-case like the grid badge', () => {
+  assert.equal(spatialTypeLabel('POINT'), 'Point');
+  assert.equal(spatialTypeLabel('MULTIPOINT'), 'MultiPoint');
+  assert.equal(spatialTypeLabel('MULTILINESTRING'), 'MultiLineString');
+  assert.equal(spatialTypeLabel('MULTIPOLYGON'), 'MultiPolygon');
+  assert.equal(spatialTypeLabel('GEOMETRYCOLLECTION'), 'GeometryCollection');
+  assert.equal(spatialTypeLabel('GEOMETRY'), 'Geometry');
+});
+
+test('spatialTypeLabel: dimensionality suffixes split off the base type', () => {
+  // PostGIS may report POINTZ / POINTM / POINTZM in the type column.
+  assert.equal(spatialTypeLabel('POINTZ'), 'Point Z');
+  assert.equal(spatialTypeLabel('POINTM'), 'Point M');
+  assert.equal(spatialTypeLabel('POINTZM'), 'Point ZM');
+});
+
+test('spatialTypeLabel: unknown tokens title-case rather than break', () => {
+  assert.equal(spatialTypeLabel('triangle'), 'Triangle');
+  assert.equal(spatialTypeLabel('somefuture'), 'Somefuture');
 });

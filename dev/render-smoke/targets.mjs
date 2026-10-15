@@ -44,6 +44,18 @@ export function namedTargets(fixtures) {
   };
   const trackColumnInfo = trackProps.columns.map(name => ({ name, type_name: 'varchar', nullable: true }));
 
+  // Little-endian EWKB Point with an explicit SRID, as PostGIS sends it.
+  const ewkbPoint = (srid, x, y) => {
+    const b = new Uint8Array(25);
+    const v = new DataView(b.buffer);
+    b[0] = 1;
+    v.setUint32(1, 0x20000001, true);   // Point + EWKB SRID flag
+    v.setUint32(5, srid, true);
+    v.setFloat64(9, x, true);
+    v.setFloat64(17, y, true);
+    return [...b].map(n => n.toString(16).padStart(2, '0')).join('');
+  };
+
   return [
     {
       // The sharpest Wave 6 case: canvas + ResizeObserver + drag scrubber,
@@ -55,6 +67,48 @@ export function namedTargets(fixtures) {
           if (!html.includes(needle)) return `mounted markup lacks "${needle}"`;
         }
         if (!ssrHtml.includes('map-root')) return 'ssr markup lacks map-root';
+      },
+    },
+    {
+      // Round-2 geo: a lon/lat geometry column opens geometry-first, and the
+      // GeoParquet footer bbox (initialBbox) drives the first fit rather than
+      // the loaded page's own extent.
+      // (Identifier-style name: rolldown sanitizes entry names into bundle
+      // file names, so spaces and punctuation break the import.)
+      name: 'MapViewGeoFirst', file: 'src/components/MapView.tsx', tier: 'mount',
+      props: {
+        columns: ['id', 'geom'],
+        columnTypes: ['int4', 'geometry'],
+        rows: [
+          [1, ewkbPoint(4326, 14.4378, 50.0755)],
+          [2, ewkbPoint(4326, 14.4207, 50.0870)],
+        ],
+        initialBbox: [14.2, 49.9, 14.8, 50.2],
+      },
+      assert: ({ html }) => {
+        for (const needle of ['<canvas', '2 geometries']) {
+          if (!html.includes(needle)) return `mounted markup lacks "${needle}"`;
+        }
+      },
+    },
+    {
+      // Round-2 geo: a projected CRS (3857) is politely refused, and on
+      // PostgreSQL the refusal offers the explicit derived-query action.
+      name: 'MapViewProjectedRefusal', file: 'src/components/MapView.tsx', tier: 'mount',
+      props: {
+        columns: ['id', 'geom'],
+        columnTypes: ['int4', 'geometry'],
+        rows: [
+          [1, ewkbPoint(3857, 1606175, 6462465)],
+          [2, ewkbPoint(3857, 1605000, 6463000)],
+        ],
+        engine: 'postgres',
+        sourceSql: 'SELECT id, geom FROM districts',
+      },
+      assert: ({ html }) => {
+        for (const needle of ['not longitude/latitude', 'SRID 3857', 'View in WGS 84']) {
+          if (!html.includes(needle)) return `mounted markup lacks "${needle}"`;
+        }
       },
     },
     {
@@ -349,7 +403,7 @@ export async function sweepFixtures(fixtures) {
         explainNowRef: { current: null }, runNowRef: { current: null },
         runBareNowRef: { current: null }, killReplaceRef: { current: null },
         tabId: 't1', active: true, showInvisibles: false, zoom: 1,
-        diagContext: null, statementRuns: [],
+        diagContext: null, statementRuns: [], duckdbSpatial: false,
       },
     },
     GaleraClusterPanel: {

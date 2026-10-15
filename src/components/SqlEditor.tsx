@@ -785,6 +785,12 @@ interface Props {
    * MariaDB-only syntax to a MySQL server.
    */
   flavor?: 'mysql' | 'mariadb' | 'percona';
+  /**
+   * DuckDB sessions only: the `spatial` extension is loaded on this session
+   * (the toolbar's spatial affordance ran INSTALL/LOAD). Gates the ST_*
+   * completions — before LOAD they are a catalog error, not a suggestion.
+   */
+  duckdbSpatial?: boolean;
   initialValue?: string;
   /**
    * Serialized CodeMirror undo history to rehydrate on mount (Editor §5.2) —
@@ -920,6 +926,7 @@ export interface KillContext {
 export function SqlEditor({
   engine,
   flavor,
+  duckdbSpatial = false,
   initialValue = '',
   initialHistory,
   onHistoryChange,
@@ -1135,6 +1142,11 @@ export function SqlEditor({
   const getRoutineSignatureRef = useRef(getRoutineSignature);
   const onRenameReportRef = useRef(onRenameReport);
   const schemaCompletionsRef = useRef(schemaCompletions);
+  // The mount effect (which owns signature help) runs once per engine, so the
+  // spatial gate reaches it through a ref — toggling it must not remount the
+  // editor. Completion/hover take it as a normal reactive value instead.
+  const duckdbSpatialRef = useRef(duckdbSpatial);
+  duckdbSpatialRef.current = duckdbSpatial;
   // The mount effect closes over these once, so route them through refs.
   const hoverCtxForRef = useRef<(doc: string) => HoverContext>(() => ({
     aliases: new Map(), objects: new Map(), functions: new Set(), keywords: new Set(),
@@ -1221,12 +1233,13 @@ export function SqlEditor({
     }, {
       upperCaseKeywords: getPref(PREFS.editorKeywordCase) === 'upper',
       flavor,
+      duckdbSpatial,
       usageBoost,
       // After a statement-ending `;` the completion source stays silent, so
       // Enter inserts a newline instead of accepting the first hint.
       delimiter: sqlDelimiter(),
     });
-  }, [engine, flavor]);
+  }, [engine, flavor, duckdbSpatial]);
 
 
   /**
@@ -1244,14 +1257,14 @@ export function SqlEditor({
       objects.set(c.label.toLowerCase(), qualified);
       if (qualified.includes('.')) objects.set(qualified.toLowerCase().replace(/[`"]/g, ''), qualified);
     }
-    const cat = keywordCatalog(engine);
+    const cat = keywordCatalog(engine, undefined, { duckdbSpatial });
     return {
       objects,
       functions: new Set(cat.filter(k => k.type === 'function').map(k => k.label.toUpperCase())),
       keywords: new Set(cat.filter(k => k.type === 'keyword')
         .flatMap(k => k.label.toLowerCase().split(/[^a-z_]+/)).filter(Boolean)),
     };
-  }, [engine, schemaCompletions]);
+  }, [engine, schemaCompletions, duckdbSpatial]);
 
   const hoverCtxFor = useCallback(
     (doc: string): HoverContext => ({ ...hoverBase, aliases: findAliases(doc) }),
@@ -1272,7 +1285,7 @@ export function SqlEditor({
     if (t.kind === 'keyword') return null;
 
     if (t.kind === 'function') {
-      const item = keywordCatalog(engine).find(k =>
+      const item = keywordCatalog(engine, undefined, { duckdbSpatial }).find(k =>
         k.type === 'function' && k.label.toUpperCase() === t.name);
       if (!item) return null;
       line('cm-tip-head', item.label);
@@ -1332,7 +1345,7 @@ export function SqlEditor({
       return null;
     }
     return null;
-  }, [engine]);
+  }, [engine, duckdbSpatial]);
 
   // Initial editor setup
   useEffect(() => {
@@ -1891,7 +1904,9 @@ export function SqlEditor({
       const call = callSiteAt(doc, sel.head, engine);
       if (!call) { setSignature(null); return; }
       const upper = call.name.toUpperCase();
-      const hit = keywordCatalog(engine).find(k =>
+      // The spatial gate is a ref: this callback was created at mount, and
+      // toggling the extension must not remount the editor.
+      const hit = keywordCatalog(engine, undefined, { duckdbSpatial: duckdbSpatialRef.current }).find(k =>
         k.type === 'function' && k.label.toUpperCase() === upper);
       if (hit?.detail) {
         setSignature({ text: hit.detail, args: signatureArgs(hit.detail), active: call.argIndex });

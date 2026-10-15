@@ -865,6 +865,7 @@ mod tests {
             ],
             rows_affected: None, execution_ms: 0, fetch_ms: 0, warnings: vec![],
             truncated: false,
+            geo_bbox: None,
         };
         assert_eq!(wait_pairs(&r), vec![(11, 12)]);
     }
