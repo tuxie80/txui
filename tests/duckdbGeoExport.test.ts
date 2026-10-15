@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { geoParquetVerdict, hasGeometryColumn, GEOMETRY_TYPE } from '../src/utils/duckdbGeoExport.ts';
+import { geoParquetVerdict, hasGeometryColumn, geoExportStatus, GEOMETRY_TYPE } from '../src/utils/duckdbGeoExport.ts';
 
 const ON = { status: 'on' } as const;
 const OFF = { status: 'off' } as const;
@@ -70,4 +70,25 @@ test('spatial states gate the entry and name the fix', () => {
   const failedLocal = geoParquetVerdict({ ...base, spatial: { status: 'failed', reason: 'GEOS mismatch', network: false } });
   assert.equal(failedLocal.ok, false);
   if (!failedLocal.ok) assert.doesNotMatch(failedLocal.tip, /network/);
+});
+
+test('geoExportStatus: one line per export phase, bytes humanized', () => {
+  assert.equal(geoExportStatus({ type: 'validating' }), 'checking the statement');
+  assert.equal(geoExportStatus({ type: 'running' }), 'COPY running on the engine');
+  assert.equal(
+    geoExportStatus({ type: 'progress', bytes_written: 12.4 * 1024 * 1024 }),
+    'COPY running — 12.4 MB written',
+  );
+  // No row percentage anywhere — the engine exposes none; progress is the
+  // output file's size, and the line must not pretend otherwise.
+  assert.doesNotMatch(
+    geoExportStatus({ type: 'progress', bytes_written: 512 }), /%/);
+  assert.equal(
+    geoExportStatus({ type: 'done', rows_written: 2000, bytes: 512 }),
+    'done — 2,000 rows, 512 B',
+  );
+  assert.equal(
+    geoExportStatus({ type: 'error', message: 'boom' }),
+    'failed — boom',
+  );
 });

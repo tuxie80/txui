@@ -23,6 +23,7 @@ import { ResultChart } from './ResultChart';
 import { ResultPivot } from './ResultPivot';
 import { matchesFilter, topValueCounts } from '../utils/columnFilter';
 import type { ColumnFilter } from '../utils/columnFilter';
+import { viewAsGeoAction } from '../utils/mssqlUdt';
 
 interface Props {
   /**
@@ -42,6 +43,13 @@ interface Props {
    */
   sessionId?: string;
   sourceSql?: string;
+  /**
+   * Runs a derived query in a new tab through the normal execute path — the
+   * SQL Server "⬡ View as geo" action (same shape as the map's "View in
+   * WGS 84"). Absent on surfaces that cannot open tabs; the button then
+   * greys itself out with the reason.
+   */
+  onRunDerived?: (sql: string, label: string) => void;
 }
 
 interface Aggregates { count: number; sum: number | null; avg: number | null; min: number | null; max: number | null }
@@ -78,7 +86,7 @@ function fmtNum(n: number): string {
   return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql }: Props) {
+export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, onRunDerived }: Props) {
   const [sort, setSort] = useState<SortClause[]>([]);
   const [filters, setFilters] = useState<ColumnFilter[]>([]);
   const [filterPop, setFilterPop] = useState<{ column: string; anchor: { x: number; y: number } } | null>(null);
@@ -186,6 +194,22 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql }: 
       ?? { columns: result.columns.map(c => c.name), rows: sortedRows };
   }, [result.columns, sortedRows]);
 
+  // SQL Server UDT columns arrive undecodable (`<udt: N bytes>`) — "View as
+  // geo" re-runs the statement as a derived query with STAsBinary() wraps.
+  // The pure gate decides show/block; no onRunDerived means this surface
+  // cannot open tabs, which is a block reason, not a disappearance.
+  const geoAction = useMemo(() => {
+    const gate = viewAsGeoAction(
+      engine,
+      result.columns.map(c => ({ name: c.name, typeName: c.type_name })),
+      sourceSql,
+    );
+    if (gate.show && gate.reason === null && !onRunDerived) {
+      return { ...gate, reason: 'This surface cannot open a query tab for the derived query.' };
+    }
+    return gate;
+  }, [engine, result.columns, sourceSql, onRunDerived]);
+
   if (result.rows.length === 0) {
     return <div className="empty-result">Query returned 0 rows.</div>;
   }
@@ -218,6 +242,20 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql }: 
         <button className={`toolbar-btn ${showPivot ? 'active' : ''}`}
           title="Group and pivot the result (respects active column filters)"
           onClick={() => { setShowPivot(v => !v); setShowChart(false); }}>▦ Pivot</button>
+        {geoAction.show && (
+          <button
+            className={`toolbar-btn${geoAction.reason ? ' unavail' : ''}`}
+            data-tip={geoAction.reason
+              ?? 'Re-run as a derived query in a new tab: each udt column wrapped with .STAsBinary() → WKB hex, which the grid, cell viewer and map decode as geometry. Your SQL is not changed.'}
+            onClick={() => {
+              if (geoAction.reason !== null || !geoAction.derived) return;
+              onRunDerived?.(geoAction.derived.sql, 'View as geo');
+              if (geoAction.derived.clauseNotes.length > 0) {
+                note(geoAction.derived.clauseNotes.join(' · '));
+              }
+            }}
+          >⬡ View as geo</button>
+        )}
         <div style={{ flex: 1 }} />
         {agg && agg.count > 0 && (
           <span className="result-agg">

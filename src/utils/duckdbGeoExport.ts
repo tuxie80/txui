@@ -18,6 +18,31 @@
  * is imported TYPE-ONLY so this module stays free of React/Tauri.
  */
 import type { DuckdbSpatialState } from '../store/duckdbSpatial';
+import { fmtBytes } from './syncLog.ts';
+
+/**
+ * Progress of a server-side GeoParquet export, streamed over the command's
+ * channel (`duckdb_export_geoparquet`). Mirrors the Rust `GeoExportEvent` —
+ * keep the two in sync. The engine exposes no row percentage, so `progress`
+ * reports the output file's size: liveness, never a fake percent.
+ */
+export type GeoExportEvent =
+  | { type: 'validating' }
+  | { type: 'running' }
+  | { type: 'progress'; bytes_written: number }
+  | { type: 'done'; rows_written: number; bytes: number }
+  | { type: 'error'; message: string };
+
+/** The one-line running-tasks status for an export event. */
+export function geoExportStatus(ev: GeoExportEvent): string {
+  switch (ev.type) {
+    case 'validating': return 'checking the statement';
+    case 'running':    return 'COPY running on the engine';
+    case 'progress':   return `COPY running — ${fmtBytes(ev.bytes_written)} written`;
+    case 'done':       return `done — ${ev.rows_written.toLocaleString()} rows, ${fmtBytes(ev.bytes)}`;
+    case 'error':      return `failed — ${ev.message}`;
+  }
+}
 
 export type GeoParquetVerdict = { ok: true } | { ok: false; tip: string };
 

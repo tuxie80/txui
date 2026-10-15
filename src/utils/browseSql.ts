@@ -6,7 +6,11 @@
  * builder in src-tauri/src/db/browser.rs (`build_select`) — keep the two in
  * sync. The executed query binds values as parameters; the display copy
  * inlines them as quoted literals so the log line reads like a runnable
- * statement. Nothing here is executed.
+ * statement.
+ *
+ * One form IS executed: with `limit` omitted the text is the source statement
+ * of the server-side GeoParquet export (`COPY (<sql>) TO …`), which re-runs
+ * it unpaged so the file holds the full filtered+sorted result.
  */
 import { quoteIdent, sqlLiteral } from './sqlIdent.ts';
 import type { FilterClause, FilterOp, SortClause } from '../types/browser';
@@ -81,8 +85,11 @@ export interface BrowseSqlOpts {
   table:   string;             // "schema.table" or "table"
   filters: FilterClause[];
   sort:    SortClause[];
-  limit:   number;
-  offset:  number;
+  /** Omit for an unpaged SELECT — the GeoParquet export builds its source
+   *  statement this way, so the file holds the full result, not a page. */
+  limit?:  number;
+  /** Ignored without a limit (an offset alone is not a page). */
+  offset?: number;
   engine:  string;             // 'postgres'/'duckdb' → PG quoting; anything else → MySQL
 }
 
@@ -111,13 +118,18 @@ export function browseSqlText(o: BrowseSqlOpts): string {
     // stylistic: `TOP (n)` for the first page, `OFFSET … FETCH` beyond it —
     // and FETCH is a **syntax error without an ORDER BY**, so an unsorted
     // browse gets a stabilising one rather than a rejected statement.
-    if (o.offset > 0) {
+    if (o.limit === undefined) {
+      return `SELECT * FROM ${from}${where}${order}`;
+    }
+    const offset = o.offset ?? 0;
+    if (offset > 0) {
       const stabilise = o.sort.length === 0 ? ' ORDER BY 1' : '';
       return `SELECT * FROM ${from}${where}${order}${stabilise}`
-        + ` OFFSET ${o.offset} ROWS FETCH NEXT ${o.limit} ROWS ONLY`;
+        + ` OFFSET ${offset} ROWS FETCH NEXT ${o.limit} ROWS ONLY`;
     }
     return `SELECT TOP (${o.limit}) * FROM ${from}${where}${order}`;
   }
 
-  return `SELECT * FROM ${from}${where}${order} LIMIT ${o.limit} OFFSET ${o.offset}`;
+  const limit = o.limit === undefined ? '' : ` LIMIT ${o.limit} OFFSET ${o.offset ?? 0}`;
+  return `SELECT * FROM ${from}${where}${order}${limit}`;
 }

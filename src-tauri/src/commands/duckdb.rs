@@ -17,6 +17,7 @@
 //! the user runs explicitly in the editor).
 
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::State;
 use uuid::Uuid;
 
@@ -121,6 +122,26 @@ pub struct GeoParquetExportResult {
     pub bytes: u64,
 }
 
+/// Progress of a server-side GeoParquet export, streamed over the command's
+/// channel. duckdb-rs exposes no `duckdb_query_progress` binding, so a true
+/// row percentage is impossible — `Progress` reports the output FILE's size
+/// while the COPY runs (honest liveness, never a fake percent).
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GeoExportEvent {
+    /// The statement, path and spatial probe are being checked.
+    Validating,
+    /// The checks passed; the COPY statement is starting on the engine.
+    Running,
+    /// Liveness while the COPY runs: the output file's current size.
+    Progress { bytes_written: u64 },
+    /// The COPY finished — final row count and file size (the invoke's
+    /// return value carries the same numbers).
+    Done { rows_written: u64, bytes: u64 },
+    /// The export failed; the invoke rejects with the same message.
+    Error { message: String },
+}
+
 /// The statement a GeoParquet export re-runs must be ONE read: the text is
 /// pasted into `COPY (<sql>) TO …`, so a write here is a write the export
 /// menu smuggled past the grid's read path, and a second statement cannot
@@ -172,7 +193,7 @@ async fn spatial_loaded(s: &crate::db::duckdb::DuckDbSession) -> anyhow::Result<
 /// it on a bare session. Refuses an existing path — a parquet file is written
 /// once, completely (same rule as `write_parquet_file`); DuckDB's COPY would
 /// otherwise truncate it silently.
-async fn export_geoparquet(
+async fn export_geoparquet_inner(
     s: &crate::db::duckdb::DuckDbSession,
     sql: &str,
     out_path: &str,
@@ -202,6 +223,45 @@ async fn export_geoparquet(
     Ok(GeoParquetExportResult { path: out_path.to_string(), rows_written, bytes })
 }
 
+/// The event-emitting wrapper: phase events around the export, and a poller
+/// that reports the output file's size while the blocking COPY runs — the
+/// engine offers no row percentage, so bytes-on-disk is the honest liveness
+/// signal. The poller is aborted on every exit path, success or failure.
+async fn export_geoparquet(
+    s: &crate::db::duckdb::DuckDbSession,
+    sql: &str,
+    out_path: &str,
+    on_event: Option<&Channel<GeoExportEvent>>,
+) -> Result<GeoParquetExportResult, crate::apperror::AppError> {
+    let send = |ev: GeoExportEvent| {
+        if let Some(ch) = on_event { let _ = ch.send(ev); }
+    };
+    send(GeoExportEvent::Validating);
+
+    let poller = on_event.map(|ch| {
+        let ch = ch.clone();
+        let path = std::path::PathBuf::from(out_path);
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                iv.tick().await;
+                if let Ok(md) = tokio::fs::metadata(&path).await {
+                    let _ = ch.send(GeoExportEvent::Progress { bytes_written: md.len() });
+                }
+            }
+        })
+    });
+
+    send(GeoExportEvent::Running);
+    let result = export_geoparquet_inner(s, sql, out_path).await;
+    if let Some(p) = poller { p.abort(); }
+    match &result {
+        Ok(r) => send(GeoExportEvent::Done { rows_written: r.rows_written, bytes: r.bytes }),
+        Err(e) => send(GeoExportEvent::Error { message: e.to_string() }),
+    }
+    result
+}
+
 /// Write the result of a read statement to a GeoParquet file — server-side
 /// `COPY (<sql>) TO '<path>' (FORMAT PARQUET)` on the session's own DuckDB
 /// connection, so GEOMETRY columns keep their type and the spatial extension
@@ -213,11 +273,15 @@ async fn export_geoparquet(
 /// statement being re-run (`guard_statement`); the statement itself must be
 /// a single read (`validate_export_sql`); spatial must be LOADed, probed from
 /// the engine's catalog; the output path must not exist yet.
+///
+/// Progress rides `on_event` as [`GeoExportEvent`]s: validating → running →
+/// progress (the output file's size, ~4×/s) → done / error.
 #[tauri::command]
 pub async fn duckdb_export_geoparquet(
     session_id: Uuid,
     sql: String,
     out_path: String,
+    on_event: Channel<GeoExportEvent>,
     state: State<'_, AppState>,
 ) -> Result<GeoParquetExportResult, crate::apperror::AppError> {
     // The statement will execute on this session, so it faces the same
@@ -227,7 +291,7 @@ pub async fn duckdb_export_geoparquet(
     let LiveSession::Duckdb(s) = session.as_ref() else {
         return Err("GeoParquet export is only available for DuckDB sessions.".into());
     };
-    export_geoparquet(s, &sql, &out_path).await
+    export_geoparquet(s, &sql, &out_path, Some(&on_event)).await
 }
 
 #[cfg(test)]
@@ -310,18 +374,39 @@ mod tests {
         assert_eq!(sql_string_literal(r"C:\data\out.parquet"), r"'C:\data\out.parquet'");
     }
 
+    /// The channel contract the frontend parses: a `type`-tagged enum with
+    /// snake_case variants and fields (same shape as dump's ToolEvent).
+    #[test]
+    fn geo_export_events_serialize_in_the_channel_shape() {
+        assert_eq!(
+            serde_json::to_value(GeoExportEvent::Validating).unwrap(),
+            serde_json::json!({ "type": "validating" }));
+        assert_eq!(
+            serde_json::to_value(GeoExportEvent::Running).unwrap(),
+            serde_json::json!({ "type": "running" }));
+        assert_eq!(
+            serde_json::to_value(GeoExportEvent::Progress { bytes_written: 42 }).unwrap(),
+            serde_json::json!({ "type": "progress", "bytes_written": 42 }));
+        assert_eq!(
+            serde_json::to_value(GeoExportEvent::Done { rows_written: 7, bytes: 1024 }).unwrap(),
+            serde_json::json!({ "type": "done", "rows_written": 7, "bytes": 1024 }));
+        assert_eq!(
+            serde_json::to_value(GeoExportEvent::Error { message: "boom".into() }).unwrap(),
+            serde_json::json!({ "type": "error", "message": "boom" }));
+    }
+
     /// The export refuses before touching the engine when the input is wrong —
     /// no spatial probe, no file. (The engine-needing paths are the live test.)
     #[tokio::test]
     async fn export_refuses_bad_sql_and_existing_paths_without_an_engine() {
         let s = crate::db::duckdb::open_memory_sync(false).unwrap();
-        let err = export_geoparquet(&s, "DELETE FROM t", "/tmp/never-written.parquet")
+        let err = export_geoparquet(&s, "DELETE FROM t", "/tmp/never-written.parquet", None)
             .await.unwrap_err().to_string();
         assert!(err.contains("write statement"), "{err}");
-        let err = export_geoparquet(&s, "SELECT 1; SELECT 2", "/tmp/never-written.parquet")
+        let err = export_geoparquet(&s, "SELECT 1; SELECT 2", "/tmp/never-written.parquet", None)
             .await.unwrap_err().to_string();
         assert!(err.contains("one statement"), "{err}");
-        let err = export_geoparquet(&s, "SELECT 1", "  ")
+        let err = export_geoparquet(&s, "SELECT 1", "  ", None)
             .await.unwrap_err().to_string();
         assert!(err.contains("no output path"), "{err}");
 
@@ -329,7 +414,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let taken = dir.join("taken.parquet");
         std::fs::write(&taken, b"already here").unwrap();
-        let err = export_geoparquet(&s, "SELECT 1", &taken.to_string_lossy())
+        let err = export_geoparquet(&s, "SELECT 1", &taken.to_string_lossy(), None)
             .await.unwrap_err().to_string();
         assert!(err.contains("already exists"), "{err}");
         assert_eq!(std::fs::read(&taken).unwrap(), b"already here",
@@ -339,7 +424,7 @@ mod tests {
         // Without the extension the probe refuses — offline-safe: the probe
         // itself (duckdb_extensions()) is built in.
         let err = export_geoparquet(&s, "SELECT 1 AS a",
-                                    &dir.join("plain.parquet").to_string_lossy())
+                                    &dir.join("plain.parquet").to_string_lossy(), None)
             .await.unwrap_err().to_string();
         assert!(err.contains("spatial extension is not loaded"), "{err}");
         assert!(!dir.join("plain.parquet").exists());
@@ -369,7 +454,7 @@ mod tests {
         let res = export_geoparquet(&s,
             "SELECT 'Brno' AS name, ST_Point(16.6068, 49.1951) AS geom \
              UNION ALL SELECT 'Oslo', ST_Point(10.7522, 59.9139)",
-            &out.to_string_lossy()).await.unwrap();
+            &out.to_string_lossy(), None).await.unwrap();
         assert_eq!(res.rows_written, 2);
         assert_eq!(res.bytes, std::fs::metadata(&out).unwrap().len());
 
@@ -388,7 +473,7 @@ mod tests {
         // …and a plain (no-geometry) export is still a plain parquet file.
         let plain = dir.join("plain.parquet");
         let _ = std::fs::remove_file(&plain);
-        export_geoparquet(&s, "SELECT 1 AS a", &plain.to_string_lossy()).await.unwrap();
+        export_geoparquet(&s, "SELECT 1 AS a", &plain.to_string_lossy(), None).await.unwrap();
         let f = crate::db::parquet::open_path(&plain).unwrap();
         assert_eq!(crate::db::parquet::geo_bbox(&f), None, "no geometry column, no geo footer");
 

@@ -24,6 +24,7 @@ import { parseWkbHex } from './wkb.ts';
 import type { Geometry } from './wkb';
 import { parseGeoJson } from './geojsonDetect.ts';
 import { parseChGeometry } from './chGeoDetect.ts';
+import { columnFacts } from './geoTrack.ts';
 
 /**
  * Decode one cell into a Geometry, or null. `typeName` is the column's
@@ -59,4 +60,23 @@ export function detectGeoColumns(
     .filter(({ index, typeName }) =>
       probe.some(r => cellGeometry(r[index], typeName) !== null))
     .map(({ name, index }) => ({ name, index }));
+}
+
+/**
+ * Could this result be drawn on a map at all? — the Graphics tab's initial
+ * mode gate. Two mostly-numeric columns is the floor for a lat/lon track;
+ * one decodable geometry column is enough on its own (the map's
+ * geometry-first mode needs nothing else). Without the geometry arm a
+ * geometry-only result opened on a chart of nothing.
+ */
+export function mappableResult(
+  columns: { name: string; typeName?: string }[],
+  rows: unknown[][],
+): boolean {
+  if (rows.length === 0) return false;
+  const facts = columnFacts(columns.map(c => c.name), rows);
+  if (facts.filter(f => f.numeric >= Math.max(1, f.sampled * 0.8)).length >= 2) {
+    return true;
+  }
+  return detectGeoColumns(columns, rows).length > 0;
 }

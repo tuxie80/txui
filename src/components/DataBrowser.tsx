@@ -236,6 +236,17 @@ export function DataBrowser({
     [userSort, meta]
   );
 
+  // The GeoParquet export re-runs the browse as COPY (<sql>) TO … — built
+  // WITHOUT the page's LIMIT/OFFSET, so the file holds the full filtered +
+  // sorted result, not the page the grid happens to show (browseSql includes
+  // LIMIT, so it cannot serve as the source).
+  const geoExportSql = useMemo(
+    () => engine === 'duckdb'
+      ? browseSqlText({ table: browseTarget, filters: effFilters, sort: effSort, engine })
+      : undefined,
+    [engine, browseTarget, effFilters, effSort]
+  );
+
   /**
    * One page fetch — the only browse_table call site. Logs exactly like the
    * query runner: the executed SELECT (`> …`), then the canonical result
@@ -558,6 +569,10 @@ export function DataBrowser({
               getData={() => apiRef.current?.getSelectionData() ?? { columns: cols.map(c => c.name), rows }}
               tableName={tableLabel}
               engine={engine}
+              onNote={setError}
+              sessionId={sessionId}
+              sourceSql={geoExportSql}
+              columnTypes={cols.map(c => c.type_name)}
             />
           )}
           <GridSettingsPopover />

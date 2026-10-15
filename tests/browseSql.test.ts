@@ -73,6 +73,36 @@ test('browseSqlText: DuckDB takes the PG form — double quotes, never backticks
   );
 });
 
+test('browseSqlText: limit omitted → an unpaged SELECT (the GeoParquet export source)', () => {
+  // The export re-runs the browse as COPY (<sql>) TO … — the page's
+  // LIMIT/OFFSET must NOT be in it, or the file would hold only the page.
+  assert.equal(
+    browseSqlText({
+      table: 'main.cities', engine: 'duckdb', filters: [],
+      sort: [{ column: 'id', direction: 'desc' }],
+    }),
+    'SELECT * FROM "main"."cities" ORDER BY "id" DESC',
+  );
+  // Filters and literals inline the same as the paged form.
+  assert.equal(
+    browseSqlText({
+      table: 't', engine: 'mysql', sort: [],
+      filters: [{ column: 'a', op: 'eq', value: "o'hara" }],
+    }),
+    "SELECT * FROM `t` WHERE `a` = 'o''hara'",
+  );
+  // An offset without a limit is not a page — it is dropped, not emitted.
+  assert.equal(
+    browseSqlText({ table: 't', engine: 'postgres', filters: [], sort: [], offset: 200 }),
+    'SELECT * FROM "t"',
+  );
+  // SQL Server: no TOP, no OFFSET … FETCH (which needs an ORDER BY anyway).
+  assert.equal(
+    browseSqlText({ table: 'dbo.t', engine: 'sqlserver', filters: [], sort: [] }),
+    'SELECT * FROM [dbo].[t]',
+  );
+});
+
 test('duckdbBrowseTarget: the catalog segment is stripped for the SELECT builder', () => {
   // The tree names DuckDB objects three-level ("db.schema.table") — that form
   // addresses get_table_meta, but build_select splits a dotted name ONCE, so

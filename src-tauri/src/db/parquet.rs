@@ -290,7 +290,7 @@ pub fn open_dataset(root: &Path) -> Result<ParquetDataset> {
         "CREATE TEMP VIEW dataset AS SELECT * FROM read_parquet([{globs}], \
          hive_partitioning = true, union_by_name = true, filename = true)"
     );
-    super::duckdb::execute_params_blocking(&duck, &view_sql, &[])?;
+    super::duckdb::execute_params_blocking(&duck, &view_sql, &[]).map_err(friendly_dataset_error)?;
 
     Ok(ParquetDataset {
         root: root.to_path_buf(),
@@ -299,6 +299,32 @@ pub fn open_dataset(root: &Path) -> Result<ParquetDataset> {
         duck: Arc::new(duck),
         view_sql,
     })
+}
+
+/// DuckDB's Parquet reader decodes a GeoParquet footer into a GEOMETRY column
+/// but leaves a plain file's geometry column as BLOB, and the dataset view's
+/// `union_by_name = true` then cannot cast between members. Because the view
+/// is lazy, that failure surfaces at QUERY time as raw engine prose ("missing
+/// geometry_types", "Conversion Error: … BLOB … GEOMETRY …" from
+/// read_parquet). Rewrite that one family into a sentence that names the cause
+/// and the fix; anything else passes through untouched, and the raw engine
+/// text stays in the chain for the log.
+pub fn friendly_dataset_error(e: anyhow::Error) -> anyhow::Error {
+    let msg = format!("{e:#}").to_ascii_lowercase();
+    let mixed_geo = msg.contains("geometry_types")
+        || (msg.contains("conversion error")
+            && msg.contains("geometry")
+            && msg.contains("blob")
+            && msg.contains("read_parquet"));
+    if !mixed_geo {
+        return e;
+    }
+    e.context(
+        "this dataset mixes GeoParquet members (geo footer metadata) with \
+         plain Parquet files whose geometry column is a bare BLOB, and \
+         DuckDB's union-by-name cannot cast between them — query the members \
+         separately, or rewrite the plain files with GeoParquet metadata",
+    )
 }
 
 pub fn open(config: &ConnectionConfig) -> Result<ParquetSource> {
@@ -621,7 +647,7 @@ fn execute_dataset(d: &ParquetDataset, command: &str) -> Result<QueryResult> {
                 &d.duck,
                 &format!("SELECT * FROM dataset LIMIT {n}"),
                 &[],
-            )?;
+            ).map_err(friendly_dataset_error)?;
             r.execution_ms = start.elapsed().as_millis() as u64;
             // The DuckDB view knows nothing of the GeoParquet footers, so the
             // map's viewport hint is attached here from the union of the
@@ -1729,7 +1755,7 @@ pub fn export_dataset_to_file(d: &ParquetDataset, out_path: &Path, format: &str)
         "COPY (SELECT * FROM dataset) TO '{}' ({options})",
         sql_str(&out_path.to_string_lossy())
     );
-    super::duckdb::execute_params_blocking(&d.duck, &sql, &[])?;
+    super::duckdb::execute_params_blocking(&d.duck, &sql, &[]).map_err(friendly_dataset_error)?;
     Ok(d.num_rows() as u64)
 }
 
@@ -2304,6 +2330,42 @@ mod geoparquet_tests {
         // GEOMETRY('OGC:CRS84') — the decode of that type is the DuckDB
         // spatial wave's story, not this channel's.)
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mixed-GeoParquet failure family (see `friendly_dataset_error`)
+    /// gets a message that names the cause and the fix — and keeps the raw
+    /// engine text in the chain for the log.
+    #[test]
+    fn a_mixed_geoparquet_error_gets_a_friendly_message() {
+        let raw = "Conversion Error: read_parquet schema mismatch with union_by_name: \
+                   column \"geom\" has type GEOMETRY('OGC:CRS84') in file \"a.parquet\" \
+                   but type BLOB in file \"b.parquet\"";
+        let e = friendly_dataset_error(anyhow!(raw));
+        let text = format!("{e:#}");
+        assert!(text.contains("mixes GeoParquet members"), "rewritten: {text}");
+        assert!(text.contains(raw), "raw engine text must stay in the chain: {text}");
+
+        let raw = "Invalid Input Error: GeoParquet column \"geom\" in file \"c.parquet\" \
+                   does not declare geometry_types";
+        let e = friendly_dataset_error(anyhow!(raw));
+        let text = format!("{e:#}");
+        assert!(text.contains("mixes GeoParquet members"), "rewritten: {text}");
+        assert!(text.contains(raw), "raw engine text must stay in the chain: {text}");
+    }
+
+    /// Anything outside that family — including BLOB/GEOMETRY words in an
+    /// unrelated conversion — passes through untouched.
+    #[test]
+    fn unrelated_dataset_errors_pass_through_untouched() {
+        for raw in [
+            "IO Error: Cannot open file \"/tmp/nope.parquet\": No such file or directory",
+            "Conversion Error: Could not convert string 'x' to INT32",
+            "Conversion Error: Cannot cast BLOB to VARCHAR",
+            "Binder Error: Referenced column \"geom\" not found in FROM clause",
+        ] {
+            let e = friendly_dataset_error(anyhow!(raw));
+            assert_eq!(format!("{e:#}"), raw, "must pass through: {raw}");
+        }
     }
 
     #[test]

@@ -318,3 +318,46 @@ export function buildUdtDerivedQuery(
 
   return { ok: true, query: { sql: wrappedSql, strategy, wrapped: wrapNames, clauseNotes }, logLine };
 }
+
+// ── the grid-toolbar gate ─────────────────────────────────────────────────────
+
+export interface ViewAsGeoAction {
+  /** false → the button does not render at all (wrong engine, no udt columns). */
+  show: boolean;
+  /** non-null → the button renders greyed with this as the explained reason. */
+  reason: string | null;
+  /** The built query, present iff the button is runnable. */
+  derived: UdtDerivedQuery | null;
+  /** The derivation line, present iff runnable — which columns were wrapped
+   *  and which clauses were moved, for the log next to the run. */
+  logLine: string | null;
+}
+
+/**
+ * Should the result toolbar offer "View as geo", and may it run? The button is
+ * hidden only when it is irrelevant (not SQL Server, or the result has no udt
+ * columns); when it is relevant but cannot run, the reason comes back so the
+ * UI greys the button and explains — a blocked feature is shown, never hidden.
+ * wkb only: STAsBinary lands in the existing 0x-hex → parseWkbHex stack; a
+ * hierarchyid column fails server-side (Msg 195) and that error surfaces as
+ * any query error would.
+ */
+export function viewAsGeoAction(
+  engine: string | undefined,
+  columns: readonly ColumnLike[],
+  sourceSql: string | undefined,
+): ViewAsGeoAction {
+  const none: ViewAsGeoAction = { show: false, reason: null, derived: null, logLine: null };
+  if (engine !== 'sqlserver') return none;
+  if (udtColumnNames(columns).length === 0) return none;
+  if (!sourceSql || sourceSql.trim() === '') {
+    return {
+      show: true,
+      reason: 'No originating statement — the derived query needs the SQL that produced this result.',
+      derived: null, logLine: null,
+    };
+  }
+  const r = buildUdtDerivedQuery(sourceSql, columns, 'wkb');
+  if (!r.ok) return { show: true, reason: r.reason, derived: null, logLine: null };
+  return { show: true, reason: null, derived: r.query, logLine: r.logLine };
+}

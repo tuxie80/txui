@@ -42,10 +42,16 @@ where
         NText => super::text::decode(src, None).await?,
         Image => super::image::decode(src).await?,
         // TxUI vendored patch — CLR UDTs (geometry, geography, hierarchyid,
-        // custom types) are length-prefixed binary on the wire (PLP at max
-        // length), exactly like varbinary; keep the raw serialization as
-        // Binary and let the caller decide how to render it.
-        Udt => super::binary::decode(src, len).await?,
+        // custom types) are length-prefixed binary on the wire; keep the raw
+        // serialization as Binary and let the caller decide how to render it.
+        // The value is ALWAYS partially length-prefixed (PLP), even when the
+        // column metadata declares a small max length (hierarchyid reports
+        // 892): verified against SQL Server 2022, which streams a small
+        // hierarchyid value as u64 length + data — decoding it as a
+        // u16-prefixed varbinary desyncs the token stream ("invalid token
+        // type 0" on the next token). Force the PLP path, ignoring the
+        // declared max length.
+        Udt => super::binary::decode(src, 0xffff).await?,
         // TxUI vendored patch — an unsupported type must be a query error,
         // never a panic (panic=abort makes a decode panic a process crash).
         t => {

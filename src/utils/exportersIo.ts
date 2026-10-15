@@ -4,14 +4,16 @@
  * node-testable per the repo's utils contract; this is the half that is
  * allowed to import Tauri.
  */
-import { defaultEol } from './platform.ts';
+import { basename, defaultEol } from './platform.ts';
 import { getPref, PREFS } from '../store/preferences.ts';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import {
   FORMAT_EXT, FORMAT_LABELS, serialize, toTsv, withEol,
   type Cells, type ExportFormat,
 } from './exporters.ts';
+import { geoExportStatus, type GeoExportEvent } from './duckdbGeoExport.ts';
+import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity.ts';
 
 /** Open native save dialog and write `contents`; returns saved path or null if cancelled. */
 export async function saveTextAs(
@@ -140,5 +142,23 @@ export async function exportGeoParquetServer(
     filters: [{ name: 'GeoParquet', extensions: ['parquet'] }],
   });
   if (!path) return null;
-  return invoke<GeoParquetExportOutcome>('duckdb_export_geoparquet', { sessionId, sql, outPath: path });
+  // The COPY can run long and the engine reports no row percentage, so the
+  // running-tasks indicator shows the phase and the output file's growth —
+  // registered under the session (not one tab): the export outlives its tab.
+  const activityKey = panelTabKey(sessionId, 'geoparquet-export');
+  const chan = new Channel<GeoExportEvent>();
+  chan.onmessage = ev => {
+    setActivity(activityKey, {
+      id: 'export',
+      label: `GeoParquet export · ${basename(path)}`,
+      detail: geoExportStatus(ev),
+      survives: true,
+    });
+  };
+  try {
+    return await invoke<GeoParquetExportOutcome>('duckdb_export_geoparquet',
+      { sessionId, sql, outPath: path, onEvent: chan });
+  } finally {
+    clearTabActivities(activityKey);
+  }
 }

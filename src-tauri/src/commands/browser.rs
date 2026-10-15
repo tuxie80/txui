@@ -242,7 +242,7 @@ pub async fn browse_table(
                         r.geo_bbox = crate::db::parquet::dataset_geo_bbox(d);
                         r
                     })
-                    .map_err(Into::into)
+                    .map_err(|e| crate::db::parquet::friendly_dataset_error(e).into())
             }
             crate::db::parquet::ParquetSource::Single(_) => {
                 executed = if params.filters.is_empty() && params.sort.is_empty() {
@@ -418,7 +418,8 @@ pub async fn column_value_counts(
             crate::db::parquet::ParquetSource::Dataset(d) => {
                 let q = build_value_counts("dataset", &column, &filters, limit, true, &Default::default());
                 crate::db::duckdb::execute_params(&d.duck, &q.sql, &q.values)
-                    .await.map_err(Into::into)
+                    .await
+                    .map_err(|e| crate::db::parquet::friendly_dataset_error(e).into())
             }
         },
         // One $group pipeline would answer this, but v1 keeps the popover

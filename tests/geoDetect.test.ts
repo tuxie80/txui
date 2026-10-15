@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cellGeometry, detectGeoColumns } from '../src/utils/geoDetect.ts';
+import { cellGeometry, detectGeoColumns, mappableResult } from '../src/utils/geoDetect.ts';
 
 // A little-endian WKB POINT(14.4378 50.0755) hex string, as PostGIS sends it.
 const POINT_HEX = (() => {
@@ -68,4 +68,29 @@ test('detectGeoColumns tolerates missing type names and sparse columns', () => {
   const rows = [[null, null], [null, null], ['x', POINT_HEX]];
   assert.deepEqual(detectGeoColumns(columns, rows), [{ name: 'g', index: 1 }]);
   assert.deepEqual(detectGeoColumns(columns, []), []);
+});
+
+test('mappableResult: two numeric columns suffice (lat/lon track)', () => {
+  const columns = [{ name: 'lat' }, { name: 'lon' }, { name: 'name' }];
+  const rows = [[50.1, 14.4, 'a'], [50.2, 14.5, 'b']];
+  assert.equal(mappableResult(columns, rows), true);
+});
+
+test('mappableResult: one geometry column suffices on its own', () => {
+  // SELECT id, name, geom — one numeric column, so the old gate said "chart".
+  const columns = [{ name: 'id' }, { name: 'name' }, { name: 'geom' }];
+  const rows = [[1, 'Midtown', POINT_HEX], [2, 'FiDi', POINT_HEX]];
+  assert.equal(mappableResult(columns, rows), true);
+});
+
+test('mappableResult: typed ClickHouse geometry counts via the type gate', () => {
+  const columns = [{ name: 'pt', typeName: 'Point' }];
+  assert.equal(mappableResult(columns, [[[14.4, 50.1]]]), true);
+  // …but an ungated bare array proves nothing.
+  assert.equal(mappableResult([{ name: 'pair' }], [[[14.4, 50.1]]]), false);
+});
+
+test('mappableResult: empty and ordinary results are not mappable', () => {
+  assert.equal(mappableResult([{ name: 'a' }], []), false);
+  assert.equal(mappableResult([{ name: 'name' }, { name: 'city' }], [['x', 'y']]), false);
 });

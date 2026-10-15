@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildUdtDerivedQuery, stripTrailingSemis, udtColumnNames,
+  buildUdtDerivedQuery, stripTrailingSemis, udtColumnNames, viewAsGeoAction,
   type ColumnLike,
 } from '../src/utils/mssqlUdt.ts';
 
@@ -242,4 +242,49 @@ test('stripTrailingSemis handles trivia tails', () => {
   assert.equal(stripTrailingSemis('SELECT 1;'), 'SELECT 1');
   assert.equal(stripTrailingSemis('SELECT 1 ; ; \n\t'), 'SELECT 1');
   assert.equal(stripTrailingSemis('SELECT 1'), 'SELECT 1');
+});
+
+// ── viewAsGeoAction — the grid-toolbar gate ──────────────────────────────────
+// Hidden only when irrelevant (wrong engine, no udt columns); relevant but
+// unrunnable → shown with the reason, so the UI greys and explains.
+
+const SQL = 'SELECT id, geom FROM dbo.roads';
+const GEO_COLS = [col('id', 'int'), col('geom', 'udt')];
+
+test('hidden on any engine but sqlserver, even with udt columns', () => {
+  for (const engine of ['mysql', 'postgres', undefined]) {
+    const a = viewAsGeoAction(engine, GEO_COLS, SQL);
+    assert.equal(a.show, false);
+    assert.equal(a.derived, null);
+  }
+});
+
+test('hidden on sqlserver when the result has no udt columns', () => {
+  const a = viewAsGeoAction('sqlserver', [col('id', 'int'), col('name', 'nvarchar')], SQL);
+  assert.equal(a.show, false);
+});
+
+test('runnable: sqlserver + udt columns + originating statement', () => {
+  const a = viewAsGeoAction('sqlserver', GEO_COLS, SQL);
+  assert.equal(a.show, true);
+  assert.equal(a.reason, null);
+  assert.ok(a.derived);
+  assert.match(a.derived.sql, /txui_geo\.\[geom\]\.STAsBinary\(\) AS \[geom\]/);
+  assert.match(a.logLine ?? '', /Derived query: 1 udt column \(geom\)/);
+});
+
+test('blocked without an originating statement — greyed with the reason', () => {
+  for (const src of [undefined, '', '   ']) {
+    const a = viewAsGeoAction('sqlserver', GEO_COLS, src);
+    assert.equal(a.show, true);
+    assert.match(a.reason ?? '', /No originating statement/);
+    assert.equal(a.derived, null);
+  }
+});
+
+test('blocked when the builder refuses — the builder reason is passed through', () => {
+  const a = viewAsGeoAction('sqlserver', GEO_COLS, 'SELECT 1; SELECT 2');
+  assert.equal(a.show, true);
+  assert.match(a.reason ?? '', /multi-statement batch/);
+  assert.equal(a.derived, null);
 });

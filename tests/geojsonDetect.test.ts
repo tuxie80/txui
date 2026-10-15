@@ -90,8 +90,101 @@ test('arbitrary objects and documents never match', () => {
   assert.equal(parseGeoJson({ type: 'Point', coordinates: [1, 'x'] }), null);
   assert.equal(parseGeoJson({ type: 'Point', coordinates: [1, NaN] }), null);
   assert.equal(parseGeoJson({ type: 'point', coordinates: [1, 2] }), null);  // case-sensitive
-  // Feature wrappers are out of scope — a Feature's payload is properties.
-  assert.equal(parseGeoJson({ type: 'Feature', geometry: { type: 'Point', coordinates: [1, 2] } }), null);
+});
+
+// ── Feature / FeatureCollection wrappers are unwrapped ──
+
+test('a Feature unwraps to its geometry, properties ignored', () => {
+  const f = parseGeoJson({
+    type: 'Feature',
+    properties: { name: 'Prague', population: 1_300_000 },
+    geometry: { type: 'Point', coordinates: [14.4378, 50.0755] },
+  });
+  assert.deepEqual(f, { type: 'Point', srid: null, coordinates: { x: 14.4378, y: 50.0755 } });
+
+  // The same payload arrives as a string from a JSON column.
+  const s = JSON.stringify({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [1, 2] } });
+  assert.equal(parseGeoJson(s)?.type, 'Point');
+});
+
+test('a Feature with a null or invalid geometry has no drawable shape', () => {
+  assert.equal(parseGeoJson({ type: 'Feature', properties: { a: 1 }, geometry: null }), null);
+  assert.equal(parseGeoJson({ type: 'Feature', properties: {} }), null);            // missing
+  assert.equal(parseGeoJson({ type: 'Feature', geometry: 'nope' }), null);
+  assert.equal(parseGeoJson({ type: 'Feature', geometry: { type: 'Point' } }), null);
+  // A Feature wrapping a Feature is invalid GeoJSON — refused, not unwrapped twice.
+  assert.equal(parseGeoJson({
+    type: 'Feature',
+    geometry: { type: 'Feature', geometry: { type: 'Point', coordinates: [1, 2] } },
+  }), null);
+});
+
+test('a FeatureCollection draws as a GeometryCollection of its members', () => {
+  const homogeneous = parseGeoJson({
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [1, 2] } },
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [3, 4] } },
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [5, 6] } },
+    ],
+  });
+  assert.equal(homogeneous?.type, 'GeometryCollection');
+  assert.equal(homogeneous?.geometries.length, 3);
+  assert.ok(homogeneous?.geometries.every(g => g.type === 'Point'));
+
+  const mixed = parseGeoJson({
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [1, 2] } },
+      { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0], [1, 1]] } },
+    ],
+  });
+  assert.equal(mixed?.type, 'GeometryCollection');
+  assert.equal(mixed?.geometries.length, 2);
+  assert.equal(mixed?.geometries[1].type, 'LineString');
+});
+
+test('null-geometry members are skipped; an empty remainder matches nothing', () => {
+  const sparse = parseGeoJson({
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: {}, geometry: null },
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [1, 2] } },
+    ],
+  });
+  assert.equal(sparse?.type, 'GeometryCollection');
+  assert.equal(sparse?.geometries.length, 1);
+
+  assert.equal(parseGeoJson({ type: 'FeatureCollection', features: [] }), null);
+  assert.equal(parseGeoJson({
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: {}, geometry: null },
+      { type: 'Feature', properties: {}, geometry: null },
+    ],
+  }), null);
+  // And the strict rules still hold inside the wrapper.
+  assert.equal(parseGeoJson({ type: 'FeatureCollection' }), null);                    // no features
+  assert.equal(parseGeoJson({ type: 'FeatureCollection', features: [42] }), null);
+  assert.equal(parseGeoJson({
+    type: 'FeatureCollection',
+    features: [{ type: 'Point', coordinates: [1, 2] }],                               // members must be Features
+  }), null);
+  assert.equal(parseGeoJson({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: 'nope' } }],
+  }), null);
+});
+
+test('a deeply nested Feature bomb hits the depth guard, not the stack', () => {
+  let v: unknown = { type: 'Point', coordinates: [1, 2] };
+  for (let i = 0; i < 40; i++) v = { type: 'Feature', properties: {}, geometry: v };
+  assert.equal(parseGeoJson(v), null);
+  v = { type: 'Point', coordinates: [1, 2] };
+  for (let i = 0; i < 40; i++) {
+    v = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: v }] };
+  }
+  assert.equal(parseGeoJson(v), null);
 });
 
 test('malformed nesting is rejected at every depth', () => {

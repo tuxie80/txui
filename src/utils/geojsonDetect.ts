@@ -17,10 +17,14 @@
  *    geometry, and neither must `{ type: 'Point', coordinates: 'nope' }`.
  *  - LENIENT on extras: `bbox`, `crs`, foreign members are ignored, the way
  *    RFC 7946 permits.
- *  - NOT detected: `Feature` / `FeatureCollection` wrappers. A Feature's
- *    payload is `properties`, not a drawable shape, and unwrapping it here
- *    would hide which part of the document was drawn. (Deferred — see
- *    docs/plans/plan-geospatial.md round 2.)
+ *  - `Feature` / `FeatureCollection` wrappers are UNWRAPPED: a Feature draws
+ *    its `geometry` (`properties` is ignored — the Geometry struct has no
+ *    slot for it, same lenient-on-extras rule as bbox/crs), and a
+ *    FeatureCollection draws as a GeometryCollection of its members'
+ *    geometries. A Feature with a null geometry has no drawable shape (RFC
+ *    7946) and matches nothing; inside a collection, null-geometry members
+ *    are skipped, and a collection left with none matches nothing. A
+ *    Feature nested inside a Feature is invalid GeoJSON and is refused.
  *
  * `srid` is deliberately left null rather than claimed as 4326: RFC 7946 says
  * GeoJSON is WGS 84, but non-compliant producers exist, and `null` lets
@@ -69,8 +73,36 @@ function asRings(v: unknown): Position[][] | null {
   return out;
 }
 
-function fromObject(v: Record<string, unknown>, depth: number): Geometry | null {
+function fromObject(v: Record<string, unknown>, depth: number, wrapperOk = true): Geometry | null {
   if (depth > 8) return null;   // a hostile nesting bomb is not geometry
+  // Wrappers are only legal where a document is expected — a geometry slot
+  // (Feature.geometry, GeometryCollection.geometries) must hold a geometry,
+  // so the recursion below refuses a Feature nested inside a Feature, which
+  // is invalid GeoJSON.
+  if (wrapperOk && v.type === 'Feature') {
+    // RFC 7946: a null geometry is a Feature without a shape — not drawable.
+    // `properties` is ignored — the Geometry struct has no slot for it.
+    const g = v.geometry;
+    if (g === null || typeof g !== 'object' || Array.isArray(g)) return null;
+    return fromObject(g as Record<string, unknown>, depth + 1, false);
+  }
+  if (wrapperOk && v.type === 'FeatureCollection') {
+    if (!Array.isArray(v.features)) return null;
+    const out: Geometry[] = [];
+    for (const f of v.features) {
+      if (f === null || typeof f !== 'object' || Array.isArray(f)) return null;
+      const feat = f as Record<string, unknown>;
+      if (feat.type !== 'Feature') return null;
+      const g = feat.geometry;
+      if (g === null) continue;   // a null-geometry member contributes nothing
+      if (typeof g !== 'object' || Array.isArray(g)) return null;
+      const sub = fromObject(g as Record<string, unknown>, depth + 1, false);
+      if (!sub) return null;
+      out.push(sub);
+    }
+    if (out.length === 0) return null;
+    return { type: 'GeometryCollection', srid: null, geometries: out };
+  }
   if (typeof v.type !== 'string' || !TYPES.has(v.type)) return null;
   const srid = null;
   switch (v.type) {
@@ -115,7 +147,7 @@ function fromObject(v: Record<string, unknown>, depth: number): Geometry | null 
       const out: Geometry[] = [];
       for (const g of v.geometries) {
         if (g === null || typeof g !== 'object' || Array.isArray(g)) return null;
-        const sub = fromObject(g as Record<string, unknown>, depth + 1);
+        const sub = fromObject(g as Record<string, unknown>, depth + 1, false);
         if (!sub) return null;
         out.push(sub);
       }

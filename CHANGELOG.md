@@ -29,7 +29,14 @@ this project follows semantic versioning.
   server-side via `COPY … (FORMAT PARQUET)` (sqlguard read-guard, write-once
   paths, spatial probed server-side); the Copy/Export menu entry is
   greyed-with-reason when spatial is off. Verified by reopening the produced
-  file through the Parquet engine.
+  file through the Parquet engine. The entry also appears in **DuckDB
+  data-browser tabs** — the export SQL is rebuilt from the browse target,
+  filters and sort *without* the page's `LIMIT/OFFSET`, so the whole filtered
+  browse exports, not the visible page. The COPY reports over a Tauri
+  `Channel` (`validating → running → progress{bytes_written} → done/error`,
+  file size polled every 250 ms, surfaced in the status-bar running-tasks
+  indicator) — honest liveness, no fake row percentages: duckdb-rs exposes
+  no query-progress API. The export still re-runs the statement.
 - **DuckDB spatial support.** GEOMETRY columns labelled via logical type; new
   command **`duckdb_enable_spatial`** (LOAD first — free and offline when
   cached — INSTALL only if absent; `networkError` classifies download
@@ -43,23 +50,33 @@ this project follows semantic versioning.
   against PostGIS 3.6 / PG 17. SchemaTree badges spatial columns with SRID
   and GiST/no-index from `geometry_columns`/`geography_columns`.
 - **MongoDB GeoJSON and ClickHouse geo arrays on the map.** Strict RFC 7946
-  GeoJSON detection (objects and JSON strings; Feature wrappers deliberately
-  out of scope) and ClickHouse `Point`/`Ring`/`Polygon`/`MultiPolygon`
-  decoding gated solely on the server-reported `type_name`.
+  GeoJSON detection (objects and JSON strings) and ClickHouse
+  `Point`/`Ring`/`Polygon`/`MultiPolygon` decoding gated solely on the
+  server-reported `type_name`. `Feature`/`FeatureCollection` wrappers are
+  unwrapped: a Feature draws its `geometry` (properties ignored — the
+  Geometry struct has no slot), a FeatureCollection draws as a
+  GeometryCollection; a Feature nesting a Feature is invalid and refused.
 - **Redis "view as geo".** New command **`redis_geo_points`** (capped at
   5,000 members, GEOPOS in batches, missing coordinates counted honestly) and
   a `⬡ View as geo` toggle in the Redis browser with its own graticule
   scatter canvas. The UI carries the caveat the server does not: GEOPOS
   decodes *any* zset score as a geohash, so a leaderboard answers with edge
   coordinates — detection stays user-initiated.
-- **SQL Server UDT groundwork.** `buildUdtDerivedQuery` (pure, 24 tests)
-  wraps a result's geometry/geography columns as `STAsBinary()` hex — feeding
-  the existing WKB stack — with T-SQL-legal wrapping (TOP/OPTION/ORDER BY
-  handled, `wkt` fallback for hierarchyid). Live test written, pending the
-  next MSSQL container session. tiberius is now **vendored**
+- **SQL Server "⬡ View as geo".** A result with geometry/geography UDT
+  columns (the `<udt: N bytes>` placeholders) gets a result-toolbar button
+  that wraps them as `STAsBinary()` hex via `buildUdtDerivedQuery` (pure,
+  29 tests) — feeding the existing WKB stack — with T-SQL-legal wrapping
+  (TOP/OPTION/ORDER BY handled, `wkt` fallback for hierarchyid). The derived
+  query opens **in a new tab** through the same honestly-logged derived-query
+  path as PG's WGS 84 button; the button is greyed-with-reason (never
+  hidden) when the statement can't be wrapped. **Live-verified against a
+  SQL Server 2022 container: the full MSSQL live suite — 28 tests across
+  driver, tuner, datagen, playground, import, routines, watch and quality —
+  is green**, including the derived-query shape the button emits. tiberius
+  is now **vendored**
   (`src-tauri/vendor/tiberius/`) with UDT and sql_variant panic guards.
 
-Two new Tauri commands — **171 total**. Frontend 4,572 tests, backend 795.
+Two new Tauri commands — **171 total**. Frontend 4,588 tests, backend 798.
 
 ### Fixed
 
@@ -67,6 +84,27 @@ Two new Tauri commands — **171 total**. Frontend 4,572 tests, backend 795.
   axis swap above.
 - The grid badge now recognises GeoPackage and GaiaBinary containers, not
   just bare WKB/EWKB headers.
+- A Parquet dataset mixing GeoParquet members with bare-BLOB members (or a
+  `geo` footer missing `geometry_types`) failed with raw DuckDB engine prose
+  at query time. `friendly_dataset_error` now matches that error family and
+  answers with a named, actionable message — query the members separately or
+  rewrite the plain files with GeoParquet metadata — keeping the raw engine
+  text in the error chain.
+- A geometry-only result (one numeric column plus the geometry, e.g.
+  `SELECT id, name, geom …`) opened the Graphics tab on a chart of nothing:
+  the map/chart default gate counted only numeric columns. `mappableResult`
+  (`utils/geoDetect.ts`, pure + tested) now also honours a decodable geometry
+  column, so such results open on the map.
+- First live contact with a real SQL Server 2022 found the vendored
+  tiberius UDT guard mis-framing **hierarchyid** values: SQL Server streams
+  *every* UDT value as PLP (u64 length prefix) regardless of the declared
+  max length, so taking the fixed-size u16 path for hierarchyid (maxlen 892)
+  desynced the token stream and any raw `SELECT` over a
+  geometry/geography/hierarchyid column died with `invalid token type 0`.
+  The vendored `var_len.rs` UDT arm now always takes the PLP path
+  (matching SqlClient on TDS 7.2+); NULL UDTs still ride the PLP-null
+  sentinel, and the failure mode for anything unforeseen stays a clean
+  per-query error, never a `panic=abort`.
 
 ## [1.2.0] - 2026-10-13
 
