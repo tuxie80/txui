@@ -175,7 +175,7 @@
       "tuner": true,
       "erDiagram": false,
       "dataGen": false,
-      "csvImport": false,
+      "csvImport": true,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -185,7 +185,7 @@
     "sqlite": {
       "sql": true,
       "transactions": true,
-      "databaseSelect": true,
+      "databaseSelect": false,
       "processList": false,
       "serverInfo": false,
       "sqlDba": false,
@@ -219,7 +219,7 @@
     "parquet": {
       "sql": true,
       "transactions": false,
-      "databaseSelect": true,
+      "databaseSelect": false,
       "processList": false,
       "serverInfo": false,
       "sqlDba": false,

@@ -557,7 +557,7 @@ const html = `<!doctype html>
     ${settingsSection()}
     ${troubleshootingSection()}
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v${V} · ${inv.counts.panels} panels · ${inv.counts.commands} commands · ${inv.counts.dbaViews} DBA views · ${inv.counts.engines} engines. This help is generated directly from the application source, so it always reflects the shipped version.</footer>
+    <footer class="foot">TxUI v${V} · ${inv.counts.panels} panels · ${inv.counts.commands} commands · ${inv.counts.dbaViews} DBA views · ${inv.counts.engines} engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>${JS}</script>
