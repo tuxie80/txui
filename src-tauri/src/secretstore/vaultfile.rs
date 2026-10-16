@@ -48,6 +48,27 @@ const KDF_LANES: u32 = 1;
 pub const PRODUCTION_KDF_MEM_KIB: u32 = 64 * 1024;
 pub const PRODUCTION_KDF_PASSES: u32 = 3;
 
+/// Decode-time caps on the KDF cost read from a vault header. The header is
+/// authenticated only by the AEAD tag — checked AFTER derivation — so until
+/// that check every value in it is attacker-controlled, and an uncapped cost
+/// would let a tampered file force a multi-GiB allocation or a near-endless
+/// derivation at unlock.
+const MAX_DECODE_KDF_MEM_KIB: u32 = 1024 * 1024; // 1 GiB
+const MAX_DECODE_KDF_PASSES: u32 = 10;
+
+/// The header's KDF cost, clamped to the decode-time caps. Clamping can only
+/// make the derivation cheaper than the header demands, never weaker than a
+/// honestly written file: if the header was tampered with, the derived key is
+/// wrong and the AEAD tag check (whose AAD carries the header's ORIGINAL
+/// values) rejects the file — the tag remains the actual authentication.
+fn bounded_kdf_params(mem: u32, passes: u32, lanes: u32) -> (u32, u32, u32) {
+    (
+        mem.min(MAX_DECODE_KDF_MEM_KIB),
+        passes.min(MAX_DECODE_KDF_PASSES),
+        lanes.min(KDF_LANES),
+    )
+}
+
 /// Everything the app persists. Encrypted as one unit — connection details are
 /// not "less secret" than passwords: hostnames, users, and which entries are
 /// tagged prod are exactly what someone with your laptop would want first.
@@ -227,7 +248,10 @@ pub fn decode_with_key(text: &str, password: &str) -> Result<(Contents, VaultKey
         bail!("the vault's contents are truncated");
     }
 
-    let key = derive(password, &salt, e.kdf_mem_kib, e.kdf_passes, e.kdf_lanes)?;
+    // Clamp BEFORE deriving: the header is not authenticated until the AEAD
+    // check below, so at this point its KDF cost is attacker-controlled.
+    let (mem, passes, lanes) = bounded_kdf_params(e.kdf_mem_kib, e.kdf_passes, e.kdf_lanes);
+    let key = derive(password, &salt, mem, passes, lanes)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
     let (nonce, ct) = blob.split_at(12);
     let aad = header_aad(e.format, &salt, e.kdf_mem_kib, e.kdf_passes, e.kdf_lanes);
@@ -400,6 +424,40 @@ mod tests {
         raw[last] ^= 0xff;
         e.ciphertext = base64::engine::general_purpose::STANDARD.encode(&raw);
         assert!(decode(&serde_json::to_string(&e).unwrap(), "a-good-password").is_err());
+    }
+
+    /// A tampered header must not get to pick the KDF cost: the caps bound the
+    /// derivation, and the AEAD tag (over the header's ORIGINAL values) still
+    /// does the rejecting.
+    #[test]
+    fn a_tampered_kdf_cost_is_clamped_then_rejected() {
+        assert_eq!(
+            bounded_kdf_params(u32::MAX, u32::MAX, u32::MAX),
+            (MAX_DECODE_KDF_MEM_KIB, MAX_DECODE_KDF_PASSES, KDF_LANES));
+        // In-bounds values pass through untouched.
+        assert_eq!(
+            bounded_kdf_params(KDF_MEM_KIB, KDF_PASSES, KDF_LANES),
+            (KDF_MEM_KIB, KDF_PASSES, KDF_LANES));
+
+        let text = encode(&sample(), "a-good-password").unwrap();
+
+        // Absurd passes: without the clamp this is a near-endless derivation;
+        // with it the file is simply rejected (mem stays at the test cost, so
+        // this runs fast).
+        let mut e: Envelope = serde_json::from_str(&text).unwrap();
+        e.kdf_passes = u32::MAX;
+        let err = decode(&serde_json::to_string(&e).unwrap(), "a-good-password")
+            .unwrap_err().to_string();
+        assert!(err.contains("wrong password"), "{err}");
+
+        // Lanes tampered 1 → 64: the clamp makes the derivation identical to
+        // the honest one, so this rejection can only come from the AAD
+        // carrying the original header values.
+        let mut e: Envelope = serde_json::from_str(&text).unwrap();
+        e.kdf_lanes = 64;
+        let err = decode(&serde_json::to_string(&e).unwrap(), "a-good-password")
+            .unwrap_err().to_string();
+        assert!(err.contains("wrong password"), "{err}");
     }
 
     #[test]

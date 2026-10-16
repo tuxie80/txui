@@ -139,6 +139,23 @@ test('childElements counts depth — a nested element does not close its parent'
   assert.deepEqual(childElements(top[0].inner, 'A').map(e => e.attrs.id), ['2']);
 });
 
+test('a start tag with no closing > anywhere is simply not matched', () => {
+  // Greedy-and-bounded runs to the next `>` once; the old lazy form retried
+  // its tail at every character (O(k²) on a malformed tag). The well-formed
+  // element before the breakage still parses.
+  const top = childElements('<A id="1"/><A id="2" broken="no close', 'A');
+  assert.deepEqual(top.map(e => e.attrs.id), ['1']);
+});
+
+test('a / inside a quoted attribute value is not a self-close marker', () => {
+  // `<A href="/x">` is an OPEN tag (the / is data); only a bare `/>` closes.
+  const mixed = childElements('<A href="/x"/><A href="/y">body</A>', 'A');
+  assert.equal(mixed.length, 2);
+  assert.equal(mixed[0].inner, '');
+  assert.equal(mixed[1].inner, 'body');
+  assert.deepEqual(mixed.map(e => e.attrs.href), ['/x', '/y']);
+});
+
 test('XML entities in the statement text are decoded once, not twice', () => {
   const p = parseMssqlPlan(ESTIMATED);
   // The summary is capped at 120 characters, so the fixture's &apos; falls off

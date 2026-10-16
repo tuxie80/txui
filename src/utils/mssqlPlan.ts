@@ -77,12 +77,19 @@ interface Element {
  */
 export function childElements(xml: string, name: string): Element[] {
   const out: Element[] = [];
-  const open = new RegExp(`<${name}(\\s[^>]*?)?(/?)>`, 'g');
+  // Greedy and bounded by the next `>`: the lazy `(\s[^>]*?)?(/?)>` retried
+  // its tail pattern at every character when no closing `>` remained — O(k²)
+  // on a malformed tag. The self-close marker is read off the matched text
+  // instead: `<x a="b"/>` ends in `/>`, `<x a="/">` (a `/` inside a quoted
+  // value) does not — exactly what the lazy form's shortest-match preference
+  // decided.
+  const open = new RegExp(`<${name}(?=[\\s/>])[^>]*>`, 'g');
   let m: RegExpExecArray | null;
   let i = 0;
   while ((m = matchFrom(open, xml, i)) !== null) {
-    const attrText = m[1] ?? '';
-    if (m[2] === '/') {
+    const selfClose = m[0].endsWith('/>');
+    const attrText = m[0].slice(1 + name.length, selfClose ? -2 : -1);
+    if (selfClose) {
       out.push({ attrs: attrs(attrText), inner: '' });
       i = m.index + m[0].length;
       continue;
@@ -102,7 +109,7 @@ function matchFrom(re: RegExp, s: string, from: number): RegExpExecArray | null 
 
 /** Index of the `</name>` that closes the element whose body starts at `from`. */
 function matchingEnd(xml: string, name: string, from: number): number {
-  const tag = new RegExp(`<(/?)${name}(\\s[^>]*?)?(/?)>`, 'g');
+  const tag = new RegExp(`<(/?)${name}(?=[\\s/>])[^>]*>`, 'g');
   let depth = 1;
   let m: RegExpExecArray | null;
   tag.lastIndex = from;
@@ -110,7 +117,7 @@ function matchingEnd(xml: string, name: string, from: number): number {
     if (m[1] === '/') {
       depth--;
       if (depth === 0) return m.index;
-    } else if (m[3] !== '/') {
+    } else if (!m[0].endsWith('/>')) {
       depth++;
     }
   }
@@ -219,13 +226,13 @@ function warningFlags(inner: string): string[] {
 function ownBody(inner: string): string {
   let out = '';
   let i = 0;
-  const open = /<RelOp(\s[^>]*?)?(\/?)>/g;
+  const open = /<RelOp(?=[\s/>])[^>]*>/g;
   for (;;) {
     open.lastIndex = i;
     const m = open.exec(inner);
     if (!m) break;
     out += inner.slice(i, m.index);
-    if (m[2] === '/') { i = m.index + m[0].length; continue; }
+    if (m[0].endsWith('/>')) { i = m.index + m[0].length; continue; }
     const bodyStart = m.index + m[0].length;
     i = matchingEnd(inner, 'RelOp', bodyStart) + '</RelOp>'.length;
   }

@@ -36,6 +36,7 @@ import type { SinkAction } from '../utils/txShellPipeline';
 import { serialize, toInserts } from '../utils/exporters';
 import type { ExportFormat as ExporterFormat } from '../utils/exporters';
 import { toXlsx } from '../utils/xlsx';
+import { bytesToBase64 } from '../utils/base64';
 
 interface OsOutput {
   stdout: string; stderr: string; code: number | null;
@@ -145,9 +146,11 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         rowsAffected: (r: QueryResult) => (r.rows_affected == null ? null : Number(r.rows_affected)),
         run: () => invoke<QueryResult>('execute_query', {
           sessionId: session.sessionId,
+          connectionId: session.connectionId,
+          engine: session.engine,
           sql,
-          limit: getPref(PREFS.defaultLimit) || null,
-          tabId: null,
+          maxRows: getPref(PREFS.defaultLimit) || null,
+          tabId: 0,
           includeWarnings: false,
         }),
       });
@@ -155,7 +158,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
       say(errorDisplay(e), 'err');
       return null;
     }
-  }, [session.sessionId, session.engine, say]);
+  }, [session.sessionId, session.connectionId, session.engine, say]);
 
   const runSql = useCallback(async (sql: string) => {
     const t0 = performance.now();
@@ -353,8 +356,11 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
             sessionId: target, engine: session.engine,
             tab: '❯ TxShell', source: 'shell', statement: stmt,
             run: () => invoke('execute_query', {
-              sessionId: target, sql: stmt,
-              limit: null, tabId: null, includeWarnings: false,
+              sessionId: target,
+              connectionId: session.connectionId,
+              engine: session.engine,
+              sql: stmt,
+              tabId: 0, includeWarnings: false,
             }),
           });
         }
@@ -369,8 +375,11 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
             sessionId: target, engine: session.engine,
             tab: '❯ TxShell', source: 'shell', statement: 'ROLLBACK',
             run: () => invoke('execute_query', {
-              sessionId: target, sql: 'ROLLBACK',
-              limit: null, tabId: null, includeWarnings: false,
+              sessionId: target,
+              connectionId: session.connectionId,
+              engine: session.engine,
+              sql: 'ROLLBACK',
+              tabId: 0, includeWarnings: false,
             }),
           });
           say(`Insert failed and was rolled back: ${errorDisplay(e)}`, 'err');
@@ -389,7 +398,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         if (sink.kind === 'append') {
           return say('xlsx cannot be appended to — use `save` instead.', 'err');
         }
-          await invoke('write_binary_file', { path: file, contents: [...toXlsx(names, cells)] });
+          await invoke('write_binary_file', { path: file, contentsBase64: bytesToBase64(toXlsx(names, cells)) });
       } else {
         const text = serialize(TO_EXPORTER[sink.format!], names, cells, 'result', session.engine);
         if (sink.kind === 'append') {
@@ -409,7 +418,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
     } catch (e) {
       say(`Could not write ${file}: ${errorDisplay(e)}`, 'err');
     }
-  }, [push, say, session.sessionId, session.engine, openSessions]);
+  }, [push, say, session.sessionId, session.connectionId, session.engine, openSessions]);
 
   /**
    * Run a statement on every connection matching a pattern.

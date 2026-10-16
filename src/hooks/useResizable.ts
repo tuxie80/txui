@@ -23,13 +23,28 @@ export function useResizable(
     e.preventDefault();
     const start = axis === 'x' ? e.clientX : e.clientY;
     const startSize = sizeRef.current;
+    // One state commit per animation frame, holding the latest size (the
+    // FastGrid scroll handler's pattern): mousemoves arrive faster than
+    // frames, and every commit re-renders the whole workspace — committing
+    // per event spends the frame budget several times over for the duration
+    // of the drag.
+    let raf = 0;
     const onMove = (ev: MouseEvent) => {
       const delta = ((axis === 'x' ? ev.clientX : ev.clientY) - start) * (invert ? -1 : 1);
       const next = Math.min(max, Math.max(min, startSize + delta));
       sizeRef.current = next;
-      setSize(next);
+      if (!raf) {
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          setSize(sizeRef.current);
+        });
+      }
     };
     const onUp = () => {
+      // The exact final size lands synchronously — a coalesced frame must
+      // never be what persists to localStorage.
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      setSize(sizeRef.current);
       try { localStorage.setItem(storageKey, String(Math.round(sizeRef.current))); } catch { /* quota */ }
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);

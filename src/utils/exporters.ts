@@ -274,6 +274,20 @@ export const FORMAT_LABELS: Record<ExportFormat, string> = {
   latex:    'LaTeX tabular',
 };
 
+/**
+ * Above this many rows a full-result copy confirms before serializing: the
+ * serializer runs synchronously on the main thread, and 100k rows × N
+ * columns is a multi-second UI freeze behind a shortcut (⌘C with a fat
+ * result) that is too easy to hit by accident.
+ */
+export const COPY_CONFIRM_ROWS = 10_000;
+
+/** The confirmDialog text for a copy larger than COPY_CONFIRM_ROWS. */
+export function copyConfirmMessage(rows: number): string {
+  return `Copy ${rows.toLocaleString('en-US')} rows to the clipboard?\n\n`
+    + 'Serializing a result this large pauses the UI while it runs.';
+}
+
 export function serialize(
   format: ExportFormat,
   columns: string[],

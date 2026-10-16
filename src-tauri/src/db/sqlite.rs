@@ -146,8 +146,12 @@ where
     let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(executor);
     let mut affected: Option<u64> = None;
     let mut first_row_ms: Option<u64> = None;
-    let mut columns: Vec<ColumnInfo> = vec![];
-    let mut data: Vec<Row> = Vec::new();
+    // Per-SET column capture, like the MySQL/PG drivers: a multi-statement
+    // string hands every set its own column metadata, and decoding a later
+    // set against the FIRST set's capture padded short rows with fabricated
+    // NULLs and silently dropped extra columns.
+    let mut sets: Vec<(Vec<ColumnInfo>, Vec<Row>)> = Vec::new();
+    let mut total_rows = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.try_next().await? {
         match item {
@@ -158,8 +162,8 @@ where
                 if first_row_ms.is_none() {
                     first_row_ms = Some(start.elapsed().as_millis() as u64);
                 }
-                if columns.is_empty() {
-                    columns = row
+                if sets.last().is_none_or(|(cols, _)| !same_columns(cols, &row)) {
+                    sets.push((row
                         .columns()
                         .iter()
                         .map(|c| ColumnInfo {
@@ -167,20 +171,40 @@ where
                             type_name: c.type_info().name().to_string(),
                             nullable: true,
                         })
-                        .collect();
+                        .collect(), Vec::new()));
                 }
-                if max_rows.is_some_and(|cap| data.len() >= cap) {
+                // The cap counts the TOTAL across sets — only the first
+                // columned set is returned (sqlserver.rs, same rule).
+                if max_rows.is_some_and(|cap| total_rows >= cap) {
                     truncated = true;
                     break;
                 }
-                data.push((0..columns.len()).map(|i| json_from_sqlite_row(&row, i)).collect());
+                let (columns, rows) = sets.last_mut().expect("a row always has a set");
+                rows.push((0..columns.len()).map(|i| json_from_sqlite_row(&row, i)).collect());
+                total_rows += 1;
             }
         }
     }
     let execution_ms = first_row_ms.unwrap_or_else(|| start.elapsed().as_millis() as u64);
 
-    if columns.is_empty() {
-        return Ok(QueryResult {
+    // The FIRST columned set is the answer — the frontend renders one grid. A
+    // later set with a DIFFERENT shape is dropped whole rather than folded
+    // into the first set's shape; an identical-shaped later set keeps
+    // appending, harmlessly (no set-boundary signal exists for it and the
+    // decode is identical). sqlserver.rs's result_from_sets made the same
+    // first-set choice.
+    match sets.into_iter().find(|(cols, _)| !cols.is_empty()) {
+        Some((columns, rows)) => Ok(QueryResult {
+            columns,
+            rows,
+            rows_affected: None,
+            execution_ms,
+            fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
+            warnings: vec![],
+            truncated,
+            geo_bbox: None,
+        }),
+        None => Ok(QueryResult {
             columns: vec![],
             rows: vec![],
             rows_affected: affected,
@@ -189,19 +213,18 @@ where
             warnings: vec![],
             truncated: false,
             geo_bbox: None,
-        });
+        }),
     }
+}
 
-    Ok(QueryResult {
-        columns,
-        rows: data,
-        rows_affected: None,
-        execution_ms,
-        fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
-        warnings: vec![],
-        truncated,
-        geo_bbox: None,
-    })
+/// Same column list as the current set's capture? Compared per row: a
+/// multi-set statement's later sets must never decode against an earlier
+/// set's metadata.
+fn same_columns(cols: &[ColumnInfo], row: &SqliteRow) -> bool {
+    let rc = row.columns();
+    cols.len() == rc.len()
+        && cols.iter().zip(rc.iter())
+            .all(|(a, c)| a.type_name == c.type_info().name() && a.name == c.name())
 }
 
 pub fn json_from_row_pub(row: &SqliteRow, i: usize) -> serde_json::Value {
@@ -483,6 +506,43 @@ mod tests {
         let under = execute_capped(&pool, "SELECT n FROM t LIMIT 5", Some(100)).await.unwrap();
         assert_eq!(under.rows.len(), 5);
         assert!(!under.truncated, "an under-cap result must not claim truncation");
+    }
+
+    /// A multi-statement string yields one set per statement, each with its
+    /// own column metadata. Decoding set 2 against set 1's capture used to pad
+    /// short rows with fabricated NULLs (indistinguishable from real ones) and
+    /// silently drop extra columns. Now every set gets its own capture and the
+    /// FIRST columned set is the answer — the shape sqlserver.rs's
+    /// result_from_sets chose for the same reason.
+    #[tokio::test]
+    async fn multi_statement_sets_never_share_column_metadata() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        // Second set has MORE columns — they must not bleed into the first.
+        let r = execute(&pool, "SELECT 1 AS a; SELECT 1 AS a, 2 AS b").await.unwrap();
+        assert_eq!(r.columns.len(), 1);
+        assert_eq!(r.columns[0].name, "a");
+        assert_eq!(r.rows, vec![vec![serde_json::json!(1)]]);
+
+        // Second set has FEWER — no fabricated NULL padding onto its rows.
+        let r = execute(&pool, "SELECT 1 AS a, 2 AS b; SELECT 3 AS a").await.unwrap();
+        assert_eq!(r.columns.len(), 2);
+        assert_eq!(r.rows, vec![vec![serde_json::json!(1), serde_json::json!(2)]]);
+
+        // Identical shapes carry no trustworthy set-boundary signal — sqlx
+        // reports none and the column lists compare equal — so such sets keep
+        // appending, the historical behavior, which is harmless precisely
+        // because the metadata (and therefore the decode) is the same.
+        let r = execute(&pool, "SELECT 1 AS a; SELECT 2 AS a").await.unwrap();
+        assert_eq!(r.rows, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]);
+
+        // DML before the SELECT: the write summaries stay out of the grid and
+        // the SELECT's set is still the answer.
+        let r = execute(&pool,
+            "CREATE TABLE t (n); INSERT INTO t VALUES (1), (2); SELECT n FROM t ORDER BY n")
+            .await.unwrap();
+        assert_eq!(r.columns.len(), 1);
+        assert_eq!(r.rows.len(), 2);
     }
 
     /// BLOBs render as lowercase hex up to 64 KiB — that is what makes

@@ -527,7 +527,9 @@ function TableDesignerInner({ session, schema: schemaProp, table, dialect, onClo
           connectionId: session.connectionId,
           engine: session.engine,
           sql: c.sql,
-          tabId: -1,
+          // A handle that can never be a real tab's (the Rust arg is u64 —
+          // the old -1 failed IPC deserialization before any SQL ran).
+          tabId: Number.MAX_SAFE_INTEGER,
         });
       }
       onApplied?.();

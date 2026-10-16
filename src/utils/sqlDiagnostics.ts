@@ -359,8 +359,10 @@ function ordinalOf(raw: string): number | null {
   return /^\d+$/.test(t) ? parseInt(t, 10) : null;
 }
 
-/** Keywords that terminate a GROUP/ORDER BY item list (top level). */
-const CLAUSE_ITEMS_END_RE = /^(having|order\s+by|limit|offset|union|window|fetch|for)\b/i;
+/** Keywords that terminate a GROUP/ORDER BY item list (top level). Sticky:
+ *  matching at lastIndex avoids a per-position slice of the rest of the
+ *  statement — the same trick tokenizeSql documents in sqlBeautify.ts. */
+const CLAUSE_ITEMS_END_RE = /(having|order\s+by|limit|offset|union|window|fetch|for)\b/iy;
 
 /**
  * The top-level GROUP BY / ORDER BY clauses of a (blanked) statement, each
@@ -371,14 +373,18 @@ const CLAUSE_ITEMS_END_RE = /^(having|order\s+by|limit|offset|union|window|fetch
 function groupOrderClauses(b: string): GroupOrderClause[] {
   const out: GroupOrderClause[] = [];
   const wordStart = (i: number) => i === 0 || !/[\w$]/.test(b[i - 1]);
-  const starts = /^(group\s+by|order\s+by)\b/i;
+  // Sticky regexes match AT lastIndex without copying the rest of the
+  // statement — `regex.exec(b.slice(i))` per word boundary made a pasted
+  // dump squiggle quadratically.
+  const starts = /(group\s+by|order\s+by)\b/iy;
   let depth = 0;
   let i = 0;
   while (i < b.length) {
     const c = b[i];
     if (c === '(') { depth++; i++; continue; }
     if (c === ')') { depth--; i++; continue; }
-    const kw = depth === 0 && wordStart(i) ? starts.exec(b.slice(i)) : null;
+    starts.lastIndex = i;
+    const kw = depth === 0 && wordStart(i) ? starts.exec(b) : null;
     if (!kw) { i++; continue; }
     const keyword = kw[1].toLowerCase().startsWith('group') ? 'group' as const : 'order' as const;
     const regionStart = i + kw[1].length;
@@ -390,7 +396,10 @@ function groupOrderClauses(b: string): GroupOrderClause[] {
       const cj = b[j];
       if (cj === '(') d++;
       else if (cj === ')') { if (d === 0) { regionEnd = j; break; } d--; }
-      else if (d === 0 && wordStart(j) && CLAUSE_ITEMS_END_RE.test(b.slice(j))) { regionEnd = j; break; }
+      else if (d === 0 && wordStart(j)) {
+        CLAUSE_ITEMS_END_RE.lastIndex = j;
+        if (CLAUSE_ITEMS_END_RE.test(b)) { regionEnd = j; break; }
+      }
     }
 
     // split the region into top-level comma items, keeping offsets

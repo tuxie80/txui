@@ -164,8 +164,18 @@ export function lintSql(sql: string): Finding[] {
         m[1].split(',').map(s => s.trim().split(/\s/)[0].replace(/[`"]/g, '')).filter(Boolean)
       );
       // find the SELECT list that owns this GROUP BY: nearest preceding select
-      const selIdx = lower.lastIndexOf('select', m.index);
-      const fromIdx = lower.indexOf('from', selIdx);
+      // — as a WHOLE word, so a column named `selection` does not count — and
+      // the whole-word FROM after it (`wherefrom` must not count either).
+      let selIdx = -1;
+      const selRe = /\bselect\b/g;
+      let sm: RegExpExecArray | null;
+      while ((sm = selRe.exec(lower)) !== null && sm.index <= m.index) selIdx = sm.index;
+      let fromIdx = -1;
+      if (selIdx !== -1) {
+        const fromRe = /\bfrom\b/g;
+        fromRe.lastIndex = selIdx + 6;
+        fromIdx = fromRe.exec(lower)?.index ?? -1;
+      }
       if (selIdx === -1 || fromIdx === -1 || fromIdx > m.index) continue;
       const selectList = b.slice(selIdx + 6, fromIdx);
       // bare columns: token.token or bare token not inside an aggregate call
@@ -266,10 +276,15 @@ export function lintSql(sql: string): Finding[] {
 
   // ── leading-wildcard LIKE ──
   {
-    const re = /\blike\s+'%/gi;
+    // Run on the BLANKED copy so a `like '%…'` inside a comment or string
+    // cannot false-positive. blank() erases string CONTENTS but keeps the
+    // quote characters, so `like '` here is a real LIKE followed by a real
+    // literal — the wildcard itself is then read back from the original text
+    // at the same offset (blank preserves length).
+    const re = /\blike\s+'/gi;
     let m: RegExpExecArray | null;
-    // run on the ORIGINAL sql (blank() erases string contents)
-    while ((m = re.exec(sql)) !== null) {
+    while ((m = re.exec(b)) !== null) {
+      if (sql[m.index + m[0].length] !== '%') continue;
       push('orange', "LIKE '%…' — leading wildcard cannot use an index",
         'A leading % forces a scan of every candidate row. Consider a fulltext/trigram index or restructuring the predicate.',
         m.index);

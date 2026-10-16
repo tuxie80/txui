@@ -6,7 +6,8 @@
  */
 import { errorDisplay } from '../utils/appError';
 import { useEffect, useRef, useState } from 'react';
-import { serialize, FORMAT_LABELS } from '../utils/exporters';
+import { serialize, FORMAT_LABELS, COPY_CONFIRM_ROWS, copyConfirmMessage } from '../utils/exporters';
+import { confirmDialog } from '../utils/appDialog';
 import { exportAs, copyToClipboard, copyForExcel, exportXlsx, exportParquet, exportGeoParquetServer } from '../utils/exportersIo';
 import type { ExportFormat } from '../utils/exporters';
 import { basename } from '../utils/platform';
@@ -50,6 +51,15 @@ export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql'
   const duckdbSpatial = useDuckdbSpatial(sessionId ?? '');
 
   /**
+   * Copy serialization is synchronous main-thread work; above the threshold
+   * the menu asks before freezing the UI on a full-result copy.
+   */
+  async function confirmLargeCopy(rows: number): Promise<boolean> {
+    return rows <= COPY_CONFIRM_ROWS
+      || confirmDialog(copyConfirmMessage(rows), { title: 'Copy' });
+  }
+
+  /**
    * File → Export Results… opens this dropdown rather than exporting.
    *
    * The format is the user's choice, and the menu deliberately does not make
@@ -84,6 +94,7 @@ export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql'
     setOpen(null);
     try {
       const { columns, rows } = getData();
+      if (!await confirmLargeCopy(rows.length)) return;
       await copyToClipboard(serialize(format, columns, rows, tableName, engine));
       onNote?.(`Copied ${rows.length} row${rows.length === 1 ? '' : 's'} as ${FORMAT_LABELS[format]}`);
     } catch (e) {
@@ -173,6 +184,7 @@ export function CopyExportMenu({ getData, tableName = 'result', engine = 'mysql'
               setOpen(null);
               try {
                 const { columns, rows } = getData();
+                if (!await confirmLargeCopy(rows.length)) return;
                 await copyForExcel(columns, rows);
                 onNote?.(`Copied ${rows.length} row${rows.length === 1 ? '' : 's'} for Excel`);
               } catch (e) { onNote?.(`Copy failed: ${errorDisplay(e)}`); }

@@ -103,6 +103,24 @@ test('browseSqlText: limit omitted → an unpaged SELECT (the GeoParquet export 
   );
 });
 
+test('browseSqlText: three-part names quote every part (SQL Server db.schema.table)', () => {
+  // Splitting on the first dot alone produced [mydb].[dbo.orders] — a table
+  // literally named "dbo.orders" in database mydb.
+  assert.equal(
+    browseSqlText({ table: 'mydb.dbo.orders', engine: 'sqlserver', filters: [], sort: [] }),
+    'SELECT * FROM [mydb].[dbo].[orders]',
+  );
+  assert.equal(
+    browseSqlText({ table: 'a.b.c', engine: 'mysql', filters: [], sort: [], limit: 100, offset: 0 }),
+    'SELECT * FROM `a`.`b`.`c` LIMIT 100 OFFSET 0',
+  );
+  // One- and two-part names are byte-identical to before.
+  assert.equal(
+    browseSqlText({ table: 'shop.orders', engine: 'mysql', filters: [], sort: [], limit: 100, offset: 0 }),
+    'SELECT * FROM `shop`.`orders` LIMIT 100 OFFSET 0',
+  );
+});
+
 test('duckdbBrowseTarget: the catalog segment is stripped for the SELECT builder', () => {
   // The tree names DuckDB objects three-level ("db.schema.table") — that form
   // addresses get_table_meta, but build_select splits a dotted name ONCE, so

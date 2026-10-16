@@ -1,8 +1,9 @@
 use tauri::{Emitter, State};
+use tauri::ipc::Channel;
 use uuid::Uuid;
 
 use crate::db::connection;
-use crate::db::types::QueryResult;
+use crate::db::types::{QueryResult, Row};
 use crate::history;
 use crate::state::AppState;
 
@@ -12,6 +13,86 @@ use crate::state::AppState;
 /// in-repo precedents: multi_exec's MAX_ROWS_PER_SERVER, MongoDB's
 /// MAX_FIND_LIMIT.
 const DEFAULT_MAX_ROWS: usize = 100_000;
+
+/// Results with more rows than this cross to the webview as paged Channel
+/// events instead of one JSON invoke payload. The cap is on ROWS, not bytes:
+/// it is exact (no serialization needed to know it), and the cost being
+/// bounded — one blocking parse on the webview main thread — scales with row
+/// count closely enough. 5k rows of typical width parse in single-digit ms,
+/// so anything at or under it keeps the old single-payload path with zero
+/// behavioural change.
+const STREAM_MIN_ROWS: usize = 5_000;
+
+/// Rows per `Page` event once streaming. Matches the threshold so a result
+/// just over it is exactly two pages; a 100k-cap result is twenty.
+const STREAM_PAGE_ROWS: usize = 5_000;
+
+/// One message on the editor's result stream. The Header carries the complete
+/// result metadata with `rows` drained plus the total row count (so the
+/// frontend can verify the pages against it); the rows follow as Page events,
+/// in order. The command's return value is the same metadata-only result
+/// (rows empty) when streaming — callers that pass no channel never see this.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResultStreamEvent {
+    Header { result: QueryResult, total_rows: usize },
+    Page   { rows: Vec<Row> },
+}
+
+/// Whether this result is big enough to page over the channel.
+fn should_stream(row_count: usize) -> bool {
+    row_count > STREAM_MIN_ROWS
+}
+
+/// Split rows into pages, preserving order. Takes the Vec by value so the
+/// move is free — the alternative (chunks + to_vec) clones every cell of a
+/// result that can be 100k rows wide.
+fn split_into_pages(mut rows: Vec<Row>, page_size: usize) -> Vec<Vec<Row>> {
+    let mut pages = Vec::with_capacity(rows.len().div_ceil(page_size));
+    while !rows.is_empty() {
+        let take = rows.len().min(page_size);
+        pages.push(rows.drain(..take).collect());
+    }
+    pages
+}
+
+/// Ship a large result as Header + Page events and hand back the metadata
+/// (rows drained) as the invoke's return value.
+///
+/// The stream sits AFTER the query has finished on the server, so the kill
+/// handles are already gone and a Stop arriving here can only mean "stop the
+/// transfer" — which is what the cancels-map check does: `cancel_query`
+/// removes the token before signalling, so a missing entry between pages is
+/// a cancellation, and the run reports exactly what an in-flight cancel
+/// reports. A failed send means the webview is gone; there is no one left to
+/// page for, so the transfer stops and the metadata still returns (history
+/// was already written from the caller's captured count).
+async fn stream_result_pages(
+    on_event:   &Channel<ResultStreamEvent>,
+    mut result: QueryResult,
+    cancels:    &crate::state::CancelMap,
+    cancel_key: &str,
+) -> Result<QueryResult, crate::apperror::AppError> {
+    let pages = split_into_pages(std::mem::take(&mut result.rows), STREAM_PAGE_ROWS);
+    let total_rows = pages.iter().map(Vec::len).sum();
+    if on_event.send(ResultStreamEvent::Header { result: result.clone(), total_rows }).is_err() {
+        return Ok(result);
+    }
+    for page in pages {
+        if !cancels.read().await.contains_key(cancel_key) {
+            return Err(crate::apperror::AppError::cancelled());
+        }
+        if on_event.send(ResultStreamEvent::Page { rows: page }).is_err() {
+            break;
+        }
+    }
+    Ok(result)
+}
+
+/// Bound on the inline kill sends in `stop_in_flight` (SQL Server, ClickHouse
+/// — the engines without a victim-fingerprint check): a dead server must not
+/// stall a Stop button or a session close.
+const KILL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Execute a SQL/Redis command and return rows + metadata.
 /// `tab_id` is used as a cancellation handle; call `cancel_query` with the same
@@ -29,10 +110,23 @@ pub async fn execute_query(
     // (an explicit frontend choice). Past the cap the driver stops fetching
     // and the result carries `truncated: true`.
     max_rows:      Option<u32>,
-    // Auto-injected by Tauri (the JS `invoke` does not pass it), used only to
+    // Editor-only result stream. Typed as the raw channel id rather than
+    // Channel<ResultStreamEvent> because Channel has no Deserialize impl, so
+    // Option<Channel> cannot be a command arg — and a REQUIRED channel would
+    // force every other execute_query caller (panels, TxShell, store/query)
+    // to pass one. Optional id + webview keeps the call additive: callers
+    // that pass nothing get the single-payload result exactly as before.
+    // When an id IS provided and the result tops STREAM_MIN_ROWS, the rows
+    // cross as Header + Page events and the return value carries metadata
+    // with `rows` drained.
+    on_event:      Option<tauri::ipc::JavaScriptChannelId>,
+    // Auto-injected by Tauri (the JS `invoke` passes neither), used only to
     // emit ClickHouse live-progress events. Additive and CH-scoped: no other
     // engine touches it, and the frontend call site is unchanged.
     app:           tauri::AppHandle,
+    // Auto-injected; resolves the optional channel id to a Channel on the
+    // webview that invoked.
+    webview:       tauri::Webview,
     state:         State<'_, AppState>,
 ) -> Result<QueryResult, crate::apperror::AppError> {
     let cancel_key = format!("{}-{}", session_id, tab_id);
@@ -121,6 +215,23 @@ pub async fn execute_query(
         let _ = stop.send(());
     }
 
+    // The history row count is captured BEFORE any paging drains the rows —
+    // a streamed result returns with `rows` empty, and history keeps its
+    // historical meaning of "rows the server produced".
+    let history_rows = result.as_ref().ok().map_or(0, |r| r.rows.len() as i64);
+
+    // A big result crosses as paged Channel events when the caller offered a
+    // channel (the editor does; nobody else). Everything about the run —
+    // cap, truncation flag, warnings, timings — is already final, so the
+    // Header carries complete metadata and only the rows are paged.
+    let result = match (result, on_event) {
+        (Ok(r), Some(chan_id)) if should_stream(r.rows.len()) => {
+            let chan = chan_id.channel_on(webview);
+            stream_result_pages(&chan, r, &state.cancels, &cancel_key).await
+        }
+        (r, _) => r,
+    };
+
     // Clean up cancel token + kill handle (may already be gone if cancelled)
     state.cancels.write().await.remove(&cancel_key);
     state.kills.write().await.remove(&cancel_key);
@@ -133,7 +244,7 @@ pub async fn execute_query(
     if !matches!(result, Err(ref e) if e.code.is_user_intent()) {
         let (exec_ms, rows, err_str) = match &result {
             // history keeps its historical meaning of TOTAL time
-            Ok(r)  => ((r.execution_ms + r.fetch_ms) as i64, r.rows.len() as i64, None),
+            Ok(r)  => ((r.execution_ms + r.fetch_ms) as i64, history_rows, None),
             Err(e) => (0, 0, Some(e.message.as_str())),
         };
         // Off the critical path: the result is ready, and bookkeeping the run
@@ -243,6 +354,14 @@ fn emit_ch_progress(
 ///
 /// The handle is *removed* before the kill is sent, and read up front, because
 /// the query's own completion path races to remove it too.
+///
+/// Which kills are spawned and which are awaited is deliberate. MySQL and
+/// PostgreSQL verify the victim against the registered statement fingerprint
+/// inside `kill_backend` whenever the spawned task runs, so spawning them is
+/// safe. SQL Server and ClickHouse have no victim check, so their kills are
+/// sent INLINE — a spawned KILL could land after the query finished and the
+/// spid was reused — bounded by [`KILL_SEND_TIMEOUT`] so a dead server cannot
+/// stall a Stop button or a session close.
 pub(crate) async fn stop_in_flight(
     session_id: Uuid,
     cancel_key: &str,
@@ -250,26 +369,36 @@ pub(crate) async fn stop_in_flight(
     kills: &crate::state::KillMap,
     ch_kills: &crate::state::ChKillMap,
 ) {
-    let backend = kills.write().await.remove(cancel_key);
+    let handle = kills.write().await.remove(cancel_key);
     let ch_query_id = ch_kills.write().await.remove(cancel_key);
 
-    if let Some(backend_id) = backend {
-        let sessions = sessions.clone();
-        tokio::spawn(async move {
-            connection::kill_backend(session_id, backend_id, &sessions,
-                connection::KillForce::Cancel).await;
-        });
+    if let Some(handle) = handle {
+        let is_sqlserver = matches!(
+            connection::get_session_pub(session_id, sessions).await.ok().as_deref(),
+            Some(crate::db::types::LiveSession::SqlServer(_)));
+        if is_sqlserver {
+            let _ = tokio::time::timeout(KILL_SEND_TIMEOUT, connection::kill_backend(
+                session_id, handle.backend_id, sessions,
+                connection::KillForce::Cancel, Some(&handle.fingerprint))).await;
+        } else {
+            let sessions = sessions.clone();
+            tokio::spawn(async move {
+                connection::kill_backend(session_id, handle.backend_id, &sessions,
+                    connection::KillForce::Cancel, Some(&handle.fingerprint)).await;
+            });
+        }
     }
     if let Some(query_id) = ch_query_id {
-        let sessions = sessions.clone();
-        // Spawned, like the others: KILL QUERY is a second HTTP round trip and
-        // the Stop button must not wait on the server it is trying to stop.
-        tokio::spawn(async move {
-            let Ok(session) = connection::get_session_pub(session_id, &sessions).await else { return };
+        // Inline, like SQL Server: a KILL QUERY is a second HTTP round trip,
+        // but a spawned one could outlive the query it was aimed at. The id
+        // itself can never hit an innocent query — we minted it — so this is
+        // about the Stop button meaning "sent", not about victim confusion.
+        if let Ok(session) = connection::get_session_pub(session_id, sessions).await {
             if let crate::db::types::LiveSession::Clickhouse(s) = session.as_ref() {
-                let _ = crate::db::clickhouse::kill_query(s, &query_id).await;
+                let _ = tokio::time::timeout(KILL_SEND_TIMEOUT,
+                    crate::db::clickhouse::kill_query(s, &query_id)).await;
             }
-        });
+        }
     }
 
     // DuckDB: in-process, so there is no backend id — the engine's own
@@ -347,7 +476,24 @@ pub async fn begin_transaction(
     session_id: Uuid,
     state: State<'_, AppState>,
 ) -> Result<(), crate::apperror::AppError> {
-    if state.tx_conns.read().await.contains_key(&session_id) {
+    begin_transaction_on(session_id, &state).await
+}
+
+async fn begin_transaction_on(
+    session_id: Uuid,
+    state: &AppState,
+) -> Result<(), crate::apperror::AppError> {
+    // The check and the insert are ONE critical section. Two concurrent
+    // begins that both passed a bare contains_key would both run BEGIN, and
+    // the second insert would overwrite the first TxConn — silently returning
+    // the overwritten connection to the pool with an OPEN TRANSACTION (and,
+    // for MySQL, autocommit=0) on it, poisoning the next acquirer. Holding
+    // the write lock across the acquire + BEGIN makes the second begin fail
+    // the contains_key instead. The hold is one short round trip, and nothing
+    // acquires a pool connection while holding this lock, so there is no
+    // lock-order issue.
+    let mut tx_conns = state.tx_conns.write().await;
+    if tx_conns.contains_key(&session_id) {
         return Err("A transaction is already open on this session.".into());
     }
     let session = crate::db::connection::get_session_pub(session_id, &state.sessions)
@@ -393,8 +539,7 @@ pub async fn begin_transaction(
         }
         _ => return Err("transactions are only supported for MySQL, PostgreSQL and SQL Server".into()),
     };
-    state.tx_conns.write().await
-        .insert(session_id, std::sync::Arc::new(tokio::sync::Mutex::new(txc)));
+    tx_conns.insert(session_id, std::sync::Arc::new(tokio::sync::Mutex::new(txc)));
     Ok(())
 }
 
@@ -712,7 +857,7 @@ pub async fn kill_panel_query(
     state: State<'_, AppState>,
 ) -> Result<KillOutcome, crate::apperror::AppError> {
     let cancel_key = format!("panel-{}-{}", session_id, token);
-    let backend = state.kills.write().await.remove(&cancel_key);
+    let handle = state.kills.write().await.remove(&cancel_key);
 
     // Release the waiter regardless: whatever happens on the server, this
     // client is no longer waiting for that answer.
@@ -720,7 +865,7 @@ pub async fn kill_panel_query(
         let _ = tx.send(());
     }
 
-    let Some(backend_id) = backend else {
+    let Some(handle) = handle else {
         return Ok(KillOutcome {
             backend_id: None,
             confirmed_gone: None,
@@ -728,9 +873,34 @@ pub async fn kill_panel_query(
                       connection id was never recorded.".into(),
         });
     };
+    let backend_id = handle.backend_id;
 
-    connection::kill_backend(session_id, backend_id, &state.sessions,
-        connection::KillForce::Hard).await;
+    // Releasing the waiter drops the query's future, which can hand the pooled
+    // connection — same backend id — to another tab BEFORE the KILL lands.
+    // `kill_backend` therefore verifies the victim is still running the
+    // registered statement, and a hard kill it cannot verify is withheld:
+    // KILL CONNECTION / pg_terminate_backend on a recycled backend destroys a
+    // connection someone else is using.
+    match connection::kill_backend(session_id, backend_id, &state.sessions,
+        connection::KillForce::Hard, Some(&handle.fingerprint)).await {
+        connection::KillVerdict::SkippedStale => return Ok(KillOutcome {
+            backend_id: Some(backend_id),
+            confirmed_gone: None,
+            message: format!(
+                "Kill NOT sent — backend {backend_id} is no longer running that statement \
+                 (it finished, or the connection was handed to another query). Nothing was \
+                 killed."),
+        }),
+        connection::KillVerdict::Unverified => return Ok(KillOutcome {
+            backend_id: Some(backend_id),
+            confirmed_gone: None,
+            message: format!(
+                "Kill NOT sent — whether backend {backend_id} is still running that \
+                 statement could not be verified, and an unverified hard kill can destroy \
+                 a connection another tab is using."),
+        }),
+        connection::KillVerdict::Issued => {}
+    }
 
     // The server needs a moment to reap it; without the pause the check races
     // the kill and reports a false "still running".
@@ -900,6 +1070,10 @@ mod stop_tests {
          Arc::new(RwLock::new(Default::default())))
     }
 
+    fn handle(backend_id: u64) -> crate::state::KillHandle {
+        crate::state::KillHandle { backend_id, fingerprint: "select 1".into() }
+    }
+
     /// Both handles go, whichever engine the key belongs to. An id left behind
     /// is worse than none: the next query on that tab inherits it, and a later
     /// Stop kills whatever has since been given that backend.
@@ -907,7 +1081,7 @@ mod stop_tests {
     async fn a_stop_clears_both_kinds_of_handle() {
         let (sessions, kills, ch_kills) = maps();
         let id = Uuid::new_v4();
-        kills.write().await.insert("k".into(), 42);
+        kills.write().await.insert("k".into(), handle(42));
         ch_kills.write().await.insert("k".into(), "some-query-id".into());
 
         stop_in_flight(id, "k", &sessions, &kills, &ch_kills).await;
@@ -920,13 +1094,13 @@ mod stop_tests {
     #[tokio::test]
     async fn a_stop_leaves_other_keys_alone() {
         let (sessions, kills, ch_kills) = maps();
-        kills.write().await.insert("mine".into(), 1);
-        kills.write().await.insert("theirs".into(), 2);
+        kills.write().await.insert("mine".into(), handle(1));
+        kills.write().await.insert("theirs".into(), handle(2));
         ch_kills.write().await.insert("theirs".into(), "q".into());
 
         stop_in_flight(Uuid::new_v4(), "mine", &sessions, &kills, &ch_kills).await;
 
-        assert_eq!(kills.read().await.get("theirs"), Some(&2));
+        assert_eq!(kills.read().await.get("theirs").map(|h| h.backend_id), Some(2));
         assert_eq!(ch_kills.read().await.get("theirs").map(String::as_str), Some("q"));
     }
 
@@ -937,5 +1111,228 @@ mod stop_tests {
         let (sessions, kills, ch_kills) = maps();
         stop_in_flight(Uuid::new_v4(), "nothing-here", &sessions, &kills, &ch_kills).await;
         assert!(kills.read().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod begin_tx_tests {
+    //! `begin_transaction`'s check-then-insert used to race: two concurrent
+    //! begins both passed `contains_key`, both ran BEGIN, and the second
+    //! insert overwrote the first `TxConn` — silently returning the
+    //! overwritten connection to the pool with an OPEN TRANSACTION on it,
+    //! poisoning the next acquirer. The fix holds the `tx_conns` write lock
+    //! across check → acquire → BEGIN → insert, so the loser fails instead.
+    use super::*;
+    use crate::db::types::{ConnectionConfig, Engine, LiveSession};
+    use std::sync::Arc;
+
+    async fn mysql_state(pool_size: u32) -> (Uuid, crate::state::AppState) {
+        let mut cfg = ConnectionConfig::new(Engine::Mysql, "t");
+        cfg.host = Some("127.0.0.1".into());
+        cfg.port = Some(3306);
+        cfg.user = Some("root".into());
+        let pool = crate::db::mysql::open_pool(&cfg, Some("root".into()), None, pool_size)
+            .await.expect("connect");
+        let id = Uuid::new_v4();
+        let history = crate::history::open_in_memory().await.expect("in-memory history");
+        let state = crate::state::AppState::new(history, std::env::temp_dir(), Default::default());
+        state.sessions.write().await.insert(id, Arc::new(LiveSession::Mysql(pool)));
+        (id, state)
+    }
+
+    /// Eight begins at once: exactly one wins, the rest are told a transaction
+    /// is already open, and exactly one pinned connection exists afterwards.
+    #[tokio::test]
+    #[ignore = "needs local MySQL on 3306"]
+    async fn concurrent_begins_leave_exactly_one_transaction() {
+        let (id, state) = mysql_state(4).await;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            tasks.push(tokio::spawn(async move { begin_transaction_on(id, &state).await }));
+        }
+        let mut wins = 0;
+        let mut already_open = 0;
+        for t in tasks {
+            match t.await.unwrap() {
+                Ok(()) => wins += 1,
+                Err(e) => {
+                    assert!(e.message.contains("already open"), "unexpected error: {e}");
+                    already_open += 1;
+                }
+            }
+        }
+        assert_eq!(wins, 1, "more than one begin got through — the race is back");
+        assert_eq!(already_open, 7);
+        assert_eq!(state.tx_conns.read().await.len(), 1);
+
+        // And the winner's connection is a real, usable transaction.
+        end_transaction(id, "ROLLBACK", &state).await.expect("rollback the winner");
+        assert!(state.tx_conns.read().await.is_empty());
+    }
+
+    /// A second SEQUENTIAL begin must fail the same way — the ordinary
+    /// double-click path, which shares the atomic check with the race.
+    #[tokio::test]
+    #[ignore = "needs local MySQL on 3306"]
+    async fn a_second_begin_is_refused() {
+        let (id, state) = mysql_state(2).await;
+        begin_transaction_on(id, &state).await.expect("first begin");
+        let err = begin_transaction_on(id, &state).await.expect_err("second begin");
+        assert!(err.message.contains("already open"), "got: {err}");
+        end_transaction(id, "ROLLBACK", &state).await.expect("rollback");
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    //! The paging decision and the page split behind result streaming.
+    //! `stream_result_pages` itself needs a live Channel (a webview), so what
+    //! is pinned here without one is the part that can silently lose or
+    //! reorder rows: the split.
+    use super::*;
+
+    fn rows(n: usize) -> Vec<Row> {
+        (0..n).map(|i| vec![serde_json::json!(i)]).collect()
+    }
+
+    /// The threshold is exclusive: exactly STREAM_MIN_ROWS stays on the
+    /// single-payload path, one row over it streams.
+    #[test]
+    fn stream_threshold_is_exclusive() {
+        assert!(!should_stream(0));
+        assert!(!should_stream(STREAM_MIN_ROWS));
+        assert!(should_stream(STREAM_MIN_ROWS + 1));
+    }
+
+    /// Every row lands in exactly one page, in order, with only the last
+    /// page short.
+    #[test]
+    fn pages_preserve_order_and_count() {
+        let total = STREAM_PAGE_ROWS * 2 + 7;
+        let pages = split_into_pages(rows(total), STREAM_PAGE_ROWS);
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages[0].len(), STREAM_PAGE_ROWS);
+        assert_eq!(pages[1].len(), STREAM_PAGE_ROWS);
+        assert_eq!(pages[2].len(), 7);
+        let flat: Vec<Row> = pages.into_iter().flatten().collect();
+        assert_eq!(flat, rows(total), "the split reordered or lost rows");
+    }
+
+    /// Exact multiples produce no trailing empty page, and an empty result
+    /// (unreachable through should_stream, but the helper must not invent
+    /// one) produces no pages at all.
+    #[test]
+    fn exact_multiple_and_empty_have_no_stray_page() {
+        let pages = split_into_pages(rows(STREAM_PAGE_ROWS * 2), STREAM_PAGE_ROWS);
+        assert_eq!(pages.len(), 2);
+        assert!(pages.iter().all(|p| p.len() == STREAM_PAGE_ROWS));
+        assert!(split_into_pages(vec![], STREAM_PAGE_ROWS).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ipc_arg_tests {
+    //! Tauri's REAL per-arg IPC parsing, driven through
+    //! `tauri::test::get_ipc_response` on a mock app — no webview, no DB.
+    //!
+    //! Why this exists: several frontend call sites (TxShell, the object
+    //! panels, QueryStore) invoked `execute_query` WITHOUT the required
+    //! `connectionId`/`engine` args — and TxShell passed `tabId: null`,
+    //! TableDesigner `tabId: -1`, for a `tab_id: u64`. Serde rejects all of
+    //! those at the IPC boundary, so the SQL never ran: the feature died on
+    //! a generic invoke error.
+    //!
+    //! The probe command mirrors `execute_query`'s argument list minus the
+    //! runtime-bound injected args (`AppHandle`/`Webview`/`State` have no
+    //! `CommandArg` impl on the MockRuntime, so the real command cannot be
+    //! registered here). What is exercised is Tauri's real generated parsing
+    //! — the same code path the real command goes through. The other half of
+    //! the contract (the REAL signature vs the REAL call sites) is pinned by
+    //! tests/invokeArgs.test.ts, which parses both from source.
+    use super::*;
+
+    #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_query_args_probe(
+        session_id: Uuid,
+        connection_id: String,
+        engine: String,
+        sql: String,
+        tab_id: u64,
+        include_warnings: Option<bool>,
+        max_rows: Option<u32>,
+        on_event: Option<tauri::ipc::JavaScriptChannelId>,
+    ) -> &'static str {
+        let _ = (session_id, connection_id, engine, sql, tab_id,
+                 include_warnings, max_rows, on_event);
+        "args-ok"
+    }
+
+    const SID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn invoke(body: serde_json::Value) -> Result<String, String> {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![execute_query_args_probe])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+        tauri::test::get_ipc_response(&webview, tauri::webview::InvokeRequest {
+            cmd:        "execute_query_args_probe".into(),
+            callback:   tauri::ipc::CallbackFn(0),
+            error:      tauri::ipc::CallbackFn(1),
+            url:        "tauri://localhost".parse().unwrap(),
+            body:       tauri::ipc::InvokeBody::Json(body),
+            headers:    Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        })
+        .map(|b| b.deserialize::<String>().unwrap())
+        .map_err(|v| v.to_string())
+    }
+
+    /// The object panels' and QueryStore's old shape: no connectionId/engine.
+    #[test]
+    fn missing_connection_id_and_engine_are_rejected_at_the_ipc_boundary() {
+        let err = invoke(serde_json::json!({
+            "sessionId": SID, "sql": "SELECT 1", "tabId": 0,
+        }))
+        .expect_err("a call without connectionId/engine must not reach backend logic");
+        assert!(err.contains("connectionId"), "the missing arg must be named: {err}");
+    }
+
+    /// TxShell's old shape: `tabId: null` into a `u64`.
+    #[test]
+    fn null_tab_id_is_rejected() {
+        let err = invoke(serde_json::json!({
+            "sessionId": SID, "connectionId": "c", "engine": "mysql",
+            "sql": "SELECT 1", "tabId": null,
+        }))
+        .expect_err("tabId: null must not deserialize into u64");
+        assert!(err.contains("tabId"), "the bad arg must be named: {err}");
+    }
+
+    /// TableDesigner's old shape: `tabId: -1` into a `u64`.
+    #[test]
+    fn negative_tab_id_is_rejected_for_u64() {
+        let err = invoke(serde_json::json!({
+            "sessionId": SID, "connectionId": "c", "engine": "mysql",
+            "sql": "SELECT 1", "tabId": -1,
+        }))
+        .expect_err("tabId: -1 must not deserialize into u64");
+        assert!(err.contains("tabId"), "the bad arg must be named: {err}");
+    }
+
+    /// The editor's shape (useQueryRunner) is the known-good one: every
+    /// required arg present and well-typed passes parsing.
+    #[test]
+    fn a_fully_formed_call_passes_deserialization() {
+        let ok = invoke(serde_json::json!({
+            "sessionId": SID, "connectionId": "c", "engine": "mysql",
+            "sql": "SELECT 1", "tabId": 0, "includeWarnings": false,
+        }));
+        assert_eq!(ok.as_deref(), Ok("args-ok"), "unexpected outcome: {ok:?}");
     }
 }

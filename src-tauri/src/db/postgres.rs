@@ -146,7 +146,11 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
         Ok(o) => o,
         Err(e) => return PingResult { ok: false, latency_ms: 0, server_version: None, error: Some(e.to_string()) },
     };
-    match PgPool::connect_with(opts).await {
+    // Bounded like `open` (db/util.rs) — a bare connect_with sits on the OS's
+    // SYN retries and the connection form's Test button hung on a dead host.
+    match super::util::connect_bounded(
+        PgPool::connect_with(opts), config.connect_timeout_secs, fmt_conn_error,
+    ).await {
         Ok(pool) => {
             let version: Result<String, _> = sqlx::query_scalar("SELECT version()")
                 .fetch_one(&pool).await;
@@ -161,7 +165,7 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
             ok: false,
             latency_ms: start.elapsed().as_millis() as u64,
             server_version: None,
-            error: Some(fmt_conn_error(&e)),
+            error: Some(e.to_string()),
         },
     }
 }
@@ -197,8 +201,13 @@ where
     // execution_ms = time until the FIRST row (or stream completion for
     // non-SELECT); fetch_ms = the rest of the stream + decode.
     let mut first_row_ms: Option<u64> = None;
-    let mut columns: Vec<ColumnInfo> = vec![];
-    let mut data: Vec<Row> = Vec::new();
+    // Per-SET column capture, not per-statement: a multi-statement batch
+    // (`USE db; SELECT …` from the editor) hands every set its own column
+    // metadata, and decoding a later set against the FIRST set's capture
+    // padded short rows with fabricated NULLs and silently dropped extra
+    // columns. A row whose column list differs starts a new set.
+    let mut sets: Vec<(Vec<ColumnInfo>, Vec<Row>)> = Vec::new();
+    let mut total_rows = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.try_next().await? {
         match item {
@@ -209,27 +218,47 @@ where
                 if first_row_ms.is_none() {
                     first_row_ms = Some(start.elapsed().as_millis() as u64);
                 }
-                if columns.is_empty() {
-                    columns = row.columns().iter().map(|c| ColumnInfo {
+                if sets.last().is_none_or(|(cols, _)| !same_columns(cols, &row)) {
+                    sets.push((row.columns().iter().map(|c| ColumnInfo {
                         name:      c.name().to_string(),
                         type_name: c.type_info().name().to_string(),
                         nullable:  true,
-                    }).collect();
+                    }).collect(), Vec::new()));
                 }
-                if max_rows.is_some_and(|cap| data.len() >= cap) {
+                // The cap counts the TOTAL across sets — only the first
+                // columned set is returned (sqlserver.rs, same rule).
+                if max_rows.is_some_and(|cap| total_rows >= cap) {
                     truncated = true;
                     break;
                 }
-                data.push(columns.iter().enumerate().map(|(i, col)| {
+                let (columns, rows) = sets.last_mut().expect("a row always has a set");
+                rows.push(columns.iter().enumerate().map(|(i, col)| {
                     json_from_pg_row(&row, i, &col.type_name)
                 }).collect());
+                total_rows += 1;
             }
         }
     }
     let execution_ms = first_row_ms.unwrap_or_else(|| start.elapsed().as_millis() as u64);
 
-    if columns.is_empty() {
-        return Ok(QueryResult {
+    // The FIRST columned set is the answer — the frontend renders one grid. A
+    // later set with a DIFFERENT shape is dropped whole rather than folded
+    // into the first set's shape (the corruption this restructure removes);
+    // an identical-shaped later set keeps appending, harmlessly — no
+    // set-boundary signal exists for it and the decode is identical.
+    // sqlserver.rs's result_from_sets made the same first-set choice.
+    match sets.into_iter().find(|(cols, _)| !cols.is_empty()) {
+        Some((columns, rows)) => Ok(QueryResult {
+            columns,
+            rows,
+            rows_affected: None,
+            execution_ms,
+            fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
+            warnings: vec![],
+            truncated,
+            geo_bbox: None,
+        }),
+        None => Ok(QueryResult {
             columns: vec![],
             rows: vec![],
             rows_affected: affected,
@@ -238,19 +267,18 @@ where
             warnings: vec![],
             truncated: false,
             geo_bbox: None,
-        });
+        }),
     }
+}
 
-    Ok(QueryResult {
-        columns,
-        rows: data,
-        rows_affected: None,
-        execution_ms,
-        fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
-        warnings: vec![],
-        truncated,
-        geo_bbox: None,
-    })
+/// Same column list as the current set's capture? Compared per row: a
+/// multi-set statement's later sets must never decode against an earlier
+/// set's metadata.
+fn same_columns(cols: &[ColumnInfo], row: &sqlx::postgres::PgRow) -> bool {
+    let rc = row.columns();
+    cols.len() == rc.len()
+        && cols.iter().zip(rc.iter())
+            .all(|(a, c)| a.name == c.name() && a.type_name == c.type_info().name())
 }
 
 pub fn json_from_row_pub(row: &sqlx::postgres::PgRow, i: usize, type_name: &str) -> serde_json::Value {
@@ -1950,5 +1978,28 @@ mod tls_tests {
         assert_eq!(ro, "on", "read-only startup option lost over TLS");
         println!("  read-only over TLS → default_transaction_read_only={ro}");
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod driver_correctness_tests {
+    use super::*;
+    use crate::db::types::Engine;
+
+    /// The Test button must not hang on a dead host: ping to an unroutable
+    /// TEST-NET address (RFC 5737) with a 1 s connect timeout must come back
+    /// quickly with ok:false, not sit on the OS's SYN retries.
+    #[tokio::test]
+    async fn ping_is_bounded_by_the_connect_timeout() {
+        let mut c = ConnectionConfig::new(Engine::Postgres, "t");
+        c.host = Some("192.0.2.1".into());
+        c.port = Some(5432);
+        c.connect_timeout_secs = Some(1);
+        let start = Instant::now();
+        let r = ping(&c, None).await;
+        assert!(!r.ok);
+        assert!(r.error.is_some());
+        assert!(start.elapsed() < std::time::Duration::from_secs(20),
+                "ping sat on the dial for {:?}", start.elapsed());
     }
 }

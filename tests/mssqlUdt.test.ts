@@ -98,7 +98,7 @@ test('ORDER BY is legalised inside with OFFSET 0 ROWS (TOP semantics preserved)'
     'SELECT TOP 10 id, geom FROM t ORDER BY id DESC',
     [col('id', 'int'), col('geom', 'udt')],
   );
-  assert.match(r.query.sql, /ORDER BY id DESC OFFSET 0 ROWS\n\) AS txui_geo/);
+  assert.match(r.query.sql, /ORDER BY id DESC\nOFFSET 0 ROWS\n\) AS txui_geo/);
   assert.deepEqual(r.query.clauseNotes, ['ORDER BY kept in place via OFFSET 0 ROWS']);
 });
 
@@ -116,7 +116,7 @@ test('OPTION is hoisted to the outer query (illegal inside a derived table)', ()
     'SELECT id, geom FROM t ORDER BY id OPTION (RECOMPILE)',
     [col('id', 'int'), col('geom', 'udt')],
   );
-  assert.match(r.query.sql, /ORDER BY id OFFSET 0 ROWS\n\) AS txui_geo\nOPTION \(RECOMPILE\)$/);
+  assert.match(r.query.sql, /ORDER BY id\nOFFSET 0 ROWS\n\) AS txui_geo\nOPTION \(RECOMPILE\)$/);
   assert.ok(r.query.clauseNotes.some(n => n.includes('OPTION')));
 });
 
@@ -128,7 +128,7 @@ test('ORDER BY inside a subquery stays inside; only the top-level one is legalis
   // exactly one OFFSET 0 ROWS, appended after the TOP-LEVEL ORDER BY (the last one)
   const inner = r.query.sql.split('\n').slice(1, -1).join('\n');
   assert.equal(inner.match(/OFFSET 0 ROWS/g)!.length, 1);
-  assert.match(inner, /ORDER BY id OFFSET 0 ROWS$/);
+  assert.match(inner, /ORDER BY id\nOFFSET 0 ROWS$/);
 });
 
 test('WITH…SELECT wraps as-is', () => {
@@ -153,6 +153,17 @@ test('a trailing line comment cannot swallow the closing paren', () => {
     [col('id', 'int'), col('geom', 'udt')],
   );
   assert.match(r.query.sql, /-- the roads\n\) AS txui_geo/);
+});
+
+test('a trailing line comment after ORDER BY cannot swallow OFFSET 0 ROWS either', () => {
+  // The legaliser is newline-led: appended straight after `-- keep` it would
+  // land INSIDE the comment and the wrap would die with Msg 1033.
+  const r = built(
+    'SELECT geom FROM t ORDER BY id -- keep',
+    [col('geom', 'udt')],
+  );
+  assert.match(r.query.sql, /-- keep\nOFFSET 0 ROWS\n\) AS txui_geo/);
+  assert.deepEqual(r.query.clauseNotes, ['ORDER BY kept in place via OFFSET 0 ROWS']);
 });
 
 test('strings/comments/brackets inside the statement are not mistaken for clauses', () => {

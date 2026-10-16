@@ -32,13 +32,15 @@ import type { ColumnInfo } from '../types';
 import type { TableColumn, SortClause, RowChange } from '../types/browser';
 import { useGridSettings, gridRowHeight } from '../store/gridSettings';
 import { measureText } from '../utils/measure';
-import { toTsv, cellText } from '../utils/exporters';
+import { toTsv, cellText, COPY_CONFIRM_ROWS, copyConfirmMessage } from '../utils/exporters';
+import { confirmDialog } from '../utils/appDialog';
 import { geometryBadge, geometryBadgeLabel } from '../utils/geometryBadge';
 import type { GeometryBadgeInfo } from '../utils/geometryBadge';
 import { copyToClipboard } from '../utils/exportersIo';
 import { getPref, PREFS } from '../store/preferences';
 import { readFontScale } from '../utils/fontScale';
 import { gridWindow } from '../utils/gridWindow';
+import { scanCells } from '../utils/findInResults';
 import { shortcuts } from '../utils/platform';
 
 /** Shortcut labels for this platform — see utils/platform. */
@@ -660,31 +662,20 @@ export function FastGrid({
     }
   }, [headerH, rowH, offsets]);
 
-  // Cells matching the find query (case-insensitive substring), capped so a
-  // huge result never freezes the scan. Only computed while the bar is open,
-  // and only once the debounced query settles.
+  // Cells matching the find query (case-insensitive substring), with two
+  // honest caps (utils/findInResults): matches FOUND (5000) and — the one
+  // that bounds the work — cells SCANNED (250k), so a no-match query on a
+  // 100k×20 result cannot walk 2M cells per debounced keystroke. Only
+  // computed while the bar is open, and only once the debounced query settles.
   useEffect(() => {
     const t = setTimeout(() => setFindQuery(findText), 200);
     return () => clearTimeout(t);
   }, [findText]);
 
-  const matches = useMemo(() => {
-    const q = findQuery.trim().toLowerCase();
-    if (!findOpen || !q) return [] as { r: number; c: number }[];
-    const out: { r: number; c: number }[] = [];
-    const CAP = 5000;
-    for (let r = 0; r < nRows; r++) {
-      const row = rows[r];
-      for (let c = 0; c < nCols; c++) {
-        const v = row[c];
-        if (v != null && String(v).toLowerCase().includes(q)) {
-          out.push({ r, c });
-          if (out.length >= CAP) return out;
-        }
-      }
-    }
-    return out;
-  }, [findOpen, findQuery, rows, nRows, nCols]);
+  const scan = useMemo(
+    () => scanCells(rows, nCols, findOpen ? findQuery : ''),
+    [findOpen, findQuery, rows, nCols]);
+  const matches = scan.matches;
 
   // Distinct matching rows → red ticks on the scroll rail (VSCode-style).
   const matchRows = useMemo(() => [...new Set(matches.map(m => m.r))], [matches]);
@@ -730,10 +721,17 @@ export function FastGrid({
     if (mod && e.key === 'c') {
       e.preventDefault();
       const { columns: cols, rows: data } = getSelectionData();
-      const text = getPref(PREFS.copyHeaders)
-        ? toTsv(cols, data)
-        : data.map(r => r.map(cellText).join('\t')).join('\n') + '\n';
-      copyToClipboard(text).catch(() => {});
+      void (async () => {
+        // Serializing a whole result is synchronous main-thread work — above
+        // the threshold the copy asks first, because ⌘C with a fat result is
+        // too easy to hit by accident.
+        if (data.length > COPY_CONFIRM_ROWS
+            && !await confirmDialog(copyConfirmMessage(data.length), { title: 'Copy' })) return;
+        const text = getPref(PREFS.copyHeaders)
+          ? toTsv(cols, data)
+          : data.map(r => r.map(cellText).join('\t')).join('\n') + '\n';
+        copyToClipboard(text).catch(() => {});
+      })();
       return;
     }
     if (mod && e.key === 'a') {
@@ -792,17 +790,33 @@ export function FastGrid({
     e.stopPropagation();
     suppressSortRef.current = true;
     resizeRef.current = { col, startX: e.clientX, startW: widths[col] };
-    const move = (ev: MouseEvent) => {
+    // One overrides commit per animation frame, holding the latest width (the
+    // scroll handler's pattern): raw mousemoves arrive faster than frames and
+    // every commit re-lays-out the whole visible window.
+    let raf = 0;
+    let latestW = widths[col];
+    const apply = () => {
       const st = resizeRef.current;
       if (!st) return;
-      const w = Math.max(MIN_COL_W, st.startW + ev.clientX - st.startX);
+      const w = latestW;
       setOverrides(prev => {
         const next = new Map(prev);
         next.set(st.col, w);
         return next;
       });
     };
+    const move = (ev: MouseEvent) => {
+      const st = resizeRef.current;
+      if (!st) return;
+      latestW = Math.max(MIN_COL_W, st.startW + ev.clientX - st.startX);
+      if (!raf) {
+        raf = requestAnimationFrame(() => { raf = 0; apply(); });
+      }
+    };
     const up = () => {
+      // The exact final width lands synchronously — never a coalesced frame.
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      apply();
       resizeRef.current = null;
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
@@ -990,7 +1004,12 @@ export function FastGrid({
         />
         <span className="fg-find-count">
           {findText.trim()
-            ? (matches.length ? `${matchIdx >= 0 ? matchIdx + 1 : 0}/${matches.length}` : 'no matches')
+            ? (matches.length
+              // A capped scan says so — the count covers the cells examined,
+              // not the whole result (same honest-cap style as result-meta).
+              ? `${matchIdx >= 0 ? matchIdx + 1 : 0}/${matches.length}${scan.matchesCapped ? '+' : ''}`
+                + (scan.capped ? ` · first ${scan.scanned.toLocaleString()} cells` : '')
+              : 'no matches' + (scan.capped ? ` in first ${scan.scanned.toLocaleString()} cells` : ''))
             : ''}
         </span>
         <button className="fg-find-btn" onMouseDown={e => e.preventDefault()} onClick={() => goToMatch(matchIdx - 1)} title={`Previous (${SC.shiftEnter})`}>‹</button>

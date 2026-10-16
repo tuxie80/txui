@@ -81,9 +81,12 @@ export function SequencePanel({ session, schema, target, onTargetConsumed, onClo
     [session.sessionId]);
   const exec = useCallback(
     (sql: string) => invoke<QueryResult>('execute_query', {
-      sessionId: session.sessionId, sql, tabId: 0,
+      sessionId: session.sessionId,
+      connectionId: session.connectionId,
+      engine: session.engine,
+      sql, tabId: 0,
     }),
-    [session.sessionId]);
+    [session.sessionId, session.connectionId, session.engine]);
 
   useEffect(() => {
     if (!engine) return;

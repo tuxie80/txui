@@ -183,6 +183,39 @@ pub(crate) async fn insert_lifecycle(
 /// 500 chars is several full lines, and a longer one is noise either way.
 const CONNECT_FAILED_ERROR_MAX: usize = 500;
 
+/// One quiet row when SSH `accept-new` recorded a previously unknown host
+/// key during this connect (TOFU): the first contact is the one moment a
+/// MITM is indistinguishable from a new server, so the acceptance belongs on
+/// the record. `ok = 1`, keyword 'ssh host key accepted', the note itself in
+/// `error` — reused as the free-text detail column, the same trick
+/// `insert_connect_failed` plays. Best-effort, like every audit write.
+pub(crate) async fn insert_ssh_host_key(
+    pool: &crate::history::HistoryStore,
+    session_id: uuid::Uuid,
+    start: &crate::state::SessionStart,
+    note: &str,
+) {
+    let now = lifecycle_now();
+    let r = sqlx::query(
+        "INSERT INTO audit_log \
+         (run_id, session_id, tab_title, database, source, \
+          started_at, ended_at, duration_ms, connection_name, db_user, engine, ok, rows_out, sql, error) \
+         VALUES ('', ?, '', ?, 'lifecycle', ?, ?, 0, ?, ?, ?, 1, 0, 'ssh host key accepted', ?)"
+    )
+    .bind(session_id.to_string())
+    .bind(&start.database)
+    .bind(&now)
+    .bind(&now)
+    .bind(&start.connection_name)
+    .bind(&start.db_user)
+    .bind(&start.engine)
+    .bind(note)
+    .execute(pool).await;
+    if let Err(e) = r {
+        eprintln!("[audit] ssh-host-key insert failed: {e:#}");
+    }
+}
+
 /// Append a failed-connect lifecycle row: `ok = 0`, keyword 'connect failed'
 /// (NOT 'connect' — the welcome feed renders that keyword as "Connected"
 /// unconditionally), the already-sanitized error text, and the attempt's wall

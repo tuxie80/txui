@@ -70,7 +70,7 @@ pub async fn open_session(
             LiveSession::Clickhouse(clickhouse::open(config, password, host_override)?),
         // File-backed: `file_path` is the address. No dial, no tunnel, no auth.
         Engine::Sqlite   => LiveSession::Sqlite(sqlite::open(config).await?),
-        Engine::Parquet  => LiveSession::Parquet(Arc::new(parquet::open(config)?)),
+        Engine::Parquet  => LiveSession::Parquet(Arc::new(parquet::open_async(config).await?)),
         Engine::Duckdb   => LiveSession::Duckdb(Arc::new(duckdb::open(config).await?)),
         Engine::MongoDb  => mongodb::open(config, password, host_override).await?,
         Engine::SqlServer => {
@@ -160,6 +160,11 @@ pub async fn close_session(session_id: Uuid, sessions: &SessionMap) -> Vec<u64> 
             LiveSession::SqlServer(s) => {
                 if let Ok(spid) = sqlserver::spid(s).await { ids.push(spid); }
             }
+            // A heavy query keeps running in spawn_blocking after the session
+            // is removed — fire the engine's interrupt so it stops rather
+            // than running to completion into the void. The worker's own Arc
+            // keeps the session alive long enough for it to take effect.
+            LiveSession::Duckdb(s) => s.interrupt(),
             _ => {}
         }
     }
@@ -168,33 +173,48 @@ pub async fn close_session(session_id: Uuid, sessions: &SessionMap) -> Vec<u64> 
 
 /// Gracefully close every live session (pool .close()) and drop all SSH
 /// tunnels — used on app exit so the server sees clean disconnects.
-/// Each session gets 5 s: a pool with connections still checked out (a query
-/// mid-flight at exit) must not hold shutdown hostage for the rest.
+/// Sessions close CONCURRENTLY, each under its own 5 s timeout: a sequential
+/// loop charges app quit N×5 s when several pools have connections still
+/// checked out (a query mid-flight at exit), and one stuck close must not
+/// hold the others hostage.
 pub async fn close_all(state: &crate::state::AppState) {
     let sessions: Vec<(Uuid, Arc<LiveSession>)> = {
         let mut map = state.sessions.write().await;
         map.drain().collect()
     };
+    let mut tasks = tokio::task::JoinSet::new();
     for (session_id, s) in sessions {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            match s.as_ref() {
-                LiveSession::Mysql(pool)    => pool.close().await,
-                LiveSession::Postgres(pool) => pool.close().await,
-                // Only the sqlx pools need an awaited close. Every other engine
-                // holds either a single socket (SQL Server, ClickHouse), a file
-                // handle (SQLite, DuckDB, Parquet) or a manager (Redis, MongoDB),
-                // all of which close on Drop when this vector goes out of scope —
-                // so the wildcard here is deliberate, not an unhandled case.
-                _ => {}
-            }
-        }).await;
         // The window may already be gone at exit — the 'disconnect' audit row
         // is written from here precisely because the frontend cannot be asked.
-        if let Some(start) = state.session_starts.write().await.remove(&session_id) {
-            crate::commands::audit::insert_lifecycle(
-                &state.history, session_id, &start, "disconnect").await;
-        }
+        // Taken BEFORE the task spawns so the join loop below is the only
+        // writer left.
+        let start = state.session_starts.write().await.remove(&session_id);
+        let history = state.history.clone();
+        tasks.spawn(async move {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                match s.as_ref() {
+                    LiveSession::Mysql(pool)    => pool.close().await,
+                    LiveSession::Postgres(pool) => pool.close().await,
+                    // Stop an in-flight spawn_blocking query instead of letting it
+                    // run on past the exit; the connection itself closes on Drop
+                    // like the other non-pool engines.
+                    LiveSession::Duckdb(s)      => s.interrupt(),
+                    // Only the sqlx pools need an awaited close. Every other engine
+                    // holds either a single socket (SQL Server, ClickHouse), a file
+                    // handle (SQLite, DuckDB, Parquet) or a manager (Redis, MongoDB),
+                    // all of which close on Drop when the task ends and `s` goes out
+                    // of scope — so the wildcard here is deliberate, not an
+                    // unhandled case.
+                    _ => {}
+                }
+            }).await;
+            if let Some(start) = start {
+                crate::commands::audit::insert_lifecycle(
+                    &history, session_id, &start, "disconnect").await;
+            }
+        });
     }
+    while tasks.join_next().await.is_some() {}
     // Dropping the tunnels fires SshTunnel::Drop → kills the ssh child.
     state.tunnels.write().await.clear();
     state.session_meta.write().await.clear();
@@ -219,7 +239,7 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
             Err(e) => PingResult { ok: false, latency_ms: 0, server_version: None,
                                    error: Some(e.to_string()) },
         },
-        Engine::Parquet => match parquet::open(config) {
+        Engine::Parquet => match parquet::open_async(config).await {
             Ok(f) => parquet::ping(&f),
             Err(e) => PingResult { ok: false, latency_ms: 0, server_version: None,
                                    error: Some(e.to_string()) },
@@ -303,7 +323,10 @@ pub async fn execute_query(
             let mut conn = pool.acquire().await?;
             let backend_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
                 .fetch_one(&mut *conn).await?;
-            kills.write().await.insert(cancel_key.to_string(), backend_id);
+            kills.write().await.insert(cancel_key.to_string(), crate::state::KillHandle {
+                backend_id,
+                fingerprint: statement_fingerprint(sql),
+            });
             let mut r = mysql::execute_capped(&mut *conn, sql, max_rows).await;
             // Server warnings: the diagnostics area is per-connection, so the
             // SHOW WARNINGS must run here — before `conn` returns to the pool.
@@ -313,7 +336,9 @@ pub async fn execute_query(
                 }
             }
             // Remove the kill handle *before* `conn` returns to the pool, so a
-            // recycled backend id can never be KILLed for the wrong query.
+            // recycled backend id can never be KILLed for the wrong query —
+            // and the stored fingerprint lets a kill that still races through
+            // verify the victim before firing (kill_backend).
             kills.write().await.remove(cancel_key);
             r
         }
@@ -321,7 +346,10 @@ pub async fn execute_query(
             let mut conn = pool.acquire().await?;
             let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(&mut *conn).await?;
-            kills.write().await.insert(cancel_key.to_string(), backend_pid as u64);
+            kills.write().await.insert(cancel_key.to_string(), crate::state::KillHandle {
+                backend_id: backend_pid as u64,
+                fingerprint: statement_fingerprint(sql),
+            });
             let r = postgres::execute_capped(&mut *conn, sql, max_rows).await;
             kills.write().await.remove(cancel_key);
             r
@@ -374,13 +402,97 @@ pub async fn execute_query(
             // Best-effort: a failed @@SPID must not fail the user's query, it
             // just means this one cannot be cancelled.
             if let Ok(spid) = sqlserver::spid(s).await {
-                kills.write().await.insert(cancel_key.to_string(), spid);
+                kills.write().await.insert(cancel_key.to_string(), crate::state::KillHandle {
+                    backend_id: spid,
+                    fingerprint: statement_fingerprint(sql),
+                });
             }
             let r = sqlserver::execute_capped(s, sql, max_rows).await;
             kills.write().await.remove(cancel_key);
             r
         }
     }
+}
+
+/// A whitespace-collapsed rendering of a statement, stored in the kill
+/// registry next to the backend id. A KILL is issued asynchronously and can
+/// land AFTER the query it meant to stop has finished and its pooled
+/// connection — same CONNECTION_ID / backend pid — has been handed to another
+/// tab, so the kill path compares what the backend is running NOW against
+/// this fingerprint and refuses to fire on a mismatch.
+pub fn statement_fingerprint(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut pending_space = false;
+    for c in sql.chars() {
+        if c.is_whitespace() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Does the statement a backend is OBSERVED running (`observed`, from
+/// INFORMATION_SCHEMA.PROCESSLIST.INFO / pg_stat_activity.query) match the
+/// one this fingerprint was taken from?
+///
+/// Containment, not equality, because the two sides legitimately differ in
+/// length from each other: MySQL reports only the ONE statement of a
+/// multi-statement batch currently executing (a substring of what was sent,
+/// e.g. past the `USE …;` the editor prepends), and both servers truncate
+/// long query text (a prefix of it). The asymmetry worth remembering: a
+/// false NEGATIVE merely leaves our own query running — Stop can be pressed
+/// again — while a false POSITIVE kills an innocent query on a recycled
+/// connection. So an empty observation (idle backend, or nothing to compare)
+/// never matches.
+pub fn fingerprint_matches(fingerprint: &str, observed: &str) -> bool {
+    let obs = statement_fingerprint(observed);
+    !obs.is_empty() && !fingerprint.is_empty() && fingerprint.contains(&obs)
+}
+
+/// What a kill attempt did — the honest-reporting counterpart of
+/// [`backend_alive`] for the fire-and-forget kill path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KillVerdict {
+    /// The KILL was sent.
+    Issued,
+    /// The backend is no longer running the registered statement — the query
+    /// finished, or the connection was recycled to another tab — so the kill
+    /// was withheld on purpose.
+    SkippedStale,
+    /// The victim could not be verified (the process-list check failed), so
+    /// the kill was withheld rather than risk the wrong query.
+    Unverified,
+}
+
+/// The statement a MySQL backend is running right now. `Ok(None)` covers both
+/// "backend gone" and "idle" (INFO is NULL when idle) — either way there is
+/// nothing of ours to kill on it.
+async fn mysql_current_statement(pool: &sqlx::MySqlPool, backend_id: u64) -> Result<Option<String>> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT INFO FROM information_schema.processlist WHERE id = ?")
+        .bind(backend_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|(info,)| info))
+}
+
+/// The statement a PG backend is running right now — `state = 'active'`
+/// matters: pg_stat_activity.query shows the LAST query on an idle backend
+/// too, and an idle recycled connection is exactly the case this check
+/// exists to refuse.
+async fn pg_current_statement(pool: &sqlx::PgPool, backend_id: u64) -> Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT query FROM pg_stat_activity WHERE pid = $1 AND state = 'active'")
+        .bind(backend_id as i32)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|(q,)| q))
 }
 
 /// Best-effort server-side kill of an in-flight query by backend id.
@@ -407,22 +519,51 @@ pub enum KillForce {
     Hard,
 }
 
+/// Best-effort server-side kill of an in-flight query by backend id.
+///
+/// `fingerprint` is the statement the backend was registered as running. The
+/// kill is usually issued asynchronously, so by the time it lands the query
+/// may have finished and the pooled connection been recycled under the SAME
+/// backend id — firing then would kill whatever innocent query acquired it
+/// (and with `Hard`, destroy a connection another tab is using). On the
+/// pooled engines the victim is therefore verified against the fingerprint
+/// immediately before the KILL, and a mismatch — or a failed check —
+/// withholds it. SQL Server keeps no such check: its one KILL ends the whole
+/// session, and the mitigation there is that the caller sends it inline.
 pub async fn kill_backend(
     session_id: Uuid,
     backend_id: u64,
     sessions: &SessionMap,
     force: KillForce,
-) {
-    let Ok(session) = get_session(session_id, sessions).await else { return };
+    fingerprint: Option<&str>,
+) -> KillVerdict {
+    let Ok(session) = get_session(session_id, sessions).await else {
+        return KillVerdict::Unverified;
+    };
     match session.as_ref() {
         LiveSession::Mysql(pool) => {
+            if let Some(fp) = fingerprint {
+                match mysql_current_statement(pool, backend_id).await {
+                    Ok(Some(obs)) if fingerprint_matches(fp, &obs) => {}
+                    Ok(_) => return KillVerdict::SkippedStale,
+                    Err(_) => return KillVerdict::Unverified,
+                }
+            }
             let sql = match force {
                 KillForce::Cancel => format!("KILL QUERY {}", backend_id),
                 KillForce::Hard   => format!("KILL CONNECTION {}", backend_id),
             };
             let _ = sqlx::query(AssertSqlSafe(sql)).execute(pool).await;
+            KillVerdict::Issued
         }
         LiveSession::Postgres(pool) => {
+            if let Some(fp) = fingerprint {
+                match pg_current_statement(pool, backend_id).await {
+                    Ok(Some(obs)) if fingerprint_matches(fp, &obs) => {}
+                    Ok(_) => return KillVerdict::SkippedStale,
+                    Err(_) => return KillVerdict::Unverified,
+                }
+            }
             let sql = match force {
                 KillForce::Cancel => "SELECT pg_cancel_backend($1)",
                 KillForce::Hard   => "SELECT pg_terminate_backend($1)",
@@ -430,6 +571,7 @@ pub async fn kill_backend(
             let _ = sqlx::query(sql)
                 .bind(backend_id as i32)
                 .execute(pool).await;
+            KillVerdict::Issued
         }
         // T-SQL has exactly one KILL and it ends the session — there is no
         // kill-the-query-only form, so Cancel and Hard do the same thing here.
@@ -437,8 +579,9 @@ pub async fn kill_backend(
         // locked by the very query being killed.
         LiveSession::SqlServer(s) => {
             let _ = sqlserver::kill_spid(s, backend_id).await;
+            KillVerdict::Issued
         }
-        _ => {}
+        _ => KillVerdict::SkippedStale,
     }
 }
 
@@ -623,6 +766,56 @@ fn split_parent(parent: &str) -> Result<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whitespace runs collapse and the ends are trimmed — the server echoes
+    /// the statement with its own whitespace, not ours.
+    #[test]
+    fn fingerprint_collapses_whitespace() {
+        assert_eq!(statement_fingerprint("SELECT  *\n\tFROM  t "), "SELECT * FROM t");
+        assert_eq!(statement_fingerprint("  \n"), "");
+        assert_eq!(statement_fingerprint(""), "");
+    }
+
+    /// The kill-victim decision, without a server. The asymmetry being pinned:
+    /// a false negative leaves our own query running (Stop again); a false
+    /// positive kills an innocent query on a recycled connection.
+    #[test]
+    fn fingerprint_match_decides_the_kill() {
+        let fp = statement_fingerprint("SELECT * FROM t WHERE SLEEP(30) = 0");
+        // The backend is running exactly what was registered.
+        assert!(fingerprint_matches(&fp, "SELECT * FROM t WHERE SLEEP(30) = 0"));
+        // The comparison is deliberately case-sensitive: the server echoes
+        // the text as sent, and folding case would only widen the false-
+        // positive side — the one that kills an innocent query.
+        assert!(!fingerprint_matches(&fp, "select * from t where sleep(30) = 0"));
+        // Server-side truncation of a long query text: the observed text is a
+        // PREFIX of the registered one, and that still matches.
+        assert!(fingerprint_matches(&fp, "SELECT * FROM t WHERE SLEEP"));
+    }
+
+    /// MySQL's PROCESSLIST.INFO shows the ONE statement of a multi-statement
+    /// batch currently executing — e.g. past the `USE …;` the editor prepends
+    /// — so containment, not prefix, is the match.
+    #[test]
+    fn mysql_batch_member_statement_matches() {
+        let fp = statement_fingerprint("USE `shop`;\nSELECT SLEEP(30)");
+        assert!(fingerprint_matches(&fp, "SELECT SLEEP(30)"));
+        assert!(fingerprint_matches(&fp, "USE `shop`;"));
+    }
+
+    /// The bug this exists for: the query finished, the pooled connection was
+    /// recycled, and the backend is now idle or running someone else's
+    /// statement. The kill must be withheld in every one of these.
+    #[test]
+    fn a_recycled_or_idle_backend_never_matches() {
+        let fp = statement_fingerprint("SELECT * FROM huge_table");
+        assert!(!fingerprint_matches(&fp, ""), "idle backend: INFO is NULL/empty");
+        assert!(!fingerprint_matches(&fp, "   \n "));
+        assert!(!fingerprint_matches(&fp, "SELECT * FROM other_table"));
+        assert!(!fingerprint_matches(&fp, "UPDATE accounts SET balance = 0"));
+        // And an empty fingerprint must never match anything.
+        assert!(!fingerprint_matches("", "SELECT 1"));
+    }
 
     /// IAM off: the stored password passes through untouched.
     #[tokio::test]

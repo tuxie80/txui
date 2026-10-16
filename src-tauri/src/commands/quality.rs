@@ -80,7 +80,10 @@ pub async fn explain_analyze_guarded(
     // ANALYZE of an UPDATE/DELETE on a writable connection would execute the
     // write's plan with NO timeout at all (WP-13 13.6). This is a guarded
     // feature; refusal fits its contract.
-    if crate::sqlguard::is_write(&sql) {
+    if crate::sqlguard::is_write_for(
+        state.session_meta.read().await.get(&session_id).map(|g| g.engine),
+        &sql,
+    ) {
         return Err(crate::apperror::AppError::guard(
             "EXPLAIN ANALYZE executes the statement, and a write cannot be \
              bounded by the timeout guard — run EXPLAIN (without ANALYZE) on \

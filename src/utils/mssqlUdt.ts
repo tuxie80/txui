@@ -265,7 +265,9 @@ export function buildUdtDerivedQuery(
   // ORDER BY), so instead the inner ORDER BY gains `OFFSET 0 ROWS` — the
   // documented legaliser — unless it already carries OFFSET/FETCH.
   if (scan.orderBy !== null && !scan.orderByHasOffsetFetch) {
-    inner += ' OFFSET 0 ROWS';
+    // Newline-led: a trailing `-- comment` after the ORDER BY must not swallow
+    // the legaliser (that was Msg 1033 waiting to happen).
+    inner += '\nOFFSET 0 ROWS';
     clauseNotes.push('ORDER BY kept in place via OFFSET 0 ROWS');
   } else if (scan.orderBy !== null) {
     clauseNotes.push('ORDER BY already carries OFFSET/FETCH');

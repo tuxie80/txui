@@ -696,6 +696,19 @@ pub async fn execute_capped(
                rolled it back — this statement was NOT run, because running it on \
                the new connection would have committed it outside the transaction");
     }
+    // EXCEPT for writes, transaction or not. A dead connection is an
+    // AMBIGUOUS failure: the server may have executed and committed the
+    // statement in the moments before the socket died, and re-running an
+    // INSERT could commit it twice — the same argument `is_connection_dead`
+    // makes for the other error classes above. Only a statement the guard
+    // classifies as a non-write is safe to re-run; a write gets the truth
+    // instead: outcome unknown, not retried.
+    if crate::sqlguard::is_write_for(Some(crate::db::types::Engine::SqlServer), sql) {
+        bail!("the connection was lost and it cannot be known whether the server \
+               executed this statement before dying — it was NOT retried, because \
+               re-running a write could apply it twice; check whether it took \
+               effect and re-run it yourself");
+    }
     let stream = client.simple_query(sql).await.map_err(ms_error)?;
     let (sets, first_row_ms, truncated) = collect_stream(stream, &start, max_rows).await?;
     Ok(result_from_sets(sets, &start, first_row_ms, truncated))
@@ -1312,6 +1325,37 @@ mod tests {
         assert!(matches!(encryption_level(&SslMode::Preferred), EncryptionLevel::On));
         for m in [SslMode::Require, SslMode::VerifyCa, SslMode::VerifyFull] {
             assert!(matches!(encryption_level(&m), EncryptionLevel::Required), "{m:?}");
+        }
+    }
+
+    /// The reconnect-retry veto in `execute_capped`: after an ambiguous
+    /// connection drop, only a statement the guard calls a non-write may be
+    /// re-run — a write's outcome is unknowable, so it must be refused.
+    /// This pins the classification the veto relies on.
+    #[test]
+    fn only_reads_are_safe_to_retry_after_a_connection_drop() {
+        for read in [
+            "SELECT 1",
+            "  select * from t where id = 1",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SELECT @@SPID",
+            "SET SHOWPLAN_XML ON",   // session state — re-running it is harmless
+            "BEGIN TRANSACTION",     // not classified a write; the in-tx flag
+                                     // still vetoes a retry inside an open tx
+        ] {
+            assert!(!crate::sqlguard::is_write(read), "would be refused: {read}");
+        }
+        for write in [
+            "INSERT INTO t VALUES (1)",
+            "update t set x = 1 where id = 2",
+            "DELETE FROM t",
+            "CREATE TABLE t (id int)",
+            "DROP TABLE t",
+            "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE",
+            // A write anywhere in a batch vetoes the retry, not just first.
+            "SELECT 1; INSERT INTO t VALUES (1)",
+        ] {
+            assert!(crate::sqlguard::is_write(write), "would be retried: {write}");
         }
     }
 

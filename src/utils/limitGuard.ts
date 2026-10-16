@@ -32,9 +32,10 @@ export function applyDefaultLimit(
   sql: string,
   limit: number,
   dialect: LimitDialect = 'limit',
+  engine?: string,
 ): { sql: string; applied: boolean } {
   if (limit <= 0) return { sql, applied: false };
-  const b = blank(sql);
+  const b = blank(sql, engine);
 
   // only SELECT / WITH … SELECT / TABLE / VALUES produce unbounded row sets
   const first = /[A-Za-z]+/.exec(b)?.[0].toLowerCase() ?? '';
@@ -43,7 +44,7 @@ export function applyDefaultLimit(
   }
   // A `WITH` that actually writes (data-modifying CTE / `WITH … INSERT`) must
   // not get a LIMIT tacked on — that would change how many rows it writes.
-  if (first === 'with' && isWriteStatement(sql)) {
+  if (first === 'with' && isWriteStatement(sql, engine)) {
     return { sql, applied: false };
   }
   // SELECT … INTO OUTFILE/DUMPFILE — leave alone

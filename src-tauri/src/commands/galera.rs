@@ -159,7 +159,7 @@ async fn poll_one_config(
             config.engine.wire_name())), vec![], vec![]);
     }
 
-    let session_id = match super::connections::open_session_for_config(config, state).await {
+    let session_id = match super::connections::open_ephemeral_session(config, state).await {
         Ok(id) => id,
         Err(e) => return done(false, Some(crate::apperror::AppError::display(&e)), vec![], vec![]),
     };
@@ -182,12 +182,9 @@ async fn poll_one_config(
         Err(_) => (false, Some(format!("timeout after {}s", PER_NODE_TIMEOUT_SECS)), vec![], vec![]),
     };
 
-    // Tear down the ephemeral session + tunnel + kill handle + guard — the
-    // same four registries multi_exec cleans, so nothing leaks across polls.
-    connection::close_session(session_id, &state.sessions).await;
-    state.tunnels.write().await.remove(&session_id);
-    state.kills.write().await.remove(&cancel_key);
-    state.session_meta.write().await.remove(&session_id);
+    // Shared ephemeral teardown: every registry cleaned, and a kill handle
+    // still registered (the timeout arm above) is fired, not just removed.
+    super::connections::teardown_ephemeral_session(state, session_id, &cancel_key).await;
 
     done(outcome.0, outcome.1, outcome.2, outcome.3)
 }
@@ -469,7 +466,7 @@ async fn processlist_one_config(
             config.engine.wire_name())), vec![], vec![]);
     }
 
-    let session_id = match super::connections::open_session_for_config(config, state).await {
+    let session_id = match super::connections::open_ephemeral_session(config, state).await {
         Ok(id) => id,
         Err(e) => return done(false, Some(crate::apperror::AppError::display(&e)), vec![], vec![]),
     };
@@ -492,11 +489,8 @@ async fn processlist_one_config(
         Err(_) => (false, Some(format!("timeout after {}s", PER_NODE_TIMEOUT_SECS)), vec![], vec![]),
     };
 
-    // The same four registries the cluster poll cleans.
-    connection::close_session(session_id, &state.sessions).await;
-    state.tunnels.write().await.remove(&session_id);
-    state.kills.write().await.remove(&cancel_key);
-    state.session_meta.write().await.remove(&session_id);
+    // Shared ephemeral teardown, same as the cluster poll.
+    super::connections::teardown_ephemeral_session(state, session_id, &cancel_key).await;
 
     done(outcome.0, outcome.1, outcome.2, outcome.3)
 }
@@ -623,8 +617,9 @@ pub async fn galera_cluster_processlist(
 // nodes kill exactly like saved ones), an ephemeral session is opened for it,
 // ONE kill is issued through the same implementation the per-session Processes
 // panel uses (`do_kill_processes` — factored off `kill_processes`, so no kill
-// bypasses the existing gates), and the four registries `poll_one_config`
-// cleans are cleaned again, kill or no kill. A per-thread failure (a missing
+// bypasses the existing gates), and the shared ephemeral teardown
+// (`teardown_ephemeral_session`) cleans every registry, kill or no kill.
+// A per-thread failure (a missing
 // CONNECTION_ADMIN, a thread already gone) comes back as data in the
 // `KillOutcome`, never hidden.
 
@@ -653,19 +648,16 @@ pub(crate) async fn cluster_kill(
             "Connection is read-only — killing sessions is blocked."));
     }
 
-    let session_id = super::connections::open_session_for_config(config, state).await?;
+    let session_id = super::connections::open_ephemeral_session(config, state).await?;
     // Galera nodes are MySQL-family: numeric thread ids, no ClickHouse
     // query_ids, hence the trailing None.
     let result = super::kill::do_kill_processes(state, session_id, vec![id], mode, None).await;
 
-    // Tear down the ephemeral session + tunnel + kill handle + guard — the
-    // same four registries poll_one_config cleans, so nothing leaks, kill or
-    // no kill. (The kill path registers no cancel key of its own; the remove
-    // is the symmetric no-op that keeps the four-registry contract.)
-    connection::close_session(session_id, &state.sessions).await;
-    state.tunnels.write().await.remove(&session_id);
-    state.kills.write().await.remove(&format!("galera-kill-{session_id}"));
-    state.session_meta.write().await.remove(&session_id);
+    // Shared ephemeral teardown. (The kill path registers no cancel key of
+    // its own; passing the key keeps the contract symmetric — the remove is
+    // a no-op, and no kill is fired.)
+    super::connections::teardown_ephemeral_session(
+        state, session_id, &format!("galera-kill-{session_id}")).await;
 
     result
 }
@@ -859,7 +851,7 @@ async fn consistency_check_one(
             config.engine.wire_name())), None, 0, None, vec![]);
     }
 
-    let session_id = match super::connections::open_session_for_config(&config, state).await {
+    let session_id = match super::connections::open_ephemeral_session(&config, state).await {
         Ok(id) => id,
         Err(e) => return done(false, Some(crate::apperror::AppError::display(&e)), None, 0, None, vec![]),
     };
@@ -939,11 +931,8 @@ async fn consistency_check_one(
         Err(_) => (false, Some(format!("timeout after {}s", PER_NODE_TIMEOUT_SECS)), None, 0, None, vec![]),
     };
 
-    // Same four registries multi_exec and the cluster poll clean.
-    connection::close_session(session_id, &state.sessions).await;
-    state.tunnels.write().await.remove(&session_id);
-    state.kills.write().await.remove(&cancel_key);
-    state.session_meta.write().await.remove(&session_id);
+    // Shared ephemeral teardown, same as multi_exec and the cluster poll.
+    super::connections::teardown_ephemeral_session(state, session_id, &cancel_key).await;
 
     done(outcome.0, outcome.1, outcome.2, outcome.3, outcome.4, outcome.5)
 }
@@ -1270,7 +1259,7 @@ async fn cluster_sst_tail(
     // MariaDB 11.8 rsync SST) — which is exactly when this tail matters. The
     // connect error therefore arrives as the terminal event, rendered inline
     // by the card, never an Err the UI must special-case, never a hang.
-    let session_id = match super::connections::open_session_for_config(config, state).await {
+    let session_id = match super::connections::open_ephemeral_session(config, state).await {
         Ok(id) => id,
         Err(e) => {
             let _ = on_event.send(SstLogEvent::Ended {
@@ -1282,14 +1271,10 @@ async fn cluster_sst_tail(
 
     let result = run_sst_tail(state, session_id, config, run_key, on_event).await;
 
-    // Tear down the ephemeral session + tunnel + kill handle + guard — the
-    // same four registries poll_one_config cleans, so nothing leaks across
-    // tails. (session_starts is intentionally NOT among them: poll_one_config
-    // leaves it too, and close_connection drains it.)
-    connection::close_session(session_id, &state.sessions).await;
-    state.tunnels.write().await.remove(&session_id);
-    state.kills.write().await.remove(&format!("galera-{session_id}"));
-    state.session_meta.write().await.remove(&session_id);
+    // Shared ephemeral teardown — every registry cleaned, so nothing leaks
+    // across tails.
+    super::connections::teardown_ephemeral_session(
+        state, session_id, &format!("galera-{session_id}")).await;
     result
 }
 

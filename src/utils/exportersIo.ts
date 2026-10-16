@@ -5,6 +5,7 @@
  * allowed to import Tauri.
  */
 import { basename, defaultEol } from './platform.ts';
+import { bytesToBase64 } from './base64.ts';
 import { getPref, PREFS } from '../store/preferences.ts';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -64,7 +65,7 @@ export async function exportXlsx(
     filters: [{ name: 'Excel workbook', extensions: ['xlsx'] }],
   });
   if (!path) return null;
-  await invoke('write_binary_file', { path, contents: Array.from(bytes) });
+  await invoke('write_binary_file', { path, contentsBase64: bytesToBase64(bytes) });
   return path;
 }
 

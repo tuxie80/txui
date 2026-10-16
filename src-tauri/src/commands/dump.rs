@@ -7,6 +7,13 @@
 /// - The password never appears in argv — it is passed via MYSQL_PWD /
 ///   PGPASSWORD, so it is invisible in `ps` and in the command preview.
 /// - Write-side tools (restore) are refused for read-only connections.
+/// - The renderer-supplied argv is validated before spawn (see the "Argv
+///   validation" section): the process carries the connection's password in
+///   its environment, so an argv that re-points `-h`/`--host` at an attacker
+///   host would ship the auth handshake there. Validation guarantees the tool
+///   can only ever talk to the session's own server, as the connection's own
+///   user. It does NOT try to make a restore's SQL safe — `mysql`/`psql`
+///   execute whatever is in the dump file, gated by the read-only block.
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::ipc::Channel;
@@ -194,6 +201,228 @@ pub async fn probe_dump_tools() -> Result<Vec<ToolInfo>, crate::apperror::AppErr
     Ok(out)
 }
 
+// ── Argv validation ─────────────────────────────────────────────────────────
+//
+// The panel builds argv from structured options plus a free-text extra-args
+// field, so a fully structured command API would cost the panel that
+// flexibility. Instead the boundary is enforced here, on the resolved argv:
+//
+// - connection-target flags (host/port/user, in each tool's spelling) are
+//   allowed ONLY with the session's own resolved endpoint and user — a
+//   mismatch is rejected;
+// - password flags are always rejected (env only, never argv);
+// - option-file flags (--defaults-file, --login-path, …) are rejected — they
+//   can silently re-point the target or inject flags;
+// - every other flag must be on the tool's allowlist below. Unknown flags
+//   are rejected, which also keeps TLS-weakening options (--ssl-mode=…) out;
+// - positional arguments (database, tables, file paths) pass unchecked, with
+//   one exception: for the libpq tools a positional can BE a conninfo string
+//   or postgres:// URI (pg_dump/psql treat the database argument that way),
+//   so anything conninfo-shaped is rejected there.
+
+/// What a flag does with the connection, and whether it swallows a value.
+#[derive(Clone, Copy, PartialEq)]
+enum FlagKind {
+    /// No value (an `=value` suffix is still tolerated — `--column-statistics=0`).
+    Bool,
+    /// Takes a value, separate token or `=`-joined.
+    Value,
+    /// Host: value must equal the session's resolved host.
+    Host,
+    /// Port: value must equal the session's resolved port.
+    Port,
+    /// User: value must equal the connection's user.
+    User,
+    /// Database name (libpq): value must not be a conninfo string / URI.
+    DbName,
+}
+
+fn mysql_conn_flags() -> &'static [(&'static str, FlagKind)] {
+    &[("h", FlagKind::Host), ("host", FlagKind::Host),
+      ("u", FlagKind::User), ("user", FlagKind::User),
+      ("P", FlagKind::Port), ("port", FlagKind::Port)]
+}
+
+fn pg_conn_flags() -> &'static [(&'static str, FlagKind)] {
+    &[("h", FlagKind::Host), ("host", FlagKind::Host),
+      ("U", FlagKind::User), ("username", FlagKind::User),
+      ("p", FlagKind::Port), ("port", FlagKind::Port),
+      ("d", FlagKind::DbName), ("dbname", FlagKind::DbName),
+      // The panel emits this so a script never blocks on a password prompt;
+      // the password is already in PGPASSWORD.
+      ("w", FlagKind::Bool), ("no-password", FlagKind::Bool)]
+}
+
+/// The per-tool allowlist: connection flags plus the flags the panel emits
+/// and the common extras worth typing into the free-text field. Anything not
+/// listed is rejected.
+fn allow_table(tool: &str) -> Vec<(&'static str, FlagKind)> {
+    use FlagKind::{Bool as B, Value as V, DbName as D};
+    let mut t: Vec<(&'static str, FlagKind)> = Vec::new();
+    match tool {
+        "mysqldump" | "mysql" | "mydumper" | "myloader" => t.extend_from_slice(mysql_conn_flags()),
+        _ => t.extend_from_slice(pg_conn_flags()),
+    }
+    t.extend_from_slice(match tool {
+        "mysqldump" => &[
+            ("single-transaction", B), ("routines", B), ("R", B), ("triggers", B),
+            ("events", B), ("E", B), ("no-data", B), ("d", B), ("quick", B), ("q", B),
+            ("result-file", V), ("r", V), ("lock-tables", B), ("no-create-info", B), ("t", B),
+            ("complete-insert", B), ("c", B), ("extended-insert", B), ("e", B),
+            ("skip-extended-insert", B), ("hex-blob", B), ("comments", B), ("skip-comments", B),
+            ("dump-date", B), ("skip-dump-date", B), ("compact", B),
+            ("databases", B), ("B", B), ("all-databases", B), ("A", B),
+            ("order-by-primary", B), ("quote-names", B), ("Q", B), ("skip-quote-names", B),
+            ("replace", B), ("no-tablespaces", B), ("y", B), ("flush-logs", B),
+            ("force", B), ("f", B), ("verbose", B), ("v", B),
+            ("where", V), ("w", V), ("max-allowed-packet", V), ("net-buffer-length", V),
+            ("set-gtid-purged", V), ("ignore-table", V), ("default-character-set", V),
+            ("compatible", V), ("master-data", B), ("column-statistics", B),
+        ][..],
+        "mysql" => &[
+            ("force", B), ("f", B), ("verbose", B), ("v", B), ("show-warnings", B),
+            ("binary-mode", B), ("compress", B), ("C", B), ("quick", B), ("q", B),
+            ("batch", B), ("B", B), ("database", D), ("D", D),
+            ("default-character-set", V), ("max-allowed-packet", V),
+        ][..],
+        "mydumper" => &[
+            ("outputdir", V), ("o", V), ("threads", V), ("t", V),
+            ("verbose", V), ("v", V), ("database", D), ("B", D),
+            ("rows", V), ("regex", V),
+            ("compress", B), ("trx-consistency-only", B), ("less-locking", B),
+            ("no-locks", B), ("no-backup-locks", B), ("skip-tz-utc", B),
+        ][..],
+        "myloader" => &[
+            ("directory", V), ("d", V), ("threads", V), ("t", V),
+            ("verbose", V), ("v", V), ("database", D), ("B", D),
+            ("overwrite-tables", B),
+        ][..],
+        "pg_dump" => &[
+            ("format", V), ("F", V), ("file", V), ("f", V), ("jobs", V), ("j", V),
+            ("table", V), ("t", V), ("exclude-table", V), ("T", V),
+            ("schema", V), ("n", V), ("exclude-schema", V), ("N", V),
+            ("schema-only", B), ("s", B), ("no-owner", B), ("O", B),
+            ("no-privileges", B), ("x", B), ("clean", B), ("c", B), ("if-exists", B),
+            ("create", B), ("C", B), ("data-only", B), ("a", B), ("inserts", B),
+            ("verbose", B), ("v", B), ("quote-all-identifiers", B),
+            ("serializable-deferrable", B), ("no-comments", B),
+        ][..],
+        "pg_restore" => &[
+            ("jobs", V), ("j", V),
+            ("clean", B), ("if-exists", B), ("no-owner", B), ("O", B),
+            ("verbose", B), ("v", B), ("data-only", B), ("a", B),
+            ("schema-only", B), ("s", B), ("exit-on-error", B),
+            ("single-transaction", B), ("1", B), ("no-comments", B),
+        ][..],
+        "psql" => &[
+            ("file", V), ("f", V), ("set", V), ("variable", V), ("v", V),
+            ("single-transaction", B), ("1", B), ("echo-errors", B),
+            ("quiet", B), ("q", B),
+        ][..],
+        _ => &[][..],
+    });
+    t
+}
+
+/// Flags rejected even before the allowlist, with the reason the user sees.
+fn reject_table(tool: &str) -> &'static [(&'static str, &'static str)] {
+    const PW: &str = "the password is passed via env (MYSQL_PWD / PGPASSWORD) — never on the command line";
+    const REPOINT: &str = "it can re-point the tool away from this connection's server";
+    match tool {
+        "mysqldump" | "mysql" | "mydumper" | "myloader" => &[
+            ("p", PW), ("password", PW),
+            ("S", REPOINT), ("socket", REPOINT),
+            ("defaults-file", REPOINT), ("defaults-extra-file", REPOINT),
+            ("defaults-group-suffix", REPOINT), ("login-path", REPOINT),
+            ("print-defaults", REPOINT),
+        ][..],
+        _ => &[
+            ("W", PW), ("password", PW),
+        ][..],
+    }
+}
+
+/// libpq accepts a conninfo string or postgres:// URI anywhere a database
+/// name goes — which would re-point the connection. `-v NAME=VALUE` values
+/// are exempt (they legitimately contain '='), so this is applied only to
+/// DbName values and to positional tokens of pg_dump/psql.
+fn looks_like_conninfo(v: &str) -> bool {
+    v.contains('=') || v.starts_with("postgres://") || v.starts_with("postgresql://")
+}
+
+/// Validate the RESOLVED argv (placeholders already substituted) against the
+/// session's own endpoint. See the section comment for the boundary.
+fn validate_argv(
+    tool: &str,
+    args: &[String],
+    host: &str,
+    port: u16,
+    user: &str,
+) -> Result<(), crate::apperror::AppError> {
+    let allow = allow_table(tool);
+    let reject = reject_table(tool);
+    let mut positional_only = false;
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i].clone();
+        i += 1;
+        if tok == "--" && !positional_only {
+            positional_only = true;
+            continue;
+        }
+        if positional_only || !tok.starts_with('-') || tok == "-" {
+            // Positional. pg_dump/psql read the first one as the database
+            // name, and a database name can be a conninfo string.
+            if matches!(tool, "pg_dump" | "psql") && looks_like_conninfo(&tok) {
+                return Err(format!(
+                    "{tool}: '{tok}' looks like a conninfo string — the database must be a plain name on this connection's server"
+                ).into());
+            }
+            continue;
+        }
+        let body = tok.trim_start_matches('-');
+        let (name, inline_val) = match body.split_once('=') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (body, None),
+        };
+        if let Some((_, reason)) = reject.iter().find(|(n, _)| *n == name) {
+            return Err(format!("{tool}: '{tok}' is not allowed — {reason}").into());
+        }
+        let Some((_, kind)) = allow.iter().find(|(n, _)| *n == name) else {
+            return Err(format!(
+                "{tool}: '{tok}' is not an allowed flag for this tool (unknown flags are rejected)"
+            ).into());
+        };
+        let kind = *kind;
+        let value: Option<String> = match (kind, inline_val) {
+            (FlagKind::Bool, _) => None,
+            (_, Some(v)) => Some(v),
+            (_, None) => {
+                let v = args.get(i)
+                    .ok_or_else(|| format!("{tool}: '{tok}' needs a value"))?;
+                i += 1;
+                Some(v.clone())
+            }
+        };
+        let mismatch = |what: &str, got: &str, want: &str| crate::apperror::AppError::from(format!(
+            "{tool}: --{name} is '{got}' but this connection's {what} is '{want}' — \
+             a dump/restore can only target the server the connection names"
+        ));
+        match (kind, value.as_deref()) {
+            (FlagKind::Host, Some(v)) if v != host => return Err(mismatch("host", v, host)),
+            (FlagKind::Port, Some(v)) if v != port.to_string() =>
+                return Err(mismatch("port", v, &port.to_string())),
+            (FlagKind::User, Some(v)) if v != user => return Err(mismatch("user", v, user)),
+            (FlagKind::DbName, Some(v)) if looks_like_conninfo(v) =>
+                return Err(format!(
+                    "{tool}: --{name} looks like a conninfo string — the database must be a plain name on this connection's server"
+                ).into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 // ── Execution ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,8 +443,10 @@ fn get_password(config: &crate::db::types::ConnectionConfig, data_dir: &std::pat
 ///
 /// `args` may contain `{{host}}` / `{{port}}` placeholders — they are resolved
 /// here (to the SSH tunnel endpoint when the connection uses one, which is
-/// opened for the duration of the run). `stdin_file` streams a file into the
-/// process (mysql/psql plain-SQL restore).
+/// opened for the duration of the run), and the resolved argv is validated
+/// against the session's own endpoint (`validate_argv`) before anything is
+/// spawned. `stdin_file` streams a file into the process (mysql/psql plain-SQL
+/// restore).
 #[tauri::command]
 pub async fn run_dump_tool(
     connection_id: Uuid,
@@ -320,8 +551,19 @@ async fn run_tool_inner(
         .map(|a| a.replace("{{host}}", &host).replace("{{port}}", &port.to_string()))
         .collect();
 
+    // The argv is renderer-controlled and the process carries the password in
+    // its environment — a re-pointed --host would ship the auth handshake to
+    // an attacker host. Validated post-resolution so the SSH-tunnel endpoint
+    // is what the connection flags are compared against.
+    validate_argv(tool, &resolved, &host, port, config.user.as_deref().unwrap_or(""))?;
+
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(&resolved)
+        // Quitting the app mid-dump must not orphan the tool against its
+        // (dying) SSH tunnel: if the Child is dropped without a wait — process
+        // teardown, a panic path — the OS child is killed rather than left
+        // running. A reaped child is a no-op for this.
+        .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(match &stdin_file {
@@ -416,4 +658,119 @@ pub async fn cancel_dump_tool(run_key: String, state: State<'_, AppState>) -> Re
         let _ = tx.send(());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sv(args: &[&str]) -> Vec<String> { args.iter().map(|s| s.to_string()).collect() }
+
+    /// What the panel's mysqldump spec actually builds (host/port resolved).
+    const HOST: &str = "db.internal";
+    const PORT: u16 = 3306;
+    const USER: &str = "backup";
+
+    #[test]
+    fn accepts_panel_built_argv() {
+        let args = sv(&[
+            "--host", HOST, "--port", "3306", "--user", USER,
+            "--single-transaction", "--routines", "--triggers", "--events", "--quick",
+            "--where=tenant_id > 10",
+            "--result-file", "/tmp/dump.sql", "shop", "orders", "customers",
+        ]);
+        assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_ok());
+
+        let psql = sv(&[
+            "--host", "pg.internal", "--port", "5432", "--username", "dba", "--no-password",
+            "--dbname", "shop", "-v", "ON_ERROR_STOP=1", "--file", "/tmp/dump.sql",
+        ]);
+        assert!(validate_argv("psql", &psql, "pg.internal", 5432, "dba").is_ok());
+    }
+
+    #[test]
+    fn rejects_repointed_host_in_every_spelling() {
+        for tok in ["--host", "-h"] {
+            let args = sv(&[tok, "attacker.example", "shop"]);
+            assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_err(), "{tok}");
+        }
+        let eq = sv(&["--host=attacker.example", "shop"]);
+        assert!(validate_argv("mysqldump", &eq, HOST, PORT, USER).is_err());
+        let pg = sv(&["-h", "attacker.example", "shop"]);
+        assert!(validate_argv("pg_dump", &pg, "pg.internal", 5432, "dba").is_err());
+        // The session's own host is of course fine.
+        let ok = sv(&["--host", HOST, "shop"]);
+        assert!(validate_argv("mysqldump", &ok, HOST, PORT, USER).is_ok());
+    }
+
+    #[test]
+    fn rejects_repointed_port_and_user() {
+        let args = sv(&["--port", "13306", "shop"]);
+        assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_err());
+        let args = sv(&["-P", "1", "shop"]);
+        assert!(validate_argv("mysql", &args, HOST, PORT, USER).is_err());
+        let args = sv(&["--user", "root", "shop"]);
+        assert!(validate_argv("mysql", &args, HOST, PORT, USER).is_err());
+        let args = sv(&["--username=root", "shop"]);
+        assert!(validate_argv("pg_dump", &args, "h", 5432, "dba").is_err());
+    }
+
+    #[test]
+    fn rejects_password_flags_and_option_files() {
+        for tok in ["-p", "--password", "--password=hunter2"] {
+            let args = sv(&[tok]);
+            assert!(validate_argv("mysql", &args, HOST, PORT, USER).is_err(), "{tok}");
+        }
+        // A bare "-p" must not swallow the next token either — it is rejected
+        // before value parsing.
+        let args = sv(&["-p", "secret"]);
+        assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_err());
+        // PostgreSQL: prompting for a password is rejected, --no-password allowed.
+        assert!(validate_argv("pg_dump", &sv(&["-W"]), "h", 5432, "dba").is_err());
+        assert!(validate_argv("pg_dump", &sv(&["--no-password"]), "h", 5432, "dba").is_ok());
+        // Option files can carry host/user/password of their own.
+        for tok in ["--defaults-extra-file=/tmp/x.cnf", "--login-path", "--socket=/tmp/s.sock"] {
+            let args = sv(&[tok]);
+            assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_err(), "{tok}");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_flags_but_not_positionals() {
+        let args = sv(&["--this-flag-does-not-exist", "shop", "orders"]);
+        assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_err());
+        // TLS weakening is an unknown-flag rejection too.
+        let args = sv(&["--ssl-mode=DISABLED"]);
+        assert!(validate_argv("mysql", &args, HOST, PORT, USER).is_err());
+        // Positionals (database, tables, paths) are data, and `--` ends flags.
+        let args = sv(&["shop", "order items", "--", "-not-a-flag"]);
+        assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_ok());
+    }
+
+    #[test]
+    fn rejects_conninfo_in_libpq_database_positions() {
+        // libpq treats a dbname containing '=' or a postgres:// URI as a
+        // conninfo string — a re-point that never mentions --host.
+        let args = sv(&["--dbname", "host=attacker.example"]);
+        assert!(validate_argv("pg_restore", &args, "h", 5432, "dba").is_err());
+        let args = sv(&["-d", "postgresql://attacker.example/x"]);
+        assert!(validate_argv("psql", &args, "h", 5432, "dba").is_err());
+        let args = sv(&["host=attacker.example"]); // positional dbname
+        assert!(validate_argv("pg_dump", &args, "h", 5432, "dba").is_err());
+        // …but psql's -v NAME=VALUE is not a dbname and stays legal, and a
+        // pg_restore archive PATH may contain '=' (it is never a conninfo).
+        assert!(validate_argv("psql", &sv(&["-v", "ON_ERROR_STOP=1"]), "h", 5432, "dba").is_ok());
+        assert!(validate_argv("pg_restore", &sv(&["/tmp/a=b.dump"]), "h", 5432, "dba").is_ok());
+        // MySQL database names are never conninfo — '=' is merely rejected
+        // via DbName on -D, positionals stay free.
+        assert!(validate_argv("mysql", &sv(&["shop"]), HOST, PORT, USER).is_ok());
+    }
+
+    #[test]
+    fn flag_value_may_start_with_a_dash() {
+        // --where "x > -1": the value token is swallowed as a value, not
+        // parsed as another flag.
+        let args = sv(&["--where", "id > -1", "shop"]);
+        assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_ok());
+    }
 }

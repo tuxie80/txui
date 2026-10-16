@@ -8,6 +8,7 @@
 //! recording still being appended to by a live daemon is re-ingested when it
 //! grows.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -37,6 +38,25 @@ struct IngestProgress {
     total: usize,
 }
 
+/// Drop every cached generation under `prefix` (a `path|` key prefix) except
+/// `keep`, returning how many were evicted.
+///
+/// The cache key is `path|size|mtime`, so a recording still being appended to
+/// by a live daemon re-keys on every growth — without this sweep each re-open
+/// of a growing file stacked a new ReplayCache (a SQLite pool plus the decoded
+/// columnar series) on top of the last, and `replay_evict` only ever removes
+/// the CURRENT key. Generic over the value so the sweep is testable without a
+/// real recording; the dropped entries' pools close once no in-flight command
+/// still holds an Arc to them.
+fn sweep_stale_generations<V>(map: &mut HashMap<String, V>, prefix: &str, keep: &str) -> usize {
+    let stale: Vec<String> = map.keys()
+        .filter(|k| k.starts_with(prefix) && k.as_str() != keep)
+        .cloned().collect();
+    let n = stale.len();
+    for k in stale { map.remove(&k); }
+    n
+}
+
 /// Fetch a cached recording, or **open it lightly** (metadata + timestamp axis
 /// + a small sample — no full decode) and cache it. Cheap and fast: the heavy
 ///   columnar series are built later, lazily, by `replay_series`. The cache key
@@ -49,7 +69,12 @@ async fn get_or_open(path: &str, state: &AppState) -> Result<Arc<ReplayCache>, A
         return Ok(hit);
     }
     let cache = Arc::new(replay::open_light(&p).await?);
-    state.replay_cache.write().await.insert(key, cache.clone());
+    let mut map = state.replay_cache.write().await;
+    // A new key for a path already cached = the recording grew. The superseded
+    // generations of THIS path are dead weight — sweep them (replay_evict's
+    // prefix logic, applied on insert instead of only on explicit evict).
+    sweep_stale_generations(&mut map, &format!("{}|", p.display()), &key);
+    map.insert(key, cache.clone());
     Ok(cache)
 }
 
@@ -210,5 +235,28 @@ pub async fn replay_evict(path: String, state: State<'_, AppState>) -> Result<Ev
             })
         }
         None => Ok(EvictInfo::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The unbounded-growth fix: inserting a new generation of a path must
+    /// sweep the older ones, and ONLY them — a path-similar sibling
+    /// (`a.db.bak`) and unrelated recordings stay.
+    #[test]
+    fn sweep_drops_older_generations_of_the_same_path_only() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("/r/a.db|100|1".to_string(), ());
+        map.insert("/r/a.db|200|2".to_string(), ());
+        map.insert("/r/a.db.bak|100|1".to_string(), ());
+        map.insert("/r/b.db|100|1".to_string(), ());
+
+        let n = super::sweep_stale_generations(&mut map, "/r/a.db|", "/r/a.db|200|2");
+        assert_eq!(n, 1);
+        assert!(map.contains_key("/r/a.db|200|2"), "the fresh generation stays");
+        assert!(!map.contains_key("/r/a.db|100|1"), "the superseded one is gone");
+        assert!(map.contains_key("/r/a.db.bak|100|1"),
+            "the '|' terminator keeps a path-prefix sibling safe");
+        assert!(map.contains_key("/r/b.db|100|1"), "other recordings are untouched");
     }
 }

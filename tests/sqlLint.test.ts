@@ -65,3 +65,32 @@ test('several offending columns are each reported', () => {
   const findings = lintSql('CREATE TABLE t (key INT, `values` TEXT, rank INT, note TEXT)').filter(reserved);
   assert.equal(findings.length, 3);
 });
+
+// ── leading-wildcard LIKE: real predicates only, never comments/strings ──
+
+const likeWildcard = (f: Finding) => /leading wildcard/i.test(f.title);
+
+test('a real leading-wildcard LIKE is still flagged', () => {
+  assert.equal(lintSql("SELECT a FROM t WHERE c LIKE '%foo'").filter(likeWildcard).length, 1);
+  // …but a trailing-only wildcard is fine.
+  assert.equal(lintSql("SELECT a FROM t WHERE c LIKE 'foo%'").filter(likeWildcard).length, 0);
+});
+
+test('LIKE-wildcard text inside a comment or string is not a predicate', () => {
+  assert.equal(
+    lintSql("SELECT a FROM t WHERE b = 1 -- LIKE '%foo' would scan").filter(likeWildcard).length, 0);
+  assert.equal(
+    lintSql("SELECT a FROM t /* LIKE '%foo' */ WHERE b = 1").filter(likeWildcard).length, 0);
+  assert.equal(
+    lintSql("SELECT 'a like ''%foo'' example' AS note FROM t WHERE b = 1").filter(likeWildcard).length, 0);
+});
+
+// ── GROUP BY determinism: the owning-SELECT lookup matches whole words ──
+
+test('columns named selection/wherefrom do not confuse the owning-SELECT lookup', () => {
+  // The bare-substring search found `select` inside `selection` and `from`
+  // inside `wherefrom`, then flagged the fragments as non-aggregated columns.
+  const findings = lintSql('SELECT selection, wherefrom FROM t GROUP BY selection, wherefrom')
+    .filter(f => /Non-aggregated columns/i.test(f.title));
+  assert.equal(findings.length, 0);
+});

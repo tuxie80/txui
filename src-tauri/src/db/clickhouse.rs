@@ -383,7 +383,12 @@ impl ChSession {
                 record_header_progress(id, p);
             }
         }
-        let body = resp.text().await.unwrap_or_default();
+        // A truncated or reset transfer must NOT become an empty body: an
+        // empty body decodes below as a successful empty result — silently
+        // wrong in the worst direction.
+        let body = resp.text().await
+            .map_err(|e| anyhow::anyhow!(
+                "failed to read the ClickHouse response body (transfer interrupted): {e}"))?;
         if !status.is_success() {
             // ClickHouse puts a readable "Code: NN. DB::Exception: …" in the
             // body; the HTTP status alone says nothing useful.
@@ -1053,7 +1058,14 @@ fn normalize_cell(ty: &str, v: &mut serde_json::Value) {
 
 // ── Schema tree ──────────────────────────────────────────────────────────────
 
-fn esc(s: &str) -> String { s.replace('\'', "\\'") }
+/// Escape a name for interpolation into a single-quoted string literal.
+/// Backslash FIRST, order matters: ClickHouse treats `\` as the escape
+/// character inside literals, so quote-first escaping of `we\ird'` would end
+/// `…\` + `\'` — the backslash escapes the escape and the real quote then
+/// terminates the literal early, injecting into the metadata query. (The
+/// server-side parameter mechanism `kill_query` uses is the cleaner tool, but
+/// these catalog lookups predate it and stay textual.)
+fn esc(s: &str) -> String { s.replace('\\', "\\\\").replace('\'', "\\'") }
 
 /// Parse the `(cluster, database, table[, sharding_key, …])` arguments of a
 /// `Distributed(...)` engine as it appears in `system.tables.engine_full`.
@@ -1322,6 +1334,24 @@ pub async fn get_ddl(session: &ChSession, database: &str, object: &str) -> Resul
 mod tests {
     use super::*;
     use crate::db::types::Engine;
+
+    #[test]
+    fn esc_neutralises_hostile_names() {
+        // Plain names pass through untouched.
+        assert_eq!(esc("analytics"), "analytics");
+        assert_eq!(esc("it's"), "it\\'s");
+        // The case the quote-only version missed: a name containing `\`.
+        // ClickHouse treats `\` as the escape character, so a trailing
+        // backslash escaped the closing quote and the literal ran on into the
+        // rest of the metadata query.
+        assert_eq!(esc("evil\\"), "evil\\\\");
+        // Quote-first order is the trap: `\` before `'` would double-escape.
+        // The escaped form must parse back to exactly the input.
+        assert_eq!(esc("we\\ird'name"), "we\\\\ird\\'name");
+        // Full breakout attempt — every special char escaped, the payload
+        // stays inert text inside the literal.
+        assert_eq!(esc("x\\' OR '1'='1"), "x\\\\\\' OR \\'1\\'=\\'1");
+    }
 
     #[test]
     fn decode_applies_the_house_rules_to_quoted_cells() {

@@ -585,7 +585,7 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
   const openExtensionPicker = useCallback(async () => {
     setExtPicker({ loading: true, error: null, items: [] });
     try {
-      const res = await QueryStore.execute(session.sessionId, AVAILABLE_EXTENSIONS_SQL);
+      const res = await QueryStore.execute(session, AVAILABLE_EXTENSIONS_SQL);
       const items: AvailableExtension[] = res.rows.map(r => ({
         name: String(r[0]),
         version: r[1] == null ? null : String(r[1]),
@@ -595,7 +595,7 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
     } catch (e) {
       setExtPicker({ loading: false, error: errorDisplay(e), items: [] });
     }
-  }, [session.sessionId]);
+  }, [session]);
 
   // Load root nodes when session opens or refreshKey changes
   const loadedSessionRef = useRef<string | null>(null);

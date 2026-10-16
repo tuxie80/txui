@@ -10,8 +10,8 @@
  * activity marks, logs, notifications — also arrives through deps, so this
  * hook has no state of its own and the move is behavior-neutral.
  */
-import { useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useRef } from 'react';
+import { invoke, Channel } from '@tauri-apps/api/core';
 
 import type { QueryResult, Session, ConnectionConfig } from '../types';
 import type { QueryTab } from '../components/QueryTabs';
@@ -25,6 +25,10 @@ import { fmtDuration } from '../utils/fmtDuration';
 import { redactSecrets } from '../utils/redactSecrets';
 import { splitStatements } from '../utils/sqlSplit';
 import { statementIndexAt, foldScriptInto } from '../utils/runMarkers';
+import {
+  newStreamAccum, applyStreamEvent, partialResult, finishStream, streamComplete,
+} from '../utils/resultStream';
+import type { ResultStreamEvent } from '../utils/resultStream';
 import {
   guardWrite, isWriteStatement, isDangerousDdl, isUnfilteredWrite,
   isDmlStatement, isReadFamilyStatement,
@@ -119,6 +123,10 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     tabId: number,
     /** Audit attribution — which run, and where in it. */
     ctx?: { runId: string; index?: number; total?: number },
+    /** Progressive display hook for big streamed results: called with a
+        partial QueryResult as each page arrives (single-statement runs only —
+        a script statement's result lands on its own line at completion). */
+    onStreamRows?: (partial: QueryResult) => void,
   ): Promise<{ result: QueryResult; limited: boolean; limit: number | null; prodCapped: boolean }> => {
     // Prod row cap (soft): on prod the pref cap replaces the default LIMIT —
     // unless the user picked a limit in this session's status bar (that wins).
@@ -131,7 +139,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     // Server the cap is `SELECT TOP (n)` and appending LIMIT was a syntax error
     // on every unbounded SELECT.
     const guard = can(session.engine, 'sql')
-      ? applyDefaultLimit(rawSql, effLimit, limitDialect(session.engine))
+      ? applyDefaultLimit(rawSql, effLimit, limitDialect(session.engine), session.engine)
       : { sql: rawSql, applied: false };
     const sql = guard.sql;
     // Redacted copy for LOG/AUDIT output only — the executed SQL and the query
@@ -142,14 +150,35 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     const oneLine = safeSql.replace(/\s+/g, ' ').trim();
     addLog(sid, { level: 'info', action: 'QUERY', detail: oneLine, line: `> ${oneLine}` });
     try {
-      const result: QueryResult = await invoke('execute_query', {
+      // Big results stream over this channel as header + row pages instead of
+      // crossing as one giant invoke payload (utils/resultStream reassembles
+      // them; the backend decides, so small results are untouched). The
+      // accumulator is per-RUN — channels are cheap and reuse would mix runs.
+      const chan = new Channel<ResultStreamEvent>();
+      const acc = newStreamAccum();
+      chan.onmessage = ev => {
+        applyStreamEvent(acc, ev);
+        if (onStreamRows) {
+          const partial = partialResult(acc);
+          if (partial) onStreamRows(partial);
+        }
+      };
+      const returned: QueryResult = await invoke('execute_query', {
         sessionId:    session.sessionId,
         connectionId: session.connectionId,
         engine:       session.engine,
         tabId,
         sql,
         includeWarnings: getPref(PREFS.queryWarnings),
+        onEvent:      chan,
       });
+      const result = finishStream(acc, returned);
+      if (!streamComplete(acc)) {
+        // Pages should all precede the invoke resolution on the one IPC
+        // transport; a shortfall means rows were lost in transit, and the
+        // grid + log would quietly disagree with the server. Say so.
+        console.warn(`result stream incomplete: ${acc.rows.length} of ${acc.totalRows} rows arrived`);
+      }
       const ms = Math.round(performance.now() - t0);
       const execMs = Math.round(result.execution_ms);
       const fetchMs = Math.round(result.fetch_ms ?? 0);
@@ -169,12 +198,12 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       }
       const rowCount = result.rows.length;
       const affected = result.rows_affected === null ? null : Number(result.rows_affected);
-      if (rowCount > 0 || (rowCount === 0 && (affected === null || affected === 0) && isReadFamilyStatement(sql))) {
+      if (rowCount > 0 || (rowCount === 0 && (affected === null || affected === 0) && isReadFamilyStatement(sql, session.engine))) {
         const n = rowCount;
         addLog(sid, { level: 'ok', action: 'QUERY', detail: oneLine,
           rows: n, execMs, fetchMs,
           line: `${n} row${n === 1 ? '' : 's'} retrieved in ${fmtDuration(totalMs)} (execution: ${fmtDuration(execMs)}, fetching: ${fmtDuration(fetchMs)})` });
-      } else if (affected !== null && (affected > 0 || isDmlStatement(sql))) {
+      } else if (affected !== null && (affected > 0 || isDmlStatement(sql, session.engine))) {
         addLog(sid, { level: 'ok', action: 'QUERY', detail: oneLine,
           rows: affected, execMs, fetchMs,
           line: `${affected} row${affected === 1 ? '' : 's'} affected in ${fmtDuration(totalMs)} (execution: ${fmtDuration(execMs)})` });
@@ -220,6 +249,21 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
   }, [session.sessionId]);
 
   /**
+   * Per-tab run sequencing. The Run button disables on `tab.running`, but ⌘↵,
+   * F9 and `dbgui:run-statement` fire regardless, so two runs on ONE tab can
+   * overlap. Unguarded, the slower run's completion overwrites the newer
+   * run's state: the first finisher sets `running:false` (Cancel vanishes
+   * while run 2 is still live), its `markIdle` erases the close-guard
+   * activity, and the result slot goes to the last FINISHER instead of the
+   * last STARTED. Every run claims the tab's generation counter at start;
+   * before any completion patch / beep / notify / markIdle it bails when the
+   * tab's generation has moved on. Audit and session-log lines inside
+   * executeOne are deliberately NOT gated — a statement that ran on the
+   * server must be recorded, whichever run won the tab.
+   */
+  const runGenRef = useRef(new Map<number, number>());
+
+  /**
    * Beep once a run was long enough that the user has probably looked away.
    * Below the threshold the sound would just be noise on every quick SELECT.
    */
@@ -257,7 +301,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     const threshold = getPref(PREFS.autoExplainSecs);
     if (!(threshold > 0) || ms < threshold * 1000) return;
     if (!can(session.engine, 'sql')) return;   // redis has no EXPLAIN at all
-    if (!isReadFamilyStatement(sql)) return;   // SELECT-family only
+    if (!isReadFamilyStatement(sql, session.engine)) return;   // SELECT-family only
     if (!explainVerdict(sql, session.engine).ok) return;
     void invoke<{ format: string; engine: string; content: string }>('explain_query', {
       sessionId: session.sessionId,
@@ -309,6 +353,11 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
   const executeSql = useCallback(async (sql: string, tabId: number, from?: number, noResults = false) => {
     const stmts = splitStatements(sql, getPref(PREFS.sqlDelimiter));
     const startedMs = Date.now();
+    // Claim the tab's run generation. From here on, `stale()` is the first
+    // question every completion-side effect asks — see runGenRef above.
+    const gen = (runGenRef.current.get(tabId) ?? 0) + 1;
+    runGenRef.current.set(tabId, gen);
+    const stale = () => runGenRef.current.get(tabId) !== gen;
 
     // ── single statement — straight to the grid ──
     if (stmts.length <= 1) {
@@ -330,7 +379,16 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         stmtRuns: { ...acc, [idx]: { status: 'running', startedAt: startedMs } } });
       markRunning(tabId, sql);
       try {
-        const { result, limit, prodCapped } = await executeOne(sql, tabId);
+        // Streamed results render as they arrive: each page patch shows the
+        // rows so far in the grid while the backend ships the rest. Same
+        // patchTab + generation-guard contract as the completion patch below.
+        const { result, limit, prodCapped } = await executeOne(sql, tabId, undefined, partial => {
+          if (stale()) return;
+          patchTab(tabId, { result: partial, resultSql: sql, view: 'grid' });
+        });
+        // A newer run started on this tab while this one was in flight — the
+        // result slot, the running flag and the marker belong to it now.
+        if (stale()) return;
         const ms = Date.now() - startedMs;
         patchTab(tabId, {
           result, resultSql: sql, running: false, view: 'grid',
@@ -344,12 +402,15 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         maybeAutoExplain(sql, tabId, idx, ms);
         maybeDigestStats(sql, tabId, idx, startedMs, ms);
       } catch (err) {
+        if (stale()) return;
         patchTab(tabId, { error: errorDisplay(err), running: false,
           stmtRuns: { ...acc, [idx]: { status: 'error', ms: Date.now() - startedMs, startedAt: startedMs } } });
         beepIfLong(startedMs, false);
         notifyIfLong(startedMs, false, { statements: 1, error: errorDisplay(err) });
       } finally {
-        markIdle(tabId);
+        // Only the LATEST run releases the close-guard activity — an older
+        // finisher clearing it would erase run 2's mark (and Cancel button).
+        if (!stale()) markIdle(tabId);
       }
       return;
     }
@@ -364,12 +425,15 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     let pendingLines: ScriptLine[] | null = null;
     const flushLines = () => {
       if (linesFlushTimer != null) { clearTimeout(linesFlushTimer); linesFlushTimer = null; }
+      // A superseded run never patches the tab — the newer run owns it.
+      if (stale()) { pendingLines = null; return; }
       if (pendingLines) {
         patchTab(tabId, { scriptResults: [...pendingLines] });
         pendingLines = null;
       }
     };
     const setLines = (next: ScriptLine[]) => {
+      if (stale()) return;
       pendingLines = next;
       if (linesFlushTimer == null) {
         linesFlushTimer = window.setTimeout(flushLines, 100);
@@ -423,6 +487,11 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       invoke('tx_exec', { sessionId: session.sessionId, sql });
 
     for (let i = 0; i < stmts.length; i++) {
+      // A newer run claimed this tab while a statement (or the error prompt)
+      // was awaited: stop here, silently — no summary patch, no markIdle, no
+      // beep; the newer run owns the tab's state and activity entry now. The
+      // statements that already ran keep their audit and log lines.
+      if (stale()) return;
       lines[i] = { ...lines[i], status: 'running', startedAt: Date.now() };
       setLines(lines);
       const t0 = performance.now();
@@ -549,6 +618,11 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     }
     flushLines();
 
+    // Superseded while the last statement was in flight — see the loop-top
+    // bail. The summary, the running flag and the activity entry all belong
+    // to the newer run now.
+    if (stale()) return;
+
     // Counted from the lines rather than from counters kept alongside them: a
     // cancel rewrites every later line to `skipped` without touching a counter,
     // so the two could disagree and the summary contradict the list above it.
@@ -627,6 +701,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       const report = preflightScript(sql, {
         readOnly: session.readOnly,
         environment: session.environment,
+        engine: session.engine,
         allowProdDdl: connCfg?.prod_allow_ddl ?? false,
         allowUnfilteredWrite: connCfg?.prod_allow_unfiltered_write ?? false,
         delimiter: delim,
@@ -646,7 +721,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       const where = (bad: number[]) =>
         stmts.length > 1 ? ` in statement${bad.length === 1 ? '' : 's'} ${bad.join(', ')}` : '';
       if (!allowDdl) {
-        const bad = stmts.map((s, i) => isDangerousDdl(s.text) ? i + 1 : 0).filter(n => n > 0);
+        const bad = stmts.map((s, i) => isDangerousDdl(s.text, session.engine) ? i + 1 : 0).filter(n => n > 0);
         if (bad.length > 0) {
           patchTab(tabId, { error:
             `Blocked on prod: destructive DDL (DROP/TRUNCATE/ALTER/RENAME/GRANT/REVOKE)${where(bad)}`
@@ -655,7 +730,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         }
       }
       if (!allowUnfiltered) {
-        const bad = stmts.map((s, i) => isUnfilteredWrite(s.text) ? i + 1 : 0).filter(n => n > 0);
+        const bad = stmts.map((s, i) => isUnfilteredWrite(s.text, session.engine) ? i + 1 : 0).filter(n => n > 0);
         if (bad.length > 0) {
           patchTab(tabId, { error:
             `Blocked on prod: UPDATE/DELETE without a WHERE clause${where(bad)}`
@@ -667,8 +742,8 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     if (stmts.length > 1) {
       // script: guard every statement, one combined decision
       const writes = stmts.filter(s =>
-        guardWrite(s.text, { readOnly: session.readOnly, environment: session.environment }) !== 'allow'
-        || isWriteStatement(s.text));
+        guardWrite(s.text, { readOnly: session.readOnly, environment: session.environment, engine: session.engine }) !== 'allow'
+        || isWriteStatement(s.text, session.engine));
       // The read-only refusal and the production confirmation both moved into
       // the pre-flight above, which reaches this point only when it found
       // nothing to refuse or confirm. A count in an alert ("3 write statements
@@ -676,7 +751,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       void writes;
     } else {
       const verdict = guardWrite(sql, {
-        readOnly: session.readOnly, environment: session.environment,
+        readOnly: session.readOnly, environment: session.environment, engine: session.engine,
       });
       if (verdict === 'deny') {
         patchTab(tabId, { error: 'Blocked: this connection is read-only.' });
@@ -686,7 +761,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       // its BLAST RADIUS (a live COUNT of the matching rows), the environment
       // and whether a default database is even selected. window.confirm could
       // show none of that (utils/writePreview + components/WriteConfirm).
-      const unfiltered = isUnfilteredWrite(sql);
+      const unfiltered = isUnfilteredWrite(sql, session.engine);
       // UPDATE and DELETE, plus the three that are irreversible or expensive:
       // DROP and TRUNCATE cannot be undone, and an ALTER can block writes for
       // ten minutes. All four now get the window that states the consequence
@@ -694,7 +769,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       const destructive = /^\s*(update|delete|drop\s+table|truncate|alter\s+table)\b/i.test(sql);
       const mode = getPref(PREFS.writeConfirm);
       const ask = verdict === 'confirm' || unfiltered
-        || (mode === 'always' && isWriteStatement(sql))
+        || (mode === 'always' && isWriteStatement(sql, session.engine))
         || (mode === 'destructive' && destructive);
       if (ask) {
         setWriteAsk({

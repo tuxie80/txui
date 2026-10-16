@@ -241,7 +241,12 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
         Ok(o) => o,
         Err(e) => return PingResult { ok: false, latency_ms: 0, server_version: None, error: Some(e.to_string()) },
     };
-    match MySqlPool::connect_with(opts).await {
+    // The same bounded dial `open` uses (db/util.rs): a bare connect_with sits
+    // on the OS's SYN retries, and the connection form's Test button hung a
+    // minute or more on a host that is simply off.
+    match super::util::connect_bounded(
+        MySqlPool::connect_with(opts), config.connect_timeout_secs, fmt_conn_error,
+    ).await {
         Ok(pool) => {
             let version: Result<String, _> = sqlx::query_scalar("SELECT VERSION()")
                 .fetch_one(&pool).await;
@@ -256,7 +261,7 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
             ok: false,
             latency_ms: start.elapsed().as_millis() as u64,
             server_version: None,
-            error: Some(fmt_conn_error(&e)),
+            error: Some(e.to_string()),
         },
     }
 }
@@ -293,10 +298,14 @@ where
     // execution_ms = time until the FIRST row (or stream completion for
     // non-SELECT); fetch_ms = the rest of the stream + decode.
     let mut first_row_ms: Option<u64> = None;
-    let mut columns: Vec<ColumnInfo> = vec![];
-    // Classify each column's type once, not once per cell.
-    let mut classes: Vec<MySqlTypeClass> = vec![];
-    let mut data: Vec<Row> = Vec::new();
+    // Per-SET column capture, not per-statement: a multi-set batch (CALL
+    // proc() — CLIENT_MULTI_STATEMENTS is on — or multi-statement text with
+    // a `USE db;` prefix) hands every set its own column metadata, and
+    // decoding a later set against the FIRST set's capture padded short rows
+    // with fabricated NULLs and silently dropped extra columns. A row whose
+    // column list differs from the current set's starts a new set.
+    let mut sets: Vec<(Vec<ColumnInfo>, Vec<MySqlTypeClass>, Vec<Row>)> = Vec::new();
+    let mut total_rows = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.try_next().await? {
         match item {
@@ -307,30 +316,54 @@ where
                 if first_row_ms.is_none() {
                     first_row_ms = Some(start.elapsed().as_millis() as u64);
                 }
-                if columns.is_empty() {
-                    columns = row.columns().iter().map(|c| ColumnInfo {
+                if sets.last().is_none_or(|(cols, _, _)| !same_columns(cols, &row)) {
+                    let columns: Vec<ColumnInfo> = row.columns().iter().map(|c| ColumnInfo {
                         name:      c.name().to_string(),
                         type_name: c.type_info().name().to_string(),
                         nullable:  true,
                     }).collect();
-                    classes = columns.iter()
+                    // Classify each column's type once, not once per cell.
+                    let classes = columns.iter()
                         .map(|c| classify_mysql_type(&c.type_name))
                         .collect();
+                    sets.push((columns, classes, Vec::new()));
                 }
-                if max_rows.is_some_and(|cap| data.len() >= cap) {
+                // The cap counts the TOTAL across sets — only the first
+                // columned set is returned, and breaking early biases toward
+                // exactly that set (sqlserver.rs's collect_stream, same rule).
+                if max_rows.is_some_and(|cap| total_rows >= cap) {
                     truncated = true;
                     break;
                 }
-                data.push(classes.iter().enumerate().map(|(i, &class)| {
+                let (_, classes, rows) = sets.last_mut().expect("a row always has a set");
+                rows.push(classes.iter().enumerate().map(|(i, &class)| {
                     json_value_from_mysql_row(&row, i, class)
                 }).collect());
+                total_rows += 1;
             }
         }
     }
     let execution_ms = first_row_ms.unwrap_or_else(|| start.elapsed().as_millis() as u64);
 
-    if columns.is_empty() {
-        return Ok(QueryResult {
+    // The FIRST columned set is the answer: the frontend renders one grid, and
+    // a multi-set batch returns its SELECT(s) first. A later set with a
+    // DIFFERENT shape is dropped whole — folding it into the first set's
+    // shape was the corruption this restructure removes — while an
+    // identical-shaped later set keeps appending (no set-boundary signal
+    // exists for it, and the decode is identical, so that is harmless).
+    // sqlserver.rs's result_from_sets made the same first-set choice.
+    match sets.into_iter().find(|(cols, _, _)| !cols.is_empty()) {
+        Some((columns, _, rows)) => Ok(QueryResult {
+            columns,
+            rows,
+            rows_affected: None,
+            execution_ms,
+            fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
+            warnings: vec![],
+            truncated,
+            geo_bbox: None,
+        }),
+        None => Ok(QueryResult {
             columns: vec![],
             rows: vec![],
             rows_affected: affected,
@@ -339,19 +372,18 @@ where
             warnings: vec![],
             truncated: false,
             geo_bbox: None,
-        });
+        }),
     }
+}
 
-    Ok(QueryResult {
-        columns,
-        rows: data,
-        rows_affected: None,
-        execution_ms,
-        fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
-        warnings: vec![],
-        truncated,
-        geo_bbox: None,
-    })
+/// Same column list as the current set's capture? Compared per row: a
+/// multi-set statement's later sets must never decode against an earlier
+/// set's metadata.
+fn same_columns(cols: &[ColumnInfo], row: &sqlx::mysql::MySqlRow) -> bool {
+    let rc = row.columns();
+    cols.len() == rc.len()
+        && cols.iter().zip(rc.iter())
+            .all(|(a, c)| a.name == c.name() && a.type_name == c.type_info().name())
 }
 
 /// `SHOW WARNINGS` on the same connection right after a statement — one
@@ -562,6 +594,26 @@ fn zero_date_literal(row: &sqlx::mysql::MySqlRow, i: usize, class: MySqlTypeClas
     }
 }
 
+/// Render a MySQL TIME that NaiveTime cannot hold. TIME is a signed elapsed
+/// span (±838:59:59), not a wall clock: hours can exceed 24 and the value can
+/// be negative. The previous rendering (`format!("{}s", v.num_seconds())`)
+/// truncated sub-second precision and read oddly for both cases — render the
+/// delta the way the server prints it: `[-]HH:MM:SS[.ffffff]`, the fraction
+/// only when non-zero (matching the `%.f` of the NaiveTime arm above).
+fn format_time_delta(v: &chrono::TimeDelta) -> String {
+    let micros = v.num_microseconds().unwrap_or_default();
+    let (sign, abs) = if micros < 0 { ("-", micros.unsigned_abs()) } else { ("", micros as u64) };
+    let hours = abs / 3_600_000_000;
+    let mins  = abs / 60_000_000 % 60;
+    let secs  = abs / 1_000_000 % 60;
+    let frac  = abs % 1_000_000;
+    if frac > 0 {
+        format!("{sign}{hours:02}:{mins:02}:{secs:02}.{frac:06}")
+    } else {
+        format!("{sign}{hours:02}:{mins:02}:{secs:02}")
+    }
+}
+
 fn json_value_from_mysql_row(row: &sqlx::mysql::MySqlRow, i: usize, class: MySqlTypeClass) -> serde_json::Value {
     use serde_json::Value;
     use sqlx::ValueRef;
@@ -617,8 +669,9 @@ fn json_value_from_mysql_row(row: &sqlx::mysql::MySqlRow, i: usize, class: MySql
             if let Ok(v) = row.try_get::<chrono::NaiveTime, _>(i) {
                 return Value::String(v.format("%H:%M:%S%.f").to_string());
             }
+            // Outside 00:00:00–24:00:00 sqlx hands us a TimeDelta instead.
             if let Ok(v) = row.try_get::<chrono::TimeDelta, _>(i) {
-                return Value::String(format!("{}s", v.num_seconds()));
+                return Value::String(format_time_delta(&v));
             }
         }
         MySqlTypeClass::Json => {
@@ -1713,5 +1766,44 @@ mod mariadb_live_tests {
                     ":{port} returned no measurements: {text}");
             sqlx::raw_sql("DROP DATABASE txui_plan").execute(&mut *conn).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod driver_correctness_tests {
+    use super::*;
+    use crate::db::types::Engine;
+
+    /// MySQL TIME is a signed elapsed span (±838:59:59), not a wall clock —
+    /// the old `format!("{}s", v.num_seconds())` truncated sub-second
+    /// precision and read oddly for negative or >24 h values.
+    #[test]
+    fn time_delta_renders_as_signed_hh_mm_ss() {
+        let us = chrono::TimeDelta::microseconds;
+        assert_eq!(format_time_delta(&us(0)), "00:00:00");
+        assert_eq!(format_time_delta(&us(1_500_000)), "00:00:01.500000");
+        assert_eq!(format_time_delta(&us(3_723_000_000)), "01:02:03");
+        // Negative and beyond-24h spans — the cases NaiveTime cannot hold.
+        assert_eq!(format_time_delta(&us(-(25 * 3_600 + 62) * 1_000_000)), "-25:01:02");
+        assert_eq!(format_time_delta(&us(838 * 3_600_000_000 + 59 * 60_000_000 + 59_000_000)),
+                   "838:59:59");
+        assert_eq!(format_time_delta(&us(-1)), "-00:00:00.000001");
+    }
+
+    /// The Test button must not hang on a dead host: ping to an unroutable
+    /// TEST-NET address (RFC 5737) with a 1 s connect timeout must come back
+    /// quickly with ok:false, not sit on the OS's SYN retries.
+    #[tokio::test]
+    async fn ping_is_bounded_by_the_connect_timeout() {
+        let mut c = ConnectionConfig::new(Engine::Mysql, "t");
+        c.host = Some("192.0.2.1".into());
+        c.port = Some(3306);
+        c.connect_timeout_secs = Some(1);
+        let start = Instant::now();
+        let r = ping(&c, None).await;
+        assert!(!r.ok);
+        assert!(r.error.is_some());
+        assert!(start.elapsed() < std::time::Duration::from_secs(20),
+                "ping sat on the dial for {:?}", start.elapsed());
     }
 }

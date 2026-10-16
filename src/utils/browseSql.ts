@@ -71,10 +71,10 @@ function quotingFor(engine: string): Quoting {
 const ident = (name: string, q: Quoting) => quoteIdent(name, q);
 
 function quoteTable(table: string, q: Quoting): string {
-  const i = table.indexOf('.');
-  return i < 0
-    ? ident(table, q)
-    : `${ident(table.slice(0, i), q)}.${ident(table.slice(i + 1), q)}`;
+  // Split on EVERY dot and quote each part (as safePath in sqlIdent.ts does) —
+  // SQL Server names can be three-level (`db.schema.table`), and splitting on
+  // the first dot alone quoted `schema.table` as one literally-dotted table.
+  return table.split('.').map(p => ident(p, q)).join('.');
 }
 
 function literal(v: string, engine: string): string {

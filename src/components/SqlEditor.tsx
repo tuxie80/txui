@@ -1154,6 +1154,10 @@ export function SqlEditor({
   const describeTargetRef = useRef<(t: HoverTarget) => Promise<HTMLElement | null>>(
     async () => null);
   const diagTimerRef = useRef(0);
+  /** Debounce for signature help — it flattens the whole doc per caret move. */
+  const sigTimerRef = useRef(0);
+  /** Debounce for the kill-context probe — same full-doc cost as signatures. */
+  const killTimerRef = useRef(0);
   /** Debounce for the semantic symbol-reference highlight (utils/symbolRefs). */
   const symTimerRef = useRef(0);
   /** Debounce for serializing the undo history out to the host (Editor §5.2). */
@@ -1864,8 +1868,8 @@ export function SqlEditor({
           selLen,
           carets: sel.ranges.length,
         });
-        reportKillContext(update.view);
-        updateSignature(update.view);
+        reportKillContextDebounced(update.view);
+        updateSignatureDebounced(update.view);
       }
     });
 
@@ -1925,6 +1929,27 @@ export function SqlEditor({
       }).catch(() => setSignature(null));
     };
 
+    /**
+     * Signature help on a 150 ms debounce: the check above flattens the WHOLE
+     * doc (`doc.toString()` plus `insertContext(doc.slice(0, caret))`) to find
+     * the call site — O(buffer) per keystroke on a 200-500KB script. The live
+     * diagnostics listener is 350 ms-debounced for exactly this reason. The
+     * cheap exits (hints off, a selection open) stay synchronous, so the bar
+     * disappears the moment it stops applying rather than one debounce later.
+     */
+    const updateSignatureDebounced = (view: EditorView) => {
+      if (!hintsRef.current || !view.state.selection.main.empty) {
+        window.clearTimeout(sigTimerRef.current);
+        setSignature(null);
+        return;
+      }
+      window.clearTimeout(sigTimerRef.current);
+      sigTimerRef.current = window.setTimeout(() => {
+        const v = viewRef.current;
+        if (v) updateSignature(v);
+      }, 150);
+    };
+
     // `kill …` / `killall` under the caret → the host opens the live process
     // picker anchored at the caret. Reported as null the moment it stops
     // matching (caret moved away, command finished, selection made).
@@ -1938,6 +1963,27 @@ export function SqlEditor({
       const coords = view.coordsAtPos(sel.head);
       if (!coords) { cb(null); return; }
       cb({ trigger, anchor: { x: coords.left, y: coords.top, lineBottom: coords.bottom } });
+    };
+
+    /**
+     * Same debounce as signature help: parseKillTrigger reads
+     * `doc.sliceString(0, caret)` — another O(buffer) flatten per keystroke.
+     * A non-empty selection still reports null synchronously, so the picker
+     * closes the instant the caret stops being a bare caret.
+     */
+    const reportKillContextDebounced = (view: EditorView) => {
+      const cb = onKillContextRef.current;
+      if (!cb) return;
+      if (!view.state.selection.main.empty) {
+        window.clearTimeout(killTimerRef.current);
+        cb(null);
+        return;
+      }
+      window.clearTimeout(killTimerRef.current);
+      killTimerRef.current = window.setTimeout(() => {
+        const v = viewRef.current;
+        if (v) reportKillContext(v);
+      }, 150);
     };
 
     // One SQL language instance for the whole editor: the extension itself, the
@@ -2353,6 +2399,8 @@ export function SqlEditor({
       window.clearTimeout(diagTimerRef.current);
       window.clearTimeout(symTimerRef.current);
       window.clearTimeout(historyTimerRef.current);
+      window.clearTimeout(sigTimerRef.current);
+      window.clearTimeout(killTimerRef.current);
       // Closing a tab is exactly the moment the undo stack would be lost —
       // flush the latest history synchronously before the view is destroyed.
       if (onHistoryChangeRef.current) {

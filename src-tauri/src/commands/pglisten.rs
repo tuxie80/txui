@@ -63,6 +63,23 @@ pub async fn abort_session_listeners(map: &ListenerMap, session_id: Uuid) {
     for e in entries { e.handle.abort(); }
 }
 
+/// Insert `entry` under `token`, aborting any listener already there.
+///
+/// A bare `insert` would DROP the old entry — and dropping a JoinHandle
+/// DETACHES the task instead of stopping it. The orphaned task then holds its
+/// dedicated connection forever, and when it finally exits (channel closed,
+/// connection error) its exit path removes the token from the map — taking
+/// the NEW listener's registry entry with it: an unstoppable, invisible
+/// listener. Remove + abort BEFORE insert is the pgwait sampler's pattern;
+/// the aborted task is cancelled at its current await, so its exit path never
+/// runs and cannot touch the replacement.
+async fn replace_listener(map: &ListenerMap, token: String, entry: ListenerEntry) {
+    if let Some(prev) = map.write().await.remove(&token) {
+        prev.handle.abort();
+    }
+    map.write().await.insert(token, entry);
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -132,7 +149,7 @@ pub async fn pg_listen_start(
         listeners.write().await.remove(&key);
     });
 
-    state.pg_listeners.write().await.insert(token, ListenerEntry { session_id, handle });
+    replace_listener(&state.pg_listeners, token, ListenerEntry { session_id, handle }).await;
     Ok(())
 }
 
@@ -175,6 +192,48 @@ pub async fn pg_notify(
         .await
         .map_err(|e| AppError::bad_request(format!("NOTIFY failed: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The duplicate-token bug: a bare `insert` dropped the old entry, and
+    /// dropping a JoinHandle DETACHES the task — the orphan kept its dedicated
+    /// connection and, on its way out, removed the NEW listener's map entry.
+    /// `replace_listener` aborts first, so the old task is cancelled at its
+    /// await and its exit path never runs.
+    #[tokio::test]
+    async fn replacing_a_token_aborts_the_old_task_and_keeps_the_new_entry() {
+        let map: ListenerMap = Default::default();
+        let sid = Uuid::new_v4();
+
+        // The old listener, shaped like the real task: wait forever, then on
+        // exit remove its key — the tail that used to eat the replacement.
+        let m2 = map.clone();
+        let old = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            m2.write().await.remove("tok");
+        });
+        let old_handle = old.abort_handle();
+        replace_listener(&map, "tok".into(), ListenerEntry { session_id: sid, handle: old }).await;
+
+        // A restart under the same token.
+        let new = tokio::spawn(std::future::pending::<()>());
+        let new_handle = new.abort_handle();
+        replace_listener(&map, "tok".into(), ListenerEntry { session_id: sid, handle: new }).await;
+
+        // Give the aborted task the chance to (wrongly) run its exit path.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(old_handle.is_finished(), "the replaced task must be aborted");
+        assert!(!new_handle.is_finished(), "the replacement must still be running");
+        assert!(map.read().await.contains_key("tok"),
+            "the old task's exit path must not remove the replacement's entry");
+
+        let leftover = map.write().await.remove("tok");
+        if let Some(e) = leftover { e.handle.abort(); }
+    }
 }
 
 #[cfg(test)]

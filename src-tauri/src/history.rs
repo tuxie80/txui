@@ -211,6 +211,12 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(&mut *tx).await?;
 
+    // Retention cap — see MAX_AUDIT_ROWS / audit_retention_trigger_sql for why
+    // this is a trigger and not a call in the insert paths. AssertSqlSafe: the
+    // SQL is generated from two integer constants.
+    sqlx::query(sqlx::AssertSqlSafe(audit_retention_trigger_sql(MAX_AUDIT_ROWS, AUDIT_PRUNE_EVERY)))
+        .execute(&mut *tx).await?;
+
     // Saved queries / snippets
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS saved_queries (
@@ -489,6 +495,42 @@ async fn seed_sql_templates(pool: &SqlitePool) -> Result<()> {
 /// scans the newest DIGEST_SCAN_ROWS anyway.
 const MAX_HISTORY_ROWS: i64 = 100_000;
 
+/// Amortization for the retention prune: the OFFSET-subquery delete scans the
+/// cap on the rowid btree, so running it on EVERY insert taxes every executed
+/// statement. One insert in HISTORY_PRUNE_EVERY pays it instead; between fires
+/// the table overshoots the cap by at most HISTORY_PRUNE_EVERY - 1 rows and
+/// then converges — the cap is a rolling bound, not a hard wall.
+const HISTORY_PRUNE_EVERY: i64 = 256;
+
+/// Rolling cap on audit_log rows — same order as query_history, and the same
+/// rolling-bound semantics (enforced by the `audit_log_retention` trigger
+/// installed in migrate, amortized one insert in AUDIT_PRUNE_EVERY). The audit
+/// log is the store a user would LEAST want silently truncated, so the cap is
+/// the generous one: 100k statements is months of interactive use, and the
+/// alternative is the unbounded growth the galera poll used to feed.
+const MAX_AUDIT_ROWS: i64 = 100_000;
+/// See HISTORY_PRUNE_EVERY — same amortization, for the trigger's WHEN clause.
+const AUDIT_PRUNE_EVERY: i64 = 256;
+
+/// The audit retention trigger's SQL, parameterized so the store test can
+/// exercise the mechanism without inserting 100 001 rows.
+///
+/// A trigger rather than a call in the insert paths: audit rows arrive from
+/// three places (the frontend's `audit_insert`, the backend lifecycle rows),
+/// and a cap every caller must remember to apply is a cap that eventually
+/// isn't. The WHEN clause is the amortization — NEW.id is the fresh rowid, so
+/// the prune fires on a fixed cadence with no shared state.
+fn audit_retention_trigger_sql(cap: i64, every: i64) -> String {
+    format!(
+        "CREATE TRIGGER IF NOT EXISTS audit_log_retention AFTER INSERT ON audit_log \
+         WHEN NEW.id % {every} = 0 \
+         BEGIN \
+             DELETE FROM audit_log WHERE id <= \
+                 (SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET {cap}); \
+         END"
+    )
+}
+
 pub async fn insert(
     store: &HistoryStore,
     connection_id: &str,
@@ -498,11 +540,13 @@ pub async fn insert(
     rows_returned: i64,
     error: Option<&str>,
 ) -> Result<i64> {
-    insert_capped(store, connection_id, engine, sql, execution_ms, rows_returned, error, MAX_HISTORY_ROWS).await
+    insert_capped(store, connection_id, engine, sql, execution_ms, rows_returned, error,
+        MAX_HISTORY_ROWS, HISTORY_PRUNE_EVERY).await
 }
 
 /// `cap` is a parameter so the retention test does not have to insert 100 001
-/// rows to see one roll off (the digest-snapshot store's pattern).
+/// rows to see one roll off (the digest-snapshot store's pattern); same for
+/// `prune_every` — a test passes 1 for the strict, every-insert behaviour.
 #[allow(clippy::too_many_arguments)]
 async fn insert_capped(
     store: &HistoryStore,
@@ -513,6 +557,7 @@ async fn insert_capped(
     rows_returned: i64,
     error: Option<&str>,
     cap: i64,
+    prune_every: i64,
 ) -> Result<i64> {
     let pool = store;
     let id = sqlx::query(
@@ -529,14 +574,16 @@ async fn insert_capped(
     .last_insert_rowid();
     // Retention: delete everything older than the cap-th newest row. With
     // fewer rows the subquery yields NULL and `id <= NULL` matches nothing.
-    // Inserts are already off the query critical path (spawned), so the extra
-    // indexed delete costs the user nothing.
-    sqlx::query(
-        "DELETE FROM query_history WHERE id <= \
-         (SELECT id FROM query_history ORDER BY id DESC LIMIT 1 OFFSET ?)"
-    )
-    .bind(cap)
-    .execute(&*pool).await?;
+    // Amortized by rowid cadence (see HISTORY_PRUNE_EVERY): no shared state,
+    // and deterministic for a given table.
+    if prune_every <= 1 || id % prune_every == 0 {
+        sqlx::query(
+            "DELETE FROM query_history WHERE id <= \
+             (SELECT id FROM query_history ORDER BY id DESC LIMIT 1 OFFSET ?)"
+        )
+        .bind(cap)
+        .execute(&*pool).await?;
+    }
     Ok(id)
 }
 
@@ -2154,7 +2201,9 @@ mod fingerprint_tests {
     async fn history_retention_and_created_index() {
         let (store, dir) = temp_store("hist-cap").await;
         for i in 0..6 {
-            insert_capped(&store, "c", "mysql", &format!("SELECT {i}"), 1, 1, None, 4)
+            // prune_every = 1: the strict every-insert behaviour the cap had
+            // before amortization.
+            insert_capped(&store, "c", "mysql", &format!("SELECT {i}"), 1, 1, None, 4, 1)
                 .await.unwrap();
         }
         let rows = search(&store, None, None, 100).await.unwrap();
@@ -2167,6 +2216,76 @@ mod fingerprint_tests {
             .fetch_all(&store).await.unwrap();
         assert!(idx.iter().any(|n| n == "idx_history_created"), "missing index: {idx:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The amortized prune fires on the rowid cadence, not per insert: the
+    /// table may overshoot the cap between fires (bounded by prune_every - 1)
+    /// and must converge back to the cap when the cadence next fires.
+    #[tokio::test]
+    async fn history_prune_is_amortized_but_converges() {
+        let (store, dir) = temp_store("hist-amort").await;
+        // cap 4, prune every 3rd insert. Fires at ids 3 and 6: id 3 is a
+        // no-op (fewer rows than the cap's OFFSET), id 6 deletes ids 1–2.
+        for i in 0..7 {
+            insert_capped(&store, "c", "mysql", &format!("SELECT {i}"), 1, 1, None, 4, 3)
+                .await.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM query_history")
+            .fetch_one(&store).await.unwrap();
+        assert_eq!(count, 5, "cap 4 + at most prune_every-1 overshoot: {count}");
+
+        // The next cadence tick (id 9) converges back to the strict cap.
+        insert_capped(&store, "c", "mysql", "SELECT 7", 1, 1, None, 4, 3).await.unwrap();
+        insert_capped(&store, "c", "mysql", "SELECT 8", 1, 1, None, 4, 3).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM query_history")
+            .fetch_one(&store).await.unwrap();
+        assert_eq!(count, 4, "converged to the cap on the cadence tick: {count}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// audit_log has the same rolling cap as query_history, enforced by the
+    /// installed trigger — the insert paths (frontend audit_insert, backend
+    /// lifecycle rows) never see it.
+    #[tokio::test]
+    async fn audit_retention_trigger_prunes_on_cadence() {
+        let (store, dir) = temp_store("audit-cap").await;
+
+        // The production migration must install the trigger.
+        let triggers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            .fetch_all(&store).await.unwrap();
+        assert!(triggers.iter().any(|n| n == "audit_log_retention"),
+            "missing trigger: {triggers:?}");
+
+        // Exercise the mechanism at test scale: same SQL, small cap/cadence.
+        sqlx::query("DROP TRIGGER audit_log_retention").execute(&store).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(audit_retention_trigger_sql(4, 2)))
+            .execute(&store).await.unwrap();
+
+        // Fires at ids 2, 4, 6, 8, 10; the first two are no-ops (fewer rows
+        // than the cap's OFFSET). Ending ON a fire: converged to the cap.
+        for i in 0..10 {
+            sqlx::query(
+                "INSERT INTO audit_log (started_at, ended_at, duration_ms, connection_name, engine, ok, sql)
+                 VALUES ('t', 't', 0, 'c', 'mysql', 1, ?)")
+                .bind(format!("SELECT {i}"))
+                .execute(&store).await.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&store).await.unwrap();
+        assert_eq!(count, 4, "converged to the cap: {count}");
+        let oldest: String = sqlx::query_scalar("SELECT sql FROM audit_log ORDER BY id LIMIT 1")
+            .fetch_one(&store).await.unwrap();
+        assert_eq!(oldest, "SELECT 6", "the oldest six rolled off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shipped cap is the query_history one — a deliberate choice, pinned
+    /// so a later "tidy the constant" edit has to say it changed the audit
+    /// log's retention.
+    #[test]
+    fn audit_cap_matches_history_cap() {
+        assert_eq!(MAX_AUDIT_ROWS, MAX_HISTORY_ROWS);
     }
 
 }

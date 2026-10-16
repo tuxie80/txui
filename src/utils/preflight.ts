@@ -79,6 +79,8 @@ export function preflightScript(
   opts: {
     readOnly?: boolean;
     environment?: string | null;
+    /** Session engine — the guard's comment/string rules are engine-aware. */
+    engine?: string;
     /** Per-connection opt-outs, mirroring the server-side prod limits. */
     allowProdDdl?: boolean;
     allowUnfilteredWrite?: boolean;
@@ -91,7 +93,7 @@ export function preflightScript(
 
   parts.forEach((p, i) => {
     const sql = p.text;
-    const writes = isWriteStatement(sql);
+    const writes = isWriteStatement(sql, opts.engine);
     // `from` is the document offset of the statement's first character;
     // `slice(0, undefined)` would return the whole document and give every
     // statement the same line, which is how the first version of this read.
@@ -100,7 +102,7 @@ export function preflightScript(
       index: i + 1, line, preview: preview(sql), writes,
     };
 
-    const verdict = guardWrite(sql, { readOnly: opts.readOnly, environment: opts.environment });
+    const verdict = guardWrite(sql, { readOnly: opts.readOnly, environment: opts.environment, engine: opts.engine });
 
     if (verdict === 'deny') {
       rows.push({
@@ -114,7 +116,7 @@ export function preflightScript(
     // when it arrives. Finding that out mid-script is the thing this exists to
     // prevent, so they are evaluated here too — with the same opt-outs, or the
     // pre-flight would refuse work the server would have accepted.
-    if (isProd && isDangerousDdl(sql) && !opts.allowProdDdl) {
+    if (isProd && isDangerousDdl(sql, opts.engine) && !opts.allowProdDdl) {
       rows.push({
         ...base, verdict: 'blocked',
         reason: 'destructive DDL is refused on a production connection '
@@ -122,7 +124,7 @@ export function preflightScript(
       });
       return;
     }
-    if (isProd && isUnfilteredWrite(sql) && !opts.allowUnfilteredWrite) {
+    if (isProd && isUnfilteredWrite(sql, opts.engine) && !opts.allowUnfilteredWrite) {
       rows.push({
         ...base, verdict: 'blocked',
         reason: 'a WHERE-less UPDATE/DELETE is refused on a production connection '
@@ -141,7 +143,7 @@ export function preflightScript(
 
     // A WHERE-less write outside production is not blocked, and is still the
     // thing most worth seeing in a list before pressing run.
-    if (isUnfilteredWrite(sql)) {
+    if (isUnfilteredWrite(sql, opts.engine)) {
       rows.push({ ...base, verdict: 'confirm', reason: 'no WHERE clause — every row is affected' });
       return;
     }

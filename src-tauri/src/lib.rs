@@ -906,12 +906,31 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Graceful shutdown: close pools + kill SSH tunnels like a manual
-            // disconnect, so the DB sees clean connection teardown.
+            // Graceful shutdown: cancel in-flight work FIRST, then close pools
+            // + kill SSH tunnels like a manual disconnect, so the DB sees
+            // clean connection teardown.
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app.try_state::<AppState>() {
                     let st = state.inner().clone();
                     tauri::async_runtime::block_on(async move {
+                        // In-flight queries, watches, datagen runs and PG
+                        // listeners hold pooled connections that pool.close()
+                        // (inside close_all) would otherwise wait on — up to
+                        // its 5 s per session, sequentially.
+                        let sids: Vec<uuid::Uuid> =
+                            st.sessions.read().await.keys().cloned().collect();
+                        for sid in sids {
+                            st.cancel_session_work(sid).await;
+                        }
+                        // Jobs not keyed by a session: dump/restore registers
+                        // its cancel under the CONNECTION id. Fire every
+                        // remaining oneshot so a quit mid-mysqldump stops the
+                        // tool instead of orphaning it against the tunnel that
+                        // is about to die. (kill_on_drop on the child is the
+                        // belt to this brace — see commands/dump.rs.)
+                        let jobs: Vec<_> = st.ext_jobs.write().await.drain()
+                            .map(|(_, tx)| tx).collect();
+                        for tx in jobs { let _ = tx.send(()); }
                         crate::db::connection::close_all(&st).await;
                     });
                 }

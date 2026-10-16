@@ -675,6 +675,12 @@ pub async fn debug_routine(
     let LiveSession::Postgres(pool) = session.as_ref() else {
         return Err("stepping through a routine is PostgreSQL-only for now".into());
     };
+    // Same gate as the MySQL twin: the statements are frontend-supplied, and
+    // the ROLLBACK does not make the run side-effect free — `nextval()`
+    // survives it.
+    let guard = state.session_meta.read().await.get(&session_id).cloned();
+    debug_gate(guard.as_ref())?;
+
     let mut conn = pool.acquire().await?;
 
     // Everything from here on must reach the ROLLBACK.
@@ -764,23 +770,27 @@ pub struct DebugRunMysql {
     pub swept: Vec<String>,
 }
 
-/// The debug gate: who may run an instrumented copy at all.
+/// The debug gate: who may run an instrumented routine at all — shared by the
+/// MySQL (`debug_routine_mysql`) and PostgreSQL (`debug_routine`) debuggers.
 ///
 /// Unlike `run_guarded`'s per-statement judgement this is decided up front,
-/// because the flow is a dozen statements that must all pass or none should
+/// because the flow is many statements that must all pass or none should
 /// start. Two refusals, both by session rather than by statement:
 ///
 /// - **prod is disabled outright** (docs/ROUTINE_DEBUGGER.md §3 — the
 ///   destructive-DDL opt-out is explicitly NOT a sufficient signal here);
-/// - **read-only refuses** — instrumentation CREATEs and DROPs a copy and
-///   writes trace rows; "read-only" means the session cannot change server
-///   state, and the driver-level enforcement only covers pooled connections
-///   the app sets up, not a user with out-of-band grants.
+/// - **read-only refuses** — on MySQL instrumentation CREATEs and DROPs a
+///   copy and writes trace rows; on PostgreSQL the BEGIN…ROLLBACK wrapper is
+///   not side-effect free either (`nextval()` survives the rollback) and the
+///   three statements are frontend-supplied. "read-only" means the session
+///   cannot change server state, and the driver-level enforcement only
+///   covers pooled connections the app sets up, not a user with out-of-band
+///   grants.
 ///
 /// An unknown session guard is allowed, matching the privileges doctrine
 /// (unknown means allowed): the session lookup in the command is the real
 /// existence check.
-pub fn mysql_debug_gate(guard: Option<&crate::state::SessionGuard>) -> Result<(), crate::apperror::AppError> {
+pub fn debug_gate(guard: Option<&crate::state::SessionGuard>) -> Result<(), crate::apperror::AppError> {
     let Some(g) = guard else { return Ok(()) };
     if g.environment.as_deref() == Some("prod") {
         return Err(crate::apperror::AppError::guard(
@@ -940,7 +950,7 @@ pub async fn debug_routine_mysql(
         return Err("the instrumented MySQL debugger needs a MySQL/MariaDB session".into());
     };
     let guard = state.session_meta.read().await.get(&session_id).cloned();
-    mysql_debug_gate(guard.as_ref())?;
+    debug_gate(guard.as_ref())?;
 
     let mut conn = pool.acquire().await?;
     run_mysql_debug(&mut conn, &parts).await
@@ -971,24 +981,39 @@ mod mysql_debug_tests {
         // "disabled outright", and an opt-in here would re-admit exactly what
         // the safety model exists to keep off production.
         let mut g = guard(Some("prod"), false);
-        assert!(mysql_debug_gate(Some(&g)).is_err());
+        assert!(debug_gate(Some(&g)).is_err());
         g.prod_allow_ddl = true;
-        assert!(mysql_debug_gate(Some(&g)).is_err(),
+        assert!(debug_gate(Some(&g)).is_err(),
             "the DDL opt-out must NOT unlock debugging on prod");
     }
 
     #[test]
     fn read_only_is_refused() {
-        let e = mysql_debug_gate(Some(&guard(None, true))).unwrap_err();
+        let e = debug_gate(Some(&guard(None, true))).unwrap_err();
         assert!(e.display().contains("read-only"), "{e:?}");
     }
 
     #[test]
     fn dev_and_unknown_sessions_pass() {
-        assert!(mysql_debug_gate(Some(&guard(None, false))).is_ok());
-        assert!(mysql_debug_gate(Some(&guard(Some("staging"), false))).is_ok());
+        assert!(debug_gate(Some(&guard(None, false))).is_ok());
+        assert!(debug_gate(Some(&guard(Some("staging"), false))).is_ok());
         // Unknown guard → allowed (the session lookup is the existence check).
-        assert!(mysql_debug_gate(None).is_ok());
+        assert!(debug_gate(None).is_ok());
+    }
+
+    #[test]
+    fn the_gate_is_engine_agnostic() {
+        // The PG debugger shares this gate: its BEGIN…ROLLBACK wrapper is not
+        // side-effect free (nextval survives the rollback), so prod and
+        // read-only refuse there exactly as on MySQL.
+        let mut pg = guard(Some("prod"), false);
+        pg.engine = Engine::Postgres;
+        assert!(debug_gate(Some(&pg)).is_err());
+        pg.environment = None;
+        pg.read_only = true;
+        assert!(debug_gate(Some(&pg)).is_err());
+        pg.read_only = false;
+        assert!(debug_gate(Some(&pg)).is_ok());
     }
 
     // ── live runner mechanics, against a real MySQL ─────────────────────────

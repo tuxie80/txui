@@ -46,14 +46,14 @@ export function QueryEditor({ session, insertTextRef }: Props) {
     setError(null);
     setResult(null);
     try {
-      const res = await QueryStore.execute(session.sessionId, query);
+      const res = await QueryStore.execute(session, query);
       setResult(res);
     } catch (err) {
       setError(errorDisplay(err));
     } finally {
       setRunning(false);
     }
-  }, [sql, session.sessionId, running]);
+  }, [sql, session, running]);
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {

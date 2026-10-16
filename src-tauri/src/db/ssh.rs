@@ -6,6 +6,11 @@ use tokio::net::TcpListener;
 
 pub struct SshTunnel {
     pub local_port: u16,
+    /// OpenSSH's own line when `accept-new` recorded a previously unknown
+    /// host key (TOFU), captured from stderr during the handshake — `None`
+    /// for a known host. Surfaced by the caller (audit row + session log);
+    /// the stderr drain task also `log::warn!`s it the moment it appears.
+    pub host_key_note: Option<String>,
     child: tokio::process::Child,
 }
 
@@ -25,6 +30,27 @@ fn validate_jump(jump: &str) -> Result<()> {
     }
     if !jump.chars().all(|c| c.is_ascii_alphanumeric() || "@._:-[]%,".contains(c)) {
         anyhow::bail!("SSH jump host contains invalid characters: {jump:?}");
+    }
+    Ok(())
+}
+
+/// The `user@host` target becomes ONE argv element and never goes through a
+/// shell — but ssh parses ANY argv element starting with '-' as another
+/// option wherever it sits, and `-oProxyCommand=…` runs through a shell.
+/// Reject a leading '-' and anything outside the characters a real user or
+/// host carries (host extras cover IPv6 literals and zone ids); the `--`
+/// separator before the target at the spawn site is the second layer.
+fn validate_endpoint(user: &str, host: &str) -> Result<()> {
+    for (what, v, extra) in [("user", user, "._-"), ("host", host, "._:[]%-")] {
+        if v.is_empty() {
+            anyhow::bail!("SSH {what} is empty");
+        }
+        if v.starts_with('-') {
+            anyhow::bail!("SSH {what} must not start with '-': {v:?}");
+        }
+        if !v.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c)) {
+            anyhow::bail!("SSH {what} contains invalid characters: {v:?}");
+        }
     }
     Ok(())
 }
@@ -141,6 +167,57 @@ fn suppress_console_window(cmd: &mut tokio::process::Command) {
     let _ = cmd;
 }
 
+/// OpenSSH's stderr line when `StrictHostKeyChecking=accept-new` records a
+/// previously unknown host key:
+/// "Warning: Permanently added 'host' (ED25519) to the list of known hosts."
+/// Returns the line trimmed, or None for anything else. Pure so it is
+/// testable; the matching is deliberately loose about host/algorithm.
+fn host_key_note(line: &str) -> Option<String> {
+    let l = line.trim();
+    if !l.starts_with("Warning:") || !l.contains("Permanently added") {
+        return None;
+    }
+    Some(l.to_string())
+}
+
+/// Bounded stderr state for a spawned ssh: a short tail for the quick-exit
+/// diagnosis (previously read straight off the pipe, which only worked
+/// because nothing else drained it) and the first host-key note seen.
+struct StderrScan {
+    tail:     std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    host_key: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// Drain a spawned ssh's stderr for its whole life. Two jobs beyond keeping
+/// the pipe from filling (a piped-but-unread stderr can stall ssh): the
+/// quick-exit tail above, and TOFU surfacing — the first-contact host-key
+/// warning is `log::warn!`ed the moment it appears and stashed for the
+/// caller's audit row, so `accept-new` silently recording a key stops being
+/// silent.
+fn spawn_stderr_scan(stderr: tokio::process::ChildStderr) -> (StderrScan, tauri::async_runtime::JoinHandle<()>) {
+    let scan = StderrScan {
+        tail:     std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        host_key: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    };
+    let tail = scan.tail.clone();
+    let host_key = scan.host_key.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(note) = host_key_note(&line) {
+                log::warn!("ssh accept-new recorded a first-contact host key: {note}");
+                let mut slot = host_key.lock().unwrap();
+                if slot.is_none() { *slot = Some(note); }
+            }
+            let mut t = tail.lock().unwrap();
+            if t.len() >= 20 { t.pop_front(); }
+            t.push_back(line);
+        }
+    });
+    (scan, task)
+}
+
 impl SshTunnel {
     /// Spawn `ssh -N -L local_port:db_host:db_port user@ssh_host` and wait
     /// up to 1 second for the process to stabilise (quick-exit = failure).
@@ -159,6 +236,34 @@ impl SshTunnel {
         ssh_jump:     Option<&str>,
         ssh_password: Option<&str>,
     ) -> Result<Self> {
+        match Self::open_once(ssh_host, ssh_port, ssh_user, ssh_key_path, db_host, db_port,
+                              ssh_jump, ssh_password).await {
+            // The local port is chosen by bind:0 and then RELEASED before ssh
+            // binds it — another process can claim it in that window, and ssh
+            // exits at once under ExitOnForwardFailure. "Address already in
+            // use" is that lost race: pick a fresh port and try once more.
+            // The race itself cannot be closed (ssh owns the bind; there is
+            // no way to hand it a ready fd), so one retry is an honest
+            // mitigation, not a guarantee.
+            Err(e) if e.to_string().contains("Address already in use") =>
+                Self::open_once(ssh_host, ssh_port, ssh_user, ssh_key_path, db_host, db_port,
+                                ssh_jump, ssh_password).await,
+            r => r,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_once(
+        ssh_host:     &str,
+        ssh_port:     u16,
+        ssh_user:     &str,
+        ssh_key_path: Option<&str>,
+        db_host:      &str,
+        db_port:      u16,
+        ssh_jump:     Option<&str>,
+        ssh_password: Option<&str>,
+    ) -> Result<Self> {
+        validate_endpoint(ssh_user, ssh_host)?;
         if let Some(jump) = ssh_jump {
             validate_jump(jump)?;
         }
@@ -216,7 +321,8 @@ impl SshTunnel {
             cmd.args(["-i", key]);
         }
 
-        cmd.arg(&ssh_target)
+        cmd.arg("--")
+           .arg(&ssh_target)
            .stdout(std::process::Stdio::null())
            // Captured, not nulled: when the tunnel dies at birth, ssh's own
            // words ("Permission denied", "Connection refused", a host-key
@@ -233,24 +339,31 @@ impl SshTunnel {
             }
         };
 
+        // stderr is drained from the start (host-key TOFU note + quick-exit
+        // tail), not read once on failure — see spawn_stderr_scan.
+        let (scan, scan_task) = match child.stderr.take() {
+            Some(e) => { let (s, t) = spawn_stderr_scan(e); (Some(s), Some(t)) }
+            None => (None, None),
+        };
+
         // Poll for 1 s; if the process exits early that indicates a failure
         let mut result = Ok(());
         for attempt in 0..10 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    // Read the tail of ssh's stderr — its own words are the
-                    // diagnosis. Bounded read: the process has exited, so the
-                    // pipe is finite, but keep only the last few lines.
+                    // The process has exited, so the drain task is at EOF or
+                    // about to be — give it a moment, then read ssh's own
+                    // words from the tail it kept.
+                    if let Some(t) = scan_task { let _ = t.await; }
                     let mut err_tail = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = String::new();
-                        let _ = stderr.read_to_string(&mut buf).await;
-                        let lines: Vec<&str> = buf.lines().filter(|l| !l.trim().is_empty()).collect();
-                        let tail = lines.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" | ");
-                        if !tail.is_empty() {
-                            err_tail = format!(" ssh said: {tail}");
+                    if let Some(scan) = &scan {
+                        let tail = scan.tail.lock().unwrap();
+                        let lines: Vec<&String> = tail.iter().filter(|l| !l.trim().is_empty()).collect();
+                        let tail_text = lines.iter().rev().take(3).rev()
+                            .map(|s| s.as_str()).collect::<Vec<_>>().join(" | ");
+                        if !tail_text.is_empty() {
+                            err_tail = format!(" ssh said: {tail_text}");
                         }
                     }
                     result = Err(anyhow::anyhow!(
@@ -278,7 +391,13 @@ impl SshTunnel {
             local_port, db_host, db_port, ssh_user, ssh_host, ssh_port
         );
 
-        Ok(SshTunnel { local_port, child })
+        // Host-key acceptance happens during the handshake, before auth — a
+        // first-contact note is essentially always captured within the settle
+        // window above. A pathologically slow kex that lands it later still
+        // gets the drain task's log::warn!, just not the audit row.
+        let host_key_note = scan.and_then(|s| s.host_key.lock().unwrap().clone());
+
+        Ok(SshTunnel { local_port, host_key_note, child })
     }
 }
 
@@ -373,6 +492,7 @@ pub async fn spawn_ssh_exec(
     ssh_password:   Option<&str>,
     remote_command: &str,
 ) -> Result<tokio::process::Child> {
+    validate_endpoint(ssh_user, ssh_host)?;
     if let Some(jump) = ssh_jump {
         validate_jump(jump)?;
     }
@@ -418,9 +538,14 @@ pub async fn spawn_ssh_exec(
         cmd.args(["-i", key]);
     }
 
-    cmd.arg(&ssh_target)
+    cmd.arg("--")
+       .arg(&ssh_target)
        .arg(remote_command)
        .stdout(std::process::Stdio::piped())
+       // Piped for the caller: the galera SST tail drains it into Note events,
+       // which is also where a first-contact host-key warning (accept-new
+       // TOFU) surfaces on this path — the tunnel path scans it in-band
+       // instead (spawn_stderr_scan).
        .stderr(std::process::Stdio::piped());
 
     suppress_console_window(&mut cmd);
@@ -497,6 +622,30 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_validation_accepts_real_users_and_hosts() {
+        assert!(validate_endpoint("deploy", "bastion.example.com").is_ok());
+        assert!(validate_endpoint("ubuntu", "10.0.0.1").is_ok());
+        assert!(validate_endpoint("dba_ro", "db-host-01.internal").is_ok());
+        // IPv6 literals, bracketed or bare, and a zone id.
+        assert!(validate_endpoint("root", "[2001:db8::1]").is_ok());
+        assert!(validate_endpoint("root", "fe80::1%eth0").is_ok());
+    }
+
+    #[test]
+    fn endpoint_validation_rejects_option_injection() {
+        // A leading '-' parses as another ssh OPTION wherever the element
+        // sits in argv — `-oProxyCommand=…` runs through a shell.
+        assert!(validate_endpoint("-oProxyCommand=evil", "host").is_err());
+        assert!(validate_endpoint("user", "-oProxyCommand=evil").is_err());
+        assert!(validate_endpoint("", "host").is_err());
+        assert!(validate_endpoint("user", "").is_err());
+        // And shell metachars/whitespace stay out, same as validate_jump.
+        assert!(validate_endpoint("us er", "host").is_err());
+        assert!(validate_endpoint("user", "ho`id`st").is_err());
+        assert!(validate_endpoint("user", "host;rm").is_err());
+    }
+
+    #[test]
     fn remote_path_validation_accepts_real_log_paths() {
         // The live MariaDB 11.8 Galera testbed and the usual Linux layouts.
         assert!(validate_remote_path("/opt/homebrew/var/log/mariadb-galera-1.err").is_ok());
@@ -517,6 +666,20 @@ mod tests {
         assert!(validate_remote_path("/x/a|cat.err").is_err());
         assert!(validate_remote_path("/x/a\nid.err").is_err());
         assert!(validate_remote_path("/x/*.err").is_err());
+    }
+
+    #[test]
+    fn host_key_note_recognizes_only_the_accept_new_line() {
+        assert_eq!(
+            host_key_note("Warning: Permanently added 'db-01.internal' (ED25519) to the list of known hosts."),
+            Some("Warning: Permanently added 'db-01.internal' (ED25519) to the list of known hosts.".to_string()),
+        );
+        // IPv6 / jump-host spellings carry extra punctuation.
+        assert!(host_key_note("Warning: Permanently added '[2001:db8::1]:22' (RSA) to the list of known hosts.").is_some());
+        // Not every ssh warning is a host-key acceptance.
+        assert!(host_key_note("Warning: remote port forwarding failed for listen port 53306").is_none());
+        assert!(host_key_note("Permission denied (publickey).").is_none());
+        assert!(host_key_note("").is_none());
     }
 
     #[test]

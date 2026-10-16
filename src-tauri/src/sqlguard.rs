@@ -7,13 +7,101 @@
 //! a false negative runs a write on a read-only server (unsafe). When in
 //! doubt we block.
 
+/// Lexical dialect switches for `blank` — the few places the supported
+/// engines disagree on what is code and what is text. Getting one wrong is
+/// not cosmetic: each was a verified guard bypass (a write the scanner
+/// blanked away, e.g. treating `#` as a comment erases `… # 2; DROP TABLE t`
+/// on PostgreSQL, where `#` is the XOR operator) or a false positive on live
+/// SQL (`DELETE FROM #tmp WHERE …` on T-SQL).
+///
+/// The engine-less default (`None`) keeps the historical MySQL-leaning
+/// behavior — backslash escapes, `#` comments, no comment nesting, dollar
+/// strings — so callers that predate engine threading see no behavior
+/// change. That default is NOT safe against these bypasses on non-MySQL
+/// engines; every enforcement path holding a session engine must call the
+/// `*_for` variants instead.
+#[derive(Clone, Copy)]
+pub(crate) struct Dialect {
+    /// `#` starts a line comment — MySQL-family only. On PostgreSQL `#` is an
+    /// operator, on T-SQL the temp-table prefix (`DELETE FROM #tmp`).
+    hash_comment: bool,
+    /// A backslash escapes inside '…'/"…" strings — MySQL-family and
+    /// ClickHouse. On PostgreSQL (standard_conforming_strings), SQLite,
+    /// DuckDB and T-SQL it is data, so `'x\'; DROP TABLE t; --'` is a
+    /// complete string followed by a real DROP.
+    backslash_escape: bool,
+    /// Block comments nest (`/* /* */ */`) — PostgreSQL and T-SQL. MySQL,
+    /// SQLite, ClickHouse and DuckDB end the comment at the first `*/`, and
+    /// counting depth there would blank the live SQL that follows it
+    /// (`/* /* */ DROP TABLE t -- */` is a real DROP on MySQL).
+    nested_comments: bool,
+    /// Dollar-quoted strings `$tag$ … $tag$` — PostgreSQL and DuckDB. On
+    /// MySQL/T-SQL `$` is an identifier character, so blanking between two
+    /// `$a$` tokens would hide the statements between them.
+    dollar_strings: bool,
+    /// Semantic, not lexical: on PostgreSQL `SET [SESSION|LOCAL]
+    /// (default_)transaction_read_only` flips the driver-level read-only
+    /// backstop off, so `statement_is_write` treats it as a write.
+    ///
+    /// PG-only by owner decision (2026-10-15): MySQL/MariaDB's
+    /// `SET SESSION transaction_read_only = 0` is deliberately NOT blocked —
+    /// a DBA tool must let the user manage that switch explicitly.
+    pg_set_readonly: bool,
+}
+
+impl Dialect {
+    /// The historical engine-less behavior: MySQL-family lexing plus dollar
+    /// strings (which predate the dialect split). See the struct doc for why
+    /// callers with a known engine must not rely on it.
+    fn legacy() -> Dialect {
+        Dialect {
+            hash_comment: true,
+            backslash_escape: true,
+            nested_comments: false,
+            dollar_strings: true,
+            pg_set_readonly: false,
+        }
+    }
+
+    /// Every switch off: blank nothing beyond universal `--`/`/* */`/quotes.
+    fn off() -> Dialect {
+        Dialect {
+            hash_comment: false,
+            backslash_escape: false,
+            nested_comments: false,
+            dollar_strings: false,
+            pg_set_readonly: false,
+        }
+    }
+
+    fn for_engine(engine: Option<crate::db::types::Engine>) -> Dialect {
+        use crate::db::types::Engine as E;
+        match engine {
+            Some(E::Mysql) => Dialect { hash_comment: true, backslash_escape: true, ..Dialect::off() },
+            Some(E::Postgres) => Dialect { nested_comments: true, dollar_strings: true, pg_set_readonly: true, ..Dialect::off() },
+            Some(E::SqlServer) => Dialect { nested_comments: true, ..Dialect::off() },
+            Some(E::Clickhouse) => Dialect { backslash_escape: true, ..Dialect::off() },
+            Some(E::Duckdb) => Dialect { dollar_strings: true, ..Dialect::off() },
+            // Sqlite/Parquet/Redis/MongoDb: everything off — reveal the text,
+            // let the keyword scan see it.
+            Some(_) => Dialect::off(),
+            None => Dialect::legacy(),
+        }
+    }
+}
+
 /// Replace the contents of string literals, quoted identifiers, dollar-quoted
 /// bodies and comments with spaces, preserving overall structure (parens,
 /// keywords, statement separators). Operates on `char`s so UTF-8 identifiers
-/// are handled safely.
+/// are handled safely. Engine-less wrapper — see `Dialect` for what that
+/// means; prefer `blank_dialect` where the engine is known.
 /// `pub(crate)`: commands/duckdb.rs's GeoParquet export uses it to reject a
 /// comment-only "statement" as effectively empty.
 pub(crate) fn blank(sql: &str) -> String {
+    blank_dialect(sql, &Dialect::legacy())
+}
+
+pub(crate) fn blank_dialect(sql: &str, d: &Dialect) -> String {
     let cs: Vec<char> = sql.chars().collect();
     let n = cs.len();
     let mut out = String::with_capacity(n);
@@ -25,7 +113,7 @@ pub(crate) fn blank(sql: &str) -> String {
             while i < n && cs[i] != '\n' { out.push(' '); i += 1; }
             continue;
         }
-        if c == '#' {
+        if c == '#' && d.hash_comment {
             while i < n && cs[i] != '\n' { out.push(' '); i += 1; }
             continue;
         }
@@ -45,13 +133,24 @@ pub(crate) fn blank(sql: &str) -> String {
                 while i < n && cs[i].is_ascii_digit() { out.push(' '); i += 1; }
                 continue;
             }
-            while i < n && !(cs[i] == '*' && i + 1 < n && cs[i + 1] == '/') { out.push(' '); i += 1; }
-            if i < n { out.push(' '); i += 1; }        // '*'
-            if i < n { out.push(' '); i += 1; }        // '/'
+            // Depth counts only where the engine nests comments (see
+            // Dialect::nested_comments); elsewhere the first `*/` closes.
+            // The opener is consumed before the loop so it is not re-counted.
+            out.push(' '); out.push(' '); i += 2;
+            let mut depth = 1i32;
+            while i < n && depth > 0 {
+                if d.nested_comments && cs[i] == '/' && i + 1 < n && cs[i + 1] == '*' {
+                    depth += 1; out.push(' '); out.push(' '); i += 2; continue;
+                }
+                if cs[i] == '*' && i + 1 < n && cs[i + 1] == '/' {
+                    depth -= 1; out.push(' '); out.push(' '); i += 2; continue;
+                }
+                out.push(' '); i += 1;
+            }
             continue;
         }
         // PostgreSQL dollar-quote:  $tag$ ... $tag$   (tag may be empty)
-        if c == '$' {
+        if c == '$' && d.dollar_strings {
             if let Some(tag) = dollar_tag(&cs, i) {
                 let body_start = i + tag.len();
                 let end = find_seq(&cs, &tag, body_start)
@@ -67,8 +166,9 @@ pub(crate) fn blank(sql: &str) -> String {
             out.push(' ');
             i += 1;
             while i < n {
-                // backslash escape (not for backtick-quoted identifiers)
-                if cs[i] == '\\' && c != '`' && i + 1 < n {
+                // backslash escape (not for backtick-quoted identifiers, and
+                // only on engines whose strings take backslash escapes)
+                if d.backslash_escape && cs[i] == '\\' && c != '`' && i + 1 < n {
                     out.push(' '); out.push(' '); i += 2; continue;
                 }
                 if cs[i] == c {
@@ -234,7 +334,7 @@ fn copy_writes(blanked: &str) -> bool {
 }
 
 /// Detect whether a single (already-blanked) statement writes.
-fn statement_is_write(blanked: &str) -> bool {
+fn statement_is_write(blanked: &str, d: &Dialect) -> bool {
     let kw = first_word(blanked);
     if kw.is_empty() { return false; }
     if WRITE_KEYWORDS.contains(&kw.as_str()) { return true; }
@@ -242,7 +342,25 @@ fn statement_is_write(blanked: &str) -> bool {
         // SET GLOBAL / SET PERSIST / SET PERSIST_ONLY mutate server state;
         // session/user variables do not.
         let second = word_after(blanked, kw.len());
-        return matches!(second.as_str(), "global" | "persist" | "persist_only");
+        if matches!(second.as_str(), "global" | "persist" | "persist_only") { return true; }
+        if d.pg_set_readonly {
+            // SET [SESSION|LOCAL] {default_transaction_read_only|
+            // transaction_read_only} flips the driver-level read-only
+            // backstop the pool sets at startup — on a read-only PG
+            // connection this one statement undoes the safety net, so it
+            // classifies as a write like SET GLOBAL does on MySQL.
+            let mut words = blanked
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_lowercase());
+            words.next(); // "set"
+            let mut name = words.next().unwrap_or_default();
+            if name == "session" || name == "local" {
+                name = words.next().unwrap_or_default();
+            }
+            return name == "default_transaction_read_only" || name == "transaction_read_only";
+        }
+        return false;
     }
     if kw == "start" {
         // START TRANSACTION is BEGIN's other spelling — not a write. Every
@@ -279,7 +397,7 @@ fn statement_is_write(blanked: &str) -> bool {
         // strip the EXPLAIN prefix + its options, re-test the remainder:
         // EXPLAIN [ANALYZE] [VERBOSE] [( … )] <statement>
         let rest = strip_explain(blanked);
-        return statement_is_write(&rest);
+        return statement_is_write(&rest, d);
     }
     false
 }
@@ -318,9 +436,18 @@ fn strip_explain(blanked: &str) -> String {
 }
 
 /// True if any statement in `sql` is a write/DDL/DCL statement.
+/// Engine-less wrapper — the most transparent scanner (see `Dialect`);
+/// callers holding a session engine should use `is_write_for`.
 pub fn is_write(sql: &str) -> bool {
-    let blanked = blank(sql);
-    blanked.split(';').any(statement_is_write)
+    is_write_for(None, sql)
+}
+
+/// `is_write` with the session engine, so the scanner blanks exactly what
+/// that engine treats as text (nested comments, `#` comments, backslash
+/// escapes, dollar quotes — see `Dialect`).
+pub fn is_write_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool {
+    let d = Dialect::for_engine(engine);
+    blank_dialect(sql, &d).split(';').any(|s| statement_is_write(s, &d))
 }
 
 /// Read-family statements (SELECT/WITH/TABLE/VALUES/SHOW/DESCRIBE/EXPLAIN) —
@@ -351,7 +478,12 @@ const DANGEROUS_DDL_KEYWORDS: &[&str] = &[
 /// of losing data, but on a production server they stall every reader for the
 /// duration, which is exactly what the prod border exists to prevent.
 pub fn is_dangerous_ddl(sql: &str) -> bool {
-    let blanked = blank(sql);
+    is_dangerous_ddl_for(None, sql)
+}
+
+/// `is_dangerous_ddl` with the session engine — see `is_write_for`.
+pub fn is_dangerous_ddl_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool {
+    let blanked = blank_dialect(sql, &Dialect::for_engine(engine));
     blanked.split(';').any(|s| {
         let kw = first_word(s);
         if DANGEROUS_DDL_KEYWORDS.contains(&kw.as_str()) { return true; }
@@ -378,7 +510,12 @@ pub fn is_dangerous_ddl(sql: &str) -> bool {
 /// detected on blanked SQL so a `where` inside a string/comment doesn't
 /// hide the danger; a data-modifying CTE outer UPDATE/DELETE counts.
 pub fn is_unfiltered_write(sql: &str) -> bool {
-    let blanked = blank(sql);
+    is_unfiltered_write_for(None, sql)
+}
+
+/// `is_unfiltered_write` with the session engine — see `is_write_for`.
+pub fn is_unfiltered_write_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool {
+    let blanked = blank_dialect(sql, &Dialect::for_engine(engine));
     blanked.split(';').any(unfiltered_updel)
 }
 
@@ -429,11 +566,14 @@ pub fn check_prod_limits(guard: &crate::state::SessionGuard, sql: &str) -> Resul
     if guard.environment.as_deref() != Some("prod") {
         return Ok(());
     }
-    if is_dangerous_ddl(sql) && !guard.prod_allow_ddl {
+    // The guard carries the session engine, so the prod border scans the SQL
+    // the way that engine will actually parse it.
+    let engine = Some(guard.engine);
+    if is_dangerous_ddl_for(engine, sql) && !guard.prod_allow_ddl {
         return Err("blocked on prod: destructive DDL (DROP/TRUNCATE/ALTER/RENAME/GRANT/REVOKE) \
                     — enable 'Allow destructive DDL' on the connection to permit".into());
     }
-    if is_unfiltered_write(sql) && !guard.prod_allow_unfiltered_write {
+    if is_unfiltered_write_for(engine, sql) && !guard.prod_allow_unfiltered_write {
         return Err("blocked on prod: UPDATE/DELETE without a WHERE clause \
                     — enable 'Allow unfiltered writes' on the connection to permit".into());
     }
@@ -583,6 +723,11 @@ mod pg_tests {
     fn a_where_hiding_in_a_dollar_quote_does_not_excuse_a_write() {
         // dollar-quoted bodies are blanked before keyword scanning
         assert!(super::is_unfiltered_write("UPDATE t SET body = $$ where $$"));
+        // …and still are once the scanner knows the engine is PostgreSQL
+        assert!(super::is_unfiltered_write_for(
+            Some(crate::db::types::Engine::Postgres),
+            "UPDATE t SET body = $$ where $$",
+        ));
     }
 
     // ── Prod hard limits: heavy-lock maintenance ─────────────────────────
@@ -827,6 +972,111 @@ mod guard_bypass_tests {
         assert!(is_write("EXEC sp_executesql N'DROP TABLE t'"));
         assert!(is_write("EXECUTE w(1)"));   // unchanged
         assert!(!is_write("SELECT exec_count FROM stats"));
+    }
+}
+
+#[cfg(test)]
+mod dialect_tests {
+    //! Probe tests for the engine-blindness bypasses: each asserts the exact
+    //! payload from the audit is now classified the way the engine parses it.
+    //! The engine-less wrappers deliberately keep their historical MySQL
+    //! behavior (see `Dialect`), so every probe passes the engine in.
+    use crate::db::types::Engine::*;
+    use super::{is_unfiltered_write, is_unfiltered_write_for, is_write, is_write_for};
+
+    /// `/* a /* b */ c */ DROP TABLE t` — PG and T-SQL nest block comments,
+    /// so the DROP is live SQL; blanking only to the first `*/` hid it.
+    #[test]
+    fn nested_block_comments_cannot_smuggle_writes() {
+        for eng in [Postgres, SqlServer] {
+            assert!(is_write_for(Some(eng), "/* a /* b */ c */ DROP TABLE t"));
+            // a balanced nested comment is still just a comment
+            assert!(!is_write_for(Some(eng), "/* a /* b */ c */ SELECT 1"));
+        }
+        // MySQL does NOT nest: the comment ends at the first `*/` and what
+        // follows is live SQL — depth-counting here would blank the DROP.
+        assert!(is_write_for(Some(Mysql), "/* /* */ DROP TABLE t -- */"));
+    }
+
+    /// `'x\'; DROP TABLE t; --'` — on PG (standard_conforming_strings),
+    /// T-SQL and SQLite the string ends at the quote and the DROP is real;
+    /// treating the backslash as an escape blanked the whole tail.
+    #[test]
+    fn backslash_escapes_only_where_the_engine_says_so() {
+        for eng in [Postgres, SqlServer, Sqlite, Duckdb] {
+            assert!(is_write_for(Some(eng), "'x\\'; DROP TABLE t; --'"));
+        }
+        // MySQL and ClickHouse: it really is one long string literal.
+        assert!(!is_write_for(Some(Mysql), "'x\\'; DROP TABLE t; --'"));
+        assert!(!is_write_for(Some(Clickhouse), "'x\\'; DROP TABLE t; --'"));
+    }
+
+    /// `SELECT 1 # 2; DROP TABLE t` — `#` is PostgreSQL's XOR operator, not
+    /// a comment; blanking to end-of-line erased the DROP. And on T-SQL,
+    /// `#tmp` is a temp table, so `DELETE FROM #tmp WHERE …` kept its WHERE.
+    #[test]
+    fn hash_is_a_comment_only_on_mysql() {
+        assert!(is_write_for(Some(Postgres), "SELECT 1 # 2; DROP TABLE t"));
+        assert!(!is_unfiltered_write_for(Some(SqlServer), "DELETE FROM #tmp WHERE id=1"));
+        assert!(is_unfiltered_write_for(Some(SqlServer), "DELETE FROM #tmp"));
+        // MySQL: `#` really does comment out the rest of the line.
+        assert!(!is_write_for(Some(Mysql), "SELECT 1 # ; DROP TABLE t"));
+    }
+
+    /// Dollar quotes exist on PostgreSQL and DuckDB only. Elsewhere `$tag$`
+    /// is identifier text, and blanking between two of them hides the
+    /// statements in between.
+    #[test]
+    fn dollar_quotes_blank_only_where_the_engine_has_them() {
+        // PG: the `where` is string content — it must not excuse the missing
+        // WHERE on the UPDATE.
+        assert!(is_unfiltered_write_for(Some(Postgres), "UPDATE t SET body = $$ where $$"));
+        assert!(!is_write_for(Some(Postgres), "SELECT $$ into $$ FROM t"));
+        // MySQL: `$a$` is an identifier; the DROP between two of them is live.
+        assert!(is_write_for(Some(Mysql), "SELECT 1 $a$; DROP TABLE t; SELECT 1 $a$"));
+        assert!(!is_write_for(Some(Mysql), "SELECT $a$ FROM t"));
+    }
+
+    /// On PostgreSQL, SET (default_)transaction_read_only flips the
+    /// driver-level read-only backstop the pool sets at connect — a write as
+    /// far as the guard is concerned, like SET GLOBAL on MySQL.
+    #[test]
+    fn pg_set_readonly_flip_is_a_write() {
+        for sql in [
+            "SET default_transaction_read_only = off",
+            "SET transaction_read_only = on",
+            "SET SESSION default_transaction_read_only TO off",
+            "set local transaction_read_only = on",
+            "SET  SESSION   transaction_read_only=off",
+        ] {
+            assert!(is_write_for(Some(Postgres), sql), "{sql}");
+        }
+        // ordinary session settings stay reads
+        assert!(!is_write_for(Some(Postgres), "SET work_mem = '64MB'"));
+        assert!(!is_write_for(Some(Postgres), "SET SESSION statement_timeout = 1000"));
+        assert!(!is_write_for(Some(Postgres), "SET LOCAL search_path = public"));
+        // the rule is PG-only — other engines have no such backstop here
+        assert!(!is_write_for(Some(Mysql), "SET SESSION sql_mode = 'x'"));
+        assert!(!is_write("SET default_transaction_read_only = off"));
+    }
+
+    /// The engine-less wrappers keep the historical MySQL-leaning behavior so
+    /// callers that predate engine threading are unchanged — which is exactly
+    /// why enforcement paths holding a session engine must use the `*_for`
+    /// variants: each assertion below is a residual bypass when the engine is
+    /// not threaded.
+    #[test]
+    fn the_engine_less_wrapper_keeps_historical_behavior() {
+        // backslash escapes strings: the tail stays inside the literal
+        assert!(!is_write("'x\\'; DROP TABLE t; --'"));
+        // `#` comments out the rest of the line
+        assert!(!is_write("SELECT 1 # 2; DROP TABLE t"));
+        // dollar-quoted bodies are blanked
+        assert!(is_unfiltered_write("UPDATE t SET body = $$ where $$"));
+        // block comments do not nest: `c */` stays visible, so the statement
+        // leads with `c` and the DROP — though visible text — is not leading.
+        // This is the residual gap only engine threading closes.
+        assert!(!is_write("/* a /* b */ c */ DROP TABLE t"));
     }
 }
 

@@ -76,7 +76,7 @@ this project follows semantic versioning.
   is now **vendored**
   (`src-tauri/vendor/tiberius/`) with UDT and sql_variant panic guards.
 
-Two new Tauri commands — **171 total**. Frontend 4,588 tests, backend 798.
+Two new Tauri commands — **171 total**. Frontend 4,636 tests, backend 846.
 
 ### Fixed
 
@@ -105,6 +105,159 @@ Two new Tauri commands — **171 total**. Frontend 4,588 tests, backend 798.
   (matching SqlClient on TDS 7.2+); NULL UDTs still ride the PLP-null
   sentinel, and the failure mode for anything unforeseen stays a clean
   per-query error, never a `panic=abort`.
+
+### Security — the architecture-audit round (2026-10-15)
+
+A five-pass principal-architect audit (drivers, concurrency, frontend, SQL
+guard, security paths — full findings: `docs/plans/audit-arch-2026-10-15.md`,
+progress: `docs/plans/audit-fix-progress.md`) found the write-guard — the
+product's core safety promise — had real holes on specific engines. All
+closed:
+
+- **The guard is now dialect-aware.** `sqlguard::blank` blanked comments and
+  strings identically for every engine, which made three bypasses possible:
+  `/* a /* b */ c */ DROP TABLE t` (PG/T-SQL nested comments — on SQL
+  Server, where the driver has NO read-only switch, the guard is the only
+  enforcement), `'x\'; DROP TABLE t; --'` (backslash treated as an escape on
+  engines where it isn't one), and `SELECT 1 # 2; DROP TABLE t` (`#` treated
+  as a MySQL comment — on PG it's an operator). `sqlguard.rs` gained a
+  `Dialect` (`is_write_for`/`is_dangerous_ddl_for`/`is_unfiltered_write_for`),
+  the engine is threaded through every enforcement call site (state,
+  multi-exec, duckdb export, quality), and the TS pre-flight mirror accepts
+  the engine too. MySQL versioned comments stay exposed; a new drift test
+  (`tests/sqlGuardDrift.test.ts`) diffs the TS and Rust keyword vocabularies
+  so they cannot silently part again. The TS pre-flight also split-
+  statements now, knows the ClickHouse keyword set, handles dollar-quotes,
+  and loops EXPLAIN options — the prod dialog can no longer be skipped by a
+  multi-statement buffer.
+- **`explain_query` was unguarded.** With `analyze=true` it EXECUTES the
+  statement (EXPLAIN ANALYZE / STATISTICS XML) — on a read-only SQL Server
+  session an unguarded invoke ran writes; prod hard limits were bypassed on
+  every engine. It now goes through `guard_statement` like its sibling
+  `explain_analyze_guarded`.
+- **`pg_copy_export` statement stacking closed.** sqlx's COPY uses the
+  simple query protocol, so a crafted `source` could stack a DELETE past the
+  COPY. The source is now shape-validated (single statement, balanced
+  parens, read-family first keyword) AND guard-checked; prod limits apply.
+- **The PG read-only backstop can no longer be flipped through the guard** —
+  `SET [SESSION] default_transaction_read_only = off` is now classified as a
+  write on PG sessions (the driver-level backstop the pools set at connect).
+- **PG `debug_routine` gets the prod/read-only gate** its MySQL twin always
+  had (`debug_gate`, factored — BEGIN…ROLLBACK is not side-effect free:
+  `nextval()` survives).
+- **SSH option injection closed** — `ssh_user`/`ssh_host` are validated
+  (`validate_endpoint`, no leading `-`, character allowlist) and `--` ends
+  option parsing, so a malicious imported config can't smuggle
+  `-oProxyCommand=…` into argv.
+- **Vault KDF parameters are clamped before authentication** — a tampered
+  vault header can no longer force a multi-GiB Argon2 allocation at unlock;
+  the AEAD tag still authenticates the original header values.
+- **Debug builds no longer hex-dump the stored password** into the session
+  log/audit on connect failure — a first/last-byte fingerprint keeps the
+  diagnostic (stray whitespace, encoding) without the secret.
+- **Dump/restore argv is validated.** `run_dump_tool` still spawns only
+  allowlisted binaries with passwords in env, but the resolved argv must now
+  also prove it talks to the session's OWN server: host/port/user flags must
+  match the (possibly SSH-tunnelled) endpoint, password flags, option files
+  and socket re-points are rejected outright, unknown flags fail closed, and
+  libpq conninfo strings (`-d "host=…"`, `postgres://…`) are refused — a
+  renderer-supplied `-h attacker.example` can no longer ship the connection's
+  credentials to a foreign server.
+- **A strict Content-Security-Policy.** Production webview:
+  `script-src 'self'` (the splash's inline fallback script moved to
+  `public/splash-fallback.js`), `img-src` allows only the opt-in OSM tile
+  host, `connect-src` self + Tauri IPC, object/base-uri/frame-ancestors/
+  form-action `none`; a looser `devCsp` keeps Vite HMR working. There was no
+  live XSS sink (grep-verified) — this keeps it that way. Render-verified
+  headless: `dev/csp_check.mjs` builds a production bundle with mocked IPC,
+  serves it with the exact CSP string, and boots the app in Chromium —
+  shell and workspace render with zero violations.
+- **SSH first-contact host keys are surfaced, not silent.** `accept-new`
+  stays (the GUI default), but OpenSSH's "Permanently added …" line is now
+  caught from the tunnel's stderr, written to the audit log, and shown as a
+  warn line in the session log.
+
+### Added — deferred audit items
+
+- **Big results stream.** An editor result over 5,000 rows no longer crosses
+  the webview boundary as one giant JSON payload: `execute_query` pages it
+  over a Tauri Channel (5k-row pages, header first with full metadata +
+  total row count) and the grid renders pages as they arrive. Cancel is
+  checked per page; history, session-log lines, warnings and the truncated
+  notice are reassembled byte-identical. Engine decode loops untouched —
+  the seam is the command layer. Panel/multi-exec/watch paths are unchanged
+  (already capped/small).
+- **Copy of huge results asks first.** Full-result ⌘C / Copy-menu copies
+  above 10,000 rows confirm before serializing ("Copy 87,234 rows?");
+  `write_binary_file` takes base64 instead of a JSON number array (~7x
+  memory amplification on xlsx exports gone). App quit closes sessions
+  concurrently (worst case ~5 s total, not N×5 s).
+
+### Fixed — the rest of the audit round
+
+- **SQL Server no longer double-executes a write after a connection drop.**
+  The reconnect-retry path is ambiguous (the server may have committed
+  before dying); only guard-classified reads are retried now — a write
+  reconnects but answers "outcome unknown, NOT retried".
+- **Cancel/kill races closed.** The spawned `KILL`/`pg_cancel_backend` now
+  verifies a statement fingerprint against the processlist before firing, so
+  a recycled pooled connection can't take an innocent query down;
+  multi-exec and Galera timeouts FIRE the registered server-side kill
+  instead of abandoning the statement; a `begin_transaction` race that could
+  return a pooled connection with an open transaction (and `autocommit=0`)
+  is now serialized under one lock.
+- **Ephemeral sessions stopped leaking.** Multi-exec, Galera polls/kills and
+  consistency checks share one `open_ephemeral_session` /
+  `teardown_ephemeral_session` pair that cleans every registry
+  (`session_starts`, `session_dbs`, catalogs, kill handles — fired, not
+  dropped) and no longer floods `audit_log` with unmatched `connect` rows
+  per poll per node; `audit_log` gained a 100k retention cap (SQLite
+  trigger, amortized) and the query_history prune no longer runs an O(cap)
+  delete per insert. Duplicate `pg_listen_start` tokens abort the old
+  listener instead of orphaning it; the replay cache sweeps superseded
+  generations of a growing recording; shutdown cancels in-flight work and
+  dump child processes are `kill_on_drop`.
+- **Drivers:** `ping()` (the Test button) honors the connect timeout on
+  MySQL/PG/Redis; multi-result-set batches no longer decode later sets
+  against the first set's column metadata (fabricated NULLs / dropped
+  columns via `CALL proc()`); ClickHouse `esc()` escapes backslash first
+  (injection into the app's own metadata queries) and a truncated response
+  body is an error, not a fake empty success; Parquet dataset open moved off
+  the async runtime (`spawn_blocking`); Redis reports the actual server
+  error text and renders binary values as hex instead of lossy UTF-8; MySQL
+  `TIME` keeps sign and microseconds; closing a DuckDB session interrupts
+  its in-flight query; vault unlock/create/change-password run Argon2id off
+  the runtime worker.
+- **Frontend performance:** cursor position, ClickHouse progress and
+  split-drag sizes moved out of the workspace root into leaf-subscribed
+  stores / rAF-coalesced commits (every keystroke no longer re-renders every
+  mounted tab); the signature/kill-context analyzers are debounced instead
+  of flattening the whole document per keystroke; overlapping runs on one
+  tab are sequenced by a generation counter (Cancel can no longer vanish
+  mid-run); map pan/zoom repaints once per frame; find-in-results caps
+  cells scanned (honestly labelled) and searches JSON cells.
+- **Utils:** `mssqlUdt`'s `OFFSET 0 ROWS` legaliser can't be swallowed by a
+  trailing `--` comment; the custom-delimiter splitter is ordered
+  defensively (with the `DELIMITER $$` contract pinned); `groupOrderClauses`
+  lost its O(n²) slicing; `quoteTable` quotes every dot-separated part;
+  sqlLint's LIKE check runs on the blanked copy (no more comment/string
+  false positives); mssqlPlan's tag regex is linear on malformed input.
+- **Six shipped features were dead at the IPC boundary** (the audit's one
+  unresolved anomaly — confirmed empirically, then fixed). `execute_query`
+  requires `connectionId`/`engine` (history attribution + engine-aware
+  handling), but TxShell's runner, the Type/Dictionary/View/Sequence object
+  panels' DDL actions, the SchemaTree extension picker and the mini
+  QueryEditor called it without them — and TxShell passed `tabId: null`,
+  TableDesigner's Apply `tabId: -1`, into a `u64`. Serde rejects all of that
+  before the SQL runs, so every one of those features died on a generic
+  invoke error. All call sites now pass the full arg set (TxShell's silently
+  ignored `limit` arg became the real `maxRows`), and the contract is pinned
+  on both halves: `ipc_arg_tests` in `commands/query.rs` drives Tauri's real
+  per-arg parsing through a mock-runtime IPC round-trip (missing arg →
+  rejected naming the arg; `null`/`-1` → rejected; full set → passes), and
+  `tests/invokeArgs.test.ts` diffs EVERY `#[tauri::command]`'s required args
+  against EVERY `invoke('…', { … })` object literal in `src/` — a missing
+  arg is now a red `npm test`, not a support ticket.
 
 ## [1.2.0] - 2026-10-13
 

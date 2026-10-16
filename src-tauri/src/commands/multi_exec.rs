@@ -223,14 +223,14 @@ async fn run_one(state: &AppState, conn_id: Uuid, sql: &str) -> Result<QueryResu
         }
         crate::redisguard::check_prod_limits(&guard, sql)?;
     } else {
-        if config.read_only && crate::sqlguard::is_write(sql) {
+        if config.read_only && crate::sqlguard::is_write_for(Some(config.engine), sql) {
             return Err("Blocked: this connection is read-only.".into());
         }
         // Prod hard limits, straight from the config (no session exists yet).
         crate::sqlguard::check_prod_limits(&guard, sql)?;
     }
 
-    let session_id = super::connections::open_session_for_config(&config, state).await?;
+    let session_id = super::connections::open_ephemeral_session(&config, state).await?;
 
     let cancel_key = format!("multi-{}", session_id);
     let default_db = state.session_dbs.read().await.get(&session_id).cloned();
@@ -243,14 +243,16 @@ async fn run_one(state: &AppState, conn_id: Uuid, sql: &str) -> Result<QueryResu
         std::time::Duration::from_secs(PER_SERVER_TIMEOUT_SECS), exec,
     ).await {
         Ok(r) => r.map_err(Into::into),
+        // Dropping the execute future does NOT stop the statement server-side
+        // (the editor deadline in query.rs::race_query fires the kill for the
+        // same reason) — the kill handle is still registered, and the
+        // teardown below fires it before removing the registry entries.
         Err(_) => Err(format!("timeout after {}s", PER_SERVER_TIMEOUT_SECS).into()),
     };
 
-    // Tear down the ephemeral session + tunnel + kill handle + guard
-    connection::close_session(session_id, &state.sessions).await;
-    state.tunnels.write().await.remove(&session_id);
-    state.kills.write().await.remove(&cancel_key);
-    state.session_meta.write().await.remove(&session_id);
+    // Tear down the ephemeral session and every registry it touched (and fire
+    // a still-registered kill first — see above).
+    super::connections::teardown_ephemeral_session(state, session_id, &cancel_key).await;
 
     result
 }

@@ -237,3 +237,97 @@ test('T-SQL EXEC runs an invisible body — a write', () => {
   assert.ok(isWriteStatement("EXEC sp_executesql N'DROP TABLE t'"));
   assert.ok(!isWriteStatement('SELECT exec_count FROM stats'));
 });
+
+// ── Engine-blindness probes (2026-10 audit) — each payload is classified the
+// way the named engine actually parses it; mirrors sqlguard::dialect_tests in
+// Rust. The server side is authoritative; these keep the pre-flight honest.
+
+test('nested block comments cannot smuggle writes (PG/T-SQL)', () => {
+  for (const engine of ['postgres', 'sqlserver']) {
+    assert.ok(isWriteStatement('/* a /* b */ c */ DROP TABLE t', engine), engine);
+    // a balanced nested comment is still just a comment
+    assert.ok(!isWriteStatement('/* a /* b */ c */ SELECT 1', engine), engine);
+  }
+  // MySQL does NOT nest — the DROP after the first */ is live SQL
+  assert.ok(isWriteStatement('/* /* */ DROP TABLE t -- */', 'mysql'));
+  // versioned comments still expose their body (existing behavior)
+  assert.ok(isWriteStatement('/*!50000 DELETE FROM t*/', 'mysql'));
+});
+
+test('a backslash is a string escape only where the engine says so', () => {
+  const payload = String.raw`'x\'; DROP TABLE t; --'`;
+  for (const engine of ['postgres', 'sqlserver', 'sqlite', 'duckdb']) {
+    assert.ok(isWriteStatement(payload, engine), engine);
+  }
+  // MySQL/ClickHouse: it really is one long string literal
+  assert.ok(!isWriteStatement(payload, 'mysql'));
+  assert.ok(!isWriteStatement(payload, 'clickhouse'));
+});
+
+test('# is a line comment only on MySQL-family engines', () => {
+  // PG: `#` is the XOR operator — the statement after it is real
+  assert.ok(isWriteStatement('SELECT 1 # 2; DROP TABLE t', 'postgres'));
+  // T-SQL: `#tmp` is a temp table — the WHERE survives blanking
+  assert.ok(!isUnfilteredWrite('DELETE FROM #tmp WHERE id=1', 'sqlserver'));
+  assert.ok(isUnfilteredWrite('DELETE FROM #tmp', 'sqlserver'));
+  // MySQL: `#` really does comment out the rest of the line
+  assert.ok(!isWriteStatement('SELECT 1 # ; DROP TABLE t', 'mysql'));
+});
+
+test('dollar-quoted bodies blank only where the engine has them', () => {
+  // PG: the `where` is string content — no excuse for the missing WHERE
+  assert.ok(isUnfilteredWrite('UPDATE t SET body = $$ where $$', 'postgres'));
+  assert.ok(!isWriteStatement('SELECT $$ into $$ FROM t', 'postgres'));
+  // MySQL: `$a$` is identifier text; the DROP between two of them is live
+  assert.ok(isWriteStatement('SELECT 1 $a$; DROP TABLE t; SELECT 1 $a$', 'mysql'));
+  assert.ok(!isWriteStatement('SELECT $a$ FROM t', 'mysql'));
+});
+
+test('PG SET of the driver read-only backstop is a write', () => {
+  assert.ok(isWriteStatement('SET default_transaction_read_only = off', 'postgres'));
+  assert.ok(isWriteStatement('SET transaction_read_only = on', 'postgres'));
+  assert.ok(isWriteStatement('SET SESSION default_transaction_read_only TO off', 'postgres'));
+  assert.ok(isWriteStatement('set local transaction_read_only = on', 'postgres'));
+  assert.ok(isWriteStatement('SET  SESSION   transaction_read_only=off', 'postgres'));
+  // ordinary session settings stay reads
+  assert.ok(!isWriteStatement("SET work_mem = '64MB'", 'postgres'));
+  assert.ok(!isWriteStatement('SET SESSION statement_timeout = 1000', 'postgres'));
+  // PG-only rule — other engines have no such backstop here
+  assert.ok(!isWriteStatement("SET SESSION sql_mode = 'x'", 'mysql'));
+});
+
+// ── TS↔RS divergence fixes ──────────────────────────────────────────────────
+
+test('isWriteStatement splits on ; — a write behind a leading SELECT', () => {
+  assert.ok(isWriteStatement('SELECT 1; UPDATE t SET a=1 WHERE id=2'));
+  assert.ok(isWriteStatement('SELECT 1; DROP TABLE t'));
+  assert.ok(!isWriteStatement('SELECT 1; SELECT 2'));
+  assert.ok(!isWriteStatement("SELECT '; DROP TABLE t'"));   // inside a string
+  assert.ok(!isWriteStatement('SELECT 1 -- ; DROP TABLE t')); // inside a comment
+  assert.ok(!isReadFamilyStatement('SELECT 1; UPDATE t SET a=1 WHERE id=2'));
+});
+
+test('keyword sync: ClickHouse detach/attach/exchange/system + cleanup', () => {
+  assert.ok(isWriteStatement('DETACH TABLE t'));
+  assert.ok(isWriteStatement('ATTACH TABLE t'));
+  assert.ok(isWriteStatement('EXCHANGE TABLES a AND b'));
+  assert.ok(isWriteStatement('SYSTEM SHUTDOWN'));
+  assert.ok(isWriteStatement('CLEANUP'));
+  // …and the dangerous-DDL border learned detach/exchange + the SYSTEM half
+  assert.ok(isDangerousDdl('DETACH TABLE t'));
+  assert.ok(isDangerousDdl('EXCHANGE TABLES a AND b'));
+  assert.ok(!isDangerousDdl('ATTACH TABLE t'));
+  assert.ok(isDangerousDdl('SYSTEM SHUTDOWN'));
+  assert.ok(!isDangerousDdl('SYSTEM FLUSH LOGS'));
+  // reads stay reads
+  assert.ok(!isWriteStatement('SELECT detach FROM t'));
+  assert.ok(!isWriteStatement('SELECT * FROM system_config'));
+});
+
+test('EXPLAIN strips ALL option words before re-testing', () => {
+  assert.ok(isWriteStatement('EXPLAIN ANALYZE VERBOSE DELETE FROM t'));
+  assert.ok(isWriteStatement('EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET a=1'));
+  assert.ok(isWriteStatement('EXPLAIN FORMAT JSON DELETE FROM t'));
+  assert.ok(!isWriteStatement('EXPLAIN ANALYZE VERBOSE SELECT * FROM t'));
+  assert.ok(!isWriteStatement('EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM t'));
+});

@@ -673,6 +673,11 @@ pub async fn explain_query(
     mode: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ExplainResult, crate::apperror::AppError> {
+    // analyze = true EXECUTES the statement (and on SQL Server there is no
+    // driver-level read-only backstop), so the same guard as
+    // explain_analyze_guarded runs before any engine sees it. The guard
+    // strips an EXPLAIN prefix itself when one is already present.
+    state.guard_statement(&session_id, &sql).await?;
     let session = get_session_pub(session_id, &state.sessions)
         .await
         ?;

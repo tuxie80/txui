@@ -121,7 +121,8 @@ pub async fn gsheets_export(
         "values": values,
     });
     let url = format!(
-        "https://sheets.googleapis.com/v4/spreadsheets/{id}/values/{}?valueInputOption=RAW",
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}?valueInputOption=RAW",
+        url_path_encode(&id),
         url_path_encode(&range),
     );
     let resp = client.put(&url).bearer_auth(&token).json(&body).send().await

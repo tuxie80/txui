@@ -38,3 +38,12 @@ test('serialize threads the engine through the insert format', async () => {
   const out = serialize('insert', ['a'], [['x']], 't', 'postgres');
   assert.match(out, /INSERT INTO "t" \("a"\) VALUES \('x'\);/);
 });
+
+test('copy confirm threshold and message', async () => {
+  const { COPY_CONFIRM_ROWS, copyConfirmMessage } = await import('../src/utils/exporters.ts');
+  assert.equal(COPY_CONFIRM_ROWS, 10_000);
+  // The message states the count with grouping and says why it asks.
+  const msg = copyConfirmMessage(87_234);
+  assert.match(msg, /87,234 rows/);
+  assert.match(msg, /pauses the UI/);
+});

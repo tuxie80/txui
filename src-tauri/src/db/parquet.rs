@@ -342,6 +342,17 @@ pub fn open(config: &ConnectionConfig) -> Result<ParquetSource> {
     }
 }
 
+/// Async wrapper around [`open`]: a directory open is a recursive walk plus
+/// up to MAX_DATASET_FILES footer reads plus an in-memory DuckDB CREATE VIEW —
+/// unbounded synchronous I/O that must not run on an async worker thread.
+/// Off the runtime, mirroring the export path in commands/browser.rs.
+pub async fn open_async(config: &ConnectionConfig) -> Result<ParquetSource> {
+    let cfg = config.clone();
+    tokio::task::spawn_blocking(move || open(&cfg))
+        .await
+        .map_err(|e| anyhow!("parquet open task failed: {e}"))?
+}
+
 pub fn open_path(path: &Path) -> Result<ParquetFile> {
     if !path.exists() {
         bail!("no such file: {}", path.display());

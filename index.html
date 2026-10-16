@@ -53,16 +53,8 @@
     </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script>
-      /* Hard fallback: a wedged app (HMR, a crash before mount) must never
-         trap the user on the logo — reveal whatever is there after 5 s. The
-         hidden WINDOW itself has the same 5 s net in Rust (lib.rs setup), so
-         even a totally dead webview cannot leave a windowless process. */
-      setTimeout(function () {
-        if (!document.body.classList.contains('txui-ready')) {
-          document.body.classList.add('txui-ready');
-        }
-      }, 5000);
-    </script>
+    <!-- External so the production CSP keeps script-src 'self' (no
+         unsafe-inline); see the file for what this fallback is for. -->
+    <script src="/splash-fallback.js"></script>
   </body>
 </html>

@@ -108,6 +108,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { formatChProgress, type ChProgressEvent } from '../utils/chProgress';
 import { addLog, dropLog, setLogSink, setSessionLabel, useSessionLogCount, useSessionLogNonEmpty } from '../store/logStore';
+import { setCursorPos, useCursorPos } from '../store/cursorStore';
+import { setChProgress, pruneChProgress, useChProgress } from '../store/chProgressStore';
 import { LogView } from './LogView';
 import { useQueryRunner } from '../hooks/useQueryRunner';
 import { ConnectionsStore } from '../store/connections';
@@ -485,6 +487,55 @@ function ResultTabBar({ tab, sid, patchTab, setTabs }: {
 const LogCount = memo(function LogCount({ sid }: { sid: string }) {
   const n = useSessionLogCount(sid);
   return n ? <> ({n})</> : null;
+});
+
+/** Live Ln/Col badge for the status bar — subscribes to the cursor store so a
+ *  caret move re-renders this span, never the whole QueryTabs tree (the
+ *  LogCount pattern; the position used to be a useState on the root). */
+const CursorBadge = memo(function CursorBadge({ tabId }: { tabId: number }) {
+  const cursor = useCursorPos(tabId);
+  if (!cursor) return null;
+  return (
+    <span
+      className="qsb-cursor qsb-click"
+      title={`Go to line   ${SC.gotoLine}`}
+      onClick={() => window.dispatchEvent(new CustomEvent('dbgui:goto-line-dialog'))}
+    >
+      Ln {cursor.line}, Col {cursor.col}
+      {cursor.selLen > 0 && ` · ${cursor.selLen} sel`}
+      {cursor.carets > 1 && ` · ${cursor.carets} carets`}
+    </span>
+  );
+});
+
+/** The outline's caret tracking subscribes to the cursor store itself, so
+ *  caret moves re-render this leaf while the outline is open. */
+const OutlineWithCaret = memo(function OutlineWithCaret({ tabId, sql, bookmarks, onGoto, onClose }: {
+  tabId: number;
+  sql: string;
+  bookmarks: number[];
+  onGoto: (from: number, to: number) => void;
+  onClose: () => void;
+}) {
+  const cursor = useCursorPos(tabId);
+  return <SqlOutline sql={sql} caret={caretOffset(sql, cursor)} bookmarks={bookmarks} onGoto={onGoto} onClose={onClose} />;
+});
+
+/** Live ClickHouse read progress next to Cancel — subscribes to the
+ *  ch-progress store so the backend's 200 ms samples re-render this span,
+ *  never the workspace (same pattern as CursorBadge). */
+const ChProgressBadge = memo(function ChProgressBadge({ tabId }: { tabId: number }) {
+  const p = useChProgress(tabId);
+  if (!p) return null;
+  return (
+    <span
+      className="ch-progress"
+      style={{ marginRight: 8, fontVariantNumeric: 'tabular-nums', opacity: 0.85, fontSize: '0.85em' }}
+      title="ClickHouse live query progress — rows and bytes read (percent when the total is known)"
+    >
+      {formatChProgress(p)}
+    </span>
+  );
 });
 
 /**
@@ -1667,32 +1718,25 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   /**
    * Live ClickHouse read progress, per tab. Fed by the backend's
    * `dbgui:ch-progress` event (rows/bytes/percent from `X-ClickHouse-Progress`
-   * headers + `system.processes`) while a query runs. Keyed by tabId; other
-   * engines never emit, so this stays empty for them.
+   * headers + `system.processes`) while a query runs. Written into the
+   * ch-progress store (store/chProgressStore) rather than root state — the
+   * event fires every ~200 ms for the whole run, and a root setState
+   * re-rendered every mounted tab and grid for the duration. Only the
+   * ChProgressBadge leaf subscribes.
    */
-  const [chProgress, setChProgress] = useState<Record<number, ChProgressEvent>>({});
   useEffect(() => {
     if (session.engine !== 'clickhouse') return;
     const un = listen<ChProgressEvent>('dbgui:ch-progress', e => {
       const p = e.payload;
       if (p.sessionId !== session.sessionId) return;
-      setChProgress(prev => ({ ...prev, [p.tabId]: p }));
+      setChProgress(p);
     });
     return () => { un.then(f => f()); };
   }, [session.engine, session.sessionId]);
   // Drop a tab's progress once it is no longer running, so a finished query
   // does not leave a stale figure next to an idle tab.
   useEffect(() => {
-    setChProgress(prev => {
-      const running = new Set(tabs.filter(t => t.running).map(t => t.id));
-      let changed = false;
-      const next: Record<number, ChProgressEvent> = {};
-      for (const [id, v] of Object.entries(prev)) {
-        if (running.has(Number(id))) next[Number(id)] = v;
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
+    pruneChProgress(new Set(tabs.filter(t => t.running).map(t => t.id)));
   }, [tabs]);
 
   /** Which plugin tab is in front (null when a SQL tab is). */
@@ -2351,7 +2395,6 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   // A ref (not state): only read at execution time, never rendered.
   const dbUserRef = useRef('');
   const [charset, setCharset] = useState('');
-  const [cursor, setCursor] = useState<{ line: number; col: number; selLen: number; carets: number } | null>(null);
   /** The outline pane beside the editor — remembered, like every other pane. */
   const [outlineOpen, setOutlineOpen] = useState<boolean>(
     () => localStorage.getItem('dbgui.outlineOpen') === '1');
@@ -3031,18 +3074,10 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
               )}
               {tab.running ? (
                 <>
-                  {chProgress[tab.id] && (
-                    // ClickHouse-only live read progress. Absent for other
-                    // engines and for CH queries that finish before the first
-                    // sample — the button alone then shows the running state.
-                    <span
-                      className="ch-progress"
-                      style={{ marginRight: 8, fontVariantNumeric: 'tabular-nums', opacity: 0.85, fontSize: '0.85em' }}
-                      title="ClickHouse live query progress — rows and bytes read (percent when the total is known)"
-                    >
-                      {formatChProgress(chProgress[tab.id])}
-                    </span>
-                  )}
+                  {/* ClickHouse-only live read progress. Nothing renders for
+                      other engines or for CH queries that finish before the
+                      first sample — the button alone shows the running state. */}
+                  <ChProgressBadge tabId={tab.id} />
                   <button className="cancel-btn" onClick={cancelQuery}>
                     ■ Cancel
                   </button>
@@ -3138,7 +3173,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                 onRun={runQuery}
                 onExplain={runExplain}
                 onChange={sql => handleSqlChange(tab.id, sql)}
-                onCursor={tab.id === activeId ? setCursor : undefined}
+                onCursor={tab.id === activeId ? (pos => setCursorPos(tab.id, pos)) : undefined}
                 insertTextRef={insertRefFor(tab.id)}
                 explainNowRef={tab.id === activeId ? explainTriggerRef : undefined}
                 runNowRef={tab.id === activeId ? runTriggerRef : undefined}
@@ -3200,9 +3235,9 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
               )}
               {outlineOpen && (
                 <Suspense fallback={null}>
-                <SqlOutline
+                <OutlineWithCaret
+                  tabId={tab.id}
                   sql={tab.sql}
-                  caret={caretOffset(tab.sql, cursor)}
                   bookmarks={marksFor(tab.id).map(b => b.line)}
                   onGoto={(from, to) => window.dispatchEvent(
                     new CustomEvent('dbgui:goto-range', { detail: { from, to } }))}
@@ -3400,17 +3435,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                 </span>
               )}
               <div style={{ flex: 1 }} />
-              {tab.id === activeId && cursor && (
-                <span
-                  className="qsb-cursor qsb-click"
-                  title={`Go to line   ${SC.gotoLine}`}
-                  onClick={() => window.dispatchEvent(new CustomEvent('dbgui:goto-line-dialog'))}
-                >
-                  Ln {cursor.line}, Col {cursor.col}
-                  {cursor.selLen > 0 && ` · ${cursor.selLen} sel`}
-                  {cursor.carets > 1 && ` · ${cursor.carets} carets`}
-                </span>
-              )}
+              {tab.id === activeId && <CursorBadge tabId={tab.id} />}
               {/* Encoding and line endings belong to the *document*, and every
                   editor in this class shows them here. Click to convert. */}
               {tab.id === activeId && tab.file && (

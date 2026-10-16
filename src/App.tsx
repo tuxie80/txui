@@ -68,7 +68,7 @@ import { forgetPrivileges } from './store/sessionPrivileges';
 import { forgetDuckdbSpatial } from './store/duckdbSpatial';
 import { forgetFlavor } from './store/serverFlavors';
 import { clearSchemaScan } from './store/schemaScan';
-import { restoreRunLog } from './store/logStore';
+import { restoreRunLog, addLog } from './store/logStore';
 import { initGaleraWatches } from './store/galeraWatch';
 import { logAudit, isoNow } from './utils/audit';
 import { PALETTE } from './utils/palette';
@@ -543,6 +543,18 @@ export default function App() {
   }, []);
   useEffect(() => {
     const un = listen('dbgui:menu-copyheaders', () => setPref(PREFS.copyHeaders, !getPref(PREFS.copyHeaders)));
+    return () => { un.then(f => f()); };
+  }, []);
+
+  // SSH first-contact host keys (accept-new TOFU): the backend emits one
+  // event per newly recorded key at connect; the session log gets one quiet
+  // line. Registered here, not in the session's tab, because the event fires
+  // before the tab that would listen for it exists.
+  useEffect(() => {
+    const un = listen<{ sessionId: string; note: string }>('dbgui:ssh-host-key', e => {
+      addLog(e.payload.sessionId, { level: 'warn', action: 'SSH',
+        detail: e.payload.note, line: `! ${e.payload.note}` });
+    });
     return () => { un.then(f => f()); };
   }, []);
 

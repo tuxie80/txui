@@ -160,7 +160,7 @@ fn validate_export_sql(sql: &str) -> Result<String, String> {
     if crate::sqlguard::blank(&stmt).trim().is_empty() {
         return Err("nothing to export — the statement is empty".into());
     }
-    if crate::sqlguard::is_write(sql) {
+    if crate::sqlguard::is_write_for(Some(crate::db::types::Engine::Duckdb), sql) {
         return Err("GeoParquet export re-runs the query server-side — \
                     a write statement cannot be exported".into());
     }

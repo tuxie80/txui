@@ -20,30 +20,93 @@ const NOT_ALIAS = new Set([
 ]);
 
 /**
+ * `#` starts a line comment only on the MySQL family — on PostgreSQL it is
+ * the XOR operator (`SELECT 1 # 2`), on T-SQL the temp-table prefix
+ * (`DELETE FROM #tmp`). An unknown engine keeps the historical MySQL
+ * behavior, matching backslashEscapesStrings.
+ */
+export function hashLineComments(engine?: string): boolean {
+  return engine == null || engine === '' || engine === 'mysql'
+    || engine === 'mariadb' || engine === 'percona';
+}
+
+/** Block comments nest on PostgreSQL and T-SQL only; MySQL, SQLite,
+ *  ClickHouse and DuckDB close at the first closer. Mirrors
+ *  `Dialect::nested_comments` in src-tauri/src/sqlguard.rs. */
+export function nestedBlockComments(engine?: string): boolean {
+  return engine === 'postgres' || engine === 'sqlserver';
+}
+
+/** Dollar-quoted strings `$tag$ … $tag$` exist on PostgreSQL and DuckDB;
+ *  elsewhere `$` is identifier text. Mirrors `Dialect::dollar_strings`. */
+export function dollarQuotedStrings(engine?: string): boolean {
+  return engine === 'postgres' || engine === 'duckdb';
+}
+
+/** Index just past the end of the `/*` comment whose body starts at `from`
+ *  (nested-aware where the engine nests), or -1 when it never closes. */
+function blockCommentEnd(sql: string, from: number, engine?: string): number {
+  if (!nestedBlockComments(engine)) {
+    const close = sql.indexOf('*/', from);
+    return close === -1 ? -1 : close + 2;
+  }
+  let depth = 1;
+  let j = from;
+  while (j < sql.length && depth > 0) {
+    if (sql[j] === '/' && sql[j + 1] === '*') { depth++; j += 2; }
+    else if (sql[j] === '*' && sql[j + 1] === '/') { depth--; j += 2; }
+    else j++;
+  }
+  return depth === 0 ? j : -1;
+}
+
+/** The dollar-quote tag (`$tag$`, tag may be empty) starting at `start`,
+ *  or null. Mirrors `dollar_tag` in src-tauri/src/sqlguard.rs. */
+function dollarTag(sql: string, start: number): string | null {
+  let j = start + 1;
+  while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j])) j++;
+  return sql[j] === '$' ? sql.slice(start, j + 1) : null;
+}
+
+/**
  * Blank out strings and comments (preserving length so offsets survive).
  *
  * Engine-aware where the dialects disagree (WP-08 8.7): a backslash is a
  * string escape on MySQL/MariaDB/ClickHouse (and inside PG `E'…'` strings),
  * but plain data on PostgreSQL/SQLite/DuckDB/T-SQL — and NEVER an escape
- * inside a backtick-quoted identifier on any engine. Callers that know the
- * engine pass it; the default keeps the historical MySQL behavior.
+ * inside a backtick-quoted identifier on any engine. `#` line comments,
+ * nested block comments and dollar-quoted strings are likewise gated on the
+ * engine (hashLineComments / nestedBlockComments / dollarQuotedStrings) —
+ * getting any of them wrong hides live SQL from the write guard
+ * (src/utils/sqlGuard.ts), which passes the session engine in. Callers that
+ * know the engine pass it; the default keeps the historical MySQL behavior.
  */
 export function blank(sql: string, engine?: string): string {
   const bsInStrings = backslashEscapesStrings(engine);
+  const hashOk = hashLineComments(engine);
+  const dollarOk = dollarQuotedStrings(engine);
   let out = '';
   const n = sql.length;
   let i = 0;
   while (i < n) {
     const ch = sql[i];
     const next = i + 1 < n ? sql[i + 1] : '';
-    if ((ch === '-' && next === '-') || ch === '#') {
+    if ((ch === '-' && next === '-') || (ch === '#' && hashOk)) {
       const nl = sql.indexOf('\n', i);
       const end = nl === -1 ? n : nl;
       out += ' '.repeat(end - i);
       i = end;
     } else if (ch === '/' && next === '*') {
-      const close = sql.indexOf('*/', i + 2);
-      const end = close === -1 ? n : close + 2;
+      const close = blockCommentEnd(sql, i + 2, engine);
+      const end = close === -1 ? n : close;
+      out += ' '.repeat(end - i);
+      i = end;
+    } else if (ch === '$' && dollarOk) {
+      const tag = dollarTag(sql, i);
+      if (!tag) { out += ch; i += 1; continue; }
+      const bodyStart = i + tag.length;
+      const close = sql.indexOf(tag, bodyStart);
+      const end = close === -1 ? n : close + tag.length;
       out += ' '.repeat(end - i);
       i = end;
     } else if (ch === "'" || ch === '"' || ch === '`') {
@@ -56,7 +119,12 @@ export function blank(sql: string, engine?: string): string {
       let j = i + 1;
       while (j < n) {
         if (bs && sql[j] === '\\') { j += 2; continue; }
-        if (sql[j] === q) { j++; break; }
+        if (sql[j] === q) {
+          // doubled-quote escape — '' / "" / `` stay inside the string on
+          // every engine (mirrors blank_dialect in sqlguard.rs)
+          if (sql[j + 1] === q) { j += 2; continue; }
+          j++; break;
+        }
         j++;
       }
       // keep the quote chars so `ident` parsing still sees boundaries

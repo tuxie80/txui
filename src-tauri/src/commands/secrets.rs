@@ -31,7 +31,10 @@ pub async fn vault_status(state: State<'_, AppState>) -> Result<Status, crate::a
 /// folded in, and the count of what came with it is returned.
 #[tauri::command]
 pub async fn vault_create(password: String, state: State<'_, AppState>) -> Result<usize, crate::apperror::AppError> {
-    secretstore::create(&state.data_dir, &password)?;
+    // Argon2id (64 MiB, 3 passes) is hundreds of ms of CPU — off the runtime
+    // worker, or every other session stalls while the vault opens.
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || secretstore::create(&dir, &password)).await??;
     // Whatever the upgrade carried in has to reach the running app, not just
     // the file — otherwise the sidebar reports "No connections yet" about a
     // vault that holds all of them.
@@ -40,7 +43,8 @@ pub async fn vault_create(password: String, state: State<'_, AppState>) -> Resul
 
 #[tauri::command]
 pub async fn vault_unlock(password: String, state: State<'_, AppState>) -> Result<(), crate::apperror::AppError> {
-    secretstore::unlock(&state.data_dir, &password)?;
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || secretstore::unlock(&dir, &password)).await??;
     adopt_into_state(&state).await?;
     Ok(())
 }
@@ -57,7 +61,10 @@ pub async fn vault_change_password(
     next: String,
     state: State<'_, AppState>,
 ) -> Result<(), crate::apperror::AppError> {
-    secretstore::change_password(&state.data_dir, &current, &next).map_err(Into::into)
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || secretstore::change_password(&dir, &current, &next))
+        .await?
+        .map_err(Into::into)
 }
 
 /// Turn the vault OFF: verify the password, decrypt everything back to the

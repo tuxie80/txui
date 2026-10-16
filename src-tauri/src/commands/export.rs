@@ -47,10 +47,16 @@ pub async fn write_text_file(path: PathBuf, contents: String) -> Result<(), crat
         .map_err(crate::apperror::AppError::from)
 }
 
-/// Binary sibling of write_text_file (xlsx export). Raw bytes over IPC.
+/// Binary sibling of write_text_file (xlsx export). The payload arrives
+/// base64-encoded: a raw `Vec<u8>` over the JSON bridge is a number array —
+/// ~7x memory amplification on a big workbook — where one string decodes
+/// straight into the write buffer.
 #[tauri::command]
-pub async fn write_binary_file(path: PathBuf, contents: Vec<u8>) -> Result<(), crate::apperror::AppError> {
-    tokio::fs::write(&path, contents)
+pub async fn write_binary_file(path: PathBuf, contents_base64: String) -> Result<(), crate::apperror::AppError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(contents_base64)
+        .map_err(|e| format!("write_binary_file got invalid base64: {e}"))?;
+    tokio::fs::write(&path, bytes)
         .await
         .map_err(|e| format!("could not write {}: {e}", path.display()))
         .map_err(crate::apperror::AppError::from)

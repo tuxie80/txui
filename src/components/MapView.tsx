@@ -436,10 +436,34 @@ export function MapView({ columns, rows, columnTypes, onSelectRow, initialBbox, 
 
   // Pan/zoom overrides the auto-fit until Fit is pressed or the data changes.
   const [manualView, setManualView] = useState<Viewport | null>(null);
+  // Viewport commits are rAF-coalesced (the FastGrid scroll handler's
+  // pattern): raw mousemoves and wheel ticks arrive faster than frames, and
+  // every commit repaints the whole static layer — basemap, up to 5000
+  // geometries, track, graticule. One commit per frame, holding the LATEST
+  // viewport, keeps the two-layer architecture but spends it once per frame.
+  const viewRafRef = useRef(0);
+  const pendingViewRef = useRef<Viewport | null>(null);
+  const commitView = useCallback((v: Viewport) => {
+    pendingViewRef.current = v;
+    if (viewRafRef.current) return;
+    viewRafRef.current = requestAnimationFrame(() => {
+      viewRafRef.current = 0;
+      const pending = pendingViewRef.current;
+      pendingViewRef.current = null;
+      if (pending) setManualView(pending);
+    });
+  }, []);
+  /** Back to auto-fit — drops any coalesced commit still waiting for a frame. */
+  const resetView = useCallback(() => {
+    if (viewRafRef.current) { cancelAnimationFrame(viewRafRef.current); viewRafRef.current = 0; }
+    pendingViewRef.current = null;
+    setManualView(null);
+  }, []);
+  useEffect(() => () => cancelAnimationFrame(viewRafRef.current), []);
   const boundsSig = boundsForFit
     ? `${boundsForFit.minLat},${boundsForFit.maxLat},${boundsForFit.minLon},${boundsForFit.maxLon}` : '';
   const [fitSig, setFitSig] = useState('');
-  if (fitSig !== boundsSig) { setFitSig(boundsSig); if (manualView) setManualView(null); }
+  if (fitSig !== boundsSig) { setFitSig(boundsSig); if (manualView) resetView(); }
 
   const viewport = manualView ?? fitView;
   const viewportRef = useRef(viewport);
@@ -895,7 +919,7 @@ export function MapView({ columns, rows, columnTypes, onSelectRow, initialBbox, 
       const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.moved = true;
       // Absolute from the drag start, so it never drifts as the view re-renders.
-      setManualView({ scale: viewport.scale, offsetX: d.ox + dx, offsetY: d.oy + dy });
+      commitView({ scale: viewport.scale, offsetX: d.ox + dx, offsetY: d.oy + dy });
       return;
     }
     // Geometry-first hover: which shape is under the cursor. Bbox-gated
@@ -955,15 +979,15 @@ export function MapView({ columns, rows, columnTypes, onSelectRow, initialBbox, 
       e.preventDefault();
       const r = el.getBoundingClientRect();
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      setManualView(zoomViewport(v, factor, e.clientX - r.left, e.clientY - r.top));
+      commitView(zoomViewport(v, factor, e.clientX - r.left, e.clientY - r.top));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+  }, [commitView]);
 
   const zoomBy = (factor: number) => {
     const v = viewportRef.current;
-    if (v) setManualView(zoomViewport(v, factor, size.w / 2, size.h / 2));
+    if (v) commitView(zoomViewport(v, factor, size.w / 2, size.h / 2));
   };
 
   // The map is already drawn to a <canvas> at device resolution, so a PNG is
@@ -1043,7 +1067,7 @@ export function MapView({ columns, rows, columnTypes, onSelectRow, initialBbox, 
         <button className="toolbar-btn" data-tip="Zoom in (or scroll)" onClick={() => zoomBy(1.3)}>＋</button>
         <button className="toolbar-btn" data-tip="Zoom out (or scroll)" onClick={() => zoomBy(1 / 1.3)}>－</button>
         <button className="toolbar-btn" data-tip="Fit the data to the view"
-          onClick={() => setManualView(null)}>⤢ Fit</button>
+          onClick={resetView}>⤢ Fit</button>
         <button className="toolbar-btn" data-tip="Download the map as a PNG"
           onClick={exportPng}>PNG</button>
       </div>

@@ -96,6 +96,28 @@ test('a custom delimiter inside a string does not split either', () => {
     ["SELECT 'a/b' AS x/", 'SELECT 2/']);
 });
 
+test('a multi-char custom delimiter inside a string or comment does not split', () => {
+  // The delimiter check runs after the string/comment skips, so a `//` that is
+  // data — not a terminator — has already been consumed by those branches.
+  assert.deepEqual(texts("SELECT 'a//b' AS x// SELECT 2//", '//'),
+    ["SELECT 'a//b' AS x//", 'SELECT 2//']);
+  assert.deepEqual(texts('SELECT 1 /* a // b */ // SELECT 2//', '//'),
+    ['SELECT 1 /* a // b */ //', 'SELECT 2//']);
+  assert.deepEqual(texts('SELECT 1 -- a // b\n// SELECT 2//', '//'),
+    ['SELECT 1 -- a // b\n//', 'SELECT 2//']);
+});
+
+test('DELIMITER $$ beats dollar-quoting, and a $$ inside a string does not split', () => {
+  // The delimiter is checked before the PG dollar-quote branch: in a MySQL
+  // dump `$$` is the terminator, not a quote opener — but inside a string the
+  // string branch has already consumed it.
+  const doc = "DELIMITER $$\nCREATE PROC p() BEGIN SELECT 'a$$b'; END$$\nDELIMITER ;\nSELECT 2;";
+  assert.deepEqual(texts(doc), [
+    "CREATE PROC p() BEGIN SELECT 'a$$b'; END$$",
+    'SELECT 2;',
+  ]);
+});
+
 // ── caret lookup ─────────────────────────────────────────────────────────────
 
 test('statementAt honours the delimiter it is given', () => {

@@ -73,13 +73,6 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
       continue;
     }
 
-    // custom delimiter boundary
-    if (delim !== ';' && doc.startsWith(delim, i) && delimiterFits(doc, i, delim)) {
-      push(i + delim.length);
-      i += delim.length;
-      continue;
-    }
-
     // line comments
     if ((ch === '-' && next === '-') || ch === '#') {
       const nl = doc.indexOf('\n', i);
@@ -129,6 +122,16 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
         }
         i++;
       }
+      continue;
+    }
+    // custom delimiter boundary — evaluated AFTER the string/comment skips so
+    // the delimiter occurring inside a literal or comment is consumed by those
+    // branches and never splits mid-string (mirrors the `;` fast path below).
+    // It must still come BEFORE dollar quoting: with `DELIMITER $$` — every
+    // MySQL dump — the `$$` is the terminator, not a PG dollar-quote opener.
+    if (delim !== ';' && doc.startsWith(delim, i) && delimiterFits(doc, i, delim)) {
+      push(i + delim.length);
+      i += delim.length;
       continue;
     }
     // dollar quoting (PG): $$ or $tag$

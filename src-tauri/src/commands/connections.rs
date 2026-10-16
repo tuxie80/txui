@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::db::connection;
@@ -54,8 +54,14 @@ fn password_diag(config: &ConnectionConfig, data_dir: &std::path::Path) -> Strin
         Some(pw) => {
             let ws = if pw.trim().len() != pw.len() { " ⚠ leading/trailing whitespace" } else { "" };
             #[cfg(debug_assertions)]
-            { let hex: String = pw.bytes().map(|b| format!("{b:02x}")).collect();
-              format!("[stored password: {} bytes, hex {}{} — server rejected it]", pw.len(), hex, ws)}
+            { // A fingerprint, not the password: the first/last bytes catch
+              // stray whitespace and encoding surprises (the diagnostic's
+              // whole purpose) without spilling the secret into the session
+              // log and audit trail, where it would persist and get pasted
+              // into tickets.
+              let b = pw.as_bytes();
+              let fp = format!("{:02x}…{:02x}", b.first().unwrap_or(&0), b.last().unwrap_or(&0));
+              format!("[stored password: {} bytes, ends {}{} — server rejected it]", pw.len(), fp, ws)}
             #[cfg(not(debug_assertions))]
             format!("[stored password is {} bytes{} — server rejected it: wrong for this account]", pw.len(), ws)
         }
@@ -195,17 +201,57 @@ pub async fn test_connection(id: Uuid, state: State<'_, AppState>) -> Result<Pin
 
 /// Open a live session, optionally through an SSH tunnel. Returns the session UUID.
 #[tauri::command]
-pub async fn open_connection(id: Uuid, state: State<'_, AppState>) -> Result<Uuid, crate::apperror::AppError> {
+pub async fn open_connection(id: Uuid, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Uuid, crate::apperror::AppError> {
     let config = state.configs.read().await.get(&id).cloned()
         .ok_or_else(|| format!("connection {} not found", id))?;
-    open_session_for_config(&config, &state).await
+    let session_id = open_session_for_config(&config, &state).await?;
+    // TOFU surfacing: ssh's accept-new recorded a previously unknown host key
+    // during this connect's handshake. One quiet audit row + one session-log
+    // line (via the frontend's dbgui:ssh-host-key listener) — not a dialog.
+    // Ephemeral connects (galera polls, multi-exec) skip this like they skip
+    // every lifecycle row; the drain task's log::warn! fires regardless.
+    let host_key_note = state.tunnels.read().await.get(&session_id)
+        .and_then(|t| t.host_key_note.clone());
+    if let Some(note) = host_key_note {
+        let start = crate::commands::audit::session_start(&config);
+        crate::commands::audit::insert_ssh_host_key(&state.history, session_id, &start, &note).await;
+        let _ = app.emit("dbgui:ssh-host-key", serde_json::json!({
+            "sessionId": session_id,
+            "note": note,
+        }));
+    }
+    Ok(session_id)
 }
 
 /// Shared connect path (keychain password + optional SSH tunnel) used by both
-/// `open_connection` and the multi-server executor's ephemeral sessions.
+/// `open_connection` and the ephemeral session consumers.
 pub(crate) async fn open_session_for_config(
     config: &crate::db::types::ConnectionConfig,
     state: &AppState,
+) -> Result<Uuid, crate::apperror::AppError> {
+    open_session_inner(config, state, false).await
+}
+
+/// The quiet variant for sessions that live for seconds (multi-exec fan-out,
+/// galera polls/kills/consistency checks, SST tails): identical machinery, but
+/// no lifecycle audit rows and no `session_starts` record. A galera poll opens
+/// one session per node per poll — audited like a user connect, that is an
+/// unmatched 'connect' row per poll per node in a table with no retention
+/// interest in them, and a `session_starts` entry nothing ever removed.
+/// Guards (`session_meta`) are NOT skipped: a read-only or prod config must
+/// bite exactly the same on an ephemeral session. Pair with
+/// `teardown_ephemeral_session`.
+pub(crate) async fn open_ephemeral_session(
+    config: &crate::db::types::ConnectionConfig,
+    state: &AppState,
+) -> Result<Uuid, crate::apperror::AppError> {
+    open_session_inner(config, state, true).await
+}
+
+async fn open_session_inner(
+    config: &crate::db::types::ConnectionConfig,
+    state: &AppState,
+    quiet: bool,
 ) -> Result<Uuid, crate::apperror::AppError> {
     let password = get_password(config, &state.data_dir);
     // Apply the app-wide connect timeout to anything that has not set its own.
@@ -243,7 +289,9 @@ pub(crate) async fn open_session_for_config(
             Ok(t) => t,
             Err(e) => {
                 let msg = format!("SSH tunnel to {}@{}:{} failed:\n{:#}", ssh_user, ssh_host, ssh_port, e);
-                crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
+                if !quiet {
+                    crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
+                }
                 return Err(msg.into());
             }
         };
@@ -261,7 +309,9 @@ pub(crate) async fn open_session_for_config(
         Ok(id) => id,
         Err(e) => {
             let msg = format!("Connect to {} failed:\n{:#}\n{}", describe(config), e, password_diag(config, &state.data_dir));
-            crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
+            if !quiet {
+                crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
+            }
             return Err(msg.into());
         }
     };
@@ -278,9 +328,12 @@ pub(crate) async fn open_session_for_config(
 
     // Lifecycle audit: the 'connect' row, plus the start record the matching
     // 'disconnect' (close_connection / close_all) reads its duration from.
-    let start = crate::commands::audit::session_start(config);
-    state.session_starts.write().await.insert(session_id, start.clone());
-    crate::commands::audit::insert_lifecycle(&state.history, session_id, &start, "connect").await;
+    // Quiet (ephemeral) sessions write neither — see open_ephemeral_session.
+    if !quiet {
+        let start = crate::commands::audit::session_start(config);
+        state.session_starts.write().await.insert(session_id, start.clone());
+        crate::commands::audit::insert_lifecycle(&state.history, session_id, &start, "connect").await;
+    }
 
     // Redis: capture the server's own write catalog once per session
     // (`ACL CAT write` tracks the exact version and loaded modules), so the
@@ -301,6 +354,59 @@ pub(crate) async fn open_session_for_config(
     }
 
     Ok(session_id)
+}
+
+/// Tear down a session opened by `open_ephemeral_session`: every registry the
+/// open (or the work done on the session) could have touched.
+///
+/// Exists because there are six ephemeral consumers and each used to clean a
+/// different four-item subset — `session_starts`, `session_dbs`,
+/// `redis_catalogs` and the kill-probe cache leaked on all of them. Mirrors
+/// `close_connection`'s registry list, minus the audit row (a quiet session
+/// wrote none) and minus `cancel_session_work` (the session's only in-flight
+/// work is the caller's own statement, handled by the kill sweep below).
+///
+/// `cancel_key` is the key the caller's statement registered its server-side
+/// kill handle under. A handle STILL PRESENT at teardown means the statement
+/// is still running on the server (the caller's timeout dropped the execute
+/// future — `execute_query` removes the handle itself on completion), so it
+/// is fired, not just removed: a plain remove is how a "timed out" statement
+/// keeps burning server-side. `stop_in_flight` is not reused here because it
+/// still spawns the (fingerprint-verified) kill for MySQL/PG, and the spawned
+/// task's session lookup would race the pool close below and usually lose;
+/// this kill is awaited, bounded, before close.
+pub(crate) async fn teardown_ephemeral_session(state: &AppState, session_id: Uuid, cancel_key: &str) {
+    /// Grace for delivering the server-side kill before the pool closes.
+    const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let backend = state.kills.write().await.remove(cancel_key);
+    let ch_query_id = state.ch_kills.write().await.remove(cancel_key);
+    if let Some(handle) = backend {
+        let _ = tokio::time::timeout(KILL_GRACE, connection::kill_backend(
+            session_id, handle.backend_id, &state.sessions, connection::KillForce::Cancel,
+            Some(&handle.fingerprint),
+        )).await;
+    }
+    if let Some(query_id) = ch_query_id {
+        let kill = async {
+            if let Ok(session) = connection::get_session_pub(session_id, &state.sessions).await {
+                if let crate::db::types::LiveSession::Clickhouse(s) = session.as_ref() {
+                    let _ = crate::db::clickhouse::kill_query(s, &query_id).await;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(KILL_GRACE, kill).await;
+    }
+
+    connection::close_session(session_id, &state.sessions).await;
+    state.tunnels.write().await.remove(&session_id); // Drop kills ssh process
+    state.session_meta.write().await.remove(&session_id);
+    state.session_dbs.write().await.remove(&session_id);
+    state.redis_catalogs.write().await.remove(&session_id);
+    // Quiet sessions never wrote a start record; removed defensively so the
+    // map provably never outlives the session.
+    state.session_starts.write().await.remove(&session_id);
+    crate::commands::kill::forget_session(session_id);   // drop its cached probe result
 }
 
 /// The config a scratch session is built from: in-memory DuckDB, writable,
@@ -365,6 +471,7 @@ pub async fn close_connection(session_id: Uuid, state: State<'_, AppState>) -> R
     };
     state.tunnels.write().await.remove(&session_id); // Drop kills ssh process
     state.session_meta.write().await.remove(&session_id);
+    state.session_dbs.write().await.remove(&session_id);
     state.redis_catalogs.write().await.remove(&session_id);
     crate::commands::kill::forget_session(session_id);   // drop its cached probe result
     // Lifecycle audit: the session is gone either way (a timed-out close is
@@ -544,6 +651,69 @@ pub async fn import_connections(json: String, state: State<'_, AppState>) -> Res
 mod tests {
     use super::*;
     use crate::db::types::Engine;
+
+    async fn test_state() -> AppState {
+        let history = crate::history::open_in_memory().await.expect("in-memory history");
+        AppState::new(history, std::env::temp_dir(), Default::default())
+    }
+
+    /// Quiet open: no session_starts record, no audit rows — but the guard
+    /// registration (session_meta) is NOT skipped, or an ephemeral session
+    /// would slip past the read-only/prod border. The loud open keeps both.
+    #[tokio::test]
+    async fn ephemeral_open_is_quiet_regular_open_is_audited() {
+        let state = test_state().await;
+        let cfg = scratch_config();
+
+        let quiet = open_ephemeral_session(&cfg, &state).await.unwrap();
+        assert!(!state.session_starts.read().await.contains_key(&quiet),
+            "a seconds-long session must not leave a start record");
+        assert!(state.session_meta.read().await.contains_key(&quiet),
+            "the guard must still apply to an ephemeral session");
+
+        let loud = open_session_for_config(&cfg, &state).await.unwrap();
+        assert!(state.session_starts.read().await.contains_key(&loud));
+
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT sql FROM audit_log ORDER BY id")
+            .fetch_all(&state.history).await.unwrap();
+        assert_eq!(rows, ["connect"], "only the loud open is audited");
+
+        teardown_ephemeral_session(&state, quiet, "k-quiet").await;
+        teardown_ephemeral_session(&state, loud, "k-loud").await;
+    }
+
+    /// The factored teardown must clean EVERY registry a session can touch —
+    /// the six consumers used to drop a four-item subset and leaked
+    /// session_starts / session_dbs / redis_catalogs. Driven against a real
+    /// (in-memory DuckDB) session so the pool close is exercised too.
+    #[tokio::test]
+    async fn teardown_ephemeral_session_cleans_every_registry() {
+        let state = test_state().await;
+        let cfg = scratch_config();
+        let session_id = open_ephemeral_session(&cfg, &state).await.unwrap();
+
+        // Seed every registry the session could have accumulated. (Tunnels
+        // can't be seeded without spawning a real ssh child; that removal is
+        // one `remove` on a HashMap, covered by close_connection's path.)
+        state.session_dbs.write().await.insert(session_id, "db".into());
+        state.session_starts.write().await
+            .insert(session_id, crate::commands::audit::session_start(&cfg));
+        state.redis_catalogs.write().await
+            .insert(session_id, std::sync::Arc::new(crate::redisguard::CommandCatalog::baseline()));
+
+        teardown_ephemeral_session(&state, session_id, "multi-x").await;
+
+        assert!(connection::get_session_pub(session_id, &state.sessions).await.is_err());
+        assert!(!state.session_meta.read().await.contains_key(&session_id));
+        assert!(!state.session_dbs.read().await.contains_key(&session_id));
+        assert!(!state.session_starts.read().await.contains_key(&session_id));
+        assert!(!state.redis_catalogs.read().await.contains_key(&session_id));
+        // Teardown wrote no audit row (a quiet session wrote none at open).
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&state.history).await.unwrap();
+        assert_eq!(n, 0);
+    }
 
     // ── Scratch sessions ────────────────────────────────────────────────────
 

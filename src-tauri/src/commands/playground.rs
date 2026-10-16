@@ -549,7 +549,7 @@ pub async fn playground_spawn(
     // Prod border: the playground manufactures load, lock chains and
     // minutes-long sleeping connections — there is no legitimate use for it
     // against a production server, so it refuses outright (same posture as
-    // routines::mysql_debug_gate; the destructive-DDL opt-out is explicitly
+    // routines::debug_gate; the destructive-DDL opt-out is explicitly
     // not a sufficient signal here).
     if let Some(g) = state.session_meta.read().await.get(&session_id) {
         if g.environment.as_deref() == Some("prod") {

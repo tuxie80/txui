@@ -53,6 +53,21 @@ fn build_url(
     format!("{scheme}://{creds}{host}:{port}{db_path}")
 }
 
+/// Bounded ConnectionManager dial, shared by `open` and `ping`.
+/// ConnectionManager retries internally and would otherwise hang past any
+/// sensible UI wait when the host is unreachable. Never unbounded: `None`
+/// falls back to DEFAULT_CONNECT_TIMEOUT_SECS.
+async fn connect_manager(client: Client, connect_timeout_secs: Option<u32>) -> Result<ConnectionManager> {
+    let secs = connect_timeout_secs
+        .filter(|s| *s > 0)
+        .map(u64::from)
+        .unwrap_or(crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS);
+    tokio::time::timeout(std::time::Duration::from_secs(secs), ConnectionManager::new(client))
+        .await
+        .map_err(|_| anyhow::anyhow!("connection timed out after {secs}s"))?
+        .map_err(Into::into)
+}
+
 /// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
 pub async fn open(
     config: &ConnectionConfig,
@@ -64,22 +79,7 @@ pub async fn open(
     // The Client is kept on the session (cheap: it is just the parsed URL) so
     // db sweeps can open a DEDICATED connection instead of SELECT-switching
     // the shared manager.
-    let connect = ConnectionManager::new(client.clone());
-    // ConnectionManager retries internally and would otherwise hang past any
-    // sensible UI wait when the host is unreachable.
-    let mgr = match config.connect_timeout_secs {
-        Some(secs) if secs > 0 => tokio::time::timeout(
-            std::time::Duration::from_secs(secs.into()), connect)
-            .await
-            .map_err(|_| anyhow::anyhow!("connection timed out after {secs}s"))??,
-        // Never unbounded: see DEFAULT_CONNECT_TIMEOUT_SECS.
-        _ => {
-            let secs = crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS;
-            tokio::time::timeout(std::time::Duration::from_secs(secs), connect)
-                .await
-                .map_err(|_| anyhow::anyhow!("connection timed out after {secs}s"))??
-        }
-    };
+    let mgr = connect_manager(client.clone(), config.connect_timeout_secs).await?;
     Ok(LiveSession::Redis(mgr, client))
 }
 
@@ -87,7 +87,8 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
     let url = build_url(config, password, None);
     let start = Instant::now();
     match Client::open(url) {
-        Ok(client) => match ConnectionManager::new(client).await {
+        // Bounded like `open` — the Test button must not hang on a dead host.
+        Ok(client) => match connect_manager(client, config.connect_timeout_secs).await {
             Ok(mut mgr) => {
                 let pong: Result<String, _> = redis::cmd("PING").query_async(&mut mgr).await;
                 let info: Result<String, _> = redis::cmd("INFO").arg("server").query_async(&mut mgr).await;
@@ -155,7 +156,13 @@ fn redis_value_to_json(val: redis::Value) -> serde_json::Value {
     match val {
         Value::Nil                => J::Null,
         Value::Int(i)             => J::from(i),
-        Value::BulkString(b)      => J::String(String::from_utf8_lossy(&b).into_owned()),
+        // The MySQL Binary arm's rule: valid UTF-8 is text (most Redis values
+        // are), anything else is lowercase hex — from_utf8_lossy would render
+        // bytes that are not what is stored, indistinguishable from real text.
+        Value::BulkString(b)      => J::String(match String::from_utf8(b) {
+            Ok(s) => s,
+            Err(e) => hex::encode(e.into_bytes()),
+        }),
         Value::SimpleString(s)    => J::String(s),
         Value::Array(arr)         => J::Array(arr.into_iter().map(redis_value_to_json).collect()),
         Value::Boolean(b)         => J::Bool(b),
@@ -178,7 +185,13 @@ fn redis_value_to_json(val: redis::Value) -> serde_json::Value {
         Value::Okay        => J::String("OK".into()),
         Value::Push { data, .. } => J::Array(data.into_iter().map(redis_value_to_json).collect()),
         Value::Attribute { data, .. } => redis_value_to_json(*data),
-        Value::ServerError(_) => J::String("server_error".into()),
+        // A server error is data the user asked for — render the reply the
+        // way Redis sent it ("WRONGTYPE Operation against …"), not a bare tag
+        // that discards the message.
+        Value::ServerError(e) => J::String(match e.details() {
+            Some(d) => format!("{} {d}", e.code()),
+            None => e.code().to_string(),
+        }),
     }
 }
 
@@ -390,6 +403,45 @@ mod tests {
         c.ssl_mode = SslMode::VerifyFull;
         assert_eq!(build_url(&c, Some("pw".into()), None),
                    "rediss://admin:pw@cache.internal:6379/5");
+    }
+
+    #[test]
+    fn bulk_strings_are_text_when_utf8_hex_when_not() {
+        assert_eq!(redis_value_to_json(redis::Value::BulkString(b"hello".to_vec())),
+                   serde_json::json!("hello"));
+        // 0xFF is not UTF-8 — from_utf8_lossy would render the replacement
+        // character and show bytes that are not what is stored.
+        assert_eq!(redis_value_to_json(redis::Value::BulkString(vec![0xff, 0x00, 0x41])),
+                   serde_json::json!("ff0041"));
+    }
+
+    #[test]
+    fn server_errors_keep_the_message() {
+        // ServerError itself is not nameable outside the redis crate — build
+        // the value the way the server delivers it: an RESP error reply.
+        let err = redis::parse_redis_value(
+            b"-READONLY You can't write against a read only replica.\r\n").unwrap();
+        assert_eq!(redis_value_to_json(err),
+                   serde_json::json!("READONLY You can't write against a read only replica."));
+        // A bare code with no detail still renders the code.
+        let bare = redis::parse_redis_value(b"-TRYAGAIN\r\n").unwrap();
+        assert_eq!(redis_value_to_json(bare), serde_json::json!("TRYAGAIN"));
+    }
+
+    /// The Test button must not hang on a dead host: ping to an unroutable
+    /// TEST-NET address (RFC 5737) with a 1 s connect timeout must come back
+    /// quickly with ok:false, not sit on ConnectionManager's internal retries.
+    #[tokio::test]
+    async fn ping_is_bounded_by_the_connect_timeout() {
+        let mut c = cfg();
+        c.host = Some("192.0.2.1".into());
+        c.connect_timeout_secs = Some(1);
+        let start = std::time::Instant::now();
+        let r = ping(&c, None).await;
+        assert!(!r.ok);
+        assert!(r.error.is_some());
+        assert!(start.elapsed() < std::time::Duration::from_secs(20),
+                "ping sat on the dial for {:?}", start.elapsed());
     }
 }
 

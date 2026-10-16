@@ -14,9 +14,24 @@ pub type TunnelMap   = Arc<RwLock<HashMap<Uuid, SshTunnel>>>;
 /// Oneshot senders used to cancel in-flight queries.
 /// Key = "<session_id>-<tab_id>".
 pub type CancelMap   = Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
-/// Server-side backend ids (MySQL thread id / PG backend pid) of in-flight
-/// queries, so cancel can issue KILL QUERY / pg_cancel_backend. Same key.
-pub type KillMap     = Arc<RwLock<HashMap<String, u64>>>;
+/// Server-side kill handles of in-flight queries, so cancel can issue
+/// KILL QUERY / pg_cancel_backend / KILL. Same key as [`CancelMap`].
+///
+/// The value is more than the backend id: a kill is issued asynchronously and
+/// can land AFTER the query it meant to stop has finished and its pooled
+/// connection was recycled under the same CONNECTION_ID / backend pid. The
+/// fingerprint (see `db::connection::statement_fingerprint`) lets the kill
+/// path verify the victim is still running THAT statement before firing.
+pub type KillMap     = Arc<RwLock<HashMap<String, KillHandle>>>;
+
+/// One in-flight query's kill handle: which backend runs it, and WHAT it is
+/// running. `fingerprint` is the whitespace-collapsed statement text as sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KillHandle {
+    /// MySQL thread id / PG backend pid / SQL Server spid.
+    pub backend_id: u64,
+    pub fingerprint: String,
+}
 /// In-flight ClickHouse `query_id`s, same key as {@link KillMap}.
 ///
 /// Separate from `KillMap` rather than widening it: ClickHouse identifies a
@@ -194,6 +209,8 @@ pub struct AppState {
     /// When each session connected + the identity its lifecycle audit rows
     /// carry. Entries are written at open and removed at close (both of which
     /// also write the audit row), so the map never outlives the session.
+    /// Quiet ephemeral sessions (`open_ephemeral_session`) write NO entry —
+    /// `teardown_ephemeral_session` removes defensively anyway.
     pub session_starts: SessionStartMap,
     pub ext_jobs: ExtJobMap,
     pub tx_conns: TxConnMap,
@@ -305,8 +322,10 @@ impl AppState {
         crate::commands::pgwait::stop_session_samplers(session_id).await;
 
         // Server-side kills for queries in flight right now. `stop_in_flight`
-        // removes the handles and spawns the KILL / pg_cancel_backend, so a
-        // dead server cannot stall the close.
+        // removes the handles and issues the KILL / pg_cancel_backend —
+        // spawned where the victim can be verified, inline and
+        // timeout-bounded where it cannot — so a dead server cannot stall
+        // the close.
         let keys: Vec<String> = {
             let kills = self.kills.read().await;
             let ch = self.ch_kills.read().await;
@@ -497,7 +516,7 @@ impl AppState {
                 .map_err(crate::apperror::AppError::guard);
         }
 
-        if g.read_only && crate::sqlguard::is_write(sql) {
+        if g.read_only && crate::sqlguard::is_write_for(Some(g.engine), sql) {
             return Err(crate::apperror::AppError::guard(
                 "connection is read-only — write statement rejected"));
         }
@@ -574,8 +593,10 @@ mod cancel_work_tests {
         let (conn_tx, _conn_rx) = tokio::sync::oneshot::channel::<()>();
         state.ext_jobs.write().await.insert(ext_job_key(other, "run-2"), conn_tx);
 
-        state.kills.write().await.insert(format!("{sid}-1"), 42);
-        state.kills.write().await.insert(format!("{other}-3"), 43);
+        state.kills.write().await.insert(format!("{sid}-1"),
+            KillHandle { backend_id: 42, fingerprint: "select sleep(30)".into() });
+        state.kills.write().await.insert(format!("{other}-3"),
+            KillHandle { backend_id: 43, fingerprint: "select 1".into() });
         state.ch_kills.write().await.insert(format!("panel-{sid}-tok"), "qid".into());
 
         // A listener belonging to the session and one belonging to another.

@@ -130,9 +130,16 @@ export function MultiExec({ onClose }: Props) {
 
     const ids = [...selected];
 
-    // Safety: read-only servers are excluded from writes; prod requires confirmation
-    if (isWriteStatement(text)) {
-      const targets = conns.filter(c => selected.has(c.id));
+    // Safety: read-only servers are excluded from writes; prod requires confirmation.
+    // The fleet may span engines and the guard's comment/string rules are
+    // engine-aware — a statement counts as a write if ANY target's engine
+    // would classify it as one.
+    const targets = conns.filter(c => selected.has(c.id));
+    const engines = [...new Set(targets.map(c => c.engine))];
+    const isWrite = engines.length === 0
+      ? isWriteStatement(text)
+      : engines.some(eng => isWriteStatement(text, eng));
+    if (isWrite) {
       const readOnlyNames = targets.filter(c => c.read_only).map(c => c.name);
       if (readOnlyNames.length > 0) {
         await alertDialog(`Blocked: write statement, but these servers are read-only:\n${readOnlyNames.join(', ')}\n\nDeselect them or clear their read-only flag.`);
