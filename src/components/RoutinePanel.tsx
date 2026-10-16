@@ -17,6 +17,7 @@
  * Backend: `list_routines` / `get_routine` / `save_routine` / `drop_routine`.
  */
 import { errorDisplay } from '../utils/appError';
+import { confirmDialog } from '../utils/appDialog';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { SqlEditor } from './SqlEditor';
@@ -28,7 +29,8 @@ import {
 import type { RoutineDef, RoutineKind, RoutineParam, ParamMode } from '../utils/routineDdl';
 import { buildRoutineCall } from '../utils/routineCall';
 import { copyToClipboard } from '../utils/exportersIo';
-import type { Engine } from '../types';
+import { schemaListSql, defaultSchema } from '../utils/schemaPick';
+import type { Engine, QueryResult } from '../types';
 
 interface RoutineInfo {
   kind: string;
@@ -132,19 +134,40 @@ export function RoutinePanel({
   const isProd = environment === 'prod';
   const canWrite = !readOnly && !isProd;
 
+  // SQL Server has no default-database plumbing (engineCaps databaseSelect is
+  // false and DbScopeBar hides itself), so the `schema` prop never arrives for
+  // it. Like SequencePanel/ColumnProfilePanel, the panel then enumerates the
+  // schemas itself into an in-panel picker, defaulting to dbo. Every other
+  // engine is untouched: the prop wins whenever it is provided.
+  const [mssqlSchemas, setMssqlSchemas] = useState<string[]>([]);
+  const [pickedSchema, setPickedSchema] = useState('');
+  useEffect(() => {
+    if (engine !== 'sqlserver' || schema) return;
+    const sql = schemaListSql(engine);
+    if (!sql) return;
+    invoke<QueryResult>('monitor_query', { sessionId, sql })
+      .then(r => {
+        const l = r.rows.map(x => String(x[0]));
+        setMssqlSchemas(l);
+        setPickedSchema(d => d || defaultSchema(engine, l));
+      })
+      .catch(e => setListError(errorDisplay(e)));
+  }, [engine, schema, sessionId]);
+  const effSchema = schema ?? (pickedSchema || null);
+
   const refresh = useCallback(async () => {
-    if (!schema) { setList([]); return; }
+    if (!effSchema) { setList([]); return; }
     setLoading(true);
     setListError(null);
     try {
-      setList(await invoke<RoutineInfo[]>('list_routines', { sessionId, schema }));
+      setList(await invoke<RoutineInfo[]>('list_routines', { sessionId, schema: effSchema }));
     } catch (e) {
       setListError(errorDisplay(e));
       setList([]);
     } finally {
       setLoading(false);
     }
-  }, [sessionId, schema]);
+  }, [sessionId, effSchema]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -226,7 +249,7 @@ export function RoutinePanel({
   }, [target, engine, open, openPgTrigger, onTargetConsumed]);
 
   const startNew = (kind: RoutineKind) => {
-    setDef(blankRoutine(kind, schema, engine));
+    setDef(blankRoutine(kind, effSchema, engine));
     setOriginalDdl('');
     setIsNew(true);
     setOutcome(null);
@@ -298,6 +321,31 @@ export function RoutinePanel({
     setEditorKey(k => k + 1);
   }, [originalDdl, def, engine]);
 
+  /** Drop the loaded routine outright (save is for create/replace). */
+  const drop = useCallback(async () => {
+    if (!def || isNew || !canWrite) return;
+    const sql = dropRoutineDdl(engine, def);
+    if (!sql) return;
+    const ok = await confirmDialog(
+      `Drop ${def.kind} ${def.name}?\n\nThis executes:\n${sql}\n\nThere is no undo.`,
+      { title: 'Drop routine', okLabel: 'Drop', danger: true },
+    );
+    if (!ok) return;
+    setBusy(true);
+    setOutcome(null);
+    try {
+      await invoke('drop_routine', { sessionId, dropSql: sql });
+      setDef(null);
+      setOriginalDdl('');
+      setIsNew(false);
+      await refresh();
+    } catch (e) {
+      setOutcome({ ok: false, executed: [sql], restored: false, error: errorDisplay(e) });
+    } finally {
+      setBusy(false);
+    }
+  }, [def, isNew, canWrite, engine, sessionId, refresh]);
+
   const patch = (p: Partial<RoutineDef>) => setDef(d => (d ? { ...d, ...p } : d));
   const patchParam = (i: number, p: Partial<RoutineParam>) =>
     setDef(d => (d ? {
@@ -316,7 +364,14 @@ export function RoutinePanel({
     <div className="rt-panel">
       <div className="panel-header">
         <span className="panel-title">⚙ Routines</span>
-        {schema && <span className="rt-schema">{schema}</span>}
+        {schema
+          ? <span className="rt-schema">{schema}</span>
+          : mssqlSchemas.length > 0 && (
+            <select value={pickedSchema} onChange={e => setPickedSchema(e.target.value)}
+                    title="Schema — SQL Server has no default database, so the panel lists its schemas itself">
+              {mssqlSchemas.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
         <div style={{ flex: 1 }} />
         {canWrite && (
           <span className="rt-new">
@@ -362,7 +417,7 @@ export function RoutinePanel({
           {listError && <div className="rt-hint rt-hint-err">{listError}</div>}
           {!loading && !listError && list.length === 0 && (
             <div className="rt-hint">
-              {schema ? `No routines in ${schema}.` : 'Select a database first.'}
+              {effSchema ? `No routines in ${effSchema}.` : 'Select a database first.'}
             </div>
           )}
           {grouped.map(g => (
@@ -629,6 +684,10 @@ export function RoutinePanel({
                 Copy DDL
               </button>
               <div style={{ flex: 1 }} />
+              {!isNew && canWrite && (
+                <button className="toolbar-btn" onClick={drop} disabled={busy}
+                        title="Drop this routine (with confirmation)">Drop</button>
+              )}
               {!isNew && originalDdl && canWrite && (
                 <button className="toolbar-btn" onClick={revert} disabled={busy}>Revert</button>
               )}

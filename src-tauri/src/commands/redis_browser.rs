@@ -1,7 +1,7 @@
 /// Redis-specific browser commands:
 /// redis_scan, redis_key_info, redis_get_value, redis_set_string,
 /// redis_set_ttl, redis_delete_keys, redis_server_info,
-/// redis_key_audit, redis_sentinel_overview
+/// redis_key_audit, redis_sentinel_overview, redis_geo_points
 ///
 /// Every command is a thin `tauri::command` shell (session lookup, read-only
 /// guard) over a `pub(crate)` body taking the ConnectionManager — the same
@@ -84,6 +84,29 @@ async fn get_mgr(
 fn bulk_to_string(v: &redis::Value) -> Option<String> {
     match v {
         redis::Value::BulkString(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        redis::Value::SimpleString(s) => Some(s.clone()),
+        redis::Value::VerbatimString { text, .. } => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// The display policy for value payloads, mirroring the raw command path
+/// (`db/redis.rs`): valid UTF-8 is text (most Redis values are), anything else
+/// is lowercase hex — `from_utf8_lossy` would render bytes that are not what
+/// is stored, indistinguishable from real text, and a typed `String` decode
+/// would fail the whole fetch on one protobuf payload.
+fn bytes_display(b: &[u8]) -> String {
+    match std::str::from_utf8(b) {
+        Ok(s) => s.to_string(),
+        Err(_) => hex::encode(b),
+    }
+}
+
+/// `bulk_to_string` with the value-payload policy above, for replies decoded
+/// as raw `redis::Value` (ZRANGE WITHSCORES, XRANGE).
+fn bulk_to_display(v: &redis::Value) -> Option<String> {
+    match v {
+        redis::Value::BulkString(b) => Some(bytes_display(b)),
         redis::Value::SimpleString(s) => Some(s.clone()),
         redis::Value::VerbatimString { text, .. } => Some(text.clone()),
         _ => None,
@@ -214,13 +237,16 @@ pub(crate) async fn get_value_body(
 
     let val = match type_str.as_str() {
         "string" => {
-            let v: Option<String> = mgr.get(key).await?;
-            RedisValue::String { value: v }
+            // Bytes, not String: a typed String decode fails the whole fetch
+            // on a protobuf/msgpack/image payload. UTF-8 shows as text,
+            // anything else as hex (bytes_display).
+            let v: Option<Vec<u8>> = mgr.get(key).await?;
+            RedisValue::String { value: v.map(|b| bytes_display(&b)) }
         }
 
         "list" => {
-            let items: Vec<String> = mgr.lrange(key, 0, 199).await?;
-            RedisValue::List { items }
+            let items: Vec<Vec<u8>> = mgr.lrange(key, 0, 199).await?;
+            RedisValue::List { items: items.iter().map(|b| bytes_display(b)).collect() }
         }
 
         "hash" => {
@@ -231,12 +257,15 @@ pub(crate) async fn get_value_body(
             let mut fields: Vec<HashField> = Vec::new();
             let mut cursor: u64 = 0;
             loop {
-                let (next, flat): (u64, Vec<String>) = redis::cmd("HSCAN")
+                let (next, flat): (u64, Vec<Vec<u8>>) = redis::cmd("HSCAN")
                     .arg(key).arg(cursor).arg("COUNT").arg(200i64)
                     .query_async(mgr).await?;
                 for c in flat.chunks(2) {
                     if c.len() == 2 && fields.len() < 200 {
-                        fields.push(HashField { field: c[0].clone(), value: c[1].clone() });
+                        fields.push(HashField {
+                            field: bytes_display(&c[0]),
+                            value: bytes_display(&c[1]),
+                        });
                     }
                 }
                 cursor = next;
@@ -251,11 +280,11 @@ pub(crate) async fn get_value_body(
             let mut members: Vec<String> = Vec::new();
             let mut cursor: u64 = 0;
             loop {
-                let (next, batch): (u64, Vec<String>) = redis::cmd("SSCAN")
+                let (next, batch): (u64, Vec<Vec<u8>>) = redis::cmd("SSCAN")
                     .arg(key).arg(cursor).arg("COUNT").arg(200i64)
                     .query_async(mgr).await?;
                 for m in batch {
-                    if members.len() < 200 { members.push(m); }
+                    if members.len() < 200 { members.push(bytes_display(&m)); }
                 }
                 cursor = next;
                 if cursor == 0 || members.len() >= 200 { break; }
@@ -270,7 +299,7 @@ pub(crate) async fn get_value_body(
                 .query_async(mgr).await?;
             let flat: Vec<String> = match raw {
                 redis::Value::Array(arr) =>
-                    arr.iter().filter_map(bulk_to_string).collect(),
+                    arr.iter().filter_map(bulk_to_display).collect(),
                 _ => vec![],
             };
             let entries = flat.chunks(2).filter_map(|c| {
@@ -301,9 +330,9 @@ fn parse_stream_entries(raw: redis::Value) -> Vec<StreamEntry> {
     outer.into_iter().filter_map(|entry| {
         let pair = match entry { redis::Value::Array(a) => a, _ => return None };
         if pair.len() < 2 { return None; }
-        let id = bulk_to_string(&pair[0])?;
+        let id = bulk_to_display(&pair[0])?;
         let field_arr = match &pair[1] { redis::Value::Array(a) => a, _ => return None };
-        let flat: Vec<String> = field_arr.iter().filter_map(bulk_to_string).collect();
+        let flat: Vec<String> = field_arr.iter().filter_map(bulk_to_display).collect();
         let fields = flat.chunks(2)
             .filter_map(|c| if c.len() == 2 { Some((c[0].clone(), c[1].clone())) } else { None })
             .collect();
@@ -344,7 +373,8 @@ pub(crate) async fn set_string_body(
     Ok(())
 }
 
-/// Set TTL. ttl_secs = -1 means PERSIST (remove expiry).
+/// Set TTL. ttl_secs = -1 means PERSIST (remove expiry); 0 is refused — it
+/// would delete the key (see ttl_op).
 #[tauri::command]
 pub async fn redis_set_ttl(
     session_id: Uuid,
@@ -357,17 +387,43 @@ pub async fn redis_set_ttl(
     set_ttl_body(&mut mgr, &key, ttl_secs).await
 }
 
+/// What a TTL edit asks the server to do.
+#[derive(Debug)]
+enum TtlOp { Persist, Expire(i64) }
+
+/// Validate a TTL edit before it reaches the server.
+///
+/// `-1` is PERSIST and a positive number is EXPIRE. `0` is refused:
+/// `EXPIRE key 0` deletes the key immediately — a TTL editor that deletes is
+/// a Delete button with the wrong label, and it ran with no confirmation.
+/// Any other negative is not a Redis TTL at all.
+fn ttl_op(ttl_secs: i64) -> Result<TtlOp, crate::apperror::AppError> {
+    if ttl_secs == 0 {
+        return Err("A TTL of 0 would expire the key immediately, deleting it — \
+            use a positive number of seconds, -1 to make it persistent, or Delete.".into());
+    }
+    if ttl_secs < -1 {
+        return Err(format!(
+            "{ttl_secs} is not a valid TTL — use -1 (persistent) or a positive number of seconds."
+        ).into());
+    }
+    Ok(if ttl_secs == -1 { TtlOp::Persist } else { TtlOp::Expire(ttl_secs) })
+}
+
 pub(crate) async fn set_ttl_body(
     mgr:      &mut redis::aio::ConnectionManager,
     key:      &str,
     ttl_secs: i64,
 ) -> Result<(), crate::apperror::AppError> {
-    if ttl_secs < 0 {
-        let _: i64 = redis::cmd("PERSIST").arg(key)
-            .query_async(mgr).await?;
-    } else {
-        let _: i64 = mgr.expire(key, ttl_secs)
-            .await?;
+    match ttl_op(ttl_secs)? {
+        TtlOp::Persist => {
+            let _: i64 = redis::cmd("PERSIST").arg(key)
+                .query_async(mgr).await?;
+        }
+        TtlOp::Expire(secs) => {
+            let _: i64 = mgr.expire(key, secs)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -822,6 +878,37 @@ mod tests {
         }
         assert_eq!(size_command("none"), None);
         assert_eq!(size_command("module-type"), None);
+    }
+
+    #[test]
+    fn value_payloads_display_as_text_or_hex_never_lossy() {
+        // Valid UTF-8 (including multi-byte) shows as text.
+        assert_eq!(bytes_display("héllo".as_bytes()), "héllo");
+        assert_eq!(bytes_display(b""), "");
+        // A protobuf/msgpack-style payload is lowercase hex, matching the raw
+        // command path (db/redis.rs) — not U+FFFD-spangled fake text.
+        let bin = [0x08, 0x96, 0x01, 0xff, 0x00];
+        assert_eq!(bytes_display(&bin), hex::encode(bin));
+        // bulk_to_display applies the same policy to raw Value replies.
+        assert_eq!(bulk_to_display(&redis::Value::BulkString(bin.to_vec())),
+                   Some(hex::encode(bin)));
+        assert_eq!(bulk_to_display(&bulk("plain")), Some("plain".into()));
+        assert_eq!(bulk_to_display(&redis::Value::Int(7)), None);
+    }
+
+    #[test]
+    fn ttl_zero_is_refused_because_it_deletes_the_key() {
+        let err = ttl_op(0).unwrap_err();
+        let msg = crate::apperror::AppError::display(&err);
+        assert!(msg.contains("deleting it"), "{msg}");
+    }
+
+    #[test]
+    fn ttl_validation_accepts_persist_and_positive_only() {
+        assert!(matches!(ttl_op(-1), Ok(TtlOp::Persist)));
+        assert!(matches!(ttl_op(300), Ok(TtlOp::Expire(300))));
+        let err = ttl_op(-5).unwrap_err();
+        assert!(crate::apperror::AppError::display(&err).contains("not a valid TTL"));
     }
 
     #[test]

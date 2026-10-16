@@ -31,6 +31,11 @@ const MUST_BE_AUDITED: Array<{ file: string; command: string }> = [
   { file: 'src/components/DumpRestorePanel.tsx', command: 'run_dump_tool' },
   { file: 'src/components/MultiExec.tsx', command: 'multi_execute' },
   { file: 'src/components/TxShellPanel.tsx', command: 'execute_query' },
+  // The Redis browser's three write paths — they ran with no audit row at all
+  // until this list closed the class.
+  { file: 'src/components/RedisBrowser.tsx', command: 'redis_set_string' },
+  { file: 'src/components/RedisBrowser.tsx', command: 'redis_set_ttl' },
+  { file: 'src/components/RedisBrowser.tsx', command: 'redis_delete_keys' },
 ];
 
 test('every consequential panel command is wrapped in audited()', () => {

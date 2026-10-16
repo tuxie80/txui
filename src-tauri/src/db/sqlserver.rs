@@ -841,9 +841,10 @@ pub async fn list_schema(session: &SqlServerSession, context: Option<&str>) -> R
     }
 }
 
-/// Tables and views of one database, across its schemas (folded into the name,
-/// see module docs). Row counts come from `sys.dm_db_partition_stats` — an
-/// estimate read from metadata, not a COUNT(*) scan.
+/// Tables, views, sequences, routines and triggers of one database, across its
+/// schemas (folded into the name, see module docs). Row counts come from
+/// `sys.dm_db_partition_stats` — an estimate read from metadata, not a
+/// COUNT(*) scan.
 async fn list_objects(session: &SqlServerSession, database: &str) -> Result<Vec<SchemaNode>> {
     let tables = catalog_query(session, &format!(
         // sys.partitions spells this `rows`; sys.dm_db_partition_stats — which is
@@ -863,6 +864,34 @@ async fn list_objects(session: &SqlServerSession, database: &str) -> Result<Vec<
          ORDER BY s.name, v.name",
         db = qident(database)), &[]).await?;
 
+    // Sequences, routines, triggers — the same three families the MySQL tree
+    // emits (mysql.rs). sys.objects covers module-backed objects AND triggers
+    // (TR rows are schema-scoped); sys.triggers adds the parent table.
+    // CLR modules (PC/FS/FT) are excluded: with no source in sys.sql_modules
+    // the routine editor cannot open them, so listing them would offer a
+    // broken Edit. DDL triggers (parent_class = 0) are database-scoped, not
+    // schema objects, and stay out.
+    let sequences = catalog_query(session, &format!(
+        "SELECT s.name, q.name FROM {db}.sys.sequences q \
+         JOIN {db}.sys.schemas s ON s.schema_id = q.schema_id \
+         ORDER BY s.name, q.name",
+        db = qident(database)), &[]).await?;
+    let routines = catalog_query(session, &format!(
+        "SELECT s.name, o.name, CASE WHEN o.type = 'P' THEN 'PROCEDURE' ELSE 'FUNCTION' END \
+         FROM {db}.sys.objects o \
+         JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE o.type IN ('P','FN','IF','TF') AND o.is_ms_shipped = 0 \
+         ORDER BY s.name, o.name",
+        db = qident(database)), &[]).await?;
+    let triggers = catalog_query(session, &format!(
+        "SELECT s.name, o.name, OBJECT_NAME(tr.parent_id) \
+         FROM {db}.sys.triggers tr \
+         JOIN {db}.sys.objects o ON o.object_id = tr.object_id \
+         JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE tr.parent_class = 1 AND o.is_ms_shipped = 0 \
+         ORDER BY s.name, o.name",
+        db = qident(database)), &[]).await?;
+
     let mut out = Vec::new();
     for row in &tables.rows {
         let (schema, name) = (col_str(row, 0), col_str(row, 1));
@@ -879,6 +908,30 @@ async fn list_objects(session: &SqlServerSession, database: &str) -> Result<Vec<
         out.push(SchemaNode::View {
             name: format!("{schema}.{name}"),
             schema: Some(schema),
+        });
+    }
+    for row in &sequences.rows {
+        let (schema, name) = (col_str(row, 0), col_str(row, 1));
+        out.push(SchemaNode::Sequence {
+            name: format!("{schema}.{name}"),
+            schema: Some(schema),
+        });
+    }
+    for row in &routines.rows {
+        let (schema, name) = (col_str(row, 0), col_str(row, 1));
+        out.push(SchemaNode::Routine {
+            name: format!("{schema}.{name}"),
+            schema: Some(schema),
+            routine_type: col_str(row, 2),
+        });
+    }
+    for row in &triggers.rows {
+        let (schema, name) = (col_str(row, 0), col_str(row, 1));
+        let table = col_str(row, 2);
+        out.push(SchemaNode::Trigger {
+            name: format!("{schema}.{name}"),
+            schema: Some(schema),
+            table: if table.is_empty() { None } else { Some(table) },
         });
     }
     Ok(out)
@@ -1079,7 +1132,30 @@ pub async fn get_ddl(session: &SqlServerSession, database: &str, object: &str) -
         return Ok(text);
     }
 
-    // No module row: a table, or nothing at all. Synthesise from sys.columns.
+    // No module row: maybe a sequence. sys.sequences keeps the parameters as
+    // sql_variant, hence the CASTs — the driver should not have to guess the
+    // flavour, and a bigint must never round-trip through a JS number.
+    let seq = catalog_query(session, &format!(
+        "SELECT TYPE_NAME(q.user_type_id), \
+                CAST(q.start_value AS varchar(40)), CAST(q.increment AS varchar(40)), \
+                CAST(q.minimum_value AS varchar(40)), CAST(q.maximum_value AS varchar(40)), \
+                CAST(ISNULL(q.cache_size, 0) AS varchar(20)), q.is_cycling \
+         FROM {dbq}.sys.sequences q \
+         JOIN {dbq}.sys.schemas s ON s.schema_id = q.schema_id \
+         WHERE s.name = @P1 AND q.name = @P2"), &params).await?;
+    if let Some(row) = seq.rows.first() {
+        let cache = if col_str(row, 5) == "0" { "NO CACHE".to_string() }
+                    else { format!("CACHE {}", col_str(row, 5)) };
+        let cycle = if col_bool(row, 6) { "\n    CYCLE" } else { "" };
+        return Ok(format!(
+            "CREATE SEQUENCE {}.{}\n    AS {}\n    START WITH {}\n    INCREMENT BY {}\n    \
+             MINVALUE {}\n    MAXVALUE {}\n    {}{};",
+            qident(&schema), qident(&obj), col_str(row, 0), col_str(row, 1),
+            col_str(row, 2), col_str(row, 3), col_str(row, 4), cache, cycle));
+    }
+
+    // Neither module nor sequence: a table, or nothing at all. Synthesise from
+    // sys.columns.
     let cols = catalog_query(session, &format!(
         "SELECT c.name, ty.name, c.max_length, c.precision, c.scale, c.is_nullable, \
                 c.is_identity \
@@ -2099,5 +2175,68 @@ pub(crate) mod live_tests {
         let msg = err.to_string();
         assert!(msg.contains("STAsBinary"), "unhelpful error: {msg}");
         println!("  hierarchyid + STAsBinary refused by the server: {msg}");
+    }
+
+    /// The object tree lists sequences, routines and triggers — not just
+    /// tables and views — and get_ddl synthesises a sequence's CREATE from
+    /// sys.sequences (no sql_modules row exists for one). Fixture objects are
+    /// dropped first, so the test is idempotent against the demo database.
+    #[tokio::test]
+    #[ignore = "needs TXUI_MSSQL_HOST and a live SQL Server"]
+    async fn the_tree_lists_sequences_routines_and_triggers() {
+        skip_unless!(s);
+        let setup = [
+            "DROP TRIGGER IF EXISTS dbo.txui_tree_trg",
+            "DROP PROCEDURE IF EXISTS dbo.txui_tree_proc",
+            "DROP FUNCTION IF EXISTS dbo.txui_tree_fn",
+            "DROP SEQUENCE IF EXISTS dbo.txui_tree_seq",
+            "DROP TABLE IF EXISTS dbo.txui_tree_tbl",
+            "CREATE TABLE dbo.txui_tree_tbl (id int PRIMARY KEY)",
+            "CREATE SEQUENCE dbo.txui_tree_seq AS bigint START WITH 42 INCREMENT BY 2 \
+             MINVALUE 1 MAXVALUE 999 CACHE 10",
+            "CREATE PROCEDURE dbo.txui_tree_proc AS SELECT 1 AS n",
+            "CREATE FUNCTION dbo.txui_tree_fn() RETURNS int AS BEGIN RETURN 1 END",
+            "CREATE TRIGGER dbo.txui_tree_trg ON dbo.txui_tree_tbl AFTER INSERT \
+             AS BEGIN SET NOCOUNT ON END",
+        ];
+        for q in setup { execute(&s, q).await.expect(q); }
+
+        let db = execute(&s, "SELECT DB_NAME()").await.expect("DB_NAME()")
+            .rows[0][0].as_str().expect("a database name").to_string();
+        let nodes = list_objects(&s, &db).await.expect("list_objects");
+
+        assert!(nodes.iter().any(|n| matches!(n, SchemaNode::Sequence { name, .. }
+            if name == "dbo.txui_tree_seq")), "sequence node missing: {nodes:?}");
+        assert!(nodes.iter().any(|n| matches!(n, SchemaNode::Routine { name, routine_type, .. }
+            if name == "dbo.txui_tree_proc" && routine_type == "PROCEDURE")),
+            "procedure node missing: {nodes:?}");
+        assert!(nodes.iter().any(|n| matches!(n, SchemaNode::Routine { name, routine_type, .. }
+            if name == "dbo.txui_tree_fn" && routine_type == "FUNCTION")),
+            "function node missing: {nodes:?}");
+        assert!(nodes.iter().any(|n| matches!(n, SchemaNode::Trigger { name, table, .. }
+            if name == "dbo.txui_tree_trg" && table.as_deref() == Some("txui_tree_tbl"))),
+            "trigger node missing (with its parent table): {nodes:?}");
+
+        let ddl = get_ddl(&s, &db, "dbo.txui_tree_seq").await.expect("sequence ddl");
+        assert!(ddl.contains("CREATE SEQUENCE [dbo].[txui_tree_seq]"), "{ddl}");
+        assert!(ddl.contains("AS bigint"), "{ddl}");
+        assert!(ddl.contains("START WITH 42"), "{ddl}");
+        assert!(ddl.contains("INCREMENT BY 2"), "{ddl}");
+        assert!(ddl.contains("CACHE 10"), "{ddl}");
+
+        // Module-backed objects keep returning their verbatim source.
+        let proc = get_ddl(&s, &db, "dbo.txui_tree_proc").await.expect("proc ddl");
+        assert!(proc.contains("CREATE PROCEDURE"), "{proc}");
+        let trg = get_ddl(&s, &db, "dbo.txui_tree_trg").await.expect("trigger ddl");
+        assert!(trg.contains("CREATE TRIGGER"), "{trg}");
+
+        let teardown = [
+            "DROP TRIGGER IF EXISTS dbo.txui_tree_trg",
+            "DROP PROCEDURE IF EXISTS dbo.txui_tree_proc",
+            "DROP FUNCTION IF EXISTS dbo.txui_tree_fn",
+            "DROP SEQUENCE IF EXISTS dbo.txui_tree_seq",
+            "DROP TABLE IF EXISTS dbo.txui_tree_tbl",
+        ];
+        for q in teardown { let _ = execute(&s, q).await; }
     }
 }

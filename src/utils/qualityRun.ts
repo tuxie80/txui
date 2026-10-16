@@ -20,7 +20,7 @@ import {
 import type { ColumnMeta, ColumnType } from './typeAudit.ts';
 import { buildRawTxt, buildFindingsTxt, mdTable } from './qualityReport.ts';
 import type { ReportSection } from './qualityReport.ts';
-import { analyzePlanText } from './planAnalyze.ts';
+import { analyzePlanText, analyzeMariaJson } from './planAnalyze.ts';
 import { parseMssqlPlan } from './mssqlPlan.ts';
 import type { PlanNode } from './planParse.ts';
 import { PG_SNAPSHOT_SQL } from './schemaCollect.ts';
@@ -52,6 +52,14 @@ export interface QualityInput {
   checks: QualityChecks;
   timeoutSec: number;
   dbOverride: string;
+  /**
+   * The MySQL-protocol server is MariaDB (probed flavour, from
+   * `store/serverFlavors`). MariaDB's measured plan is `ANALYZE FORMAT=JSON`,
+   * not `EXPLAIN ANALYZE` — the backend spells it correctly either way, but
+   * the label and the parser choice here follow this flag. Optional so older
+   * callers and tests default to the MySQL reading.
+   */
+  isMariaDb?: boolean;
 }
 
 /** Everything the pipeline needs from the outside world. */
@@ -100,6 +108,19 @@ export function reportTimestamp(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * True when the server's error is the statement-timeout guard firing — and
+ * only then. The guarded EXPLAIN ANALYZE step used to report EVERY error as
+ * "did not finish in Ns", which turned a syntax error or a lost connection
+ * into a fabricated timeout verdict inside an exported report. The markers
+ * are the servers' own texts: MySQL 3024, MariaDB 1969 (the guard there is
+ * `max_statement_time`), PostgreSQL's statement_timeout cancellation.
+ */
+export function isStatementTimeout(msg: string): boolean {
+  return /maximum statement execution time exceeded|max_statement_time exceeded|due to statement timeout/i
+    .test(msg);
 }
 
 function resultToAscii(r: QueryResult): string {
@@ -760,36 +781,57 @@ ${lines.join('\n')}`,
     // text. SQL Server's measured plan is `SET STATISTICS XML`, a different
     // document entirely — it is read by the plan section above rather than
     // pushed through a parser written for another engine's output.
+    //
+    // MariaDB's measured plan is `ANALYZE FORMAT=JSON` — the backend probes
+    // the flavour and spells it correctly, so the same io call serves both;
+    // what differs here is the label and the parser (the JSON goes through
+    // analyzeMariaJson, not the TREE-text analyzer). The parser choice sniffs
+    // the content too, so a flavour probe that has not landed yet cannot put
+    // a JSON document into the text parser.
     if (checks.analyze && serverCapable && !ddlMode && !isMssql) {
-      io.say(`EXPLAIN ANALYZE (executes the query, ${timeoutSec}s guard)…`);
+      const label = input.isMariaDb ? 'ANALYZE FORMAT=JSON' : 'EXPLAIN ANALYZE';
+      io.say(`${label} (executes the query, ${timeoutSec}s guard)…`);
       const t0 = performance.now();
       try {
         const text = await io.explainAnalyzeGuarded(subSql, timeoutSec * 1000, explainDb);
         const wall = performance.now() - t0;
+        const asJson = input.isMariaDb || text.trimStart().startsWith('{');
         // systematic interpretation: est/actual ratios, loops, bottleneck
-        const insights = analyzePlanText(text);
+        const insights = asJson ? analyzeMariaJson(text) : analyzePlanText(text);
         findings.push(...insights.findings);
         sections.push({
-          title: `EXPLAIN ANALYZE (measured, ${(wall / 1000).toFixed(1)}s wall)`,
+          title: `${label} (measured, ${(wall / 1000).toFixed(1)}s wall)`,
           // The raw output lives in the appendix (and the Raw outputs chip),
           // not inlined and truncated here — one copy, complete, where the
           // forensic level goes looking for it.
           md: insights.md,
           findings: insights.findings,
-          raw: [{ label: 'EXPLAIN ANALYZE', text, wallMs: wall }],
+          raw: [{ label, text, wallMs: wall }],
         });
       } catch (e) {
         const wall = performance.now() - t0;
-        findings.push({
-          id: 'X1', severity: 'red',
-          title: `EXPLAIN ANALYZE did not finish in ${timeoutSec}s`,
-          detail: `Server response after ${(wall / 1000).toFixed(0)}s: ${errorDisplay(e)}. The statement cannot complete within the guard for these parameters — that is itself the headline finding.`,
-        });
-        sections.push({
-          title: 'EXPLAIN ANALYZE (timed out)',
-          md: `_Did not finish in ${timeoutSec}s: ${errorDisplay(e)}_`,
-          raw: [{ label: 'EXPLAIN ANALYZE (TIMEOUT)', text: errorDisplay(e), wallMs: wall }],
-        });
+        const msg = errorDisplay(e);
+        // Only the guard firing is the red "did not finish" finding — any
+        // other failure is reported as what it is, not dressed up as a
+        // timeout verdict in an exported report.
+        if (isStatementTimeout(msg)) {
+          findings.push({
+            id: 'X1', severity: 'red',
+            title: `${label} did not finish in ${timeoutSec}s`,
+            detail: `Server response after ${(wall / 1000).toFixed(0)}s: ${msg}. The statement cannot complete within the guard for these parameters — that is itself the headline finding.`,
+          });
+          sections.push({
+            title: `${label} (timed out)`,
+            md: `_Did not finish in ${timeoutSec}s: ${msg}_`,
+            raw: [{ label: `${label} (TIMEOUT)`, text: msg, wallMs: wall }],
+          });
+        } else {
+          sections.push({
+            title: `${label} (failed)`,
+            md: `_Failed: ${msg}_`,
+            raw: [{ label: `${label} (FAILED)`, text: msg, wallMs: wall }],
+          });
+        }
       }
     }
 

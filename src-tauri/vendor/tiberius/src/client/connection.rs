@@ -574,3 +574,68 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
         &mut self.context
     }
 }
+
+// TxUI vendored patch — coverage for the panic-to-error arm in the token
+// dispatch (tds/stream/token.rs). The test lives here because a Connection's
+// fields are private to this module; token.rs cannot construct one.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::io::Cursor;
+
+    // The vendored crate's shipped feature set links no async runtime for
+    // tests (tokio is an optional dependency, off in TxUI's build), and every
+    // future here drives an in-memory cursor that is always immediately
+    // ready — so drive them on the noop waker instead of adding a
+    // dev-dependency.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(v) => return v,
+                std::task::Poll::Pending => {
+                    unreachable!("an in-memory decode future must never pend")
+                }
+            }
+        }
+    }
+
+    /// One TDS packet (TabularResult, end-of-message) wrapping `payload` —
+    /// the framing PacketCodec expects on the wire [MS-TDS 2.2.3.1].
+    fn tabular_result_packet(payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8 + payload.len());
+        v.push(4); // PacketType::TabularResult
+        v.push(1); // PacketStatus::EndOfMessage
+        v.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        v.extend_from_slice(&[0, 0]); // spid
+        v.push(1); // packet id
+        v.push(0); // window
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn an_unmodelled_token_type_is_an_error_not_a_panic() {
+        // 0xA5 = COLINFO (browse mode): a VALID TokenType with no handler —
+        // the dispatch arm that used to `panic!`, which under TxUI's
+        // panic=abort release profile was a whole-backend crash on one
+        // server response.
+        let wire = tabular_result_packet(&[0xA5]);
+        let mut conn = Connection {
+            transport: Framed::new(MaybeTlsStream::Raw(Cursor::new(wire)), PacketCodec),
+            flushed: false,
+            context: Context::new(),
+            buf: BytesMut::new(),
+        };
+        let res = block_on(async {
+            let mut stream = TokenStream::new(&mut conn).try_unfold();
+            stream.try_next().await
+        });
+        let err = res.expect_err("a COLINFO token must end the stream with an error");
+        assert!(
+            matches!(err, crate::Error::Protocol(_)),
+            "expected a Protocol error, got {err:?}");
+        assert!(err.to_string().contains("ColInfo"), "{err}");
+    }
+}

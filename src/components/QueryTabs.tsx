@@ -1215,11 +1215,19 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
           // Scratch keeps its snapshots in memory only — the instance file
           // would be keyed to a one-off UUID nobody can ever read back.
           if (session.scratch) return next;
-          void invoke('instance_data_set', {
-            connectionId: session.connectionId,
-            key: BACKUP_KEY,
-            value: serializeBackups(next),
-          }).catch(() => {});   // a failed backup must never interrupt editing
+          // An empty list is a cleared blob — remove the file rather than
+          // persisting `{"snapshots":[]}`.
+          void (next.length === 0
+            ? invoke('instance_data_remove', {
+                connectionId: session.connectionId,
+                key: BACKUP_KEY,
+              })
+            : invoke('instance_data_set', {
+                connectionId: session.connectionId,
+                key: BACKUP_KEY,
+                value: serializeBackups(next),
+              })
+          ).catch(() => {});   // a failed backup must never interrupt editing
         }
         return next;
       });
@@ -1805,9 +1813,16 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     const bids = tabsRef.current.filter(t => !t.panel).map(t => t.bid);
     const value = serializeHistoryBlob(undoHistRef.current, bids);
     undoHistRef.current = parseHistoryBlob(value);
-    void invoke('instance_data_set', {
-      connectionId: session.connectionId, key: EDITOR_HISTORY_KEY, value,
-    }).catch(() => {});   // a failed history save must never interrupt editing
+    // No stacks left (every tab with history was closed) = a cleared blob —
+    // remove the file rather than persisting an empty one.
+    void (Object.keys(undoHistRef.current).length === 0
+      ? invoke('instance_data_remove', {
+          connectionId: session.connectionId, key: EDITOR_HISTORY_KEY,
+        })
+      : invoke('instance_data_set', {
+          connectionId: session.connectionId, key: EDITOR_HISTORY_KEY, value,
+        })
+    ).catch(() => {});   // a failed history save must never interrupt editing
   }, [session.connectionId, session.scratch]);
   const rememberHistory = useCallback((bid: string, h: unknown) => {
     undoHistRef.current = withHistory(undoHistRef.current, bid, h);

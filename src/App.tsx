@@ -665,8 +665,12 @@ export default function App() {
     // never freeze the UI.
     const s = sessions.find(x => x.sessionId === activeSessionId);
     // Non-SQL engines have no catalog sweep to run (MongoDB's tree is the
-    // SchemaTree's own; Redis has no schema at all).
-    if (!s || s.engine === 'redis' || s.engine === 'mongodb') { setObjectItems([]); setColumnItems([]); return; }
+    // SchemaTree's own; Redis has no schema at all). Parquet is excluded too:
+    // it reads files, not a catalog, so it would fall into the MySQL
+    // information_schema branch below, the driver would reject it, and the
+    // `catch { return null }` would leave the palette's object/column
+    // sections silently empty.
+    if (!s || s.engine === 'redis' || s.engine === 'mongodb' || s.engine === 'parquet') { setObjectItems([]); setColumnItems([]); return; }
     const q = (sql: string) => invoke<QueryResult>('monitor_query', { sessionId: s.sessionId, sql });
     // sqlite_master is per-database — one UNION over every attached db.
     const lit = (v: string) => `'${v.replace(/'/g, "''")}'`;
@@ -717,10 +721,14 @@ export default function App() {
       try {
         if (s.engine === 'sqlite') {
           const dbs = await sqliteDbs();
+          // table_xinfo, not table_info: table_info omits generated columns,
+          // so they never joined the palette. hidden IN (0,2,3) keeps ordinary
+          // + VIRTUAL/STORED generated columns and drops hidden-1
+          // virtual-table internals (mirrors db/sqlite.rs).
           const union = (dbs.length > 0 ? dbs : ['main']).map(d =>
             `SELECT ${lit(d)} AS db, m.name, p.name FROM ${ident(d)}.sqlite_master m ` +
-            `JOIN pragma_table_info(m.name) p ` +
-            `WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%'`).join(' UNION ALL ');
+            `JOIN pragma_table_xinfo(m.name) p ` +
+            `WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' AND p.hidden IN (0,2,3)`).join(' UNION ALL ');
           return await q(`${union} LIMIT 8000`);
         }
         if (s.engine === 'duckdb') {

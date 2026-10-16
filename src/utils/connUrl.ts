@@ -239,8 +239,15 @@ export function parseConnectionUrl(raw: string): ParsedConnectionUrl {
   if (scheme === 'rediss') sslMode = 'require';
   // Same for the TLS spellings of ClickHouse.
   if (scheme === 'clickhouses' || scheme === 'clickhouse+https') sslMode = 'require';
-  // mongodb+srv implies TLS by spec (the SRV record points at TLS listeners).
-  if (scheme === 'mongodb+srv') sslMode = 'require';
+  // mongodb+srv implies TLS by spec (the SRV record points at TLS listeners),
+  // and the scheme itself must survive the round trip: the backend builds the
+  // driver URI from host/port, so without a marker SRV discovery degenerates
+  // into dialing the bare discovery domain on 27017, which answers nothing.
+  // `srv` rides extra_params — the same channel authSource/replicaSet use.
+  if (scheme === 'mongodb+srv') {
+    sslMode = 'require';
+    extraParams['srv'] = 'true';
+  }
   // We speak the HTTP interface only. Port 9000 is the native protocol — a
   // paste of it would connect to nothing, so say so rather than fail obscurely.
   if (engine === 'clickhouse' && (port === 9000 || port === 9440)) {
@@ -425,6 +432,10 @@ export function buildConnectionUrl(f: ConnectionUrlFields): string {
   let scheme: string = f.engine;
   if (f.engine === 'redis' && f.sslMode && f.sslMode !== 'disable') scheme = 'rediss';
   if (f.engine === 'clickhouse' && f.sslMode && f.sslMode !== 'disable') scheme = 'clickhouses';
+  // The SRV marker lives in extra_params (see parseConnectionUrl); the scheme
+  // carries it back out, and an SRV URI has no port by spec.
+  const mongoSrv = f.engine === 'mongodb' && f.extraParams?.srv === 'true';
+  if (mongoSrv) scheme = 'mongodb+srv';
 
   if (f.engine === 'mysql' && f.sslMode) params.push(['ssl-mode', SSL_TO_MYSQL[f.sslMode]]);
   if (f.engine === 'postgres' && f.sslMode) params.push(['sslmode', SSL_TO_PG[f.sslMode]]);
@@ -451,7 +462,11 @@ export function buildConnectionUrl(f: ConnectionUrlFields): string {
   if (f.socketPath) {
     params.push([f.engine === 'postgres' ? 'host' : 'socket', f.socketPath]);
   }
-  for (const [k, v] of Object.entries(f.extraParams ?? {})) params.push([k, v]);
+  for (const [k, v] of Object.entries(f.extraParams ?? {})) {
+    // srv is the mongodb+srv marker — carried by the scheme, not a URI param.
+    if (mongoSrv && k === 'srv') continue;
+    params.push([k, v]);
+  }
 
   const userinfo = f.user ? `${encodeURIComponent(f.user)}@` : '';
   // Socket URLs carry a placeholder authority host (an empty one is invalid
@@ -463,7 +478,7 @@ export function buildConnectionUrl(f: ConnectionUrlFields): string {
     const h = f.host ?? 'localhost';
     authority = h.includes(':') ? `[${h}]` : h;
   }
-  if (f.port != null) authority += `:${f.port}`;
+  if (f.port != null && !mongoSrv) authority += `:${f.port}`;
 
   const db = f.engine === 'redis' && f.redisDb != null
     ? String(f.redisDb)

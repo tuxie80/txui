@@ -5,6 +5,12 @@
  * - Right: type-aware key detail (viewer/editor) + TTL editor + OBJECT ENCODING + delete
  * - Audit tab: TTL/type/encoding findings over the scanned keys (utils/redisAudit.ts)
  * - INFO tab: parsed Redis server INFO
+ * - Console tab: typed commands (GET x / HGETALL h / INFO) through the mini
+ *   QueryEditor → execute_query, with redisguard enforced server-side
+ * - The db strip under the tab bar shows the server's logical databases (from
+ *   list_schema's INFO-keyspace labels) and which one this session is on; it
+ *   is an INDICATOR, not a switcher — the gap is registered in
+ *   utils/engineGaps.ts ('redis::databaseSelect')
  * - Sentinel awareness: on a Sentinel port a banner shows the monitored
  *   topology instead of pretending there is a browsable keyspace
  * - DBA panels (Processes / Server / Tuner / DBA views) open as extra tabs via
@@ -19,8 +25,18 @@ import type { Session } from '../types';
 import { redisPanel, redisPanelAllowed } from '../utils/redisPanels';
 import { buildRedisKeyTree, autoExpandedPrefixes, type RedisKeyNode } from '../utils/redisKeyTree';
 import {
-  auditRedisKeys, summarizeFindings, type AuditFinding, type RedisKeyAuditRow,
+  auditRedisKeys, summarizeFindings, auditButtonLabel, AUDIT_MAX_KEYS,
+  type AuditFinding, type RedisKeyAuditRow,
 } from '../utils/redisAudit';
+import { audited } from '../utils/panelAudit';
+import { validateTtlInput, ttlToPreserveOnEdit } from '../utils/redisTtl';
+import { mergeScannedKeys } from '../utils/redisScan';
+import { shownOfTotal, valueItemCount } from '../utils/redisValue';
+import { parseRedisDbLabel, redisConfigDbIndex } from '../utils/redisDbs';
+import { engineGapReason } from '../utils/engineGaps';
+import { QueryEditor } from './QueryEditor';
+import { SchemaStore } from '../store/schema';
+import { ConnectionsStore } from '../store/connections';
 import {
   GEO_DERIVATION_NOTE, geoExtent, geoSummary, graticuleLines, projectPoints,
   type RedisGeoResult,
@@ -185,8 +201,11 @@ function KeyTree({ keys, selectedKey, onSelect }: {
 
 // ── Key Detail ────────────────────────────────────────────────────────────────
 
-function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSaved }: {
+function KeyDetail({ sessionId, engine, readOnly, keyInfo, value, onDeleted, onValueSaved, onTtlSaved }: {
   sessionId:   string;
+  engine:      Session['engine'];
+  /** Read-only connection: write controls grey with the reason, never hide. */
+  readOnly:    boolean;
   keyInfo:     KeyInfo;
   value:       RedisValue | null;
   onDeleted:   () => void;
@@ -199,20 +218,36 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
   const [saving, setSaving]     = useState(false);
   const [err, setErr]           = useState<string | null>(null);
 
+  const roTip = (action: string) =>
+    readOnly ? `Connection is read-only — ${action} is blocked.` : undefined;
+
   async function handleDelete() {
+    if (readOnly) return;
     if (!await confirmDialog(`Delete key "${keyInfo.key}"?`, { danger: true, okLabel: 'Delete' })) return;
     try {
-      await invoke('redis_delete_keys', { sessionId, keys: [keyInfo.key] });
+      await audited({
+        sessionId, engine, tab: 'Redis browser', source: 'panel',
+        statement: `DEL ${keyInfo.key}`,
+        rowsAffected: (n: number) => n,
+        run: () => invoke<number>('redis_delete_keys', { sessionId, keys: [keyInfo.key] }),
+      });
       onDeleted();
     } catch (e) { setErr(errorDisplay(e)); }
   }
 
   async function handleSaveString() {
-    if (strEdit === null) return;
+    if (strEdit === null || readOnly) return;
     setSaving(true); setErr(null);
+    // SET without EX wipes the key's TTL — send back the TTL the key has so
+    // the edit preserves it (KEEPTTL would need Redis ≥ 6).
+    const ttlSecs = ttlToPreserveOnEdit(keyInfo.ttl);
     try {
-      await invoke('redis_set_string', {
-        sessionId, key: keyInfo.key, value: strEdit, ttlSecs: null
+      await audited({
+        sessionId, engine, tab: 'Redis browser', source: 'panel',
+        statement: `SET ${keyInfo.key} ${JSON.stringify(strEdit)}${ttlSecs ? ` EX ${ttlSecs}` : ''}`,
+        run: () => invoke('redis_set_string', {
+          sessionId, key: keyInfo.key, value: strEdit, ttlSecs,
+        }),
       });
       onValueSaved();
       setStrEdit(null);
@@ -221,15 +256,30 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
   }
 
   async function handleSaveTtl() {
+    if (readOnly) return;
     setErr(null);
-    const secs = ttlInput === '' || ttlInput === '-1' ? -1 : parseInt(ttlInput, 10);
-    if (isNaN(secs)) { setErr('TTL must be a number (-1 = persistent)'); return; }
+    // 0 would EXPIRE key 0 — an immediate delete with no confirmation — and
+    // negatives other than -1 are not Redis TTLs. Validated here and again
+    // server-side (set_ttl_body).
+    const parsed = validateTtlInput(ttlInput);
+    if (!parsed.ok) { setErr(parsed.error); return; }
+    const secs = parsed.secs;
     try {
-      await invoke('redis_set_ttl', { sessionId, key: keyInfo.key, ttlSecs: secs });
+      await audited({
+        sessionId, engine, tab: 'Redis browser', source: 'panel',
+        statement: secs < 0 ? `PERSIST ${keyInfo.key}` : `EXPIRE ${keyInfo.key} ${secs}`,
+        run: () => invoke('redis_set_ttl', { sessionId, key: keyInfo.key, ttlSecs: secs }),
+      });
       setEditTtl(false);
       onTtlSaved(secs < 0 ? -1 : secs);
     } catch (e) { setErr(errorDisplay(e)); }
   }
+
+  // A capped collection page must not pose as the whole value: the backend
+  // reads at most 200 items (50 for a stream) while the header knows the real
+  // cardinality.
+  const shownCount = value ? valueItemCount(value) : null;
+  const truncNote = shownCount !== null ? shownOfTotal(shownCount, keyInfo.size) : null;
 
   return (
     <div className="rb-detail">
@@ -243,7 +293,12 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
         )}
         <span className="rb-detail-key" title={keyInfo.key}>{keyInfo.key}</span>
         <span className="rb-detail-size">{formatSize(keyInfo.key_type, keyInfo.size)}</span>
-        <button className="rb-delete-btn" onClick={handleDelete} title="Delete key">🗑 Delete</button>
+        <button
+          className={`rb-delete-btn${readOnly ? ' unavail' : ''}`}
+          data-tip={roTip('deleting keys')}
+          onClick={handleDelete}
+          title={roTip('deleting keys') ?? 'Delete key'}
+        >🗑 Delete</button>
       </div>
 
       {/* TTL row */}
@@ -267,7 +322,11 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
             <span className={`rb-ttl-val ${keyInfo.ttl === -2 ? 'expired' : ''}`}>
               {formatTtl(keyInfo.ttl)}
             </span>
-            <button className="rb-small-btn" onClick={() => { setTtlInput(String(keyInfo.ttl)); setEditTtl(true); }}>
+            <button
+              className={`rb-small-btn${readOnly ? ' unavail' : ''}`}
+              data-tip={roTip('changing TTLs')}
+              onClick={() => { if (readOnly) return; setTtlInput(String(keyInfo.ttl)); setEditTtl(true); }}
+            >
               Edit
             </button>
           </>
@@ -275,6 +334,7 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
       </div>
 
       {err && <div className="rb-err">{err}</div>}
+      {truncNote && <div className="rb-trunc-note">{truncNote}</div>}
 
       {/* Value viewer */}
       <div className="rb-value-area">
@@ -287,13 +347,15 @@ function KeyDetail({ sessionId, keyInfo, value, onDeleted, onValueSaved, onTtlSa
           onStrEdit={setStrEdit}
           onSaveString={handleSaveString}
           saving={saving}
+          readOnly={readOnly}
+          readOnlyTip={roTip('writing keys')}
         />}
       </div>
     </div>
   );
 }
 
-function ValueViewer({ value, sessionId, keyName, strEdit, onStrEdit, onSaveString, saving }: {
+function ValueViewer({ value, sessionId, keyName, strEdit, onStrEdit, onSaveString, saving, readOnly, readOnlyTip }: {
   value: RedisValue;
   sessionId: string;
   keyName: string;
@@ -301,6 +363,8 @@ function ValueViewer({ value, sessionId, keyName, strEdit, onStrEdit, onSaveStri
   onStrEdit: (v: string) => void;
   onSaveString: () => void;
   saving: boolean;
+  readOnly: boolean;
+  readOnlyTip: string | undefined;
 }) {
   if (value.type === 'none')   return <div className="rb-no-value">Key does not exist.</div>;
 
@@ -314,7 +378,12 @@ function ValueViewer({ value, sessionId, keyName, strEdit, onStrEdit, onSaveStri
         spellCheck={false}
       />
       {strEdit !== null && (
-        <button className="rb-save-btn" onClick={onSaveString} disabled={saving}>
+        <button
+          className={`rb-save-btn${readOnly ? ' unavail' : ''}`}
+          data-tip={readOnlyTip}
+          onClick={() => { if (!readOnly) onSaveString(); }}
+          disabled={saving}
+        >
           {saving ? 'Saving…' : 'Save'}
         </button>
       )}
@@ -624,7 +693,10 @@ function AuditPanel({ sessionId, keys }: { sessionId: string; keys: string[] }) 
   async function run() {
     setLoading(true); setErr(null);
     try {
-      setRows(await invoke<RedisKeyAuditRow[]>('redis_key_audit', { sessionId, keys }));
+      // The backend caps a batch at AUDIT_MAX_KEYS — the label says so too.
+      setRows(await invoke<RedisKeyAuditRow[]>('redis_key_audit', {
+        sessionId, keys: keys.slice(0, AUDIT_MAX_KEYS),
+      }));
     } catch (e) { setErr(errorDisplay(e)); }
     finally { setLoading(false); }
   }
@@ -637,7 +709,7 @@ function AuditPanel({ sessionId, keys }: { sessionId: string; keys: string[] }) 
       <div className="rb-info-toolbar">
         <button className="rb-small-btn" onClick={run} disabled={loading || keys.length === 0}
           title={keys.length === 0 ? 'Scan keys on the Keys tab first — the audit covers the scanned sample' : undefined}>
-          {loading ? 'Auditing…' : `Audit ${keys.length.toLocaleString()} scanned keys`}
+          {loading ? 'Auditing…' : auditButtonLabel(keys.length)}
         </button>
         <span className="rb-audit-note">
           Covers only the keys already loaded by SCAN (never KEYS) — Load more on
@@ -687,11 +759,112 @@ function AuditPanel({ sessionId, keys }: { sessionId: string; keys: string[] }) 
   );
 }
 
+// ── db strip ──────────────────────────────────────────────────────────────────
+
+interface DbEntry { label: string; index: number; keys: number | null }
+
+/**
+ * The server's logical databases and which one this session is on.
+ *
+ * An INDICATOR, deliberately not a switcher: the db index is fixed at connect
+ * time by the connection's Database field and the runtime-switch plumbing does
+ * not exist — registered as 'redis::databaseSelect' in utils/engineGaps.ts,
+ * whose reason (with the workaround) is the strip's tooltip. Cluster mode
+ * falls out of the data: INFO keyspace reports db0 only, so only db0 lists.
+ */
+function DbStrip({ sessionId, connectionId }: { sessionId: string; connectionId: string }) {
+  const [dbs, setDbs]           = useState<DbEntry[] | null>(null);
+  const [currentDb, setCurrentDb] = useState(0);
+  const [loading, setLoading]   = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const nodes = await SchemaStore.listSchema(sessionId);
+      const parsed = nodes.flatMap(n => {
+        if (n.kind !== 'database') return [];
+        const p = parseRedisDbLabel(n.name);
+        return p ? [{ label: n.name, index: p.index, keys: p.keys }] : [];
+      });
+      parsed.sort((a, b) => a.index - b.index);
+      setDbs(parsed);
+    } catch { setDbs(null); }
+    finally { setLoading(false); }
+  }, [sessionId]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // The session's db index is the connection's `database` field — the value
+  // build_url baked into the connection URL when the session opened.
+  useEffect(() => {
+    ConnectionsStore.list()
+      .then(list => setCurrentDb(redisConfigDbIndex(list.find(c => c.id === connectionId)?.database)))
+      .catch(() => {});
+  }, [connectionId]);
+
+  if (!dbs) return null;
+  const switchTip = engineGapReason('redis', 'databaseSelect');
+  return (
+    <div className="rb-db-strip">
+      {dbs.map(d => (
+        <span
+          key={d.index}
+          className={`rb-db-chip${d.index === currentDb ? ' current' : ''}`}
+          title={d.index === currentDb
+            ? `${d.label} — this session's database`
+            : `${d.label}\n${switchTip ?? ''}`}
+        >
+          db{d.index}
+          {d.keys !== null && <span className="rb-db-count">{d.keys.toLocaleString()}</span>}
+        </span>
+      ))}
+      <button
+        className="rb-db-refresh"
+        onClick={refresh}
+        disabled={loading}
+        title="Re-read INFO keyspace"
+      >↺</button>
+    </div>
+  );
+}
+
+// ── Console tab ───────────────────────────────────────────────────────────────
+
+/**
+ * Typed Redis commands (GET x / HGETALL h / INFO) over execute_query, with the
+ * reply shaped into a grid by the backend's redis_shape pipeline.
+ *
+ * This is the mini QueryEditor, NOT SqlEditor: a richer Redis editor surface
+ * already exists — SqlEditor's engine==='redis' branch, utils/redisComplete.ts
+ * and the generated utils/redisCommands.ts catalog — but it is wired into
+ * QueryTabs, which a Redis session never mounts. That machinery stays for a
+ * future full editor; the console needs only a run loop, and QueryEditor's is
+ * already correct.
+ *
+ * Read-only is enforced server-side (guard_statement → redisguard classifies
+ * the typed command against the server-informed write catalog), so reads run
+ * on a read-only connection and writes come back as the refusal error in the
+ * editor's error area — the frontend deliberately does not pre-guess the
+ * classification.
+ */
+function ConsolePanel({ session }: { session: Session }) {
+  return (
+    <div className="rb-console-pane">
+      {!!session.readOnly && (
+        <div className="rb-console-ro">
+          Read-only connection — read commands run; write commands are refused by the server-side guard.
+        </div>
+      )}
+      <QueryEditor session={session} />
+    </div>
+  );
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 
 export function RedisBrowser({ session, isActive = true }: Props) {
   const { sessionId } = session;
-  // 'keys' | 'audit' | 'info' | a REDIS_PANELS id — a panel is just another tab here.
+  // 'keys' | 'audit' | 'info' | 'console' | a REDIS_PANELS id — a panel is just another tab here.
   const [tab, setTab]           = useState<string>('keys');
   const [sentinel, setSentinel] = useState<SentinelOverview | null>(null);
   const [pattern, setPattern]   = useState('*');
@@ -703,6 +876,7 @@ export function RedisBrowser({ session, isActive = true }: Props) {
   const [keyInfo, setKeyInfo]   = useState<KeyInfo | null>(null);
   const [keyValue, setKeyValue] = useState<RedisValue | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailErr, setDetailErr] = useState<string | null>(null);
   // Monotonic detail-request id — two fast key clicks must not let the slower
   // response render its key's data under the other key's header.
   const detailReqRef = useRef(0);
@@ -714,7 +888,8 @@ export function RedisBrowser({ session, isActive = true }: Props) {
       const res = await invoke<ScanResult>('redis_scan', {
         sessionId, pattern, cursor: cur, count: 200
       });
-      setKeys(prev => fresh ? res.keys : [...prev, ...res.keys]);
+      // SCAN may return the same key on two pages — merge through a Set.
+      setKeys(prev => mergeScannedKeys(fresh ? [] : prev, res.keys));
       setNextCursor(res.cursor);
     } catch (e) { setScanErr(errorDisplay(e)); }
     finally { setScanning(false); }
@@ -726,6 +901,7 @@ export function RedisBrowser({ session, isActive = true }: Props) {
     setSelKey(null);
     setKeyInfo(null);
     setKeyValue(null);
+    setDetailErr(null);
     // Sentinel awareness: one cheap probe (INFO server) on open. A Sentinel
     // port gets a topology banner instead of a silent empty keyspace.
     invoke<SentinelOverview>('redis_sentinel_overview', { sessionId })
@@ -739,6 +915,7 @@ export function RedisBrowser({ session, isActive = true }: Props) {
     setSelKey(key);
     setKeyInfo(null);
     setKeyValue(null);
+    setDetailErr(null);
     setDetailLoading(true);
     try {
       const [info, val] = await Promise.all([
@@ -748,6 +925,11 @@ export function RedisBrowser({ session, isActive = true }: Props) {
       if (req !== detailReqRef.current) return; // a newer key was clicked
       setKeyInfo(info);
       setKeyValue(val);
+    } catch (e) {
+      // Without the catch the rejection was unhandled and the pane silently
+      // reverted to "Select a key to inspect it." — show the failure instead.
+      if (req !== detailReqRef.current) return;
+      setDetailErr(errorDisplay(e));
     } finally { if (req === detailReqRef.current) setDetailLoading(false); }
   }
 
@@ -756,6 +938,7 @@ export function RedisBrowser({ session, isActive = true }: Props) {
     setSelKey(null);
     setKeyInfo(null);
     setKeyValue(null);
+    setDetailErr(null);
   }, [selKey]);
 
   const handleValueSaved = useCallback(() => {
@@ -814,6 +997,11 @@ export function RedisBrowser({ session, isActive = true }: Props) {
           className={`rb-tab ${tab === 'info' ? 'active' : ''}`}
           onClick={() => setTab('info')}
         >Server INFO</button>
+        <button
+          className={`rb-tab ${tab === 'console' ? 'active' : ''}`}
+          onClick={() => setTab('console')}
+          title="Type Redis commands (GET x, HGETALL h, INFO) and run them — write commands follow the connection's read-only setting"
+        >Console</button>
         {activePanel && (
           <button
             className="rb-tab active"
@@ -821,7 +1009,13 @@ export function RedisBrowser({ session, isActive = true }: Props) {
             title="Close panel"
           ><span className="icon-slot"><PanelIcon panel={activePanel.id} size={13} /></span>{activePanel.label} ×</button>
         )}
+        {/* A Sentinel port holds no keyspace — no dbs to indicate. */}
+        {sentinel?.mode !== 'sentinel' && (
+          <DbStrip sessionId={sessionId} connectionId={session.connectionId} />
+        )}
       </div>
+
+      {tab === 'console' && <ConsolePanel session={session} />}
 
       {tab === 'processes' && (
         <ProcessListPanel sessionId={sessionId} connectionName={session.connectionName}
@@ -883,9 +1077,12 @@ export function RedisBrowser({ session, isActive = true }: Props) {
             {/* Key detail */}
             <div className="rb-right-panel">
               {detailLoading && <div className="rb-loading">Loading…</div>}
+              {!detailLoading && detailErr && <div className="rb-err">{detailErr}</div>}
               {!detailLoading && keyInfo && (
                 <KeyDetail
                   sessionId={sessionId}
+                  engine={session.engine}
+                  readOnly={!!session.readOnly}
                   keyInfo={keyInfo}
                   value={keyValue}
                   onDeleted={handleDeleted}
@@ -893,7 +1090,7 @@ export function RedisBrowser({ session, isActive = true }: Props) {
                   onTtlSaved={handleTtlSaved}
                 />
               )}
-              {!detailLoading && !keyInfo && (
+              {!detailLoading && !keyInfo && !detailErr && (
                 <div className="rb-no-sel">Select a key to inspect it.</div>
               )}
             </div>

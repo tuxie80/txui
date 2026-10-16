@@ -25,8 +25,10 @@ fn q_rel(rel: &str) -> String {
 
 fn copy_opts(format: &str, header: bool) -> String {
     let fmt = if format == "tsv" { "text" } else { "csv" };
-    // HEADER is only valid for CSV.
-    let hdr = if header && fmt == "csv" { ", HEADER true" } else { "" };
+    // HEADER under FORMAT text needs PostgreSQL ≥ 15 (before that it was
+    // CSV-only). Older servers reject it loudly — still better than the
+    // previous behaviour, which silently imported the header row as data.
+    let hdr = if header { ", HEADER true" } else { "" };
     format!("FORMAT {fmt}{hdr}")
 }
 
@@ -154,7 +156,17 @@ pub async fn pg_copy_export(
 
 #[cfg(test)]
 mod tests {
-    use super::check_copy_source;
+    use super::{check_copy_source, copy_opts};
+
+    #[test]
+    fn copy_opts_pass_header_through_for_both_formats() {
+        // HEADER used to be dropped under FORMAT text, so a .tsv with a
+        // header imported the header as data. PG ≥ 15 supports it there.
+        assert_eq!(copy_opts("csv", true), "FORMAT csv, HEADER true");
+        assert_eq!(copy_opts("csv", false), "FORMAT csv");
+        assert_eq!(copy_opts("tsv", true), "FORMAT text, HEADER true");
+        assert_eq!(copy_opts("tsv", false), "FORMAT text");
+    }
 
     #[test]
     fn legit_single_statements_pass() {

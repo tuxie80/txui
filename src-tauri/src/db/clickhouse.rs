@@ -533,6 +533,59 @@ mod progress_tests {
         assert_eq!(parse_progress_header("not json"), None);
         assert_eq!(parse_progress_header(""), None);
     }
+
+    /// The store behind `record_header_progress`/`take_progress`: only the
+    /// editor path drains, so panel and multi-exec entries must be bounded by
+    /// eviction rather than accumulating forever.
+    #[test]
+    fn a_record_then_take_cycle_leaves_the_store_empty() {
+        let mut s = super::HeaderProgressStore::default();
+        s.record("q1", ChProgress { read_rows: 1, read_bytes: 2, total_rows: 3, elapsed_ns: 4 });
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.take("q1"),
+            Some(ChProgress { read_rows: 1, read_bytes: 2, total_rows: 3, elapsed_ns: 4 }));
+        assert_eq!(s.len(), 0, "a drained query must leave nothing behind");
+        assert_eq!(s.take("q1"), None, "a take is exactly once");
+    }
+
+    #[test]
+    fn undrained_entries_are_bounded_by_fifo_eviction() {
+        let mut s = super::HeaderProgressStore::default();
+        let p = ChProgress { read_rows: 0, read_bytes: 0, total_rows: 0, elapsed_ns: 0 };
+        // The non-editor leak shape: many completed queries, nobody drains.
+        for i in 0..(super::HEADER_PROGRESS_CAP + 10) {
+            s.record(&format!("q{i}"), p);
+        }
+        assert_eq!(s.len(), super::HEADER_PROGRESS_CAP,
+            "the store must never grow past its cap");
+        // The oldest were evicted; the newest are still drainable.
+        assert_eq!(s.take("q0"), None, "the oldest entry should be evicted");
+        assert_eq!(s.take("q9"), None, "the cap oldest should all be gone");
+        assert!(s.take(&format!("q{}", super::HEADER_PROGRESS_CAP + 9)).is_some(),
+            "the newest entry must survive");
+    }
+
+    #[test]
+    fn drained_entries_free_capacity_before_anything_live_is_evicted() {
+        let mut s = super::HeaderProgressStore::default();
+        let p = ChProgress { read_rows: 0, read_bytes: 0, total_rows: 0, elapsed_ns: 0 };
+        // Fill to the cap, then drain half (the editor path's take).
+        // Recording that many again must NOT evict anything still live.
+        for i in 0..super::HEADER_PROGRESS_CAP {
+            s.record(&format!("q{i}"), p);
+        }
+        for i in 0..(super::HEADER_PROGRESS_CAP / 2) {
+            s.take(&format!("q{i}"));
+        }
+        for i in super::HEADER_PROGRESS_CAP..(super::HEADER_PROGRESS_CAP * 3 / 2) {
+            s.record(&format!("q{i}"), p);
+        }
+        assert_eq!(s.len(), super::HEADER_PROGRESS_CAP);
+        for i in (super::HEADER_PROGRESS_CAP / 2)..super::HEADER_PROGRESS_CAP {
+            assert!(s.take(&format!("q{i}")).is_some(),
+                "q{i} is live and within capacity — it must not be evicted");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -800,19 +853,60 @@ fn progress_from_headers(headers: &reqwest::header::HeaderMap) -> Option<ChProgr
         .and_then(parse_progress_header)
 }
 
-/// Per-`query_id` store of the final header-reported progress. A query id is a
-/// UUID chosen per run, so entries are unique; each is drained exactly once by
-/// `take_progress`, and any that is never drained (e.g. a query that errored
-/// before completion) is overwritten by the next run's — the map cannot grow
-/// without bound because ids are not reused.
-fn header_progress_store() -> &'static Mutex<HashMap<String, ChProgress>> {
-    static STORE: OnceLock<Mutex<HashMap<String, ChProgress>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Per-`query_id` store of the final header-reported progress.
+///
+/// A query id is a fresh UUID per run, drained exactly once by
+/// `take_progress` — but only the EDITOR path runs the poller that drains
+/// (`spawn_ch_progress` in commands/query.rs). Panel and multi-exec queries
+/// record here and are never drained, so an unbounded map would grow by one
+/// entry per non-editor ClickHouse query for the life of the process. The
+/// store is therefore bounded: past `HEADER_PROGRESS_CAP` the oldest entry
+/// (by insertion sequence) is evicted. Eviction is invisible in practice —
+/// the one consumer (the editor poller) takes its entry within a tick of the
+/// response completing, long before it could be the oldest.
+const HEADER_PROGRESS_CAP: usize = 128;
+
+#[derive(Default)]
+struct HeaderProgressStore {
+    map: HashMap<String, (u64, ChProgress)>,
+    next: u64,
+}
+
+impl HeaderProgressStore {
+    fn record(&mut self, query_id: &str, p: ChProgress) {
+        // Ids are fresh UUIDs; a repeat would be a bug, not a collision.
+        if self.map.contains_key(query_id) { return; }
+        if self.map.len() >= HEADER_PROGRESS_CAP {
+            // Oldest-first eviction; the scan is over at most CAP entries.
+            let oldest = self.map.iter()
+                .min_by_key(|(_, (seq, _))| *seq)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.map.remove(&k);
+            }
+        }
+        self.map.insert(query_id.to_string(), (self.next, p));
+        self.next += 1;
+    }
+
+    fn take(&mut self, query_id: &str) -> Option<ChProgress> {
+        self.map.remove(query_id).map(|(_, p)| p)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+fn header_progress_store() -> &'static Mutex<HeaderProgressStore> {
+    static STORE: OnceLock<Mutex<HeaderProgressStore>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HeaderProgressStore::default()))
 }
 
 fn record_header_progress(query_id: &str, p: ChProgress) {
-    if let Ok(mut m) = header_progress_store().lock() {
-        m.insert(query_id.to_string(), p);
+    if let Ok(mut s) = header_progress_store().lock() {
+        s.record(query_id, p);
     }
 }
 
@@ -820,7 +914,7 @@ fn record_header_progress(query_id: &str, p: ChProgress) {
 /// response for it has completed. Used to emit one last, exact update after the
 /// live `system.processes` row is gone.
 pub fn take_progress(query_id: &str) -> Option<ChProgress> {
-    header_progress_store().lock().ok()?.remove(query_id)
+    header_progress_store().lock().ok()?.take(query_id)
 }
 
 /// Live progress of an in-flight query, read from `system.processes`.

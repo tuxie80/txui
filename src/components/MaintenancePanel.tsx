@@ -41,6 +41,7 @@ import {
   fieldsFor, findField, planBulk, planWarning, suggestionsFor,
 } from '../utils/bulkAlter';
 import type { BulkField, BulkTable } from '../utils/bulkAlter';
+import { schemaListSql, defaultSchema } from '../utils/schemaPick';
 
 interface Props {
   session: Session;
@@ -66,7 +67,7 @@ function stamp(): string {
 
 type MaintTab = 'upkeep' | 'bulk';
 
-export function MaintenancePanel({ session, schema, onClose }: Props) {
+export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props) {
   const [mode, setMode] = useState<MaintTab>('upkeep');
   const [meta, setMeta] = useState<BulkTable[]>([]);
   const [bulkField, setBulkField] = useState<BulkField>('comment');
@@ -117,6 +118,29 @@ export function MaintenancePanel({ session, schema, onClose }: Props) {
   const bulkFields = useMemo(() => fieldsFor(session.engine), [session.engine]);
   const spec = findOp(op);
   const isProd = session.environment === 'prod';
+
+  // SQL Server has no default-database plumbing (engineCaps databaseSelect is
+  // false and DbScopeBar hides itself), so the `schema` prop never arrives for
+  // it. The panel then enumerates the schemas itself into an in-panel picker,
+  // defaulting to dbo — the same pattern as SequencePanel/ColumnProfilePanel.
+  // Every other engine is untouched: the prop wins whenever it is provided.
+  // The effective value shadows the prop name below, so the whole existing
+  // body works unchanged off whichever source supplied the schema.
+  const [mssqlSchemas, setMssqlSchemas] = useState<string[]>([]);
+  const [pickedSchema, setPickedSchema] = useState('');
+  useEffect(() => {
+    if (session.engine !== 'sqlserver' || schemaProp) return;
+    const sql = schemaListSql(session.engine);
+    if (!sql) return;
+    invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql })
+      .then(r => {
+        const l = r.rows.map(x => String(x[0]));
+        setMssqlSchemas(l);
+        setPickedSchema(d => d || defaultSchema(session.engine, l));
+      })
+      .catch(() => {});
+  }, [session.engine, session.sessionId, schemaProp]);
+  const schema = schemaProp ?? (pickedSchema || null);
 
   // A destructive operation on prod is exactly the case this panel exists to
   // make deliberate, so it is named and typed rather than clicked.
@@ -544,7 +568,14 @@ WHERE s.name = '${sch}' AND o.name = '${nm}'`,
     <div className="mnt">
       <div className="panel-header">
         <span className="panel-title">🩹 Maintenance</span>
-        {schema && <span className="mnt-schema">{schema}</span>}
+        {schemaProp
+          ? <span className="mnt-schema">{schemaProp}</span>
+          : mssqlSchemas.length > 0 && (
+            <select value={pickedSchema} onChange={e => setPickedSchema(e.target.value)}
+                    title="Schema — SQL Server has no default database, so the panel lists its schemas itself">
+              {mssqlSchemas.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
         {isProd && <span className="mnt-prod">prod</span>}
         <div style={{ flex: 1 }} />
         <button className="icon-btn" onClick={onClose} title="Close">×</button>

@@ -1,11 +1,12 @@
 //! Stored routine CRUD — list, fetch, save.
 //!
-//! The dangerous operation here is saving a MySQL routine. PostgreSQL has
-//! `CREATE OR REPLACE FUNCTION`, which is atomic and transactional: if the new
-//! body does not compile, nothing changed. MySQL has no equivalent for
-//! routines — the only way to change one is `DROP` then `CREATE`, and DDL on
-//! MySQL causes an implicit commit, so it cannot be wrapped in a transaction
-//! and rolled back.
+//! The dangerous operation here is saving a routine that has to be DROPPED
+//! and re-CREATEd: MySQL routines (no `CREATE OR REPLACE` for them) and
+//! PostgreSQL triggers (`CREATE OR REPLACE TRIGGER` needs PG 14). PostgreSQL
+//! functions have `CREATE OR REPLACE FUNCTION`, which is atomic and
+//! transactional: if the new body does not compile, nothing changed. The
+//! drop-first kinds have no equivalent — and DDL on MySQL causes an implicit
+//! commit, so it cannot be wrapped in a transaction and rolled back.
 //!
 //! That means a naive save has a window where a syntax error costs the user
 //! their routine: the DROP succeeds, the CREATE fails, and the procedure that
@@ -376,11 +377,36 @@ pub async fn get_routine(
     Ok(RoutineSource { kind, schema, name, ddl })
 }
 
+/// True when a save must DROP before it CREATEs instead of relying on one
+/// atomic `CREATE OR REPLACE` / `CREATE OR ALTER`: always on MySQL (routines
+/// have no OR REPLACE there), and on the other engines whenever the editor
+/// sent a DROP — currently PostgreSQL triggers, whose OR REPLACE form needs
+/// PG 14, so `buildPgTriggerDdl` emits a plain CREATE TRIGGER and the editor
+/// prepends `DROP TRIGGER IF EXISTS`.
+fn save_needs_drop_first(is_mysql: bool, drop_sql: &str) -> bool {
+    is_mysql || !drop_sql.trim().is_empty()
+}
+
+/// The statements a drop-first save runs, in execution order: the DROP the
+/// editor sent (absent for a brand-new object) and then the CREATE. The
+/// order is the whole point — CREATE before DROP would collide with the
+/// object being replaced.
+fn drop_first_statements<'a>(drop_sql: &'a str, create_sql: &'a str) -> Vec<&'a str> {
+    let mut v = Vec::new();
+    if !drop_sql.trim().is_empty() { v.push(drop_sql); }
+    v.push(create_sql);
+    v
+}
+
 /// Create or replace a routine.
 ///
-/// `drop_sql` is empty for PostgreSQL (`CREATE OR REPLACE` handles it) and
-/// carries the `DROP …` for MySQL. `original_ddl` is the routine as it was
-/// before the edit — the safety net described in the module docs.
+/// `drop_sql` carries the `DROP …` for MySQL (no `CREATE OR REPLACE` for
+/// routines) and for a PostgreSQL *trigger* (`CREATE OR REPLACE TRIGGER`
+/// needs PG 14, so the editor sends `DROP TRIGGER IF EXISTS` first); it is
+/// empty for everything else on PostgreSQL and SQL Server, where one
+/// `CREATE OR REPLACE` / `CREATE OR ALTER` statement does the replace.
+/// `original_ddl` is the routine as it was before the edit — the safety net
+/// described in the module docs.
 #[tauri::command]
 pub async fn save_routine(
     session_id: Uuid,
@@ -395,41 +421,22 @@ pub async fn save_routine(
     let mut executed = Vec::new();
 
     match session.as_ref() {
-        // SQL Server sits with PostgreSQL, not MySQL: `CREATE OR ALTER` (2016
-        // SP1+) replaces the module in one statement, so a rejected definition
-        // leaves the old one in place and there is nothing to restore.
-        //
-        // One caveat the restore-based path does not have, and the panel says
-        // out loud: SQL Server defers *name* resolution. A body referencing a
-        // table that does not exist is accepted by CREATE OR ALTER and fails at
-        // execution time (Msg 208) — verified against 2022. Syntax is checked;
-        // the objects it names are not. A successful save is therefore not the
-        // same promise it is on PostgreSQL, and pretending otherwise would be
-        // the more expensive kind of wrong.
-        LiveSession::Postgres(_) | LiveSession::SqlServer(_) => {
-            // Atomic: a failed CREATE OR REPLACE / OR ALTER leaves the old
-            // definition.
-            match state.run_guarded(&session_id, &create_sql).await {
-                Ok(_) => {
-                    executed.push(create_sql);
-                    Ok(SaveOutcome { ok: true, executed, restored: false, error: None })
-                }
-                Err(e) => Ok(SaveOutcome {
-                    ok: false,
-                    executed,
-                    restored: false,
-                    error: Some(e.display()),
-                }),
-            }
-        }
-
-        LiveSession::Mysql(_) => {
+        LiveSession::Mysql(_) | LiveSession::Postgres(_) | LiveSession::SqlServer(_)
+            if save_needs_drop_first(
+                matches!(session.as_ref(), LiveSession::Mysql(_)), &drop_sql) =>
+        {
             // A DDL statement on MySQL implicitly commits, so there is no
             // transaction to roll back — the restore below IS the safety net.
             // Each statement goes through the guarded path: DDL is not session
             // state, so it does not need one shared connection to be correct.
-            if !drop_sql.trim().is_empty() {
-                if let Err(e) = state.run_guarded(&session_id, &drop_sql).await {
+            //
+            // The DROP runs FIRST — discarding it (as this arm once did for
+            // PostgreSQL) left the old trigger in place, and the plain CREATE
+            // then collided with it: every save of an existing PG trigger
+            // failed.
+            let stmts = drop_first_statements(&drop_sql, &create_sql);
+            for drop in &stmts[..stmts.len() - 1] {
+                if let Err(e) = state.run_guarded(&session_id, drop).await {
                     return Ok(SaveOutcome {
                         ok: false,
                         executed,
@@ -437,7 +444,7 @@ pub async fn save_routine(
                         error: Some(format!("drop failed, nothing changed: {e}")),
                     });
                 }
-                executed.push(drop_sql);
+                executed.push((*drop).to_string());
             }
 
             match state.run_guarded(&session_id, &create_sql).await {
@@ -471,6 +478,35 @@ pub async fn save_routine(
                     }
                     Ok(SaveOutcome { ok: false, executed, restored, error: Some(detail) })
                 }
+            }
+        }
+
+        // No DROP sent: `CREATE OR REPLACE` (PostgreSQL) / `CREATE OR ALTER`
+        // (SQL Server 2016 SP1+) replaces the module in one statement, so a
+        // rejected definition leaves the old one in place and there is nothing
+        // to restore. SQL Server sits with PostgreSQL here, not MySQL.
+        //
+        // One caveat the restore-based path does not have, and the panel says
+        // out loud: SQL Server defers *name* resolution. A body referencing a
+        // table that does not exist is accepted by CREATE OR ALTER and fails at
+        // execution time (Msg 208) — verified against 2022. Syntax is checked;
+        // the objects it names are not. A successful save is therefore not the
+        // same promise it is on PostgreSQL, and pretending otherwise would be
+        // the more expensive kind of wrong.
+        LiveSession::Postgres(_) | LiveSession::SqlServer(_) => {
+            // Atomic: a failed CREATE OR REPLACE / OR ALTER leaves the old
+            // definition.
+            match state.run_guarded(&session_id, &create_sql).await {
+                Ok(_) => {
+                    executed.push(create_sql);
+                    Ok(SaveOutcome { ok: true, executed, restored: false, error: None })
+                }
+                Err(e) => Ok(SaveOutcome {
+                    ok: false,
+                    executed,
+                    restored: false,
+                    error: Some(e.display()),
+                }),
             }
         }
 
@@ -636,6 +672,33 @@ mod tests {
         assert_eq!(cell(&row, 1), "");
         assert_eq!(cell(&row, 2), "42");
         assert_eq!(cell(&row, 9), "", "out of range must not panic");
+    }
+
+    /// The PG trigger editor sends `DROP TRIGGER IF EXISTS …` in `drop_sql`
+    /// (buildPgTriggerDdl emits a plain CREATE TRIGGER; OR REPLACE needs PG
+    /// 14). Discarding it — what the OR REPLACE arm used to do — made every
+    /// save of an existing trigger fail on the duplicate. These pin the
+    /// routing and the execution order.
+    #[test]
+    fn a_supplied_drop_routes_the_save_to_drop_first() {
+        // PostgreSQL trigger: a DROP arrives → drop-first.
+        assert!(save_needs_drop_first(false, "DROP TRIGGER IF EXISTS t ON s.tab"));
+        // PostgreSQL function / SQL Server anything: no DROP → one atomic
+        // CREATE OR REPLACE / OR ALTER, nothing to restore.
+        assert!(!save_needs_drop_first(false, ""));
+        assert!(!save_needs_drop_first(false, "   \n  "));
+        // MySQL has no CREATE OR REPLACE for routines: always drop-first,
+        // even when the drop is empty (a brand-new object).
+        assert!(save_needs_drop_first(true, ""));
+    }
+
+    #[test]
+    fn the_drop_runs_before_the_create() {
+        let stmts = drop_first_statements(
+            "DROP TRIGGER IF EXISTS t ON s.tab", "CREATE TRIGGER t …");
+        assert_eq!(stmts, vec!["DROP TRIGGER IF EXISTS t ON s.tab", "CREATE TRIGGER t …"]);
+        // A brand-new object has no drop — the CREATE is the whole plan.
+        assert_eq!(drop_first_statements("", "CREATE TRIGGER t …"), vec!["CREATE TRIGGER t …"]);
     }
 }
 

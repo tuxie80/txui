@@ -1,6 +1,6 @@
-/// Dump / restore via external CLI tools (mysqldump, mydumper/myloader,
-/// pg_dump/pg_restore, mysql, psql) with a visible generated command,
-/// streamed output, and cancellation.
+/// Dump / restore via external CLI tools (mysqldump / mariadb-dump,
+/// mydumper/myloader, pg_dump/pg_restore, mysql / mariadb, psql) with a
+/// visible generated command, streamed output, and cancellation.
 ///
 /// Security posture:
 /// - Only allowlisted binaries can be spawned.
@@ -24,14 +24,22 @@ use crate::db::types::Engine;
 use crate::state::AppState;
 
 /// Binaries this module is allowed to spawn, with their DB-write side.
+///
+/// mariadb-dump / mariadb are the MariaDB-native names (the mysqldump/mysql
+/// symlinks are deprecated since MariaDB 11.4). There is no mariadb-loader:
+/// the mydumper project ships myloader under that name only. Flavor is not
+/// knowable here (the panel works from saved configs, no live session), so
+/// both namings are accepted for a MySQL-family connection.
 const TOOLS: &[(&str, bool)] = &[
-    ("mysqldump",  false),
-    ("mydumper",   false),
-    ("pg_dump",    false),
-    ("mysql",      true),
-    ("myloader",   true),
-    ("pg_restore", true),
-    ("psql",       true),
+    ("mysqldump",    false),
+    ("mariadb-dump", false),
+    ("mydumper",     false),
+    ("pg_dump",      false),
+    ("mysql",        true),
+    ("mariadb",      true),
+    ("myloader",     true),
+    ("pg_restore",   true),
+    ("psql",         true),
 ];
 
 fn is_write_tool(tool: &str) -> bool {
@@ -80,7 +88,8 @@ fn search_dirs() -> Vec<PathBuf> {
                         let n = e.file_name();
                         let n = n.to_string_lossy();
                         n.starts_with("postgresql@") || n.starts_with("mysql-client@")
-                            || n.starts_with("mysql@") || n.starts_with("mydumper@")
+                            || n.starts_with("mysql@") || n.starts_with("mariadb@")
+                            || n.starts_with("mydumper@")
                     })
                     .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().join("bin")))
                     .collect();
@@ -137,8 +146,9 @@ fn install_hint(tool: &str) -> String {
     #[cfg(target_os = "macos")]
     {
         let pkg = match tool {
-            "mydumper" | "myloader" => "mydumper",
-            "mysqldump" | "mysql"   => "mysql-client",
+            "mydumper" | "myloader"     => "mydumper",
+            "mysqldump" | "mysql"       => "mysql-client",
+            "mariadb-dump" | "mariadb"  => "mariadb",
             _ => "libpq",
         };
         format!("install it (e.g. `brew install {pkg}`) or add it to PATH")
@@ -146,8 +156,9 @@ fn install_hint(tool: &str) -> String {
     #[cfg(target_os = "linux")]
     {
         let pkg = match tool {
-            "mydumper" | "myloader" => "mydumper",
-            "mysqldump" | "mysql"   => "mysql-client",
+            "mydumper" | "myloader"     => "mydumper",
+            "mysqldump" | "mysql"       => "mysql-client",
+            "mariadb-dump" | "mariadb"  => "mariadb-client",
             _ => "postgresql-client",
         };
         format!("install it (e.g. `sudo apt install {pkg}` or `sudo dnf install {pkg}`) or add it to PATH")
@@ -260,11 +271,12 @@ fn allow_table(tool: &str) -> Vec<(&'static str, FlagKind)> {
     use FlagKind::{Bool as B, Value as V, DbName as D};
     let mut t: Vec<(&'static str, FlagKind)> = Vec::new();
     match tool {
-        "mysqldump" | "mysql" | "mydumper" | "myloader" => t.extend_from_slice(mysql_conn_flags()),
+        "mysqldump" | "mariadb-dump" | "mysql" | "mariadb" | "mydumper" | "myloader" =>
+            t.extend_from_slice(mysql_conn_flags()),
         _ => t.extend_from_slice(pg_conn_flags()),
     }
     t.extend_from_slice(match tool {
-        "mysqldump" => &[
+        "mysqldump" | "mariadb-dump" => &[
             ("single-transaction", B), ("routines", B), ("R", B), ("triggers", B),
             ("events", B), ("E", B), ("no-data", B), ("d", B), ("quick", B), ("q", B),
             ("result-file", V), ("r", V), ("lock-tables", B), ("no-create-info", B), ("t", B),
@@ -279,7 +291,7 @@ fn allow_table(tool: &str) -> Vec<(&'static str, FlagKind)> {
             ("set-gtid-purged", V), ("ignore-table", V), ("default-character-set", V),
             ("compatible", V), ("master-data", B), ("column-statistics", B),
         ][..],
-        "mysql" => &[
+        "mysql" | "mariadb" => &[
             ("force", B), ("f", B), ("verbose", B), ("v", B), ("show-warnings", B),
             ("binary-mode", B), ("compress", B), ("C", B), ("quick", B), ("q", B),
             ("batch", B), ("B", B), ("database", D), ("D", D),
@@ -329,7 +341,7 @@ fn reject_table(tool: &str) -> &'static [(&'static str, &'static str)] {
     const PW: &str = "the password is passed via env (MYSQL_PWD / PGPASSWORD) — never on the command line";
     const REPOINT: &str = "it can re-point the tool away from this connection's server";
     match tool {
-        "mysqldump" | "mysql" | "mydumper" | "myloader" => &[
+        "mysqldump" | "mariadb-dump" | "mysql" | "mariadb" | "mydumper" | "myloader" => &[
             ("p", PW), ("password", PW),
             ("S", REPOINT), ("socket", REPOINT),
             ("defaults-file", REPOINT), ("defaults-extra-file", REPOINT),
@@ -772,5 +784,37 @@ mod tests {
         // parsed as another flag.
         let args = sv(&["--where", "id > -1", "shop"]);
         assert!(validate_argv("mysqldump", &args, HOST, PORT, USER).is_ok());
+    }
+
+    #[test]
+    fn mariadb_named_tools_are_allowlisted_with_mysql_write_sides() {
+        // MariaDB 11.4 deprecates the mysqldump/mysql names; the mariadb-*
+        // binaries must be spawnable, with the same write/read split.
+        assert!(!is_write_tool("mariadb-dump"));
+        assert!(is_write_tool("mariadb"));
+        assert!(TOOLS.iter().any(|(t, _)| *t == "mariadb-dump"));
+        assert!(TOOLS.iter().any(|(t, _)| *t == "mariadb"));
+        // mariadb-loader does not exist — myloader is the only parallel loader.
+        assert!(!TOOLS.iter().any(|(t, _)| *t == "mariadb-loader"));
+    }
+
+    #[test]
+    fn mariadb_named_tools_validate_like_the_mysql_ones() {
+        let dump = sv(&[
+            "--host", HOST, "--port", "3306", "--user", USER,
+            "--single-transaction", "--routines", "--triggers", "--events", "--quick",
+            "--result-file", "/tmp/dump.sql", "shop",
+        ]);
+        assert!(validate_argv("mariadb-dump", &dump, HOST, PORT, USER).is_ok());
+
+        let restore = sv(&["--host", HOST, "--port", "3306", "--user", USER, "--force", "shop"]);
+        assert!(validate_argv("mariadb", &restore, HOST, PORT, USER).is_ok());
+
+        // Same boundaries as the mysql-named tools.
+        assert!(validate_argv("mariadb-dump", &sv(&["--host", "attacker.example", "shop"]), HOST, PORT, USER).is_err());
+        assert!(validate_argv("mariadb", &sv(&["--user", "root", "shop"]), HOST, PORT, USER).is_err());
+        assert!(validate_argv("mariadb", &sv(&["-p", "secret"]), HOST, PORT, USER).is_err());
+        assert!(validate_argv("mariadb-dump", &sv(&["--defaults-file=/tmp/x.cnf"]), HOST, PORT, USER).is_err());
+        assert!(validate_argv("mariadb-dump", &sv(&["--ssl-mode=DISABLED"]), HOST, PORT, USER).is_err());
     }
 }

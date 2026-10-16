@@ -46,12 +46,15 @@ test('Redis and ClickHouse agree with their buttons too', () => {
   for (const c of ['erDiagram', 'dataGen', 'csvImport', 'sqlQuality'] as const) {
     assert.equal(can('redis', c), false, `redis.${c}`);
   }
-  // ClickHouse still has no ER diagram (no FKs), generator or import (writes),
-  // but SQL Quality flipped to true with its own CH rulebook
-  // (utils/chQuality.ts) — see the clickhouse entry's comment in engineCaps.
-  for (const c of ['erDiagram', 'dataGen', 'csvImport'] as const) {
+  // ClickHouse still has no ER diagram (no FKs) or generator (the writer
+  // speaks MySQL/PG wire protocols), but SQL Quality flipped to true with its
+  // own CH rulebook (utils/chQuality.ts) and csvImport to true via the
+  // importer's generic multi-row INSERT path — see the clickhouse entry's
+  // comment in engineCaps.
+  for (const c of ['erDiagram', 'dataGen'] as const) {
     assert.equal(can('clickhouse', c), false, `clickhouse.${c}`);
   }
+  assert.equal(can('clickhouse', 'csvImport'), true, 'clickhouse.csvImport');
   assert.equal(can('clickhouse', 'sqlQuality'), true, 'clickhouse.sqlQuality');
 });
 
@@ -100,6 +103,20 @@ test('SQLite does not offer what the backend refuses', () => {
   assert.equal(can('sqlite', 'dataGen'), false);
   assert.equal(can('sqlite', 'csvImport'), true);
   assert.equal(can('sqlite', 'sqlQuality'), true);
+});
+
+test('SQLite and Parquet have no default-database picker — it only errored', () => {
+  // set_session_db refuses both engines ("default database is not supported
+  // for this engine"), and the current-DB probe (`SELECT current_schema()`)
+  // is not valid on either — so the dropdown rendered, probed with invalid
+  // SQL, and then alerted on every choice. A picker that errors when touched
+  // is worse than none (the duckdb entry's reasoning); both gaps are
+  // registered in utils/engineGaps.ts.
+  assert.equal(can('sqlite', 'databaseSelect'), false);
+  assert.equal(can('parquet', 'databaseSelect'), false);
+  // sqlite.erDiagram stays TRUE — the diagram's SQLite arm exists; pin it so
+  // this fix cannot be misread as touching it.
+  assert.equal(can('sqlite', 'erDiagram'), true);
 });
 
 test('the DBA panels are MySQL and PostgreSQL only', () => {
@@ -238,6 +255,15 @@ test('SQL Server draws ER diagrams', () => {
   // precision that make a diagram column worth reading.
   assert.equal(can('sqlserver', 'erDiagram'), true);
   assert.ok(enginesWith('erDiagram').includes('sqlserver'));
+});
+
+test('SQLite draws ER diagrams', () => {
+  // The flag was true before the panel had a SQLite arm — it opened, ran
+  // pg_catalog SQL and errored. The pragma-based arm now exists
+  // (tests/erDiagramSqlite.test.ts pins it); pin the flag too so nobody
+  // "fixes" the pair by hiding the panel again.
+  assert.equal(can('sqlite', 'erDiagram'), true);
+  assert.ok(enginesWith('erDiagram').includes('sqlite'));
 });
 
 test('SQL Server lights panels one at a time, never via sqlDba', () => {

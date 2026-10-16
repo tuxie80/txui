@@ -39,6 +39,14 @@ const PRESETS: Record<string, { label: string; sql: string }[]> = {
   redis: [
     { label: 'Keyspace size', sql: 'DBSIZE' },
   ],
+  clickhouse: [
+    // name/value rows — system.metrics and system.asynchronous_metrics both
+    // expose (metric, value); single-row aggregates use the numeric-column path.
+    { label: 'Queries', sql: "SELECT metric, value FROM system.metrics WHERE metric IN ('Query','HTTPConnection','TCPConnection','MySQLConnection','PostgreSQLConnection')" },
+    { label: 'Merges & replication', sql: "SELECT metric, value FROM system.metrics WHERE metric IN ('Merge','ReplicatedFetch','ReplicatedSend','ReplicatedChecks')" },
+    { label: 'Parts & memory', sql: "SELECT metric, value FROM system.asynchronous_metrics WHERE metric IN ('TotalPartsOfMergeTreeTables','MemoryTracking','NumberOfTables','ReplicasMaxQueueSize')" },
+    { label: 'Running processes', sql: 'SELECT count() AS running_queries, sum(memory_usage) AS memory_bytes, sum(read_rows) AS read_rows FROM system.processes' },
+  ],
 };
 
 interface Metric {

@@ -302,12 +302,34 @@ test('clickhouse: build → parse round-trip keeps ssl, readonly and settings', 
   assert.deepEqual(back.warnings, []);
 });
 
-test('mongodb+srv implies TLS and carries no port', () => {
+test('mongodb+srv implies TLS, carries no port, and keeps the SRV marker', () => {
   const p = ok('mongodb+srv://u@cluster0.example.net/appdb');
   assert.equal(p.engine, 'mongodb');
   assert.equal(p.sslMode, 'require');
   assert.equal(p.port, null);
   assert.equal(p.database, 'appdb');
+  // The SRV scheme must survive the round trip to the backend: it builds the
+  // driver URI from host/port, so without this marker SRV discovery
+  // degenerated into dialing the bare discovery domain on 27017.
+  assert.equal(p.extraParams['srv'], 'true');
+});
+
+test('mongodb+srv: build → parse round-trip keeps the srv scheme and drops the port', () => {
+  const url = buildConnectionUrl({
+    engine: 'mongodb', host: 'cluster0.example.net', port: null, user: 'u',
+    database: 'appdb', sslMode: 'require', extraParams: { srv: 'true', authSource: 'admin' },
+  });
+  assert.ok(url.startsWith('mongodb+srv://'), url);
+  assert.ok(!url.includes(':27017'), url);
+  // srv rides the scheme, not the query string — it is not a driver URI option.
+  assert.ok(!url.includes('srv='), url);
+  const back = ok(url);
+  assert.equal(back.engine, 'mongodb');
+  assert.equal(back.host, 'cluster0.example.net');
+  assert.equal(back.port, null);
+  assert.equal(back.sslMode, 'require');
+  assert.equal(back.extraParams['srv'], 'true');
+  assert.equal(back.extraParams['authSource'], 'admin');
 });
 
 test('mongodb: tls/ssl params, connectTimeoutMS, appName, authSource', () => {

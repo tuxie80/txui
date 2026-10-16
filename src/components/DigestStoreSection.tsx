@@ -51,6 +51,12 @@ interface StoredDigestDelta {
   after_mean_ms: number;
 }
 
+/** get_digest_snapshot's payload: its meta plus the captured rows. */
+interface StoredSnapshot {
+  meta: DigestSnapshotMeta;
+  rows: DigestRowWire[];
+}
+
 interface Props {
   session: Session;
   /** The panel's latest capture as wire rows; null before the first capture. */
@@ -70,6 +76,7 @@ export function DigestStoreSection({ session, latestRows }: Props) {
   const [beforeId, setBeforeId] = useState<number | null>(null);
   const [afterId, setAfterId] = useState<number | null>(null);
   const [deltas, setDeltas] = useState<StoredDigestDelta[] | null>(null);
+  const [viewed, setViewed] = useState<StoredSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -111,11 +118,22 @@ export function DigestStoreSection({ session, latestRows }: Props) {
     try {
       await invoke('delete_digest_snapshot', { id });
       setDeltas(null);
+      setViewed(v => (v && v.meta.id === id ? null : v));
       await refresh();
     } catch (e) {
       setError(errorDisplay(e));
     }
   }, [refresh]);
+
+  /** Open a stored snapshot — its captured rows, not just the diff. */
+  const view = useCallback(async (id: number) => {
+    setError(null);
+    try {
+      setViewed(await invoke<StoredSnapshot>('get_digest_snapshot', { id }));
+    } catch (e) {
+      setError(errorDisplay(e));
+    }
+  }, []);
 
   const diff = useCallback(async () => {
     if (beforeId == null || afterId == null) return;
@@ -175,9 +193,41 @@ export function DigestStoreSection({ session, latestRows }: Props) {
           {stored.map(m => (
             <span key={m.id} className="dv-desc" style={{ alignSelf: 'center' }}>
               {optLabel(m)}{' '}
+              <button className="icon-btn" title="View this snapshot's captured rows"
+                onClick={() => void view(m.id)}>👁</button>
               <button className="icon-btn" title="Delete stored snapshot" onClick={() => void remove(m.id)}>×</button>
             </span>
           ))}
+        </div>
+      )}
+
+      {viewed && (
+        <div className="digest-result">
+          <div className="row-actions" style={{ justifyContent: 'flex-start', padding: '0 0 4px' }}>
+            <span className="dv-desc">Snapshot {optLabel(viewed.meta)} — cumulative counters at capture.</span>
+            <button className="icon-btn" title="Close snapshot" onClick={() => setViewed(null)}>×</button>
+          </div>
+          <table className="td-table">
+            <thead>
+              <tr><th>Statement (digest)</th><th>calls</th><th>total time</th><th>mean</th><th>rows</th><th>blks hit</th><th>blks read</th></tr>
+            </thead>
+            <tbody>
+              {viewed.rows.slice(0, 200).map(r => (
+                <tr key={r.digest_id}>
+                  <td className="digest-text" title={r.query_text}>{r.query_text}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtInt(r.calls)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtMs(r.total_ms)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtMs(r.mean_ms)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtInt(r.rows_total)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtInt(r.shared_blks_hit)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtInt(r.shared_blks_read)}</td>
+                </tr>
+              ))}
+              {viewed.rows.length === 0 && (
+                <tr><td colSpan={7} className="mnt-empty">This snapshot holds no digests.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       )}
 

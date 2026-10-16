@@ -24,6 +24,7 @@ import type { QueryResult, Session } from '../types';
 import { StatusIcon } from './StatusIcon';
 import { planSearch, planSummary, DEFAULT_LIMIT } from '../utils/dbSearch';
 import type { SearchMode, SearchPlan, SearchTable } from '../utils/dbSearch';
+import { schemaListSql, defaultSchema } from '../utils/schemaPick';
 import { fmtDuration } from '../utils/fmtDuration';
 
 interface Props {
@@ -65,10 +66,31 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
   const [showSkipped, setShowSkipped] = useState(false);
   const cancelled = useRef(false);
 
+  // SQL Server has no default-database plumbing (engineCaps databaseSelect is
+  // false and DbScopeBar hides itself), so the `schema` prop never arrives for
+  // it. The panel then enumerates the schemas itself into an in-panel picker,
+  // defaulting to dbo — the same pattern as RoutinePanel/MaintenancePanel.
+  // Every other engine is untouched: the prop wins whenever it is provided.
+  const [mssqlSchemas, setMssqlSchemas] = useState<string[]>([]);
+  const [pickedSchema, setPickedSchema] = useState('');
+  useEffect(() => {
+    if (session.engine !== 'sqlserver' || schema) return;
+    const sql = schemaListSql(session.engine);
+    if (!sql) return;
+    invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql })
+      .then(r => {
+        const l = r.rows.map(x => String(x[0]));
+        setMssqlSchemas(l);
+        setPickedSchema(d => d || defaultSchema(session.engine, l));
+      })
+      .catch(e => setErrors([errorDisplay(e)]));
+  }, [session.engine, session.sessionId, schema]);
+  const effSchema = schema ?? (pickedSchema || null);
+
   // ── catalog ────────────────────────────────────────────────────────────────
 
   const loadTables = useCallback(async () => {
-    if (!schema) return;
+    if (!effSchema) return;
     setLoadingMeta(true);
     setErrors([]);
     try {
@@ -84,7 +106,7 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
            JOIN sys.objects o ON o.object_id = c.object_id AND o.type = 'U'
            JOIN sys.schemas s ON s.schema_id = o.schema_id
            JOIN sys.types t ON t.user_type_id = c.user_type_id
-           WHERE s.name = ${sqlLiteral(schema, 'sqlserver')}
+           WHERE s.name = ${sqlLiteral(effSchema, 'sqlserver')}
            ORDER BY o.name, c.column_id`
         : session.engine === 'postgres'
         ? `SELECT c.table_name, c.column_name, c.data_type,
@@ -95,7 +117,7 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
             AND t.table_type = 'BASE TABLE'
            LEFT JOIN pg_stat_user_tables s
              ON s.schemaname = c.table_schema AND s.relname = c.table_name
-           WHERE c.table_schema = ${sqlLiteral(schema, 'postgres')}
+           WHERE c.table_schema = ${sqlLiteral(effSchema, 'postgres')}
            ORDER BY c.table_name, c.ordinal_position`
         : `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.COLUMN_TYPE,
              COALESCE(t.TABLE_ROWS, 0) AS rows
@@ -103,7 +125,7 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
            JOIN information_schema.TABLES t
              ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
             AND t.TABLE_TYPE = 'BASE TABLE'
-           WHERE c.TABLE_SCHEMA = ${sqlLiteral(schema, 'mysql')}
+           WHERE c.TABLE_SCHEMA = ${sqlLiteral(effSchema, 'mysql')}
            ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`;
       const res = await invoke<QueryResult>('monitor_query', {
         sessionId: session.sessionId, sql,
@@ -113,7 +135,7 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
         const [tname, cname, ctype, rows] = r as [string, string, string, number];
         let t = byTable.get(tname);
         if (!t) {
-          t = { schema, name: tname, columns: [], estimatedRows: Number(rows) || 0 };
+          t = { schema: effSchema, name: tname, columns: [], estimatedRows: Number(rows) || 0 };
           byTable.set(tname, t);
         }
         t.columns.push({ name: cname, typeName: ctype });
@@ -125,7 +147,7 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
     } finally {
       setLoadingMeta(false);
     }
-  }, [schema, session.sessionId, session.engine]);
+  }, [effSchema, session.sessionId, session.engine]);
 
   useEffect(() => { void loadTables(); }, [loadTables]);
 
@@ -190,7 +212,14 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
     <div className="dbs">
       <div className="panel-header">
         <span className="panel-title">🔎 Find in database</span>
-        {schema && <span className="dbs-schema">{schema}</span>}
+        {schema
+          ? <span className="dbs-schema">{schema}</span>
+          : mssqlSchemas.length > 0 && (
+            <select value={pickedSchema} onChange={e => setPickedSchema(e.target.value)}
+                    title="Schema — SQL Server has no default database, so the panel lists its schemas itself">
+              {mssqlSchemas.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
         <div style={{ flex: 1 }} />
         <button className="toolbar-btn" onClick={loadTables} disabled={loadingMeta || running}>
           Reload tables
@@ -198,7 +227,7 @@ export function DbSearchPanel({ session, schema, onClose }: Props) {
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
 
-      {!schema && (
+      {!effSchema && (
         <div className="dbs-note">Select a database first — there is nothing to search yet.</div>
       )}
 

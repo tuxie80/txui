@@ -15,6 +15,7 @@ import { FastGrid } from './FastGrid';
 import { CopyExportMenu } from './CopyExportMenu';
 import { GridSettingsPopover } from './GridSettingsPopover';
 import { isWriteStatement } from '../utils/sqlGuard';
+import { isRedisWrite } from '../utils/redisWrite';
 import { shortcuts } from '../utils/platform';
 
 /** Shortcut labels for this platform — see utils/platform. */
@@ -133,12 +134,15 @@ export function MultiExec({ onClose }: Props) {
     // Safety: read-only servers are excluded from writes; prod requires confirmation.
     // The fleet may span engines and the guard's comment/string rules are
     // engine-aware — a statement counts as a write if ANY target's engine
-    // would classify it as one.
+    // would classify it as one. Redis is judged by its own classifier:
+    // sqlGuard is SQL-shaped and reports FLUSHALL/DEL/SET as reads, so without
+    // the redisWrite arm the read-only/prod prompts never fired for a Redis
+    // fleet (the backend still refused per server — this is the UX mirror).
     const targets = conns.filter(c => selected.has(c.id));
     const engines = [...new Set(targets.map(c => c.engine))];
     const isWrite = engines.length === 0
       ? isWriteStatement(text)
-      : engines.some(eng => isWriteStatement(text, eng));
+      : engines.some(eng => eng === 'redis' ? isRedisWrite(text) : isWriteStatement(text, eng));
     if (isWrite) {
       const readOnlyNames = targets.filter(c => c.read_only).map(c => c.name);
       if (readOnlyNames.length > 0) {

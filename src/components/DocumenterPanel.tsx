@@ -23,6 +23,7 @@ import { escapeLiteral } from '../utils/sqlIdent';
 import { toMarkdown, toHtmlDoc, docFileName } from '../utils/schemaDoc';
 import type { SchemaDoc, DocTable, DocRoutine } from '../utils/schemaDoc';
 import { saveTextAs } from '../utils/exportersIo';
+import { schemaListSql, defaultSchema } from '../utils/schemaPick';
 
 interface Props {
   session: Session;
@@ -35,7 +36,7 @@ type Format = 'md' | 'html';
 export function DocumenterPanel({ session, schema, onClose }: Props) {
   const isMysql = session.engine === 'mysql';
   const isMssql = session.engine === 'sqlserver';
-  const supported = can(session.engine, 'sqlDba');
+  const supported = can(session.engine, 'documenter');
 
   const [doc, setDoc] = useState<SchemaDoc | null>(null);
   const [loading, setLoading] = useState(false);
@@ -45,17 +46,38 @@ export function DocumenterPanel({ session, schema, onClose }: Props) {
   const [diagram, setDiagram] = useState(true);
   const [saved, setSaved] = useState<string | null>(null);
 
+  // SQL Server has no default-database plumbing (engineCaps databaseSelect is
+  // false and DbScopeBar hides itself), so the `schema` prop never arrives for
+  // it. The panel then enumerates the schemas itself into an in-panel picker,
+  // defaulting to dbo — the same pattern as RoutinePanel/MaintenancePanel.
+  // Every other engine is untouched: the prop wins whenever it is provided.
+  const [mssqlSchemas, setMssqlSchemas] = useState<string[]>([]);
+  const [pickedSchema, setPickedSchema] = useState('');
+  useEffect(() => {
+    if (session.engine !== 'sqlserver' || schema) return;
+    const sql = schemaListSql(session.engine);
+    if (!sql) return;
+    invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql })
+      .then(r => {
+        const l = r.rows.map(x => String(x[0]));
+        setMssqlSchemas(l);
+        setPickedSchema(d => d || defaultSchema(session.engine, l));
+      })
+      .catch(e => setError(errorDisplay(e)));
+  }, [session.engine, session.sessionId, schema]);
+  const effSchema = schema ?? (pickedSchema || null);
+
   const run = useCallback(
     (sql: string) => invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql }),
     [session.sessionId],
   );
 
   const load = useCallback(async () => {
-    if (!schema || !supported) return;
+    if (!effSchema || !supported) return;
     setLoading(true);
     setError(null);
     setSaved(null);
-    const s = escapeLiteral(schema, session.engine);
+    const s = escapeLiteral(effSchema, session.engine);
     try {
       // Four catalog queries rather than one join: information_schema joins are
       // slow enough on a large instance to look like a hang, and separate
@@ -257,7 +279,7 @@ export function DocumenterPanel({ session, schema, onClose }: Props) {
       for (const r of tblR.rows) {
         const name = String(r[0]);
         tables.set(name, {
-          schema, name,
+          schema: effSchema, name,
           engine: r[1] ? String(r[1]) : undefined,
           rows: r[2] == null ? undefined : Number(r[2]),
           comment: r[3] ? String(r[3]) : undefined,
@@ -313,21 +335,21 @@ export function DocumenterPanel({ session, schema, onClose }: Props) {
       }
 
       const routines: DocRoutine[] = routR.rows.map(r => ({
-        schema,
+        schema: effSchema,
         name: String(r[0]),
         kind: String(r[1] ?? 'FUNCTION'),
         returns: r[2] ? String(r[2]) : undefined,
         comment: r[3] ? String(r[3]) : undefined,
       }));
 
-      setDoc({ schema, engine: session.engine, tables: [...tables.values()], routines });
+      setDoc({ schema: effSchema, engine: session.engine, tables: [...tables.values()], routines });
     } catch (e) {
       setError(errorDisplay(e));
       setDoc(null);
     } finally {
       setLoading(false);
     }
-  }, [schema, supported, isMysql, isMssql, run, session.engine]);
+  }, [effSchema, supported, isMysql, isMssql, run, session.engine]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -357,9 +379,16 @@ export function DocumenterPanel({ session, schema, onClose }: Props) {
     <div className="doc">
       <div className="panel-header">
         <span className="panel-title">📘 Documenter</span>
-        {schema && <span className="doc-schema">{schema}</span>}
+        {schema
+          ? <span className="doc-schema">{schema}</span>
+          : mssqlSchemas.length > 0 && (
+            <select value={pickedSchema} onChange={e => setPickedSchema(e.target.value)}
+                    title="Schema — SQL Server has no default database, so the panel lists its schemas itself">
+              {mssqlSchemas.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
         <div style={{ flex: 1 }} />
-        <button className="toolbar-btn" onClick={() => void load()} disabled={loading || !schema}>
+        <button className="toolbar-btn" onClick={() => void load()} disabled={loading || !effSchema}>
           Reload
         </button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
@@ -367,10 +396,10 @@ export function DocumenterPanel({ session, schema, onClose }: Props) {
 
       {!supported && (
         <div className="doc-note">
-          Documenting reads the catalog, so it needs MySQL or PostgreSQL.
+          Documenting reads the catalog, so it needs MySQL, PostgreSQL or SQL Server.
         </div>
       )}
-      {supported && !schema && <div className="doc-note">Select a database first.</div>}
+      {supported && !effSchema && <div className="doc-note">Select a database first.</div>}
 
       <div className="doc-controls">
         <div className="doc-seg" role="group" aria-label="Format">

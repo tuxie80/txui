@@ -125,6 +125,35 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
   },
   {
+    id: 'mariadb-dump',
+    engine: 'mysql',
+    mode: 'dump',
+    // MariaDB's native name for mysqldump (the symlink is deprecated since
+    // 11.4) — same flags, same argv shape. Flavor is unknowable here (no
+    // live session behind a saved connection), so both namings are offered.
+    label: 'mariadb-dump — MariaDB-native single .sql file',
+    targetLabel: 'Output file',
+    targetKind: 'save-file',
+    targetDefault: 'dump.sql',
+    supportsTables: true,
+    options: [
+      { key: 'singleTx', label: '--single-transaction (consistent InnoDB snapshot)', kind: 'flag', def: true },
+      { key: 'routines', label: '--routines --triggers --events', kind: 'flag', def: true },
+      { key: 'noData',   label: '--no-data (schema only)', kind: 'flag', def: false },
+      { key: 'quick',    label: '--quick (row-at-a-time streaming)', kind: 'flag', def: true },
+    ],
+    build(i) {
+      const a = baseMysql(i);
+      if (i.options.singleTx) a.push('--single-transaction');
+      if (i.options.routines) a.push('--routines', '--triggers', '--events');
+      if (i.options.noData) a.push('--no-data');
+      if (i.options.quick) a.push('--quick');
+      a.push(...splitExtraArgs(i.extraArgs));
+      a.push('--result-file', i.target, i.database, ...i.tables);
+      return { args: a };
+    },
+  },
+  {
     id: 'mydumper',
     engine: 'mysql',
     mode: 'dump',
@@ -160,6 +189,25 @@ export const TOOL_SPECS: ToolSpec[] = [
     engine: 'mysql',
     mode: 'restore',
     label: 'mysql — load a .sql file',
+    targetLabel: 'Dump file (.sql)',
+    targetKind: 'open-file',
+    supportsTables: false,
+    options: [
+      { key: 'force', label: '--force (continue past SQL errors)', kind: 'flag', def: false },
+    ],
+    build(i) {
+      const a = baseMysql(i);
+      if (i.options.force) a.push('--force');
+      a.push(...splitExtraArgs(i.extraArgs));
+      if (i.database) a.push(i.database);
+      return { args: a, stdinFile: i.target };
+    },
+  },
+  {
+    id: 'mariadb',
+    engine: 'mysql',
+    mode: 'restore',
+    label: 'mariadb — MariaDB-native client, load a .sql file',
     targetLabel: 'Dump file (.sql)',
     targetKind: 'open-file',
     supportsTables: false,

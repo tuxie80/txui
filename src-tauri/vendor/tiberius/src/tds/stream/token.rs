@@ -247,7 +247,14 @@ where
                 TokenType::LoginAck => this.get_login_ack().await?,
                 TokenType::Sspi => this.get_sspi().await?,
                 TokenType::FeatureExtAck => this.get_feature_ext_ack().await?,
-                _ => panic!("Token {:?} unimplemented!", ty),
+                // TxUI vendored patch — a query error, never a panic
+                // (panic=abort makes a decode panic a process crash). A valid
+                // token with no modelled handler (COLINFO in browse mode, a
+                // future TokenType variant) ends the stream with a Protocol
+                // error the caller can report instead.
+                _ => return Err(Error::Protocol(
+                    format!("token {:?} unimplemented", ty).into(),
+                )),
             };
 
             Ok(Some((token, this)))

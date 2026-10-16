@@ -63,18 +63,30 @@ const KEY_SAMPLE_SIZE: i64 = 100;
 /// default authSource, per MongoDB URI semantics; `authSource` in
 /// extra_params overrides that (the common `admin` case needs it when the
 /// default db is something else).
+///
+/// `extra_params["srv"]=true` (set by utils/connUrl.ts on a `mongodb+srv://`
+/// paste) switches the scheme to `mongodb+srv://`: the driver then resolves
+/// the seed list through DNS SRV records, the URI carries NO port by spec,
+/// and the localhost pinning is skipped — the host is a discovery domain, not
+/// an endpoint (dialing it on 27017 answers nothing; that was the bug). An
+/// SSH tunnel still wins: it hands over a concrete host:port, and SRV
+/// discovery through a tunnel resolves to the wrong side of it.
 fn build_uri(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
 ) -> String {
+    let srv = host_override.is_none()
+        && config.extra_params.get("srv")
+            .map(|v| { let v = v.trim(); v.eq_ignore_ascii_case("true") || v == "1" })
+            .unwrap_or(false);
     let (host, port) = host_override.unwrap_or((
         config.host.as_deref().unwrap_or("127.0.0.1"),
         config.port.unwrap_or(27017),
     ));
     // Same macOS trap as the other drivers: "localhost" can resolve to ::1
     // only after a network change. Pinned to IPv4 unless a tunnel overrode it.
-    let host = if host_override.is_none() { super::util::pin_localhost(host) } else { host };
+    let host = if host_override.is_none() && !srv { super::util::pin_localhost(host) } else { host };
 
     let user = config.user.as_deref().unwrap_or("").trim();
     let creds = match (user.is_empty(), password.as_deref().filter(|p| !p.is_empty())) {
@@ -111,7 +123,11 @@ fn build_uri(
     }
     let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
 
-    format!("mongodb://{creds}{host}:{port}{db_path}{query}")
+    if srv {
+        format!("mongodb+srv://{creds}{host}{db_path}{query}")
+    } else {
+        format!("mongodb://{creds}{host}:{port}{db_path}{query}")
+    }
 }
 
 /// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
@@ -918,6 +934,41 @@ mod tests {
         c.host = Some("localhost".into());
         assert_eq!(build_uri(&c, None, None), "mongodb://127.0.0.1:27017");
         assert_eq!(build_uri(&c, None, Some(("localhost", 7000))), "mongodb://localhost:7000");
+    }
+
+    #[test]
+    fn srv_flag_builds_a_srv_uri_without_port() {
+        // A mongodb+srv:// paste (utils/connUrl.ts sets extra_params srv=true +
+        // TLS) must come out as SRV again: no port (by spec), no localhost
+        // pinning — the host is a DNS discovery domain, not an endpoint.
+        let mut c = cfg();
+        c.host = Some("cluster0.example.net".into());
+        c.ssl_mode = SslMode::Require;
+        c.database = Some("appdb".into());
+        c.extra_params.insert("srv".into(), "true".into());
+        assert_eq!(build_uri(&c, None, None),
+                   "mongodb+srv://cluster0.example.net/appdb?tls=true");
+        // And the marker itself is not a driver URI option — the allowlist
+        // keeps it out of the query string.
+        assert!(!build_uri(&c, None, None).contains("srv="));
+    }
+
+    #[test]
+    fn srv_uri_skips_localhost_pinning() {
+        let mut c = cfg();
+        c.host = Some("localhost".into());
+        c.extra_params.insert("srv".into(), "1".into());
+        assert_eq!(build_uri(&c, None, None), "mongodb+srv://localhost");
+    }
+
+    #[test]
+    fn ssh_tunnel_wins_over_srv() {
+        // A tunnel hands over a concrete host:port; SRV discovery through it
+        // would resolve to the wrong side of the tunnel.
+        let mut c = cfg();
+        c.extra_params.insert("srv".into(), "true".into());
+        assert_eq!(build_uri(&c, None, Some(("127.0.0.1", 51234))),
+                   "mongodb://127.0.0.1:51234");
     }
 
     // ── parse_doc ────────────────────────────────────────────────────────────

@@ -36,6 +36,12 @@ export async function loadDiagrams(connectionId: string): Promise<Diagram[]> {
 }
 
 async function writeNow(connectionId: string, diagrams: Diagram[]): Promise<void> {
+  // An empty list means the last diagram/note was deleted — the blob is
+  // cleared, so remove the file rather than leaving an empty one behind.
+  if (diagrams.length === 0) {
+    await invoke('instance_data_remove', { connectionId, key: DIAGRAM_KEY });
+    return;
+  }
   await invoke('instance_data_set', {
     connectionId, key: DIAGRAM_KEY, value: serializeDiagrams(diagrams),
   });

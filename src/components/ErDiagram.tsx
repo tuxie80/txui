@@ -52,6 +52,7 @@ interface Props {
 export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
   const isMysql = engine === 'mysql';
   const isMssql = engine === 'sqlserver';
+  const isSqlite = engine === 'sqlite';
   const supported = can(engine, 'erDiagram');
 
   const [schemas, setSchemas] = useState<string[]>([]);
@@ -121,6 +122,12 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
         + "ORDER BY CASE WHEN name IN ('sys','INFORMATION_SCHEMA') THEN 1 ELSE 0 END, name"
       : isMysql
       ? "SELECT schema_name FROM information_schema.schemata ORDER BY (schema_name IN ('information_schema','performance_schema','mysql','sys')), schema_name"
+      : isSqlite
+      // The schema axis on SQLite is the attached-database alias
+      // (PRAGMA database_list): main first, temp, then ATTACHed files in
+      // attach order — seq is that order. There is no cross-database catalog,
+      // so each alias introspects its own sqlite_master below.
+      ? "SELECT name FROM pragma_database_list ORDER BY seq"
       // pg_namespace, not information_schema.schemata: before PG 14 that view
       // lists only schemas OWNED by the current role, so a restricted account
       // could diagram fewer schemas than it can actually read. Same fix as
@@ -130,7 +137,7 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
     run(sql)
       .then(r => { const l = r.rows.map(x => String(x[0])); setSchemas(l); setSchema(s => s || l[0] || ''); })
       .catch(e => setError(errorDisplay(e)));
-  }, [run, isMysql, isMssql, supported]);
+  }, [run, isMysql, isMssql, isSqlite, supported]);
 
   // Build graph for the selected schema
   useEffect(() => {
@@ -139,7 +146,18 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
     // Show the loading state before the async introspection — intentional.
     setLoading(true);
     const q = (v: string) =>
-      escapeLiteral(v, isMssql ? 'sqlserver' : isMysql ? 'mysql' : 'postgres');
+      escapeLiteral(v, isMssql ? 'sqlserver' : isMysql ? 'mysql' : isSqlite ? 'sqlite' : 'postgres');
+    // SQLite: sqlite_master is per-database, so the alias qualifies it as an
+    // identifier, while the pragma functions take the same alias as a string
+    // literal in their second argument (`pragma_table_xinfo('t', 'main')`).
+    const sqMaster = `${quoteIdent(schema, 'sqlite')}.sqlite_master`;
+    // FTS5 shadow tables (<name>_data/_idx/…) are storage details of their
+    // parent virtual table, not schema objects — a diagram that draws them
+    // shows five extra boxes per FTS5 table. Excluded via the parent match.
+    const sqShadowFilter = `AND NOT EXISTS (
+       SELECT 1 FROM ${sqMaster} v
+       WHERE v.sql LIKE 'CREATE VIRTUAL TABLE%'
+         AND m.name LIKE v.name || '\\_%' ESCAPE '\\')`;
 
     const colsSql = isMssql
       // sys.columns + sys.types rather than information_schema, to get the
@@ -164,6 +182,17 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
          ORDER BY o.name, c.column_id`
       : isMysql
       ? `SELECT table_name, column_name, column_type, column_key FROM information_schema.columns WHERE table_schema = '${q(schema)}' ORDER BY table_name, ordinal_position`
+      : isSqlite
+      // table_xinfo, not table_info: table_info silently omits generated
+      // columns. hidden=1 columns (a virtual table module's internals) stay
+      // out; 0/2/3 = ordinary / GENERATED VIRTUAL / GENERATED STORED are in.
+      // The PK rides the fourth column as 'PRI', the MySQL shape, so SQLite
+      // needs no separate pk query either.
+      ? `SELECT m.name, p.name, p.type, CASE WHEN p.pk > 0 THEN 'PRI' ELSE '' END
+         FROM ${sqMaster} m JOIN pragma_table_xinfo(m.name, '${q(schema)}') p
+         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND p.hidden IN (0,2,3)
+         ${sqShadowFilter}
+         ORDER BY m.name, p.cid`
       : `SELECT table_name, column_name, data_type, '' FROM information_schema.columns WHERE table_schema = '${q(schema)}' ORDER BY table_name, ordinal_position`;
     // The delete rule rides along: it costs a join and turns "these tables are
     // related" into "deleting this one takes that one with it".
@@ -189,6 +218,20 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
          LEFT JOIN information_schema.referential_constraints rc
            ON rc.constraint_schema = k.constraint_schema AND rc.constraint_name = k.constraint_name
          WHERE k.table_schema = '${q(schema)}' AND k.referenced_table_name IS NOT NULL`
+      : isSqlite
+      // foreign_key_list is per-table: one row per column pair, composite FKs
+      // sharing an id (ORDER BY id, seq keeps a pair's rows together). SQLite
+      // does not store the constraint's name, so 'FK <id>' labels it. A
+      // REFERENCES without a column list means the parent's PK — f."to" is
+      // NULL then, so it is resolved to the first PK column instead of
+      // pointing the edge at nothing.
+      ? `SELECT m.name, f."from", f."table",
+                COALESCE(f."to", (SELECT pk.name FROM pragma_table_xinfo(f."table", '${q(schema)}') pk WHERE pk.pk > 0 ORDER BY pk.pk LIMIT 1)),
+                'FK ' || f.id, f.on_delete
+         FROM ${sqMaster} m JOIN pragma_foreign_key_list(m.name, '${q(schema)}') f
+         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+         ${sqShadowFilter}
+         ORDER BY m.name, f.id, f.seq`
       : `SELECT tc.table_name, kcu.column_name, ccu.table_name, ccu.column_name, tc.constraint_name, rc.delete_rule
          FROM information_schema.table_constraints tc
          JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
@@ -211,9 +254,9 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
     Promise.all([
       run(colsSql),
       run(fkSql).catch(() => ({ rows: [] } as unknown as QueryResult)),
-      // MySQL carries the PK in column_key, so it needs no second query;
-      // SQL Server and PostgreSQL both do.
-      isMysql ? Promise.resolve({ rows: [] } as unknown as QueryResult) : run(pkSql).catch(() => ({ rows: [] } as unknown as QueryResult)),
+      // MySQL and SQLite carry the PK in the column query's fourth column
+      // ('PRI'), so they need no second query; SQL Server and PostgreSQL do.
+      isMysql || isSqlite ? Promise.resolve({ rows: [] } as unknown as QueryResult) : run(pkSql).catch(() => ({ rows: [] } as unknown as QueryResult)),
     ]).then(([colsR, fkR, pkR]) => {
       if (cancelled) return;
       const fkSet = new Set(fkR.rows.map(r => `${r[0]}.${r[1]}`));
@@ -222,7 +265,7 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
       for (const r of colsR.rows) {
         const t = String(r[0]); const c = String(r[1]); const ty = String(r[2]);
         const key = `${t}.${c}`;
-        const pk = isMysql ? String(r[3]) === 'PRI' : pkSet.has(key);
+        const pk = isMysql || isSqlite ? String(r[3]) === 'PRI' : pkSet.has(key);
         const unique = isMysql ? String(r[3]) === 'UNI' : false;
         if (!byTable.has(t)) byTable.set(t, []);
         byTable.get(t)!.push({ name: c, type: ty, pk, fk: fkSet.has(key), unique: unique || pk });
@@ -265,7 +308,7 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
     return () => { cancelled = true; };
     // connectionId: virtual edges belong to one connection, so switching servers
     // must redraw them rather than keep the previous server's relations.
-  }, [schema, run, isMysql, isMssql, connectionId]);
+  }, [schema, run, isMysql, isMssql, isSqlite, connectionId]);
 
   // ── Interaction (pan / zoom / node drag / click-to-focus) ───────────────
   const drag = useRef<{
@@ -792,8 +835,10 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
     for (const r of softFound ?? []) acceptSoftRef(r);
   }, [softFound, acceptSoftRef]);
 
-  /** Few real FKs is the signal that the comments are worth reading. */
-  const fkPoor = !loading && nodes.length > 3 && edges.length < nodes.length / 4;
+  /** Few real FKs is the signal that the comments are worth reading.
+   *  Not on SQLite: the catalog stores no column comments at all, so the
+   *  scan's SQL (information_schema / pg_description) has no arm there. */
+  const fkPoor = !isSqlite && !loading && nodes.length > 3 && edges.length < nodes.length / 4;
 
   // ── Search: pan to the first hit ────────────────────────────────────────
   const jumpToFirstMatch = useCallback(() => {
@@ -1011,7 +1056,7 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
           )}
         </div>
       )}
-      {!supported && <div className="db-error">ER diagram is available for MySQL and PostgreSQL.</div>}
+      {!supported && <div className="db-error">ER diagram is available for MySQL, PostgreSQL, SQLite and SQL Server.</div>}
 
       {supported && (
         <div className={`er-canvas${moveMode ? '' : ' er-locked'}`} ref={canvasRef} onMouseDown={onCanvasDown} onWheel={onWheel}>

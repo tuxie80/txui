@@ -11,6 +11,7 @@ import { DdlModal } from './DdlModal';
 import { VirtualFkModal } from './VirtualFkModal';
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { historySql } from '../utils/temporalSql';
+import { basename } from '../utils/platform';
 import { duplicateTableSql } from '../utils/duplicateTable';
 import { insertTemplate, updateTemplate } from '../utils/gridEdits';
 import { quoteIdent } from '../utils/sqlIdent';
@@ -1014,8 +1015,17 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
         <span className="schema-tree-title">{session.connectionName}</span>
         <div style={{ display: 'flex', gap: 3 }}>
           {session.engine === 'sqlite' && (
-            <button className="icon-btn" title="Attach another SQLite database file"
-              onClick={attachDatabase}>⊕</button>
+            // Greyed with the reason on a read-only connection (the backend
+            // refuses the ATTACH) — unavailable is shown and explained, never
+            // left to error on click.
+            <button className={`icon-btn${session.readOnly ? ' unavail' : ''}`}
+              title={session.readOnly
+                ? 'Connection is read-only — attaching a database is blocked.'
+                : 'Attach another SQLite database file'}
+              data-tip={session.readOnly
+                ? 'Connection is read-only — attaching a database is blocked.'
+                : undefined}
+              onClick={() => { if (!session.readOnly) attachDatabase(); }}>⊕</button>
           )}
           <button
             className={`icon-btn ${refreshing ? 'spinning' : ''}`}
@@ -1167,6 +1177,29 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
                   onClick={() => { setObjDialog({ objType: 'database', name: '', owner: '', charset: '', collate: '' }); setCtxMenu(null); }}
                 />
               )}
+              {/* SQLite ATTACHed databases appear as database nodes named by
+                  their alias. Detach mirrors the ⊕ attach button above;
+                  `main`/`temp` are not detachable (the backend refuses too). */}
+              {session.engine === 'sqlite' && ctxMenu.tn.node.kind === 'database'
+                && 'name' in ctxMenu.tn.node
+                && ctxMenu.tn.node.name !== 'main' && ctxMenu.tn.node.name !== 'temp' && (
+                <ContextMenuItem
+                  label="Detach database"
+                  danger
+                  onClick={async () => {
+                    const node = ctxMenu.tn.node;
+                    if (node.kind !== 'database' || !('name' in node)) return;
+                    setCtxMenu(null);
+                    try {
+                      await invoke('sqlite_detach', { sessionId: session.sessionId, alias: node.name });
+                      SchemaStore.listSchema(session.sessionId)
+                        .then(nodes => { setLoadError(null); dispatch({ type: 'SET_ROOT', nodes, merge: true }); })
+                        .catch(e => setLoadError(errorDisplay(e)));
+                      window.dispatchEvent(new CustomEvent('dbgui:schema-changed'));
+                    } catch (e) { setLoadError(errorDisplay(e)); }
+                  }}
+                />
+              )}
               {isDdlOnly(ctxMenu.tn.node) && (
                 <ContextMenuItem
                   label="View DDL"
@@ -1308,8 +1341,10 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
                 />
               )}
               {/* Open the type/domain/enum editor (Agent E's panel listens for
-                  `dbgui:edit-type`). User-defined types are PG-only in this tree. */}
-              {ctxMenu.tn.node.kind === 'type' && (
+                  `dbgui:edit-type`). User-defined types are PG-only in this tree.
+                  Ranges are excluded — the editor has no range editor (typeDdl's
+                  list skips them), so the item would only produce an error. */}
+              {ctxMenu.tn.node.kind === 'type' && ctxMenu.tn.node.type_kind.toUpperCase() !== 'RANGE' && (
                 <ContextMenuItem
                   label="Edit type…"
                   onClick={() => {
@@ -1471,7 +1506,9 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
                       }}
                     />
                   )}
-                  {session.engine === 'postgres' && (
+                  {/* COPY import is offered on real tables only — COPY FROM
+                      into a view/matview fails server-side, so don't offer it. */}
+                  {session.engine === 'postgres' && ctxMenu.tn.node.kind === 'table' && (
                     <ContextMenuItem
                       label="Import CSV via COPY…"
                       onClick={async () => {
@@ -1484,8 +1521,15 @@ export function SchemaTree({ session, refreshKey, onInsertText, onBrowseTable, o
                           });
                           if (!picked || Array.isArray(picked)) return;
                           const fmt = picked.endsWith('.tsv') ? 'tsv' : 'csv';
+                          // Hardcoding header:true silently ate a headerless
+                          // file's first data row (and a .tsv's header became
+                          // data) — ask instead of guessing.
+                          const header = await confirmDialog(
+                            `Import ${basename(picked)} into ${parent}.\n\n` +
+                            'Is the first row a header (column names)?\n\nOK = skip it, Cancel = import every row as data.',
+                          );
                           const rows = await invoke<number>('pg_copy_import',
-                            { sessionId: session.sessionId, path: picked, table: parent, format: fmt, header: true });
+                            { sessionId: session.sessionId, path: picked, table: parent, format: fmt, header });
                           setLoadError(`COPY loaded ${rows.toLocaleString()} rows into ${parent}`);
                         } catch (e) { setLoadError(errorDisplay(e)); }
                       }}

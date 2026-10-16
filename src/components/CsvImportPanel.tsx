@@ -14,6 +14,7 @@ import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivi
 import { open } from '@tauri-apps/plugin-dialog';
 import type { TableMeta } from '../types/browser';
 import { quoteIdent } from '../utils/sqlIdent';
+import { csvColumnType, csvCreateTableSql } from '../utils/csvImportSql';
 import { FastGrid } from './FastGrid';
 import { basename } from '../utils/platform';
 import { audited } from '../utils/panelAudit';
@@ -103,7 +104,9 @@ export function CsvImportPanel({ sessionId, engine, environment, readOnly, onClo
         csvName: c.name,
         inferredType: c.inferred_type,
         target: c.name,
-        typeName: c.inferred_type,
+        // Mapped once here (ClickHouse: Int64/String/…), so the step-2 field
+        // shows and edits genuine target-engine types.
+        typeName: csvColumnType(engine, c.inferred_type),
         skip: false,
       })));
     } catch (e) {
@@ -112,7 +115,7 @@ export function CsvImportPanel({ sessionId, engine, environment, readOnly, onClo
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [engine]);
 
   async function pickFile() {
     const p = await open({
@@ -203,9 +206,10 @@ export function CsvImportPanel({ sessionId, engine, environment, readOnly, onClo
 
   const createSql = useMemo(() => {
     if (mode !== 'new') return null;
-    const lines = activeCols.map(c =>
-      `  ${quoteIdent(c.target || c.csvName, engine)} ${c.typeName}`);
-    return `CREATE TABLE ${quotedTable} (\n${lines.join(',\n')}\n)`;
+    return csvCreateTableSql(engine, quotedTable, activeCols.map(c => ({
+      ident: quoteIdent(c.target || c.csvName, engine),
+      type: c.typeName,
+    })));
   }, [mode, activeCols, quotedTable, engine]);
 
   const run = useCallback(async () => {
@@ -469,12 +473,13 @@ export function CsvImportPanel({ sessionId, engine, environment, readOnly, onClo
                   delete existing rows first
                 </label>
               )}
-              {/* SQL Server has no INSERT-level conflict clause at all — its
-                  upsert is MERGE, which needs the key columns to match on, and
-                  the importer only knows the CSV's column list. Offering the
-                  box and failing on Import would be worse than not offering it,
-                  so the reason is stated where the box would have been. */}
-              {mode === 'existing' && engine !== 'sqlserver' && (
+              {/* Neither SQL Server nor ClickHouse has an INSERT-level
+                  conflict clause — T-SQL's upsert is MERGE, which needs the
+                  key columns to match on; ClickHouse's is ReplacingMergeTree,
+                  which deduplicates at merge time, not on insert. Offering the
+                  box and failing on Import would be worse than not offering
+                  it, so the reason is stated where the box would have been. */}
+              {mode === 'existing' && engine !== 'sqlserver' && engine !== 'clickhouse' && (
                 <label className="gsp-check" title={engine === 'mysql' ? 'ON DUPLICATE KEY UPDATE' : 'ON CONFLICT DO NOTHING (skip duplicates)'}>
                   <input type="checkbox" checked={upsert} onChange={e => setUpsert(e.target.checked)} disabled={truncate} />
                   upsert on duplicate key {engine === 'mysql' ? '(update)' : '(skip)'}
@@ -486,12 +491,20 @@ export function CsvImportPanel({ sessionId, engine, environment, readOnly, onClo
                   and MERGE from it.
                 </span>
               )}
+              {mode === 'existing' && engine === 'clickhouse' && (
+                <span className="dv-desc" title="ReplacingMergeTree collapses duplicates when parts merge, not when rows insert">
+                  no upsert — ClickHouse deduplicates at merge time (ReplacingMergeTree), not on
+                  insert. Every row is loaded as-is.
+                </span>
+              )}
               <label className="gsp-check">
                 <input type="checkbox" checked={nullEmpty} onChange={e => setNullEmpty(e.target.checked)} />
                 empty cells → NULL
               </label>
               <span className="dv-desc">
-                {activeCols.length} column{activeCols.length === 1 ? '' : 's'} · transactional (rolls back on any error)
+                {activeCols.length} column{activeCols.length === 1 ? '' : 's'} · {engine === 'clickhouse'
+                  ? 'no transactions on ClickHouse — an error keeps the batches already in'
+                  : 'transactional (rolls back on any error)'}
               </span>
             </div>
 

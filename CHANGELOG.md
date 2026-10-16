@@ -70,13 +70,13 @@ this project follows semantic versioning.
   query opens **in a new tab** through the same honestly-logged derived-query
   path as PG's WGS 84 button; the button is greyed-with-reason (never
   hidden) when the statement can't be wrapped. **Live-verified against a
-  SQL Server 2022 container: the full MSSQL live suite — 28 tests across
+  SQL Server 2022 container: the full MSSQL live suite — 29 tests across
   driver, tuner, datagen, playground, import, routines, watch and quality —
   is green**, including the derived-query shape the button emits. tiberius
   is now **vendored**
   (`src-tauri/vendor/tiberius/`) with UDT and sql_variant panic guards.
 
-Two new Tauri commands — **171 total**. Frontend 4,636 tests, backend 846.
+Two new Tauri commands — **171 total**. Frontend 4,746 tests, backend 866.
 
 ### Fixed
 
@@ -258,6 +258,126 @@ closed:
   `tests/invokeArgs.test.ts` diffs EVERY `#[tauri::command]`'s required args
   against EVERY `invoke('…', { … })` object literal in `src/` — a missing
   arg is now a red `npm test`, not a support ticket.
+
+### Added — the engine-completeness round (2026-10-16)
+
+A full sweep of every engine against every feature the shell advertises
+(findings + per-item fix log: `docs/plans/engine-completeness-2026-10-16.md`)
+— what the geo wave was for display, this round is for reach: a menu entry
+that opens a panel that can never work is a bug, and several existed.
+
+- **SQL Server's schema tree grew the three object groups it was missing:**
+  **Sequences** (with a synthesized `CREATE SEQUENCE` for *View DDL*),
+  **Routines** (procedures and functions; CLR excluded — there is no source
+  to edit) and **table Triggers**. The frontend needed no changes — the
+  context menus, edit events and drop paths were all kind-gated, not
+  engine-gated. Live-verified on the SQL Server 2022 container (suite now
+  29 tests).
+- **SQL Server panels self-enumerate their schemas.** Routines,
+  Maintenance, Documenter and Find-in-database took their schema from the
+  default-database picker — which SQL Server deliberately has no arm for
+  (three-part names, never `USE`) — so all four opened to "Select a database
+  first" forever. Each now lists `sys.schemas` itself with an in-panel
+  picker defaulting to `dbo` (`utils/schemaPick.ts`), and Documenter's
+  capability gate checks the right flag (`documenter`, not `sqlDba`). A new
+  conformance test (`tests/panelInputs.test.ts`) fails if any schema-fed
+  panel reachable on a no-database-select engine lacks a self-supply
+  mechanism.
+- **ClickHouse CSV import.** The wizard's engine-generic batched-INSERT path
+  now covers CH: literal quoting mirrors the driver's `esc()` (backslash
+  first — never `''` doubling, which CH would silently concatenate), no
+  transaction wrap (a failed import says plainly which batches stayed),
+  `TRUNCATE TABLE` for replace, upsert refused with the reason (no conflict
+  clause exists; ReplacingMergeTree dedupes at merge time), and new tables
+  get real CH types plus `ENGINE = MergeTree ORDER BY tuple()`.
+- **ClickHouse Monitor presets** — four DBA presets over `system.metrics`,
+  `system.asynchronous_metrics` and `system.processes`.
+- **Redis browser: a Console tab and a database strip.** The console mounts
+  the mini query editor against `redis_command` — read-only sessions get a
+  banner and the server-side redisguard refusal, never a client-side guess.
+  The strip shows `db0…dbN` chips with key counts and the current database
+  highlighted; Sentinel hides it, and `redis::databaseSelect` is a
+  registered gap (there is no reconnect machinery — not invented here).
+- **SQLite ER diagrams.** The ER panel speaks SQLite now:
+  `pragma_database_list` for the schema axis, `pragma_table_xinfo` for
+  columns (generated columns included, hidden internals out),
+  `pragma_foreign_key_list` for edges — composite FKs grouped by their
+  shared id, a columnless `REFERENCES t` coalesced to t's first PK column —
+  with FTS5 shadow tables excluded. Verified verbatim against real SQLite.
+- **MariaDB-named dump tools.** `mariadb-dump` / `mariadb` join the
+  allowlist, the keg scan and the tool specs alongside their mysql twins.
+- **PostgreSQL COPY import asks about the header.** *Import via COPY…* now
+  prompts header yes/no (`HEADER true` under `FORMAT text` — PG ≥ 15, and
+  the error says so below), and is gated to real tables.
+- **MongoDB results get the map.** Both grids (Find and Aggregate) gained
+  the lazy 📈 Graphics toggle, so GeoJSON pipelines draw like everything
+  else.
+- **Multi-exec pre-flights Redis writes.** Redis targets in fleet execution
+  classify through `utils/redisWrite.ts` — a pure mirror of redisguard's
+  baseline vocabulary, drift-guarded by a test that extracts the Rust
+  constants — so the read-only block and the prod confirmation fire for
+  Redis fleets too (the backend refusal already existed; this closes the UX
+  gap).
+
+### Fixed — the engine-completeness round (2026-10-16)
+
+- **MariaDB: guarded EXPLAIN ANALYZE works, and failures stop lying.** The
+  quality probe ran MySQL's syntax on MariaDB (`EXPLAIN ANALYZE` is a syntax
+  error there; the measured plan is `ANALYZE FORMAT=JSON`) and its catch-all
+  then reported the syntax error as a *query timeout* — a fabricated verdict
+  in an exported report. The backend now probes `VERSION()` and picks the
+  right flavor (and `max_statement_time` vs `max_execution_time`); the
+  fabricated-timeout catch-all is replaced by real timeout detection (MySQL
+  3024 / MariaDB 1969 / PG) with an honest "(failed)" otherwise, and the
+  panel checkbox reads "ANALYZE FORMAT=JSON" on MariaDB.
+- **PostgreSQL trigger edits save.** `save_routine` discarded the frontend's
+  `DROP TRIGGER IF EXISTS` on PG (a comment claimed it was empty — it never
+  was), so every edit to an existing trigger failed 42710 while the DDL
+  preview showed the DROP that never ran. Drop-then-create now runs, with
+  the original restored if the create fails.
+- **Vendored tiberius: two more panic sites disarmed** (an unknown token
+  type and an off-spec `Intn` length now return protocol errors — with
+  `panic=abort` a panic is a whole-backend crash), and the vendored crate's
+  own test suite compiles and runs again (119 tests).
+- **ClickHouse header-progress store is bounded** (cap 128, evict
+  oldest-by-sequence) — the old guard was inverted and could not grow past
+  one entry, so progress lines for concurrent queries collided.
+- **Redis editing stops wiping TTLs.** Saving a string now preserves the
+  key's TTL (`KEPTTL` where the server has it, explicit re-set otherwise);
+  TTL = 0 is refused client- and server-side (it means *delete the key* —
+  the UI called it "no expiry"); the three write commands go through the
+  audited path; binary values render as hex instead of lossy UTF-8 (matching
+  the raw-command path); SCAN results are deduped; the key audit labels its
+  sample cap honestly; and Delete / Edit-TTL / Save grey with the reason on
+  read-only sessions instead of failing after the click.
+- **`mongodb+srv://` round-trips.** The URL keeps its SRV marker through the
+  connection form and the driver builds `mongodb+srv://host/db?tls=true` —
+  no port, no localhost pinning (an SSH tunnel still wins when configured).
+- **SQLite/Parquet default-database traps flipped.** Both engines reported
+  `databaseSelect: true`, which lit up a picker that could never do anything
+  (there is no `USE`); the caps now say false with `engineGaps` entries
+  explaining why.
+- **SQLite generated columns complete.** The completion cache and the
+  Open-Anything sweep read `pragma_table_xinfo`, so STORED/VIRTUAL generated
+  columns hint like stored ones.
+- **PostgreSQL range types no longer offer "Edit type…"** — the type editor
+  has no range arm, so the menu entry could only strand the user.
+- **Schema Compare says why an engine vanished** instead of showing an empty
+  picker.
+- **Four registered commands were dead code; all four are wired.**
+  `sqlite_detach` (SchemaTree → *Detach database*, refuses main/temp),
+  `drop_routine` (RoutinePanel *Drop* with confirmation),
+  `get_digest_snapshot` (the digest store's view button) and
+  `instance_data_remove` (clearing notes/diagrams/undo stacks now forgets
+  them server-side instead of resurrecting them next run). A new inverse
+  test fails if any registered command has no caller and no reasoned
+  exemption.
+- **Docs re-aligned with code** (FEATURES, BACKEND, ARCHITECTURE, PLUGINS,
+  MSSQL_DEV): the SQL Server tuner is 28 rules not 17, the live suite is 29
+  tests not 26, the CH statement-timeout is a per-request setting (there is
+  no session to set it on), `redis_shape.rs` shapes replies into grids (not
+  "key-shape sampling"), and the plugin polling recipe shows the `usePoll`
+  hook instead of the hand-rolled loop it replaced.
 
 ## [1.2.0] - 2026-10-13
 

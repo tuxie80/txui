@@ -8,6 +8,9 @@
  */
 import type { Finding, Severity } from './sqlLint.ts';
 import { mdTable } from './qualityReport.ts';
+import { parseMysqlPlan } from './planParse.ts';
+import type { PlanNode as JsonPlanNode } from './planParse.ts';
+import { misestimateOf } from './planCost.ts';
 
 export interface PlanNode {
   depth: number;
@@ -231,6 +234,110 @@ export function analyzePlanText(text: string): AnalyzeInsights {
     '### Estimation ratios (worst first)\n',
     tableRows.length
       ? mdTable(['Operation', 'Est rows', 'Actual rows', 'Ratio', 'Verdict'], tableRows)
+      : '_No measurable nodes._\n',
+  ].join('\n');
+
+  return { findings, md };
+}
+
+/**
+ * MariaDB's measured plan (`ANALYZE FORMAT=JSON`) interpreter — the sibling
+ * of {@link analyzePlanText} for the one engine whose measured plan is JSON,
+ * not TREE text. The document is MariaDB's EXPLAIN FORMAT=JSON with
+ * `r_`-prefixed measurements added; `parseMysqlPlan` already reads it (the
+ * plan view consumes the same shape), so the analysis here works from the
+ * parsed tree rather than re-slicing text.
+ *
+ * Same systematic method, same severity ladder: estimation error per node
+ * (`misestimateOf` handles the per-loop vs totalled-actuals trap), the node
+ * holding most of the measured time, and full scans that actually read a lot.
+ */
+export function analyzeMariaJson(text: string): AnalyzeInsights {
+  const plan = parseMysqlPlan(text);
+  const findings: Finding[] = [];
+  let n = 1;
+  const push = (severity: Severity, title: string, detail: string) =>
+    findings.push({ id: `P${n++}`, severity, title, detail });
+
+  interface Row { node: JsonPlanNode; mis: number | undefined }
+  const rows: Row[] = [];
+  const walk = (node: JsonPlanNode) => {
+    rows.push({ node, mis: misestimateOf(node) });
+    node.children.forEach(walk);
+  };
+  walk(plan.root);
+
+  const label = (node: JsonPlanNode) =>
+    `${node.op}${node.detail ? ` — ${node.detail}` : ''}`;
+
+  // ── estimation errors (worst first) ──
+  const offenders = rows
+    .filter(r => r.mis !== undefined && ratioSeverity(r.mis) !== null)
+    .sort((a, b) => b.mis! - a.mis!);
+  for (const o of offenders.slice(0, 5)) {
+    const s = ratioSeverity(o.mis!)!;
+    const loops = o.node.stats.loops && o.node.stats.loops > 1 ? o.node.stats.loops : 1;
+    const actPerLoop = Math.round((o.node.stats.rowsActual ?? 0) / loops);
+    const dir = actPerLoop >= (o.node.stats.rowsEst ?? 0) ? 'underestimated' : 'overestimated';
+    push(s.sev,
+      `Estimation ${s.label}: ${o.mis!.toFixed(0)}× ${dir} — ${label(o.node).slice(0, 80)}`,
+      `Estimated ${Math.round(o.node.stats.rowsEst ?? 0).toLocaleString()} rows, actual `
+        + `${actPerLoop.toLocaleString()} per loop. Estimation errors cascade upward — fix the `
+        + 'deepest wrong node first (ANALYZE TABLE / histogram / better index).');
+  }
+
+  // ── bottleneck: the node holding most of the measured time ──
+  // MariaDB reports r_total_time_ms per table access, already totalled over
+  // its loops; the join/group nodes above the tables carry no time, so there
+  // is no double counting to subtract out.
+  const timed = rows
+    .filter(r => typeof r.node.stats.msTotal === 'number')
+    .sort((a, b) => (b.node.stats.msTotal ?? 0) - (a.node.stats.msTotal ?? 0));
+  if (timed.length > 0 && plan.totalMs && plan.totalMs > 0) {
+    const top = timed[0];
+    const share = ((top.node.stats.msTotal ?? 0) / plan.totalMs) * 100;
+    if (share >= 40 && (top.node.stats.msTotal ?? 0) > 100) {
+      push('orange',
+        `Bottleneck: ${share.toFixed(0)}% of measured time in one operation`,
+        `"${label(top.node).slice(0, 100)}" accounts for `
+          + `${((top.node.stats.msTotal ?? 0) / 1000).toFixed(1)}s of `
+          + `${(plan.totalMs / 1000).toFixed(1)}s total. Optimize this node first.`);
+    }
+  }
+
+  // ── table scans that actually read a lot ──
+  for (const r of rows) {
+    if (r.node.kind !== 'scan-seq') continue;
+    const read = r.node.stats.rowsActual ?? r.node.stats.rowsEst ?? 0;
+    if (read > 100_000) {
+      push('orange', `Table scan: ${label(r.node).slice(0, 80)}`,
+        `${Math.round(read).toLocaleString()} rows read without an index (measured). `
+          + 'Check whether a usable index exists or should.');
+    }
+  }
+
+  // ── estimation-error table (worst first) ──
+  const tableRows = rows
+    .filter(r => r.mis !== undefined)
+    .sort((a, b) => b.mis! - a.mis!)
+    .slice(0, 12)
+    .map(r => {
+      const sev = ratioSeverity(r.mis!);
+      const loops = r.node.stats.loops && r.node.stats.loops > 1 ? r.node.stats.loops : 1;
+      return [
+        label(r.node).slice(0, 60),
+        Math.round(r.node.stats.rowsEst ?? 0).toLocaleString(),
+        `${Math.round((r.node.stats.rowsActual ?? 0) / loops).toLocaleString()}${loops > 1 ? ` ×${loops.toLocaleString()}` : ''}`,
+        `${r.mis!.toFixed(1)}×`,
+        sev ? `${sev.sev === 'red' ? '❌' : sev.sev === 'orange' ? '⚠️⚠️' : '⚠️'} ${sev.label}` : '✓',
+      ];
+    });
+
+  const md = [
+    plan.totalMs !== undefined ? `Total measured time: **${(plan.totalMs / 1000).toFixed(2)}s**\n` : '',
+    '### Estimation errors (worst first)\n',
+    tableRows.length
+      ? mdTable(['Operation', 'Est rows', 'Actual rows/loop', 'Miss', 'Verdict'], tableRows)
       : '_No measurable nodes._\n',
   ].join('\n');
 

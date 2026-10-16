@@ -54,6 +54,17 @@ describe('registered engine gaps', () => {
     }
   });
 
+  test('Redis database switching is a registered gap, with the why and the workaround', () => {
+    // Redis HAS numbered databases and the browser shows them — the switcher
+    // is the part that does not exist (no set_session_db arm; SELECT on the
+    // shared connection races). The reason must say so and name the way out.
+    const reason = engineGapReason('redis', 'databaseSelect');
+    assert.ok(reason, 'no reason registered — the strip would grey without explanation');
+    assert.equal(can('redis', 'databaseSelect'), false);
+    assert.match(reason, /set_session_db/);
+    assert.match(reason, /reconnect/);
+  });
+
   test('the table stays small — it is exceptions, not a catalogue', () => {
     assert.ok(registeredGaps().length <= 10,
       'if this grows, the menu is being used to list everything an engine cannot do');

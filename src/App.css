@@ -1840,6 +1840,55 @@ button.primary:disabled { opacity: .5; cursor: default; }
   line-height: 16px;
 }
 
+/* db strip: the server's logical databases, right-aligned in the tab bar.
+   Indicator only — switching means editing the connection (the chips' title
+   says so); nothing here is clickable but the refresh. */
+.rb-db-strip {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+}
+.rb-db-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg3);
+  border-radius: 9px;
+  padding: 1px 8px;
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--text2);
+  cursor: default;
+}
+.rb-db-chip.current { background: var(--accent); color: #fff; }
+.rb-db-count {
+  font-size: calc(10px * var(--font-scale, 1));
+  opacity: .75;
+}
+.rb-db-refresh {
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-size: calc(12px * var(--font-scale, 1));
+  cursor: pointer;
+  padding: 0 4px;
+}
+.rb-db-refresh:hover { color: var(--text); }
+.rb-db-refresh:disabled { opacity: .5; cursor: default; }
+
+/* Console tab */
+.rb-console-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.rb-console-ro {
+  padding: 5px 12px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text2);
+  font-size: calc(11px * var(--font-scale, 1));
+  flex-shrink: 0;
+}
+
 /* Keys pane */
 .rb-keys-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -2109,6 +2158,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .rb-small-btn:disabled { opacity: .5; cursor: default; }
 
 .rb-err { padding: 6px 12px; font-size: calc(11px * var(--font-scale, 1)); color: var(--red); flex-shrink: 0; word-break: break-all; }
+.rb-trunc-note { padding: 4px 12px; font-size: calc(11px * var(--font-scale, 1)); color: var(--text2); flex-shrink: 0; }
 
 .rb-value-area { flex: 1; overflow: auto; }
 .rb-loading { padding: 16px; color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); }

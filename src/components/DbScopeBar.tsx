@@ -6,8 +6,9 @@
  * + state), so the new value flows back into every panel's `schema` prop.
  *
  * Hidden entirely when the engine has no selectable-database concept
- * (`engineCaps.databaseSelect` — Redis, MongoDB, DuckDB, SQL Server) or the
- * schema list has not loaded yet; the panel then behaves exactly as before.
+ * (`engineCaps.databaseSelect` — Redis, MongoDB, DuckDB, SQLite, Parquet, SQL
+ * Server) or the schema list has not loaded yet; the panel then behaves
+ * exactly as before.
  */
 import { MenuSelect } from './MenuSelect';
 import { can } from '../utils/engineCaps';

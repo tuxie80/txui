@@ -60,6 +60,32 @@ pub async fn explain_with_warnings(
     }
 }
 
+/// The statement pair for a guarded measured plan on a MySQL-protocol server:
+/// (session timeout, measured EXPLAIN), in execution order.
+///
+/// MariaDB needs BOTH halves spelled differently: `EXPLAIN ANALYZE` is a
+/// syntax error on every MariaDB version (its measured plan is `ANALYZE
+/// FORMAT=JSON` — the same document as its EXPLAIN FORMAT=JSON with
+/// `r_`-prefixed measurements added, which the frontend's plan parser reads),
+/// and `max_execution_time` is an unknown variable before MariaDB 11.1, where
+/// the equivalent guard is `max_statement_time` in seconds. Sending MySQL's
+/// spelling unprobed killed the whole analysis on MariaDB. Same probe as
+/// ops.rs::explain_query.
+fn mysql_analyze_statements(version: &str, sql: &str, timeout_ms: u64) -> (String, String) {
+    if version.to_lowercase().contains("mariadb") {
+        // Seconds, fractional — the caller's clamp keeps this in 0.1..=600.
+        (
+            format!("SET SESSION max_statement_time={}", timeout_ms as f64 / 1000.0),
+            format!("ANALYZE FORMAT=JSON {}", sql),
+        )
+    } else {
+        (
+            format!("SET SESSION max_execution_time={}", timeout_ms),
+            format!("EXPLAIN ANALYZE {}", sql),
+        )
+    }
+}
+
 /// EXPLAIN ANALYZE with a server-side timeout guard on the SAME connection.
 /// This EXECUTES the statement. On timeout the server error text is returned
 /// as Err — the caller reports it (a timeout is itself a finding).
@@ -117,10 +143,16 @@ pub async fn explain_analyze_guarded(
                 mysql::execute(&mut conn, &format!("USE `{}`", d.replace('`', "``")))
                     .await.map_err(|e| format!("cannot use `{}`: {}", d, e))?;
             }
-            mysql::execute(&mut conn, &format!("SET SESSION max_execution_time={}", timeout_ms))
-                .await?;
-            let stmt = format!("EXPLAIN ANALYZE {}", sql);
-            let res = mysql::execute(&mut conn, &stmt).await;
+            // The flavour decides the spelling before any statement is built:
+            // MySQL's pair is a SYNTAX ERROR / unknown variable on MariaDB.
+            // One extra round trip on a user-initiated action — the same probe
+            // ops.rs::explain_query does.
+            let version = sqlx::query_scalar::<_, String>("SELECT VERSION()")
+                .fetch_one(&mut conn).await
+                .unwrap_or_default();
+            let (set_stmt, explain_stmt) = mysql_analyze_statements(&version, &sql, timeout_ms);
+            mysql::execute(&mut conn, &set_stmt).await?;
+            let res = mysql::execute(&mut conn, &explain_stmt).await;
             res.map(|r| plan_text(&r)).map_err(Into::into)
         }
         LiveSession::Postgres(pool) => {
@@ -421,6 +453,46 @@ mod mssql_colmap_live_tests {
         if cols.is_empty() { return }
         assert_eq!(cols[0].0, "x");
         assert_eq!(cols[0].1, "varchar(4)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mysql_analyze_statements;
+
+    #[test]
+    fn mariadb_gets_analyze_format_json_and_max_statement_time() {
+        // `EXPLAIN ANALYZE` is a syntax error on every MariaDB, and
+        // `max_execution_time` an unknown variable before 11.1 — both halves
+        // of the MySQL spelling must switch.
+        let (set, explain) =
+            mysql_analyze_statements("10.11.18-MariaDB-log", "SELECT 1", 120_000);
+        assert_eq!(set, "SET SESSION max_statement_time=120");
+        assert_eq!(explain, "ANALYZE FORMAT=JSON SELECT 1");
+        assert!(!set.contains("max_execution_time"), "{set}");
+        assert!(!explain.contains("EXPLAIN ANALYZE"), "{explain}");
+    }
+
+    #[test]
+    fn mysql_gets_explain_analyze_and_max_execution_time() {
+        let (set, explain) = mysql_analyze_statements("8.0.46", "SELECT 1", 5_000);
+        assert_eq!(set, "SET SESSION max_execution_time=5000");
+        assert_eq!(explain, "EXPLAIN ANALYZE SELECT 1");
+    }
+
+    #[test]
+    fn percona_speaks_mysql_here() {
+        // Percona's version string is MySQL's — it has EXPLAIN ANALYZE.
+        let (_, explain) = mysql_analyze_statements("8.0.36-28", "SELECT 1", 5_000);
+        assert!(explain.starts_with("EXPLAIN ANALYZE "), "{explain}");
+    }
+
+    #[test]
+    fn the_mariadb_timeout_is_seconds_with_a_fractional_floor() {
+        // The command clamps timeout_ms to 100..=600_000; as seconds that is
+        // 0.1..=600 — a zero here would silently DISABLE the guard.
+        let (set, _) = mysql_analyze_statements("11.8.8-MariaDB", "SELECT 1", 100);
+        assert_eq!(set, "SET SESSION max_statement_time=0.1");
     }
 }
 

@@ -27,6 +27,11 @@
  *   entry and on explicit Refresh only — no polling. A view's server-side
  *   refusal is shown readably, not pre-hidden.
  *
+ * Both result grids carry a 📈 Graphics toggle — the same GraphicsView the
+ * SQL engines get (QueryTabs / DataBrowser): GeoJSON sub-documents draw on
+ * the map, numeric columns chart. Detection is utils/geoDetect; MongoDB
+ * sub-documents arrive as real objects, which its GeoJSON probe reads.
+ *
  * DBA panels (Processes / Server) open as extra tabs via the Tools menu's
  * `dbgui:toggle-panel` events — the listener has to live here for the same
  * reason it lives in RedisBrowser.
@@ -34,7 +39,7 @@
  * Read-only: the MongoDB driver has no write path at all (v1, by design) —
  * the hint line says so where a user would otherwise look for one.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EditorView, keymap, highlightActiveLine, highlightActiveLineGutter,
   lineNumbers } from '@codemirror/view';
@@ -50,6 +55,11 @@ import { PanelIcon } from './panelIcons';
 import { ProcessListPanel } from './ProcessListPanel';
 import { ServerInfoPanel } from './ServerInfoPanel';
 import { ResultGrid } from './ResultGrid';
+import { mappableResult } from '../utils/geoDetect';
+
+// The map/chart surface is heavy (canvas, track playback) and most sessions
+// never open it — lazy per the panel contract, same as QueryTabs does.
+const GraphicsView = lazy(() => import('./GraphicsView').then(m => ({ default: m.GraphicsView })));
 
 interface Props { session: Session; isActive?: boolean }
 
@@ -139,6 +149,9 @@ export function MongoBrowser({ session, isActive }: Props) {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [plan, setPlan] = useState<string | null>(null);
   const [analyze, setAnalyze] = useState(false);
+  // 📈 Graphics toggle over the Find / Aggregate result grids (GeoJSON → map).
+  const [findGraphics, setFindGraphics] = useState(false);
+  const [aggGraphics, setAggGraphics] = useState(false);
   // Aggregate tab.
   const [pipeline, setPipeline] = useState(DEFAULT_PIPELINE);
   const [aggLimit, setAggLimit] = useState(String(DEFAULT_LIMIT));
@@ -300,6 +313,23 @@ export function MongoBrowser({ session, isActive }: Props) {
   const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || DEFAULT_LIMIT));
   const sk = Math.max(0, Number(skip) || 0);
 
+  // The map/chart surface over a result — identical wiring to QueryTabs'
+  // Graphics tab: geometry-first when the rows carry decodable geometry
+  // (GeoJSON sub-documents decode via utils/geoDetect), a chart otherwise.
+  const graphicsFor = (r: QueryResult) => (
+    <Suspense fallback={null}>
+      <GraphicsView
+        columns={r.columns}
+        rows={r.rows}
+        initialMode={mappableResult(
+          r.columns.map(c => ({ name: c.name, typeName: c.type_name })),
+          r.rows,
+        ) ? 'map' : 'chart'}
+        engine={session.engine}
+      />
+    </Suspense>
+  );
+
   // Shared by the three workspace tabs.
   const addrBar = (
     <div className="mb-addr-bar">
@@ -398,6 +428,11 @@ export function MongoBrowser({ session, isActive }: Props) {
                     Next →
                   </button>
                 )}
+                {result && result.rows.length > 0 && (
+                  <button className={`toolbar-btn ${findGraphics ? 'active' : ''}`}
+                    data-tip="Visualise these documents — a map (GeoJSON) or a chart"
+                    onClick={() => setFindGraphics(v => !v)}>📈 Graphics</button>
+                )}
               </div>
             </>
           )}
@@ -409,9 +444,14 @@ export function MongoBrowser({ session, isActive }: Props) {
           )}
 
           {plan === null && result && (
-            <div className="mb-grid">
-              <ResultGrid result={result} />
-            </div>
+            <>
+              {findGraphics && (
+                <div className="mb-grid">{graphicsFor(result)}</div>
+              )}
+              <div className="mb-grid" style={findGraphics ? { display: 'none' } : undefined}>
+                <ResultGrid result={result} />
+              </div>
+            </>
           )}
 
           {!addr && emptyHint}
@@ -449,6 +489,11 @@ export function MongoBrowser({ session, isActive }: Props) {
                   title="A trailing $limit (this value, capped at 10 000) is appended server-side — an unbounded pipeline never streams a whole collection. allowDiskUse is on, so big $group/$sort stages spill instead of failing.">
                   trailing $limit guard · allowDiskUse on
                 </span>
+                {aggResult && aggResult.rows.length > 0 && (
+                  <button className={`toolbar-btn ${aggGraphics ? 'active' : ''}`}
+                    data-tip="Visualise these documents — a map (GeoJSON) or a chart"
+                    onClick={() => setAggGraphics(v => !v)}>📈 Graphics</button>
+                )}
               </div>
             </>
           )}
@@ -456,9 +501,14 @@ export function MongoBrowser({ session, isActive }: Props) {
           {aggErr && <div className="rb-err">{aggErr}</div>}
 
           {aggResult && (
-            <div className="mb-grid">
-              <ResultGrid result={aggResult} />
-            </div>
+            <>
+              {aggGraphics && (
+                <div className="mb-grid">{graphicsFor(aggResult)}</div>
+              )}
+              <div className="mb-grid" style={aggGraphics ? { display: 'none' } : undefined}>
+                <ResultGrid result={aggResult} />
+              </div>
+            </>
           )}
 
           {!addr && emptyHint}

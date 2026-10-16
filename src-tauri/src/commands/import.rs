@@ -1,5 +1,7 @@
 /// CSV import: preview (delimiter/header/type detection) + streaming,
-/// transactional import with live progress. MySQL / PostgreSQL / SQLite.
+/// transactional import with live progress. MySQL / PostgreSQL / SQLite /
+/// SQL Server / ClickHouse (the last unwrapped — CH has no interactive
+/// transactions, so a failed import keeps the batches already inserted).
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
@@ -202,22 +204,40 @@ pub struct ImportSummary {
     pub cancelled: bool,
 }
 
+/// Which engine's syntax the batch builder emits — literal quoting and the
+/// upsert clause are both dialect decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportDialect {
+    /// `''` quote doubling AND `\\` backslash doubling; ON DUPLICATE KEY UPDATE.
+    Mysql,
+    /// PostgreSQL / SQLite: `''` doubling, a backslash is data;
+    /// ON CONFLICT DO NOTHING.
+    Standard,
+    /// T-SQL: `''` doubling, no backslash escapes, no conflict clause at all.
+    SqlServer,
+    /// Backslash-first escaping (`\\` then `\'` — mirrors db/clickhouse.rs's
+    /// `esc`). `''` is NOT quote doubling in ClickHouse: adjacent literals
+    /// concatenate, so `'it''s'` would silently insert `its`.
+    ClickHouse,
+}
+
 #[cfg(test)]   // the hot path uses escape_literal_into; tests assert via this wrapper
-fn escape_literal(v: &str, mysql: bool) -> String {
+fn escape_literal(v: &str, dialect: ImportDialect) -> String {
     let mut out = String::with_capacity(v.len() + 2);
-    escape_literal_into(v, mysql, &mut out);
+    escape_literal_into(v, dialect, &mut out);
     out
 }
 
 /// Append the quoted literal to `out` — the hot-loop form: no per-value
 /// String (WP-11 11.2).
-fn escape_literal_into(v: &str, mysql: bool, out: &mut String) {
+fn escape_literal_into(v: &str, dialect: ImportDialect, out: &mut String) {
     out.push('\'');
     for ch in v.chars() {
-        match ch {
-            '\'' => out.push_str("''"),
-            '\\' if mysql => out.push_str("\\\\"),
-            c => out.push(c),
+        match (ch, dialect) {
+            ('\'', ImportDialect::ClickHouse) => out.push_str("\\'"),
+            ('\'', _) => out.push_str("''"),
+            ('\\', ImportDialect::Mysql | ImportDialect::ClickHouse) => out.push_str("\\\\"),
+            (c, _) => out.push(c),
         }
     }
     out.push('\'');
@@ -226,16 +246,14 @@ fn escape_literal_into(v: &str, mysql: bool, out: &mut String) {
 /// Build batched INSERT statements from the CSV, streaming.
 struct BatchBuilder<'a> {
     spec: &'a CsvImportSpec,
-    mysql: bool,
-    /// T-SQL has no INSERT-level conflict clause; see `statement_for`.
-    sqlserver: bool,
+    dialect: ImportDialect,
     col_list: String,
 }
 
 impl<'a> BatchBuilder<'a> {
-    fn new(spec: &'a CsvImportSpec, mysql: bool, sqlserver: bool) -> Self {
+    fn new(spec: &'a CsvImportSpec, dialect: ImportDialect) -> Self {
         let col_list = spec.columns.iter().flatten().cloned().collect::<Vec<_>>().join(", ");
-        BatchBuilder { spec, mysql, sqlserver, col_list }
+        BatchBuilder { spec, dialect, col_list }
     }
     /// Append one row's `(v1, v2, …)` tuple to `out`. Writes literals
     /// directly into the reused statement buffer — the old shape allocated a
@@ -252,7 +270,7 @@ impl<'a> BatchBuilder<'a> {
             if raw.is_empty() && self.spec.null_empty {
                 out.push_str("NULL");
             } else {
-                escape_literal_into(raw, self.mysql, out);
+                escape_literal_into(raw, self.dialect, out);
             }
         }
         out.push(')');
@@ -261,22 +279,24 @@ impl<'a> BatchBuilder<'a> {
     fn statement_for(&self, values: &str) -> String {
         let base = format!("INSERT INTO {} ({}) VALUES\n{}", self.spec.table, self.col_list, values);
         if !self.spec.upsert { return base; }
-        if self.mysql {
-            // update every non-key column on duplicate key
-            let sets: Vec<String> = self.spec.columns.iter().flatten()
-                .map(|c| format!("{c}=VALUES({c})")).collect();
-            format!("{base}\nON DUPLICATE KEY UPDATE {}", sets.join(", "))
-        } else if self.sqlserver {
-            // T-SQL has no INSERT-level conflict clause at all. Its upsert is
-            // `MERGE`, which needs the key columns to match on — and this
-            // importer does not know them; it knows a column list from a CSV
-            // header. Emitting a MERGE with a guessed key would silently update
-            // or skip the wrong rows, so the command refuses the option before
-            // it reads a byte (see `csv_import`) and this branch is unreachable.
-            base
-        } else {
+        match self.dialect {
+            ImportDialect::Mysql => {
+                // update every non-key column on duplicate key
+                let sets: Vec<String> = self.spec.columns.iter().flatten()
+                    .map(|c| format!("{c}=VALUES({c})")).collect();
+                format!("{base}\nON DUPLICATE KEY UPDATE {}", sets.join(", "))
+            }
+            // Neither T-SQL nor ClickHouse has an INSERT-level conflict
+            // clause. T-SQL's upsert is `MERGE`, which needs the key columns
+            // to match on — and this importer does not know them; it knows a
+            // column list from a CSV header. ClickHouse's is ReplacingMergeTree,
+            // which deduplicates at merge time, not on insert. Emitting a MERGE
+            // with a guessed key would silently update or skip the wrong rows,
+            // so `csv_import` refuses the option before it reads a byte and
+            // this branch is unreachable.
+            ImportDialect::SqlServer | ImportDialect::ClickHouse => base,
             // PG without a known conflict target → skip duplicates safely
-            format!("{base}\nON CONFLICT DO NOTHING")
+            ImportDialect::Standard => format!("{base}\nON CONFLICT DO NOTHING"),
         }
     }
 }
@@ -298,8 +318,7 @@ fn spawn_batch_reader(
     columns: Vec<Option<String>>,
     table: String,
     null_empty: bool,
-    mysql: bool,
-    sqlserver: bool,
+    dialect: ImportDialect,
     upsert: bool,
     tx: tokio::sync::mpsc::Sender<Result<(String, u64, u64), String>>,
 ) {
@@ -310,7 +329,7 @@ fn spawn_batch_reader(
             path: path.clone(), delimiter: String::new(), has_header,
             table, columns, create_sql: None, truncate: false, null_empty, upsert,
         };
-        let builder = BatchBuilder::new(&owned_spec, mysql, sqlserver);
+        let builder = BatchBuilder::new(&owned_spec, dialect);
         let rdr = csv::ReaderBuilder::new()
             .delimiter(delim)
             .has_headers(has_header)
@@ -397,6 +416,21 @@ pub async fn csv_import(
                     knows the CSV's column list. Import into a staging table and MERGE from \
                     it, or untick the option to insert every row.".into());
     }
+    // Same refusal, different reason: ClickHouse's answer to duplicates is
+    // ReplacingMergeTree, which collapses them at merge time — not on insert.
+    // Silently ignoring the tick would promise dedup the table may never do.
+    if spec.upsert && matches!(session.as_ref(), LiveSession::Clickhouse(_)) {
+        return Err("ClickHouse has no INSERT-level conflict clause — ReplacingMergeTree \
+                    deduplicates at merge time, not on insert. Untick the option to insert \
+                    every row, or import into a ReplacingMergeTree table and OPTIMIZE FINAL.".into());
+    }
+
+    let dialect = match session.as_ref() {
+        LiveSession::Mysql(_) => ImportDialect::Mysql,
+        LiveSession::SqlServer(_) => ImportDialect::SqlServer,
+        LiveSession::Clickhouse(_) => ImportDialect::ClickHouse,
+        _ => ImportDialect::Standard,
+    };
 
     let started = std::time::Instant::now();
     let total_bytes = std::fs::metadata(&spec.path).map(|m| m.len()).unwrap_or(0);
@@ -413,8 +447,7 @@ pub async fn csv_import(
         spec.columns.clone(),
         spec.table.clone(),
         spec.null_empty,
-        matches!(session.as_ref(), LiveSession::Mysql(_)),
-        matches!(session.as_ref(), LiveSession::SqlServer(_)),
+        dialect,
         spec.upsert,
         tx,
     );
@@ -466,8 +499,16 @@ async fn run_import_inner(
             let mut exec = Exec::Postgres(&mut conn);
             run_import(&mut exec, spec, rx, on_event, total_bytes, cancel_rx).await
         }
-        LiveSession::Clickhouse(_) =>
-            Err("CSV import into ClickHouse is not supported yet".into()),
+        LiveSession::Clickhouse(s) => {
+            // The same batched-INSERT path as the other engines — INSERT …
+            // VALUES is the native load shape over the HTTP interface, and a
+            // quoted literal is parsed per target column type, so '42' loads
+            // into an Int64. Not transaction-wrapped: ClickHouse has no
+            // interactive transactions, so a failed import keeps the batches
+            // already inserted and the error says so (see run_import).
+            let mut exec = Exec::Clickhouse(s);
+            run_import(&mut exec, spec, rx, on_event, total_bytes, cancel_rx).await
+        }
         LiveSession::Redis(..) => Err("CSV import is not available for Redis".into()),
         LiveSession::Sqlite(pool) => {
             let mut conn = pool.acquire().await?;
@@ -510,7 +551,7 @@ pub async fn cancel_import(run_key: String, state: State<'_, AppState>) -> Resul
     Ok(())
 }
 
-/// Single-connection executor across the three SQL engines.
+/// Single-connection executor across the SQL engines.
 enum Exec<'a> {
     Mysql(&'a mut sqlx::pool::PoolConnection<sqlx::MySql>),
     Postgres(&'a mut sqlx::pool::PoolConnection<sqlx::Postgres>),
@@ -518,9 +559,16 @@ enum Exec<'a> {
     // Not a pooled connection: a SQL Server session IS one pinned connection,
     // which is exactly what the BEGIN/COMMIT around the import needs.
     SqlServer(&'a crate::db::sqlserver::SqlServerSession),
+    // HTTP is stateless — there is no connection to pin and no transaction to
+    // open, which is why this arm runs unwrapped (`transactional` is false).
+    Clickhouse(&'a crate::db::clickhouse::ChSession),
 }
 
 impl Exec<'_> {
+    /// ClickHouse has no interactive transactions: BEGIN/COMMIT are syntax
+    /// errors there, and an error mid-import cannot roll back.
+    fn transactional(&self) -> bool { !matches!(self, Exec::Clickhouse(_)) }
+
     /// The statement that opens a transaction on this engine.
     ///
     /// A bare `BEGIN` is a **syntax error** in T-SQL — it opens a statement
@@ -534,6 +582,16 @@ impl Exec<'_> {
         }
     }
 
+    /// The "delete existing rows first" statement. ClickHouse's `DELETE FROM`
+    /// is a lightweight mutation — asynchronous, MergeTree-family only —
+    /// where TRUNCATE TABLE is the direct spelling of "empty this table".
+    fn delete_all_stmt(&self, table: &str) -> String {
+        match self {
+            Exec::Clickhouse(_) => format!("TRUNCATE TABLE {table}"),
+            _ => format!("DELETE FROM {table}"),
+        }
+    }
+
     async fn run(&mut self, sql: &str) -> Result<(), crate::apperror::AppError> {
         match self {
             Exec::Mysql(c) => crate::db::mysql::execute(&mut ***c, sql)
@@ -543,6 +601,8 @@ impl Exec<'_> {
             Exec::Sqlite(c) => crate::db::sqlite::execute(&mut ***c, sql)
                 .await.map(|_| ()).map_err(Into::into),
             Exec::SqlServer(s) => crate::db::sqlserver::execute(s, sql)
+                .await.map(|_| ()).map_err(Into::into),
+            Exec::Clickhouse(s) => crate::db::clickhouse::execute(s, sql)
                 .await.map(|_| ()).map_err(Into::into),
         }
     }
@@ -559,10 +619,14 @@ async fn run_import(
     if let Some(ddl) = &spec.create_sql {
         exec.run(ddl).await?;
     }
-    exec.run(exec.begin_stmt()).await?;
+    // ClickHouse runs unwrapped: no BEGIN/COMMIT exist to send, so an error
+    // keeps the batches already inserted (and says so below) instead of
+    // rolling back.
+    let txn = exec.transactional();
+    if txn { exec.run(exec.begin_stmt()).await?; }
     if spec.truncate {
-        if let Err(e) = exec.run(&format!("DELETE FROM {}", spec.table)).await {
-            let _ = exec.run("ROLLBACK").await;
+        if let Err(e) = exec.run(&exec.delete_all_stmt(&spec.table)).await {
+            if txn { let _ = exec.run("ROLLBACK").await; }
             return Err(e);
         }
     }
@@ -585,12 +649,19 @@ async fn run_import(
         }
     }
     if let Some(e) = failed {
-        let _ = exec.run("ROLLBACK").await;
-        return Err(format!("import failed (rolled back): {e}").into());
+        if txn {
+            let _ = exec.run("ROLLBACK").await;
+            return Err(format!("import failed (rolled back): {e}").into());
+        }
+        return Err(format!(
+            "import failed after {rows_done} rows: {e} — ClickHouse has no transactions, \
+             so the batches already inserted stay; the rest of the file was not imported"
+        ).into());
     }
     // A cancel COMMITs what already went in — partial import stays, which is
-    // what "stop now" means. Only an error rolls back.
-    exec.run("COMMIT").await?;
+    // what "stop now" means. Only an error rolls back. (On ClickHouse every
+    // batch is committed the moment it lands, with or without a cancel.)
+    if txn { exec.run("COMMIT").await?; }
     Ok((rows_done, cancelled))
 }
 
@@ -649,7 +720,7 @@ mod mssql_import_live_tests {
             columns: vec![Some("[code]".into()), Some("[label]".into()), Some("[qty]".into())],
             create_sql: None, truncate: false, null_empty: true, upsert: false,
         };
-        let b = BatchBuilder::new(&spec, false, true);
+        let b = BatchBuilder::new(&spec, ImportDialect::SqlServer);
         let mut values = String::new();
         for i in 0..rows {
             if i > 0 { values.push_str(",\n"); }
@@ -729,13 +800,44 @@ mod mssql_import_live_tests {
             table: "[t]".into(), columns: vec![Some("[a]".into())],
             create_sql: None, truncate: false, null_empty: true, upsert: true,
         };
-        let stmt = BatchBuilder::new(&spec, false, true).statement_for("(1)");
+        let stmt = BatchBuilder::new(&spec, ImportDialect::SqlServer).statement_for("(1)");
         // Neither other engine's clause is T-SQL, and a guessed MERGE key would
         // update the wrong rows and report success.
         assert!(!stmt.contains("ON DUPLICATE"), "{stmt}");
         assert!(!stmt.contains("ON CONFLICT"), "{stmt}");
         assert!(!stmt.contains("MERGE"), "{stmt}");
         assert!(stmt.starts_with("INSERT INTO [t] ([a]) VALUES"), "{stmt}");
+    }
+}
+
+/// The ClickHouse dialect: quoting mirrors db/clickhouse.rs's `esc` rule and
+/// no conflict clause exists to emit. (The execution path itself is the
+/// generic one, covered end-to-end by the SQLite tests above.)
+#[cfg(test)]
+mod clickhouse_dialect_tests {
+    use super::*;
+
+    #[test]
+    fn quoting_matches_the_driver_esc_rule() {
+        // Backslash first, then the quote as \' — the audit-fixed order.
+        assert_eq!(escape_literal("it's \\ fine", ImportDialect::ClickHouse),
+                   "'it\\'s \\\\ fine'");
+        // And NOT the SQL-standard doubling: ClickHouse concatenates adjacent
+        // string literals, so 'it''s' would load as `its` — silent corruption.
+        assert!(!escape_literal("it's", ImportDialect::ClickHouse).contains("''"));
+    }
+
+    #[test]
+    fn the_upsert_clause_is_never_emitted_for_clickhouse() {
+        let spec = CsvImportSpec {
+            path: String::new(), delimiter: ",".into(), has_header: true,
+            table: "`t`".into(), columns: vec![Some("`a`".into())],
+            create_sql: None, truncate: false, null_empty: true, upsert: true,
+        };
+        // `csv_import` refuses the option before reading a byte; the builder
+        // must never invent a clause ClickHouse does not have.
+        let stmt = BatchBuilder::new(&spec, ImportDialect::ClickHouse).statement_for("(1)");
+        assert_eq!(stmt, "INSERT INTO `t` (`a`) VALUES\n(1)");
     }
 }
 
@@ -796,8 +898,7 @@ mod tests {
             spec.columns.clone(),
             spec.table.clone(),
             spec.null_empty,
-            false, // not MySQL → SQLite/PG literal quoting
-            false, // not SQL Server
+            ImportDialect::Standard, // SQLite/PG literal quoting
             spec.upsert,
             tx,
         );
@@ -992,7 +1093,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         spawn_batch_reader(
             spec.path.clone(), b',', spec.has_header, spec.columns.clone(),
-            spec.table.clone(), spec.null_empty, false, false, spec.upsert, tx,
+            spec.table.clone(), spec.null_empty, ImportDialect::Standard, spec.upsert, tx,
         );
         let chan: Channel<ImportEvent> = Channel::new(move |_| {
             // The first progress event means batch 1 was inserted — cancel now.
@@ -1020,7 +1121,7 @@ mod tests {
     fn sqlite_dialect_quoting_and_upsert_shape() {
         // Non-MySQL escaping: single quotes double, backslashes stay literal —
         // SQLite does not treat backslash as an escape in string literals.
-        assert_eq!(escape_literal("it's \\ fine", false), "'it''s \\ fine'");
+        assert_eq!(escape_literal("it's \\ fine", ImportDialect::Standard), "'it''s \\ fine'");
 
         let spec = CsvImportSpec {
             path: String::new(), delimiter: ",".into(), has_header: true,
@@ -1028,7 +1129,7 @@ mod tests {
             columns: vec![Some("\"a\"".into()), None, Some("\"b\"".into())],
             create_sql: None, truncate: false, null_empty: true, upsert: true,
         };
-        let builder = BatchBuilder::new(&spec, false, false);
+        let builder = BatchBuilder::new(&spec, ImportDialect::Standard);
         // Skipped columns leave no hole in the column list…
         let mut values = String::new();
         builder.push_row_values(&csv::StringRecord::from(vec!["x", "skipped", ""]), &mut values);

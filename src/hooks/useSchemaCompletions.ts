@@ -452,12 +452,16 @@ export function useSchemaCompletions(
     // (a sorted prefix — only a predicate on its first column prunes granules
     // reliably), the partition key, and skip indexes over a bare column.
     // SQLite: the first column of each index (a later one cannot drive a
-    // lookup), plus every PRIMARY KEY column.
+    // lookup), plus every PRIMARY KEY column. table_Xinfo, not table_info:
+    // table_info omits generated columns entirely, so a PK on a generated
+    // column (STORED allows it) answered "no index" for a keyed column.
+    // hidden IN (0,2,3) keeps ordinary + VIRTUAL/STORED generated columns and
+    // drops hidden-1 virtual-table internals (mirrors db/sqlite.rs).
     const sql = engine === 'sqlite'
       ? `SELECT x.name FROM pragma_index_list(${sqlLiteral(name, 'sqlite')}) i
          JOIN pragma_index_xinfo(i.name) x ON x.key = 1 AND x.seqno = 0
-         UNION SELECT p.name FROM pragma_table_info(${sqlLiteral(name, 'sqlite')}) p
-         WHERE p.pk > 0`
+         UNION SELECT p.name FROM pragma_table_xinfo(${sqlLiteral(name, 'sqlite')}) p
+         WHERE p.pk > 0 AND p.hidden IN (0,2,3)`
       : engine === 'duckdb'
       // PK columns from the constraint record. duckdb_indexes() has no column
       // list (the CREATE INDEX text would have to be parsed), and DuckDB's real

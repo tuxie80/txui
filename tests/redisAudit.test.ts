@@ -9,8 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  auditRedisKey, auditRedisKeys, summarizeFindings,
-  BIG_STRING_BYTES, BIG_COLLECTION_ITEMS, COMPACT_ENCODING_MAX,
+  auditRedisKey, auditRedisKeys, summarizeFindings, auditButtonLabel,
+  BIG_STRING_BYTES, BIG_COLLECTION_ITEMS, COMPACT_ENCODING_MAX, AUDIT_MAX_KEYS,
   type RedisKeyAuditRow,
 } from '../src/utils/redisAudit.ts';
 
@@ -104,4 +104,17 @@ test('summarizeFindings counts per kind', () => {
   assert.equal(s['no-ttl'], 2);
   assert.equal(s['big-string'], 1);
   assert.equal(s['expired'], undefined);
+});
+
+test('the audit button label is honest about the backend cap', () => {
+  assert.equal(auditButtonLabel(37), 'Audit 37 scanned keys');
+  assert.equal(auditButtonLabel(AUDIT_MAX_KEYS), 'Audit 2,000 scanned keys');
+  // Past the cap the backend silently truncates — the label must say so.
+  assert.equal(auditButtonLabel(AUDIT_MAX_KEYS + 1), 'Audit first 2,000 of 2,001 scanned keys');
+});
+
+test('the frontend cap mirrors the backend', () => {
+  // AUDIT_MAX_KEYS in src-tauri/src/commands/redis_browser.rs is the same 2,000;
+  // a change on either side must update both.
+  assert.equal(AUDIT_MAX_KEYS, 2_000);
 });

@@ -129,3 +129,17 @@ export function summarizeFindings(findings: AuditFinding[]): Partial<Record<Audi
   for (const f of findings) out[f.kind] = (out[f.kind] ?? 0) + 1;
   return out;
 }
+
+/**
+ * Mirrors `AUDIT_MAX_KEYS` in `src-tauri/src/commands/redis_browser.rs` — the
+ * backend silently truncates a batch at this many keys, so the button must
+ * say when only a prefix of the scanned sample is audited.
+ */
+export const AUDIT_MAX_KEYS = 2_000;
+
+/** The audit-run button's label, honest about the backend's cap. */
+export function auditButtonLabel(scannedCount: number): string {
+  return scannedCount > AUDIT_MAX_KEYS
+    ? `Audit first ${AUDIT_MAX_KEYS.toLocaleString()} of ${scannedCount.toLocaleString()} scanned keys`
+    : `Audit ${scannedCount.toLocaleString()} scanned keys`;
+}

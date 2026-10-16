@@ -114,7 +114,11 @@ redis            = { version = "0.26", features = ["tokio-comp", "connection-man
 # a corporate CA fails verification out of the box). Mitigation: the
 # connection's CA-path field is wired to the URI's `tlsCAFile` (db/mongodb.rs).
 # Re-check on each driver upgrade whether a native-roots feature has appeared.
-mongodb          = { version = "3.8", default-features = false, features = ["rustls-tls", "bson-2", "compat-3-3-0"] }
+# `dns-resolver` (a default feature, off here because default-features=false)
+# is required for `mongodb+srv://` URIs — without it ClientOptions::parse
+# rejects the scheme outright (db/mongodb.rs build_uri emits it for SRV
+# connections). It pulls the hickory DNS crates transitively.
+mongodb          = { version = "3.8", default-features = false, features = ["rustls-tls", "bson-2", "compat-3-3-0", "dns-resolver"] }
 
 # SQL Server (TDS) driver — spike phase (DBA-first workstream 1, phase 1.0).
 # `default-features = false` drops the default `native-tls` + `winauth`: the
@@ -139,14 +143,22 @@ mongodb          = { version = "3.8", default-features = false, features = ["rus
 # off the table. Re-check this on every tiberius upgrade; when a rustls-0.23
 # release (or a maintained fork) appears, take it and delete this note.
 #
-# VENDORED (vendor/tiberius, verbatim 0.12.3 + one decode patch): upstream hits
+# VENDORED (vendor/tiberius, verbatim 0.12.3 + decode patches): upstream hits
 # todo!()/unimplemented!() on CLR UDT columns (geometry, geography,
 # hierarchyid) — in the metadata token decode, before any row — and the
 # release profile is panic=abort, so one SELECT crashed the whole backend.
-# The patch (marked "TxUI vendored patch" in three files) decodes UDT type
-# info per MS-TDS 2.2.5.4.2, carries the value as Binary, and turns the
-# remaining unsupported-type panics into Protocol errors. Drop the path
-# override only when an upstream release decodes UDT without panicking.
+# The patches (marked "TxUI vendored patch") decode UDT type
+# info per MS-TDS 2.2.5.4.2, carry the value as Binary, and turn the
+# remaining server-reachable panics into Protocol errors (unsupported
+# precision-column types, an Intn payload length outside {0,1,2,4,8}, and a
+# token type with no handler, e.g. COLINFO from browse mode). The manifest
+# also restores the dev-dependencies upstream's test suite needs (tokio
+# macros/rt, uuid v4 — dev-only, never in the binary); without them none of
+# the vendored #[cfg(test)] modules compile standalone. Run them with:
+#   cd vendor/tiberius && cargo test --lib --no-default-features \
+#     --features tds73,rustls,chrono,rust_decimal
+# Drop the path override only when an upstream release decodes UDT without
+# panicking.
 tiberius         = { version = "0.12.3", path = "vendor/tiberius", default-features = false, features = [
     "tds73",
     "rustls",

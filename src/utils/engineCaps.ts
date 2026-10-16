@@ -310,7 +310,11 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // pointed at CH output.
     sql: true, transactions: false, databaseSelect: true, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
-    dataGen: false, csvImport: false, sqlQuality: true, sqlVariables: true,
+    // csvImport IS supported: the importer's standard multi-row INSERT path
+    // speaks CH natively (backslash-first literal quoting, no transaction
+    // wrap — CH has none — TRUNCATE for the clear-first option). dataGen
+    // stays false: that writer only speaks MySQL/PG wire protocols.
+    dataGen: false, csvImport: true, sqlQuality: true, sqlVariables: true,
     // The designer's ClickHouse dialect: CREATE with engine + MergeTree
     // clauses, and the narrow ALTER (columns, TTL) it genuinely has.
     writes: true, tableDesigner: true, statementTimeout: true,
@@ -331,15 +335,23 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // than no button (see platformCaps for the doctrine). csvImport IS supported
     // — the importer runs standard multi-row INSERTs over the SQLite pool.
     // sqlQuality stays true: the panel degrades to static lint without EXPLAIN.
-    sql: true, transactions: true, databaseSelect: true, processList: false,
+    // databaseSelect stays false: set_session_db has no SQLite arm (attached
+    // files are addressed by name, never USEd) and the current-DB probe has no
+    // SQLite SQL — the picker rendered, probed with invalid syntax, and then
+    // errored on every choice. A picker that errors when touched is worse than
+    // none; the gap is registered in utils/engineGaps.ts.
+    sql: true, transactions: true, databaseSelect: false, processList: false,
     serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true,
     dataGen: false, csvImport: true, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: true, statementTimeout: false,
   },
   parquet: {
     // A file format. It is read through a query engine, but there is nothing
-    // to write to, nothing to tune, and no session.
-    sql: true, transactions: false, databaseSelect: true, processList: false,
+    // to write to, nothing to tune, and no session. databaseSelect false, same
+    // trap as DuckDB's: there is no default-DB arm (set_session_db refuses the
+    // engine), so the picker only rendered to error when touched — registered
+    // in utils/engineGaps.ts.
+    sql: true, transactions: false, databaseSelect: false, processList: false,
     serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: true,
     writes: false, tableDesigner: false, statementTimeout: false,
@@ -379,12 +391,16 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     writes: false, tableDesigner: false, statementTimeout: false,
   },
   sqlserver: {
-    // A full networked SQL engine (T-SQL dialect exists: keywords, bracket
-    // quoting, write guard), so the editor, browser, processlist, kill and
-    // server info are real. The rest is honest v1: no EXPLAIN (SHOWPLAN_XML
-    // needs session-state handling), no tuner/replication/maintenance rules,
-    // no datagen/CSV import, and no default-DB plumbing — the driver uses
-    // three-part names and never USE (shared-connection race, db/sqlserver.rs).
+    // At parity since 0.63.0: EXPLAIN exists (SHOWPLAN_XML estimated +
+    // STATISTICS XML measured, db/sqlserver.rs), plus tuner rules,
+    // maintenance, datagen, CSV import, playground and Query Store (plan
+    // history + forcing — the only engine with it). What is still false and
+    // why: no default-DB plumbing — the driver uses three-part names and
+    // never USE (shared-connection race, db/sqlserver.rs), so panels that
+    // need a schema enumerate sys.schemas themselves (utils/schemaPick.ts).
+    // replication false is registered in utils/engineGaps.ts (AGs do not map
+    // onto the MySQL/PG replication model); stmtStats false because Query
+    // Store supersedes it.
     // erDiagram is TRUE: sys.foreign_key_columns gives the column PAIRS a
     // composite FK needs (information_schema splits them across three views and
     // joins by constraint name, which mis-pairs them), and sys.columns carries

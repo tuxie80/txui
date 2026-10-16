@@ -21,6 +21,7 @@ import {
   renderFindings, atOrAbove, DETAIL_LEVELS, DETAIL_LABEL, DETAIL_HINT,
 } from '../utils/qualityReport';
 import { usePreference, PREFS, QUALITY_FLOORS } from '../store/preferences';
+import { useServerFlavor } from '../store/serverFlavors';
 import type { Severity } from '../utils/sqlLint';
 import { ASSUMPTIONS } from '../utils/ddlCost';
 import { reviewSchema } from '../utils/schemaRules';
@@ -61,6 +62,11 @@ export function SqlQualityPanel({ session, onClose }: Props) {
    */
   const isCh = session.engine === 'clickhouse';
   const panelCapable = serverCapable || isCh;
+  // MySQL-protocol flavour: MariaDB's measured plan is ANALYZE FORMAT=JSON,
+  // not EXPLAIN ANALYZE — the checkbox labels the statement that will
+  // actually run, and the pipeline parses the document that comes back.
+  const flavor = useServerFlavor(session.sessionId, session.engine);
+  const isMariaDb = isMysql && flavor.flavor === 'mariadb';
   /**
    * Schema review is NOT the same capability as query analysis.
    *
@@ -215,7 +221,7 @@ export function SqlQualityPanel({ session, onClose }: Props) {
         : await runQualityAnalysis({
             sql, engine: session.engine, connectionName: session.connectionName,
             isMysql, serverCapable, params, qCount, varNames, checks, timeoutSec,
-            dbOverride,
+            dbOverride, isMariaDb,
           }, io);
       setReport({ findings: out.findings, sections: out.sections, meta: out.meta, txt: out.txt });
       setRawBlocks(out.rawBlocks);
@@ -225,7 +231,7 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     } finally {
       setRunning(false);
     }
-  }, [sql, running, params, qCount, varNames, checks, session, isMysql, isCh, serverCapable, timeoutSec, dbOverride]);
+  }, [sql, running, params, qCount, varNames, checks, session, isMysql, isCh, serverCapable, timeoutSec, dbOverride, isMariaDb]);
 
   /**
    * Review the schema as it stands — the rulebook without a parser.
@@ -563,9 +569,13 @@ export function SqlQualityPanel({ session, onClose }: Props) {
                 <label className="gsp-check" title={serverCapable ? '' : 'MySQL/PostgreSQL only'}>
                   <input type="checkbox" disabled={!serverCapable} checked={checks.explainJson}
                   onChange={e => set({ explainJson: e.target.checked })} /> EXPLAIN FORMAT=JSON (costs)</label>
-                <label className="gsp-check sqp-danger" title="Actually executes the statement under a server-side timeout">
+                <label className="gsp-check sqp-danger" title={isMariaDb
+                  ? 'MariaDB has no EXPLAIN ANALYZE — this runs ANALYZE FORMAT=JSON, which still executes the statement under a server-side timeout'
+                  : 'Actually executes the statement under a server-side timeout'}>
                   <input type="checkbox" disabled={!serverCapable} checked={checks.analyze}
-                  onChange={e => set({ analyze: e.target.checked })} /> EXPLAIN ANALYZE — ⚠ executes the query</label>
+                  onChange={e => set({ analyze: e.target.checked })} /> {isMariaDb
+                    ? 'ANALYZE FORMAT=JSON — ⚠ executes the query'
+                    : 'EXPLAIN ANALYZE — ⚠ executes the query'}</label>
               </>
             )}
             {checks.analyze && (

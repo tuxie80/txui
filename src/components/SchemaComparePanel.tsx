@@ -45,6 +45,9 @@ interface PanelProps { onClose?: () => void }
 
 export function SchemaComparePanel({ onClose }: PanelProps) {
   const [conns, setConns] = useState<ConnectionConfig[]>([]);
+  // Engines filtered OUT of the picker — tracked so a fleet with no
+  // MySQL/PG connections gets the reason, not an empty dropdown.
+  const [excluded, setExcluded] = useState<string[]>([]);
   const [left, setLeft] = useState<SideState>({ connId: '', schemas: [], schema: '' });
   const [right, setRight] = useState<SideState>({ connId: '', schemas: [], schema: '' });
   const [busy, setBusy] = useState<string | null>(null);
@@ -59,7 +62,12 @@ export function SchemaComparePanel({ onClose }: PanelProps) {
   useEffect(() => {
     ConnectionsStore.list()
       // Both engines are comparable; a cross-engine pair is refused below.
-      .then(list => setConns(list.filter(c => can(c.engine, 'sqlDba'))))
+      .then(list => {
+        setConns(list.filter(c => can(c.engine, 'sqlDba')));
+        setExcluded([...new Set(
+          list.filter(c => !can(c.engine, 'sqlDba')).map(c => c.engine),
+        )]);
+      })
       .catch(() => {});
     const sessions = sessionsRef.current;
     return () => {
@@ -274,6 +282,14 @@ export function SchemaComparePanel({ onClose }: PanelProps) {
       </div>
 
       {error && <div className="proc-error-bar">{error}</div>}
+
+      {conns.length === 0 && excluded.length > 0 && (
+        <div className="proc-error-bar">
+          Schema compare works on MySQL and PostgreSQL — the saved connections are
+          {' '}{excluded.join(', ')}, whose DDL vocabulary shares too little with
+          either for a meaningful diff.
+        </div>
+      )}
 
       <div className="sc-body">
         <div className="sc-list">

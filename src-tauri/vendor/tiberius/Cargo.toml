@@ -209,3 +209,18 @@ default-features = false
 [target."cfg(windows)".dependencies.winauth]
 version = "0.0.4"
 optional = true
+
+# TxUI vendored patch — the normalized crates.io manifest dropped upstreams
+# dev-dependencies, which left every shipped #[cfg(test)] module (the crate
+# HAS a test suite: column_data, type_info, token_row, …) uncompilable
+# standalone. Dev-only, same version line TxUI already builds; never part of
+# the shipped binary.
+[dev-dependencies.tokio]
+version = "1.0"
+features = ["macros", "rt"]
+
+# Same repair: an existing round-trip test uses Uuid::new_v4, which upstream
+# had via a dev-dependency enabling the v4 feature.
+[dev-dependencies.uuid]
+version = "1.3"
+features = ["v4"]

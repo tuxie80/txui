@@ -169,3 +169,52 @@ test('every invoke object literal carries the args its command requires', () => 
   }
   assert.deepEqual(failures, [], failures.join('\n'));
 });
+
+/** Command names registered in lib.rs's `generate_handler![]`. */
+function registeredCommands(): string[] {
+  const src = readFileSync(join(ROOT, 'src-tauri/src/lib.rs'), 'utf8');
+  const m = /generate_handler!\[([\s\S]*?)\]\s*\)/.exec(src);
+  if (!m) throw new Error('generate_handler! block not found in lib.rs');
+  return m[1]
+    // Strip comments BEFORE splitting: a comment may itself contain commas.
+    .replace(/\/\/[^\n]*/g, '')
+    .split(',')
+    .map(chunk => {
+      const clean = chunk.trim();
+      // Entries are bare (`save_connection`) or pathed (`commands::vacuum::run_vacuum`).
+      const seg = /(\w+)$/.exec(clean);
+      return seg ? seg[1] : '';
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Registered commands with no static `invoke('name')` call site, and WHY that
+ * is correct. Adding an entry here is the review conversation — a command
+ * nobody calls is dead weight or a feature that never got wired.
+ */
+const NO_CALLER_EXEMPTIONS: Record<string, string> = {
+  // Dispatched through a union-typed variable: QueryTabs' endTx(cmd) runs
+  // `invoke(cmd, …)` with cmd: 'commit_transaction' | 'rollback_transaction'
+  // (also re-exported via useQueryRunner and DataBrowser's onEndTx).
+  commit_transaction: 'invoked via the endTx(cmd) variable in QueryTabs/useQueryRunner',
+  rollback_transaction: 'invoked via the endTx(cmd) variable in QueryTabs/useQueryRunner',
+};
+
+test('every registered command has at least one caller in src/', () => {
+  const registered = registeredCommands();
+  assert.ok(registered.length >= 150,
+    `parsed only ${registered.length} registered commands — the parser broke`);
+  const invoked = new Set(invokeSites().map(s => s.cmd));
+  const missing = registered.filter(
+    n => !invoked.has(n) && !(n in NO_CALLER_EXEMPTIONS));
+  assert.deepEqual(missing, [],
+    `registered commands with no invoke('name') call site — wire them or exempt with a reason:\n${missing.join('\n')}`);
+  // An exemption for a command that is no longer registered is stale — it
+  // would hide the next genuinely orphaned command behind a long list.
+  const stale = Object.keys(NO_CALLER_EXEMPTIONS).filter(n => !registered.includes(n));
+  assert.deepEqual(stale, [], `exemptions for unregistered commands: ${stale.join(', ')}`);
+  // An exemption that meanwhile gained a literal call site is done — drop it.
+  const wired = Object.keys(NO_CALLER_EXEMPTIONS).filter(n => invoked.has(n));
+  assert.deepEqual(wired, [], `exempted commands now have a literal caller — remove the exemption: ${wired.join(', ')}`);
+});
