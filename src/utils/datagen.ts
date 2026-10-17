@@ -1384,3 +1384,97 @@ export function buildCreateTable(
   if (pks.length) lines.push(`  PRIMARY KEY (${pks.join(', ')})`);
   return `CREATE TABLE ${table} (\n${lines.join(',\n')}\n)`;
 }
+
+// ── Spec-file params sanitizing (Phase 5) ────────────────────────────────────
+
+const PARAM_NUMBER_KEYS = [
+  'min', 'max', 'nullPct', 'decimals', 'step', 'jitterPct',
+  'lat', 'lon', 'radiusKm',
+  'trendPct', 'seasonAmpPct', 'seasonPeriod', 'noisePct',
+  'ridePings', 'pingSec',
+] as const;
+const PARAM_STRING_KEYS = [
+  'dateFrom', 'dateTo', 'list', 'prefix', 'suffix',
+  'fkTable', 'fkColumn', 'fkGroup', 'expr', 'brand', 'ibanCountry',
+] as const;
+const PARAM_ENUMS: Record<string, readonly string[]> = {
+  dist: ['uniform', 'normal', 'zipf'],
+  stepUnit: ['second', 'minute', 'hour', 'day', 'week', 'month'],
+};
+
+export interface SanitizedParams {
+  params: Partial<GenParams>;
+  errors: string[];
+  /** Recoverable problems that were fixed by clamping or dropping. */
+  warnings: string[];
+}
+
+/**
+ * Validate a `params` object coming from a hand-written file (a schema kit, a
+ * `\generate` spec) into a safe `Partial<GenParams>`.
+ *
+ * Every problem is collected, not thrown at the first — a spec file is fixed
+ * in a text editor, and one-error-at-a-time turns that into a dozen round
+ * trips. Two severities, deliberately: a wrong TYPE is an error (the author
+ * meant something and this isn't it), while an out-of-range percentage or an
+ * unknown key is a warning — clamped/dropped so a kit written against a newer
+ * build still imports here. `where` prefixes every message ("orders.price").
+ */
+export function sanitizeGenParams(raw: unknown, where: string): SanitizedParams {
+  const params: Partial<GenParams> = {};
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (raw === undefined || raw === null) return { params, errors, warnings };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { params, errors: [`${where}: params must be an object`], warnings };
+  }
+  const src = raw as Record<string, unknown>;
+  const known = new Set<string>([
+    ...PARAM_NUMBER_KEYS, ...PARAM_STRING_KEYS, ...Object.keys(PARAM_ENUMS), 'valid',
+  ]);
+  for (const key of Object.keys(src)) {
+    if (!known.has(key)) {
+      warnings.push(`${where}: unknown param "${key}" — dropped`);
+      continue;
+    }
+    const v = src[key];
+    if ((PARAM_NUMBER_KEYS as readonly string[]).includes(key)) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) {
+        errors.push(`${where}: param "${key}" must be a finite number`);
+        continue;
+      }
+      // The percentage knobs are clamped the same way the panel's inputs clamp
+      // them — an 800% null rate is a typo, not a config to honour.
+      let n = v;
+      if (key === 'nullPct' || key === 'jitterPct') {
+        const c = Math.min(100, Math.max(0, n));
+        if (c !== n) { warnings.push(`${where}: ${key} ${n} clamped to ${c}`); n = c; }
+      }
+      if (key === 'decimals') {
+        const c = Math.min(12, Math.max(0, Math.round(n)));
+        if (c !== n) { warnings.push(`${where}: decimals ${n} clamped to ${c}`); n = c; }
+      }
+      (params as Record<string, unknown>)[key] = n;
+    } else if ((PARAM_STRING_KEYS as readonly string[]).includes(key)) {
+      if (typeof v !== 'string') {
+        errors.push(`${where}: param "${key}" must be a string`);
+        continue;
+      }
+      (params as Record<string, unknown>)[key] = v;
+    } else if (key === 'valid') {
+      if (typeof v !== 'boolean') {
+        errors.push(`${where}: param "valid" must be true or false`);
+        continue;
+      }
+      params.valid = v;
+    } else {
+      const allowed = PARAM_ENUMS[key];
+      if (typeof v !== 'string' || !allowed.includes(v)) {
+        errors.push(`${where}: param "${key}" must be one of ${allowed.join(', ')}`);
+        continue;
+      }
+      (params as Record<string, unknown>)[key] = v;
+    }
+  }
+  return { params, errors, warnings };
+}

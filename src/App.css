@@ -3699,6 +3699,9 @@ button.primary:disabled { opacity: .5; cursor: default; }
   font-size: calc(12px * var(--font-scale, 1));
   background: #2a1515;
   border-bottom: 1px solid #4a2020;
+  /* Multi-line errors (the kit importer lists EVERY problem) must not
+     collapse into one unreadable line. */
+  white-space: pre-wrap;
 }
 .proc-loading { padding: 24px; color: var(--text2); text-align: center; }
 .proc-status {
@@ -4723,6 +4726,20 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .dg-kit-ratio { font-size: calc(11px * var(--font-scale, 1)); color: var(--text2); }
 .dg-scale-label { font-size: calc(12px * var(--font-scale, 1)); color: var(--text2); }
 .dg-sql-tall { max-height: 320px; flex-shrink: 1; }
+/* Imported (user) kits: the wrapper is the grid item so the card can carry a
+   delete button without nesting buttons. */
+.dg-kit-wrap { position: relative; display: flex; }
+.dg-kit-wrap .dg-kit { flex: 1; }
+.dg-kit-del { position: absolute; top: 6px; right: 6px; }
+.dg-kit-import { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+.dg-import-note {
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--text2);
+  padding: 4px 0;
+  white-space: pre-wrap;
+}
+.dg-preset-pick { max-width: 140px; }
+.dg-preset-save { padding: 1px 8px; }
 
 /* ── Replica set dashboard ── */
 .rs-tag { color: var(--accent); border-color: var(--accent); background: rgba(108,143,255,.12); }

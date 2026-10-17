@@ -376,3 +376,18 @@ test('history is capped from the front', () => {
   assert.equal(h[h.length - 1], `q${HISTORY_CAP + 29}`);
   assert.ok(!h.includes('q0'), 'the oldest entries should have been shed');
 });
+
+// ── \\generate (datagen Phase 5) ─────────────────────────────────────────────
+
+test('\\generate is a registered meta and keeps a quoted JSON spec as one argument', () => {
+  const spec = findMeta('generate');
+  assert.ok(spec, '\\generate must be in the meta registry');
+  assert.match(spec!.summary, /headless/);
+  const h = dispatchHead('\\generate \'{"table":"t","rowCount":10,"specs":[]}\'');
+  assert.deepEqual(h, {
+    kind: 'meta', name: 'generate',
+    args: ['{"table":"t","rowCount":10,"specs":[]}'],
+  });
+  const f = dispatchHead('\\generate spec.json');
+  assert.deepEqual(f, { kind: 'meta', name: 'generate', args: ['spec.json'] });
+});

@@ -25,6 +25,7 @@ pub mod datagen;
 pub mod datagen_fk;
 pub mod datagen_formula;
 pub mod datagen_ident;
+pub mod datagen_profile;
 pub mod watch;
 pub mod vacuum;
 pub mod kill;

@@ -14,7 +14,7 @@ pub mod secretstore;
 pub mod tuner;
 mod commands;
 
-use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -870,6 +870,8 @@ pub fn run() {
             generate_database,
             cancel_datagen,
             resolve_sequence_start,
+            // "Mimic existing data" profiling (read-only, per-column sampled)
+            datagen_profile_table,
             run_watched,
             cancel_watched,
             // Vacuum & Bloat panel's tracked, cancellable maintenance runs

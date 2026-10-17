@@ -37,6 +37,13 @@ import { serialize, toInserts } from '../utils/exporters';
 import type { ExportFormat as ExporterFormat } from '../utils/exporters';
 import { toXlsx } from '../utils/xlsx';
 import { bytesToBase64 } from '../utils/base64';
+import { parseGenerateSpec } from '../utils/generateSpec';
+import { isoNow, logAudit } from '../utils/audit';
+
+/** The 🎲 generator's stream (commands/datagen.rs), consumed by `\generate`. */
+type GenEvent =
+  | { type: 'progress'; rows_done: number; rows_total: number; rows_per_sec: number }
+  | { type: 'done'; rows: number; ms: number; cancelled: boolean };
 
 interface OsOutput {
   stdout: string; stderr: string; code: number | null;
@@ -103,14 +110,18 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const push = useCallback((e: Omit<Entry, 'id'>) => {
+  const push = useCallback((e: Omit<Entry, 'id'>): number => {
     // Capped transcript (WP-14 14.6, same bound the panel's log slice uses):
     // `entries` grew without cap and result entries retained their full row
     // sets forever — a long session leaked every result ever printed.
+    // Returns the id so a long-running command (\generate) can update its own
+    // progress line in place instead of scrolling one line per chunk.
+    const id = nextId++;
     setEntries(prev => {
-      const next = [...prev, { ...e, id: nextId++ } as Entry];
+      const next = [...prev, { ...e, id } as Entry];
       return next.length > 499 ? next.slice(-499) : next;
     });
+    return id;
   }, []);
   /** Bumped on every error, so `\source` can stop at the first failure. */
   const errorCount = useRef(0);
@@ -260,6 +271,108 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
           { detail: { sql: history[history.length - 1] ?? '' } }));
         say('Sent to the SQL editor.', 'muted');
         return;
+      case 'generate': {
+        // The same guards the 🎲 panel's run path applies, in the same order —
+        // and the backend re-enforces read-only (commands/datagen.rs), so the
+        // verb cannot bypass it even if this check is skipped.
+        if (session.readOnly) {
+          return say('Blocked: this connection is read-only.', 'err');
+        }
+        const arg = args.join(' ').trim();
+        if (!arg) {
+          return say('`\\generate` needs a spec — a quoted JSON object or a .json file. '
+            + 'Try `\\help generate`.', 'err');
+        }
+        let text = arg;
+        if (!arg.startsWith('{')) {
+          try {
+            text = await invoke<string>('read_text_file', { path: arg });
+          } catch (e) {
+            return say(`Could not read ${arg}: ${errorDisplay(e)}`, 'err');
+          }
+        }
+        const parsed = parseGenerateSpec(text);
+        if (!parsed.ok) {
+          return say(`Invalid generate spec:\n${parsed.errors.map(x => `  • ${x}`).join('\n')}`, 'err');
+        }
+        const spec = parsed.spec;
+        if (session.environment === 'prod' && !await confirmDialog(
+          `⚠ PRODUCTION\n\nInsert ${spec.rowCount.toLocaleString()} generated rows into ${spec.table}?`,
+          { danger: true },
+        )) return say('Cancelled.', 'muted');
+
+        // Sequences start at MAX(pk)+1, resolved the way the panel resolves
+        // them for an existing table.
+        let seqStart = 1;
+        const seqCol = spec.specs.find(s => s.generator === 'sequence');
+        if (seqCol) {
+          try {
+            seqStart = await invoke<number>('resolve_sequence_start', {
+              sessionId: session.sessionId, table: spec.table, column: seqCol.name,
+            });
+          } catch { /* empty/new table → 1 */ }
+        }
+
+        const runKey = crypto.randomUUID();
+        const startedAt = isoNow();
+        // One transcript line updated in place as chunks land — a line per
+        // chunk would scroll the shell like a log file.
+        const lineId = push({ kind: 'text', tone: 'muted',
+          text: `Generating ${spec.rowCount.toLocaleString()} rows into ${spec.table}…` } as Entry);
+        const dropLine = () => setEntries(prev => prev.filter(en => en.id !== lineId));
+        let finalRows = 0; let finalMs = 0; let cancelled = false;
+        const chan = new Channel<GenEvent>();
+        chan.onmessage = ev => {
+          if (ev.type === 'progress') {
+            setEntries(prev => prev.map(en => en.id === lineId && en.kind === 'text'
+              ? { ...en, text: `Generating into ${spec.table} — `
+                  + `${ev.rows_done.toLocaleString()} / ${ev.rows_total.toLocaleString()} rows`
+                  + ` · ${ev.rows_per_sec.toLocaleString()} rows/s` }
+              : en));
+          } else {
+            finalRows = ev.rows; finalMs = ev.ms; cancelled = ev.cancelled;
+          }
+        };
+        let err: string | null = null;
+        try {
+          await invoke('generate_data', {
+            run: {
+              sessionId: session.sessionId,
+              table: spec.table,
+              specs: spec.specs,
+              rowCount: spec.rowCount,
+              seed: spec.seed,
+              seqStart,
+              locale: spec.locale,
+              createDdl: spec.createDdl,
+              useCopy: session.engine === 'postgres' && spec.useCopy,
+              runKey,
+            },
+            onEvent: chan,
+          });
+        } catch (e) {
+          err = errorDisplay(e);
+        }
+        dropLine();
+        // Audited like the panel's runs are — a write is a write regardless of
+        // which surface asked for it.
+        logAudit({
+          started_at: startedAt, ended_at: isoNow(), duration_ms: finalMs,
+          connection_name: session.connectionName, db_user: '', engine: session.engine,
+          ok: !err && !cancelled, rows_out: 0, rows_affected: finalRows,
+          error: err ?? (cancelled ? 'cancelled' : null),
+          sql: `-- data generator: ${spec.rowCount.toLocaleString()} rows into ${spec.table} (seed ${spec.seed}) via TxShell`,
+        });
+        if (err) return say(`Generation failed: ${err}`, 'err');
+        if (spec.createDdl) {
+          window.dispatchEvent(new CustomEvent('dbgui:schema-changed'));
+        }
+        say(cancelled
+          ? `■ Cancelled after ${finalRows.toLocaleString()} rows (rolled back to the last chunk boundary)`
+          : `✓ ${finalRows.toLocaleString()} rows into ${spec.table} in ${(finalMs / 1000).toFixed(1)}s`,
+          cancelled ? 'muted' : 'ok');
+        return;
+      }
       default:
         say(`\`\\${name}\` is recognised but not wired up yet.`, 'muted');
     }

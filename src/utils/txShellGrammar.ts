@@ -179,6 +179,14 @@ export const METAS: MetaSpec[] = [
   { name: 'history', usage: '\\history [n]', summary: 'Recent command lines.' },
   { name: 'source', alias: ['i'], usage: '\\source <file>',
     summary: 'Run a TxShell script.' },
+  { name: 'generate', usage: "\\generate <spec.json | '{…}'>",
+    summary: 'Generate rows into a table — the 🎲 panel, headless.',
+    detail: 'The spec is one JSON object, quoted inline or as a .json file path: '
+      + '\'{"table":"db.customers","rowCount":100000,"seed":7,"specs":'
+      + '[{"name":"id","typeName":"BIGINT","generator":"sequence","unique":true}]}\'. '
+      + 'Generators and params are the 🎲 Data generator\'s, and the run goes through '
+      + 'the same backend pipeline — a read-only connection is refused, exactly as in '
+      + 'the panel. Seeds default to 1: a script should be reproducible.' },
   { name: 'edit', usage: '\\edit', summary: 'Open the last statement in the SQL editor.' },
   { name: 'clear', usage: '\\clear', summary: 'Clear the transcript.' },
 ];

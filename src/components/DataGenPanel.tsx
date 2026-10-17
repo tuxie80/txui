@@ -10,9 +10,10 @@
  *                 streamed execution with a progress bar
  */
 import { errorDisplay } from '../utils/appError';
-import { confirmDialog } from '../utils/appDialog';
+import { confirmDialog, promptDialog } from '../utils/appDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { TableMeta } from '../types/browser';
 import type { QueryResult } from '../types';
 import {
@@ -21,11 +22,26 @@ import {
 } from '../utils/datagen';
 import { CHART_PRESETS, presetParams } from '../utils/chartPresets';
 import type { ColumnSpec } from '../utils/datagen';
+import {
+  mimicColumn, mimicLogLine, MIMIC_ENGINES, MIMIC_SAMPLE_CAP,
+} from '../utils/datagenMimic';
+import type { ColumnProfile } from '../utils/datagenMimic';
 import { LOCALES } from '../data/dictionaries';
 import {
   SCHEMA_KITS, resolveRowCounts, totalRows,
   buildKitPreDdl, buildKitTableDdl, kitTableSpecs,
 } from '../utils/schemaKits';
+import type { SchemaKit } from '../utils/schemaKits';
+import { parseUserKit } from '../utils/userKits';
+import {
+  useUserKits, saveUserKit, deleteUserKit,
+} from '../store/userKits';
+import {
+  capturePreset, applyPreset, presetProblem,
+} from '../utils/datagenPresets';
+import {
+  useDatagenPresets, savePreset, deletePreset,
+} from '../store/datagenPresets';
 import { isoNow, logAudit } from '../utils/audit';
 import {
   SIZINGS, buildServerPlan, estimateBytes, formatBytes, shouldUseServer,
@@ -244,7 +260,93 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
     return () => { alive = false; };
   }, [sessionId, engine]);
 
-  const kit = useMemo(() => SCHEMA_KITS.find(k => k.id === kitId) ?? SCHEMA_KITS[0], [kitId]);
+  // ── Phase 5: generator presets + user-imported kits (both global, both in
+  //    localStorage — see store/datagenPresets.ts and store/userKits.ts) ──
+  const presets = useDatagenPresets();
+  const userKits = useUserKits();
+  const allKits = useMemo(() => [...SCHEMA_KITS, ...userKits], [userKits]);
+  const kit = useMemo(
+    () => allKits.find(k => k.id === kitId) ?? allKits[0] ?? SCHEMA_KITS[0],
+    [allKits, kitId]);
+  /** Which preset each column row last applied — so the row's × can delete it. */
+  const [presetPick, setPresetPick] = useState<Record<string, string>>({});
+  /** The import outcome line under the kit picker (clamps applied, etc.). */
+  const [importNote, setImportNote] = useState<string | null>(null);
+
+  const applyPresetToSpec = useCallback((i: number, name: string) => {
+    const p = presets.find(x => x.name === name);
+    if (!p) return;
+    const problem = presetProblem(p);
+    if (problem) { setError(`Preset "${p.name}": ${problem}.`); return; }
+    setError(null);
+    setSpecs(prev => prev.map((s, idx) => (idx === i ? applyPreset(s, p) : s)));
+    setPresetPick(prev => ({ ...prev, [specs[i].name]: name }));
+  }, [presets, specs]);
+
+  const savePresetFromSpec = useCallback(async (s: ColumnSpec) => {
+    const name = await promptDialog(
+      `Save ${s.name}'s generator and parameters as a preset`,
+      GENERATOR_MAP.get(s.generator)?.label ?? s.generator,
+      { title: 'Save generator preset' });
+    if (name === null) return;
+    const captured = capturePreset(name, s);
+    if ('error' in captured) { setError(captured.error); return; }
+    if (presets.some(p => p.name === captured.name)
+        && !await confirmDialog(`Replace the existing preset "${captured.name}"?`)) return;
+    savePreset(captured);
+    setPresetPick(prev => ({ ...prev, [s.name]: captured.name }));
+  }, [presets]);
+
+  const removePresetByName = useCallback(async (name: string) => {
+    if (!name) return;
+    if (!await confirmDialog(`Delete preset "${name}"?`)) return;
+    deletePreset(name);
+    setPresetPick(prev =>
+      Object.fromEntries(Object.entries(prev).filter(([, v]) => v !== name)));
+  }, []);
+
+  const importKit = useCallback(async () => {
+    setError(null);
+    const path = await openDialog({
+      multiple: false,
+      filters: [{ name: 'Schema kit', extensions: ['json'] }],
+    });
+    if (!path || typeof path !== 'string') return;
+    let text: string;
+    try {
+      text = await invoke<string>('read_text_file', { path });
+    } catch (e) {
+      setError(`Could not read ${path}: ${errorDisplay(e)}`);
+      return;
+    }
+    const parsed = parseUserKit(text);
+    if (!parsed.ok) {
+      // Every problem, not just the first — a kit file is fixed in an editor,
+      // and one-error-at-a-time turns that into a dozen round trips.
+      setError(`Kit not imported — ${parsed.errors.length} problem${parsed.errors.length === 1 ? '' : 's'}:\n`
+        + parsed.errors.map(x => `• ${x}`).join('\n'));
+      return;
+    }
+    if (userKits.some(k => k.id === parsed.kit.id)
+        && !await confirmDialog(`Replace the imported kit "${parsed.kit.title}" (id "${parsed.kit.id}")?`)) return;
+    saveUserKit(parsed.kit);
+    setKitId(parsed.kit.id);
+    setDbName(parsed.kit.defaultName);
+    setImportNote(parsed.warnings.length
+      ? `Imported "${parsed.kit.title}" with ${parsed.warnings.length} adjustment${parsed.warnings.length === 1 ? '' : 's'}: `
+        + parsed.warnings.join(' · ')
+      : `Imported "${parsed.kit.title}" — ${parsed.kit.tables.length} tables.`);
+  }, [userKits]);
+
+  const removeUserKit = useCallback(async (k: SchemaKit) => {
+    if (!await confirmDialog(`Delete the imported kit "${k.title}"? The JSON file it came from is not touched.`)) return;
+    deleteUserKit(k.id);
+    if (kitId === k.id) {
+      setKitId(SCHEMA_KITS[0].id);
+      setDbName(SCHEMA_KITS[0].defaultName);
+    }
+    setImportNote(null);
+  }, [kitId]);
 
   // Kit or scale change → recompute per-table row counts (still editable)
   useEffect(() => {
@@ -339,6 +441,49 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
     setSpecs(prev => prev.map((s, idx) =>
       idx === i ? { ...s, params: { ...s.params, [key]: value } } : s));
   }
+
+  // ── Mimic existing data (Phase 4, synthesis-lite) ───────────────────────────
+  //
+  // Profile the target table (read-only, sampled server-side) and pre-fill
+  // every column's generator + params to reproduce the SHAPE of the data —
+  // never the values (the privacy contract lives in utils/datagenMimic.ts).
+  // Pre-fill only: the user reviews and runs as usual.
+  const [mimicking, setMimicking] = useState(false);
+  const mimicBlocked = MIMIC_ENGINES.has(engine) ? null
+    : `mimic profiling is not implemented for ${engine} — it speaks MySQL, PostgreSQL, SQL Server and SQLite`;
+  const mimic = useCallback(async () => {
+    if (mimicBlocked || mimicking) return;   // the predicate the button used
+    setError(null);
+    setMimicking(true);
+    try {
+      const profiles = await invoke<ColumnProfile[]>('datagen_profile_table', {
+        sessionId, table: qualifiedTable,
+        columns: specs.map(s => ({ name: s.name, typeName: s.typeName })),
+      });
+      const byCol = new Map(profiles.map(p => [p.column, p]));
+      let applied = 0;
+      const next = specs.map(s => {
+        const p = byCol.get(s.name);
+        // A failed/empty profile keeps the name-based suggestion untouched.
+        if (!p || p.error || p.sampledRows === 0) return s;
+        const sug = mimicColumn(
+          { name: s.name, typeName: s.typeName, generator: s.generator, unique: s.unique }, p);
+        applied += 1;
+        return { ...s, generator: sug.generator,
+          params: { ...s.params, ...sug.params }, unique: sug.unique ?? s.unique };
+      });
+      setSpecs(next);
+      addLog(sessionId, {
+        level: 'info', action: 'DATAGEN',
+        detail: `mimic ${qualifiedTable}: ${applied}/${specs.length} columns pre-filled`,
+        line: mimicLogLine(qualifiedTable, profiles, applied, MIMIC_SAMPLE_CAP),
+      });
+    } catch (e) {
+      setError(errorDisplay(e));
+    } finally {
+      setMimicking(false);
+    }
+  }, [mimicBlocked, mimicking, sessionId, qualifiedTable, specs]);
 
   // ── Preview & run ──────────────────────────────────────────────────────────
 
@@ -802,21 +947,44 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
             {mode === 'database' && (
               <>
                 <div className="dg-kits">
-                  {SCHEMA_KITS.map(k => (
-                    <button
-                      key={k.id}
-                      className={`dg-kit ${kitId === k.id ? 'active' : ''}`}
-                      onClick={() => { setKitId(k.id); setDbName(k.defaultName); }}
-                    >
-                      <div className="dg-kit-title">{k.title}</div>
-                      <div className="dg-kit-sub">{k.description}</div>
-                      <div className="dg-kit-meta">
-                        {k.tables.length} tables · ~{totalRows(k, 1).toLocaleString()} rows at 1×
-                        <span className="dg-kit-tables">{k.tables.map(t => t.name).join(' → ')}</span>
-                      </div>
-                    </button>
+                  {allKits.map(k => (
+                    // The wrapper is the grid item so an imported kit can carry
+                    // a delete button — buttons cannot nest.
+                    <div key={k.id} className="dg-kit-wrap">
+                      <button
+                        className={`dg-kit ${kitId === k.id ? 'active' : ''}`}
+                        onClick={() => { setKitId(k.id); setDbName(k.defaultName); }}
+                      >
+                        <div className="dg-kit-title">{k.title}</div>
+                        <div className="dg-kit-sub">{k.description}</div>
+                        <div className="dg-kit-meta">
+                          {k.tables.length} tables · ~{totalRows(k, 1).toLocaleString()} rows at 1×
+                          {userKits.some(u => u.id === k.id) && ' · imported'}
+                          <span className="dg-kit-tables">{k.tables.map(t => t.name).join(' → ')}</span>
+                        </div>
+                      </button>
+                      {userKits.some(u => u.id === k.id) && (
+                        <button
+                          className="filter-remove dg-kit-del"
+                          title={`Delete imported kit "${k.title}"`}
+                          onClick={() => void removeUserKit(k)}
+                        >×</button>
+                      )}
+                    </div>
                   ))}
                 </div>
+                {/* Kits are shareable JSON files — validation lists every
+                    problem at once, counts are clamped with warnings. */}
+                <div className="dg-kit-import">
+                  <button className="toolbar-btn" onClick={() => void importKit()}>
+                    ⤒ Import kit JSON…
+                  </button>
+                  <span className="dg-field-hint">
+                    A kit is one JSON object — tables in FK order, per-column generators, row counts.
+                    It is validated against the generator registry before it lands here.
+                  </span>
+                </div>
+                {importNote && <div className="dg-import-note">{importNote}</div>}
                 <label className="dg-field">
                   <span>{engine === 'mysql' ? 'Database name (created if missing)' : 'Schema name (created if missing)'}</span>
                   <input
@@ -1037,6 +1205,20 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                 />
               </label>
               <button className="toolbar-btn" onClick={() => setSeed(Math.floor(Math.random() * 1e9))}>🎲 Reroll</button>
+              {mode === 'existing' && (
+                /* Mimic: profile the table, pre-fill the specs below. Greyed
+                   with the reason on engines the profiler does not speak —
+                   the `.unavail` convention, never hidden, never `disabled`
+                   (a disabled control fires no hover, so the reason would
+                   never appear). */
+                <button
+                  className={`toolbar-btn${mimicBlocked ? ' unavail' : ''}`}
+                  data-tip={mimicBlocked
+                    ?? `Profile ${qualifiedTable || 'the table'} (a bounded sample) and pre-fill each column's generator to reproduce the data's shape — never its values. You review before anything runs.`}
+                  disabled={mimicking}
+                  onClick={() => { if (!mimicBlocked) void mimic(); }}
+                >{mimicking ? 'Profiling…' : '🪄 Mimic existing data'}</button>
+              )}
             </div>
 
             <div className="dg-spec-list">
@@ -1056,6 +1238,32 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                         </optgroup>
                       ))}
                     </select>
+                    {/* Generator presets (Phase 5): apply a saved generator +
+                        params bundle, or save this column's. The select keeps
+                        the last-applied preset so the × can delete it. */}
+                    {presets.length > 0 && (
+                      <select
+                        className="toolbar-select dg-preset-pick"
+                        value={presetPick[s.name] ?? ''}
+                        title="Apply a saved generator preset (generator + parameters)"
+                        onChange={e => { if (e.target.value) applyPresetToSpec(i, e.target.value); }}
+                      >
+                        <option value="">— preset —</option>
+                        {presets.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                      </select>
+                    )}
+                    {!!presetPick[s.name] && presets.some(p => p.name === presetPick[s.name]) && (
+                      <button
+                        className="filter-remove"
+                        title={`Delete preset "${presetPick[s.name]}"`}
+                        onClick={() => void removePresetByName(presetPick[s.name])}
+                      >×</button>
+                    )}
+                    <button
+                      className="toolbar-btn dg-preset-save"
+                      title="Save this column's generator + parameters as a reusable preset"
+                      onClick={() => void savePresetFromSpec(s)}
+                    >☆</button>
                     {g?.uses.includes('range') && (
                       <span className="dg-params">
                         <input type="number" value={s.params.min} onChange={e => updateParam(i, 'min', Number(e.target.value))} title="min" />

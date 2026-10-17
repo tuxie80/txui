@@ -5,6 +5,31 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added — data generator, next generation (phase 5 + synthesis-lite)
+
+- **Mimic existing data** (synthesis-lite): one button in fill-existing-table
+  mode profiles each column server-side (min/max, approx distinct, null %,
+  length stats, top-8 values with frequencies — over a bounded 100k-row
+  sample, per-column tolerant) and pre-fills the generator form to reproduce
+  the data's **shape, never its values** (observed values cross over only as
+  category labels of low-cardinality columns; free text is never carried).
+  MySQL / PostgreSQL / SQLite / SQL Server; other engines grey the button
+  with the reason. Pre-fills only — never auto-runs. New command
+  `datagen_profile_table` (172 registered commands).
+- **Generator presets**: save a column's generator + params as a named
+  preset and apply it to any column from a picker next to the generator
+  dropdown. Capturing strips the FK *address* (`fkTable`/`fkColumn`) so a
+  preset never silently points at another schema's parent; the FK shape
+  (distribution, null %) is kept. Persisted globally (localStorage).
+- **User schema kits**: import a kit JSON file (⤒ Import kit JSON… in the
+  kit picker) — validated against the generator registry and the kit's own
+  table graph with **every** problem listed (not just the first), clamped
+  with warnings, persisted and listed alongside the bundled kits.
+- **TxShell `\generate`**: headless entry into the same Rust pipeline —
+  `\generate <spec.json>` or inline quoted JSON; seed defaults to 1 so
+  scripts are reproducible; same read-only/prod guards, audit logging, and
+  live progress (one transcript line updated in place) as the panel.
+
 ### Added — data generator, next generation (phase 4: correlated rows & relational truth)
 
 - **Correlated personas.** The per-row locale pick now drives street shape,
