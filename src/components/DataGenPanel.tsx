@@ -1191,7 +1191,11 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                       <select value={s.params.ibanCountry ?? ''} title="IBAN country (BBAN format)"
                         onChange={e => updateParam(i, 'ibanCountry', e.target.value)}>
                         <option value="">CZ</option>
+                        <option value="DE">DE</option>
+                        <option value="ES">ES</option>
+                        <option value="FR">FR</option>
                         <option value="GB">GB</option>
+                        <option value="PL">PL</option>
                         <option value="JP">JP (synthetic — no ISO IBAN)</option>
                       </select>
                     )}

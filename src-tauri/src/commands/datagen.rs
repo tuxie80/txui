@@ -1119,27 +1119,13 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
             GenValue::Str(s)
         }
         "iban" => {
-            // BBAN shape is country-specific; the MOD-97 check digits are
-            // COMPUTED so the value validates. Empty country → CZ, byte-identical
-            // to Phase 1 (bank 4 digits + account 16 digits). JP has no ISO IBAN
+            // BBAN shape is country-specific (datagen_ident::iban_bban); the
+            // MOD-97 check digits are COMPUTED so the value validates. Empty
+            // country → CZ, byte-identical to Phase 1. JP has no ISO IBAN
             // scheme — it emits a plausible SYNTHETIC one from Zengin fields.
-            let valid = valid_of(p);
-            let s = match p.iban_country.as_deref() {
-                Some("GB") => {
-                    let bank: String = (0..4).map(|_| pick_char(rng, LETTERS)).collect();
-                    let bban = format!("{bank}{}{}", digits(rng, 6), digits(rng, 8));
-                    iban("GB", &bban, valid)
-                }
-                Some("JP") => {
-                    let bban = format!("{}{}{}", digits(rng, 4), digits(rng, 3), digits(rng, 8));
-                    iban("JP", &bban, valid)
-                }
-                _ => {
-                    let bban = format!("{}{}", rng.int(1000, 9999), digits(rng, 16));
-                    iban("CZ", &bban, valid)
-                }
-            };
-            GenValue::Str(s)
+            let country = p.iban_country.as_deref().unwrap_or("CZ");
+            let bban = datagen_ident::iban_bban(&mut || rng.next(), country);
+            GenValue::Str(iban(country, &bban, valid_of(p)))
         }
         "bic" => {
             let valid = valid_of(p);
@@ -1186,6 +1172,34 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
         }
         "cardCvv" => GenValue::Str(datagen_ident::card_cvv(
             &mut || rng.next(), p.brand.as_deref().unwrap_or(""))),
+        // ── Identifier pack 3 (batch 2 ports in datagen_ident.rs — banks,
+        //    national IDs, VATs, plates, airports, colors). Row-by-row only,
+        //    no server-side SQL form by design.
+        "abaRouting" => GenValue::Str(datagen_ident::aba_routing(&mut || rng.next(), valid_of(p))),
+        "usSsn" => GenValue::Str(datagen_ident::us_ssn(&mut || rng.next(), valid_of(p))),
+        "plPesel" => GenValue::Str(datagen_ident::pl_pesel(&mut || rng.next(), valid_of(p))),
+        "deSteuerId" => GenValue::Str(datagen_ident::de_steuer_id(&mut || rng.next(), valid_of(p))),
+        "frNir" => GenValue::Str(datagen_ident::fr_nir(&mut || rng.next(), valid_of(p))),
+        "esDni" => GenValue::Str(datagen_ident::es_dni(&mut || rng.next(), valid_of(p))),
+        "deVat" => GenValue::Str(datagen_ident::de_vat(&mut || rng.next())),
+        "frVat" => GenValue::Str(datagen_ident::fr_vat(&mut || rng.next(), valid_of(p))),
+        "esVat" => GenValue::Str(datagen_ident::es_vat(&mut || rng.next(), valid_of(p))),
+        "plVat" => GenValue::Str(datagen_ident::pl_vat(&mut || rng.next(), valid_of(p))),
+        "usEin" => GenValue::Str(datagen_ident::us_ein(&mut || rng.next())),
+        "dePlate" => GenValue::Str(datagen_ident::de_plate(&mut || rng.next())),
+        "ukPlate" => GenValue::Str(datagen_ident::uk_plate(&mut || rng.next())),
+        "jpPlate" => GenValue::Str(datagen_ident::jp_plate(&mut || rng.next())),
+        "usPlate" => GenValue::Str(datagen_ident::us_plate(&mut || rng.next())),
+        "airport" => GenValue::Str(datagen_ident::airport(&mut || rng.next())),
+        "colorHex" => GenValue::Str(datagen_ident::color_hex(&mut || rng.next())),
+        "colorRgb" => GenValue::Str(datagen_ident::color_rgb(&mut || rng.next())),
+        "colorHsl" => GenValue::Str(datagen_ident::color_hsl(&mut || rng.next())),
+        "avatarInitials" => {
+            // The SAME firstNames/lastNames draws the name generators make.
+            let f = rng.pick(dict(locale, "firstNames"));
+            let l = rng.pick(dict(locale, "lastNames"));
+            GenValue::Str(datagen_ident::avatar_initials(f, l))
+        }
         "czBirthNumber" => {
             let mut prefix;
             loop {

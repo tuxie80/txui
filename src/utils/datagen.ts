@@ -14,6 +14,10 @@ import {
   myNumber, czVat, gbVat, jpCorporateNumber,
   uuidV7, ulid, nanoId, imei, vin, isin, doi,
   btcAddress, ethAddress, cardExpiry, cardCvv,
+  abaRouting, ibanBban, usSsn, plPesel, deSteuerId, frNir, esDni,
+  deVat, frVat, esVat, plVat, usEin,
+  dePlate, ukPlate, jpPlate, usPlate, airport,
+  colorHex, colorRgb, colorHsl, avatarInitials,
 } from './datagenStandards.ts';
 
 // ── Seeded RNG (mulberry32) ───────────────────────────────────────────────────
@@ -325,9 +329,6 @@ function fillPattern(pat: string, rng: Rng): string {
   }
   return out;
 }
-// GB IBANs carry a 4-letter bank identifier (the SWIFT institution code).
-const GB_BANK_LETTERS = LETTERS;
-
 // The ISO-3166-1 alpha-2 codes the random `countryCode` generator draws from
 // under `default`. A fixed locale overrides the pick with its own code; this
 // list stays the `default` corpus, so a default run is byte-identical.
@@ -806,6 +807,11 @@ export const GENERATORS: Generator[] = [
     gen: r => pick(r, ['Engineering','Sales','Marketing','Finance','Operations','Support','Legal','People']) },
   { id: 'company', label: 'Company', group: 'People', uses: [],
     gen: (r, _i, _p, _n, loc) => pick(r, dict('companies', loc)) },
+  { id: 'avatarInitials', label: 'Avatar initials', group: 'People', uses: [],
+    // Drawn from the SAME firstNames/lastNames packs the name generators use,
+    // so the initials are consistent with the stream a fullName column draws.
+    gen: (r, _i, _p, _n, loc) =>
+      avatarInitials(pick(r, dict('firstNames', loc)), pick(r, dict('lastNames', loc))) },
 
   // ── Identifiers and codes ─────────────────────────────────────────────────
   { id: 'uuid', label: 'UUID v4', group: 'Identifiers', uses: [], gen: r => {
@@ -842,29 +848,16 @@ export const GENERATORS: Generator[] = [
       }
     } },
   { id: 'iban', label: 'IBAN (MOD-97)', group: 'Identifiers', uses: ['ibanCountry', 'validity'],
-    // The BBAN shape is country-specific; the two check digits are COMPUTED
+    // The BBAN shape is country-specific (ibanBban in datagenStandards.ts,
+    // ported in datagen_ident.rs); the two check digits are COMPUTED
     // (MOD-97-10), not random, so the result validates. Empty country keeps the
     // Phase-1 CZ output byte-identical (bank 4 digits + account 16 digits).
     // Japan has no ISO IBAN scheme — 'JP' emits a plausible SYNTHETIC IBAN built
     // from Zengin fields (bank/branch/account) with a correct MOD-97 check, so
     // it round-trips through a validator but is not an officially assigned IBAN.
     gen: (r, _i, p) => {
-      const valid = p.valid !== false;
-      switch (p.ibanCountry) {
-        case 'GB': {
-          const bank = Array.from({ length: 4 }, () => pick(r, GB_BANK_LETTERS)).join('');
-          const bban = bank + digits(r, 6) + digits(r, 8);   // 4 letters + sort + account
-          return ibanValue('GB', bban, valid);
-        }
-        case 'JP': {
-          const bban = digits(r, 4) + digits(r, 3) + digits(r, 8); // bank + branch + account
-          return ibanValue('JP', bban, valid);
-        }
-        default: {
-          const bban = String(int(r, 1000, 9999)) + digits(r, 16);
-          return ibanValue('CZ', bban, valid);
-        }
-      }
+      const country = p.ibanCountry || 'CZ';
+      return ibanValue(country, ibanBban(r, country), p.valid !== false);
     } },
   { id: 'bic', label: 'BIC / SWIFT code', group: 'Identifiers', uses: ['validity'],
     // 4 bank letters + 2 country letters + 2 location (alnum) [+ 3 branch].
@@ -911,6 +904,22 @@ export const GENERATORS: Generator[] = [
       p.dateTo ? new Date(p.dateTo + 'T00:00:00Z').getUTCFullYear() : 2030) },
   { id: 'cardCvv', label: 'Card CVV', group: 'Identifiers', uses: ['cardBrand'],
     gen: (r, _i, p) => cardCvv(r, p.brand ?? '') },
+  // ── Identifier pack 3 (batch 2) — banks, plates, airports. Row-by-row only,
+  //    like batch 1: no server-side SQL form by design.
+  { id: 'abaRouting', label: 'US ABA routing number', group: 'Identifiers', uses: ['validity'],
+    gen: (r, _i, p) => abaRouting(r, p.valid !== false) },
+  { id: 'dePlate', label: 'Licence plate — DE', group: 'Identifiers', uses: [],
+    gen: r => dePlate(r) },
+  { id: 'ukPlate', label: 'Licence plate — UK (post-2001)', group: 'Identifiers', uses: [],
+    gen: r => ukPlate(r) },
+  { id: 'jpPlate', label: 'Licence plate — JP (ASCII)', group: 'Identifiers', uses: [],
+    gen: r => jpPlate(r) },
+  { id: 'usPlate', label: 'Licence plate — US (generic)', group: 'Identifiers', uses: [],
+    gen: r => usPlate(r) },
+  { id: 'airport', label: 'Airport — IATA + coordinates', group: 'Identifiers', uses: [],
+    // One value carrying the code AND its coordinates — two columns generated
+    // independently would disagree, which is worse than a combined string.
+    gen: r => airport(r) },
 
   // ── National IDs ─ locale-authentic, correct check algorithms. The `valid`
   //    toggle emits a structurally-shaped value that FAILS the check.
@@ -942,6 +951,18 @@ export const GENERATORS: Generator[] = [
   { id: 'jpMyNumber', label: 'JP My Number (個人番号)', group: 'National IDs', uses: ['validity'],
     // 11 digits + the official mod-11 check digit.
     gen: (r, _i, p) => myNumber(digits(r, 11), p.valid !== false) },
+  // ── Batch 2 national IDs — one id per country (the czBirthNumber precedent);
+  //    the picker has no locale-gating mechanism for generator ids.
+  { id: 'usSsn', label: 'US Social Security number', group: 'National IDs', uses: ['validity'],
+    gen: (r, _i, p) => usSsn(r, p.valid !== false) },
+  { id: 'plPesel', label: 'PL PESEL', group: 'National IDs', uses: ['validity'],
+    gen: (r, _i, p) => plPesel(r, p.valid !== false) },
+  { id: 'deSteuerId', label: 'DE Steuer-ID (ISO 7064)', group: 'National IDs', uses: ['validity'],
+    gen: (r, _i, p) => deSteuerId(r, p.valid !== false) },
+  { id: 'frNir', label: 'FR NIR (numéro de sécurité sociale)', group: 'National IDs', uses: ['validity'],
+    gen: (r, _i, p) => frNir(r, p.valid !== false) },
+  { id: 'esDni', label: 'ES DNI / NIE', group: 'National IDs', uses: ['validity'],
+    gen: (r, _i, p) => esDni(r, p.valid !== false) },
 
   // ── Tax / VAT IDs ─ correct checksums; `valid` flips the check.
   { id: 'czVat', label: 'CZ DIČ (VAT, 8-digit)', group: 'Tax IDs', uses: ['validity'],
@@ -953,6 +974,18 @@ export const GENERATORS: Generator[] = [
   { id: 'jpCorporateNumber', label: 'JP corporate number (法人番号)', group: 'Tax IDs', uses: ['validity'],
     // 13 digits: a leading check digit over the trailing 12 (mod-9).
     gen: (r, _i, p) => jpCorporateNumber(digits(r, 12), p.valid !== false) },
+  // ── Batch 2 VAT / tax IDs ─ deVat and usEin have no public checksum, so no
+  //    `valid` toggle (the doi convention).
+  { id: 'deVat', label: 'DE VAT (USt-IdNr)', group: 'Tax IDs', uses: [],
+    gen: r => deVat(r) },
+  { id: 'frVat', label: 'FR VAT (TVA, SIREN key)', group: 'Tax IDs', uses: ['validity'],
+    gen: (r, _i, p) => frVat(r, p.valid !== false) },
+  { id: 'esVat', label: 'ES VAT (CIF, digit control)', group: 'Tax IDs', uses: ['validity'],
+    gen: (r, _i, p) => esVat(r, p.valid !== false) },
+  { id: 'plVat', label: 'PL VAT (NIP)', group: 'Tax IDs', uses: ['validity'],
+    gen: (r, _i, p) => plVat(r, p.valid !== false) },
+  { id: 'usEin', label: 'US EIN (employer ID)', group: 'Tax IDs', uses: [],
+    gen: r => usEin(r) },
 
   // ── Network ───────────────────────────────────────────────────────────────
   { id: 'ipv4', label: 'IPv4 address', group: 'Network', uses: [],
@@ -979,6 +1012,14 @@ export const GENERATORS: Generator[] = [
     gen: r => { const u = r();
       return u < 0.82 ? 200 : u < 0.88 ? 204 : u < 0.92 ? 301 : u < 0.95 ? 404
         : u < 0.97 ? 403 : u < 0.99 ? 500 : 503; } },
+
+  // ── Colors ────────────────────────────────────────────────────────────────
+  { id: 'colorHex', label: 'Color (#hex)', group: 'Colors', uses: [],
+    gen: r => colorHex(r) },
+  { id: 'colorRgb', label: 'Color (rgb)', group: 'Colors', uses: [],
+    gen: r => colorRgb(r) },
+  { id: 'colorHsl', label: 'Color (hsl)', group: 'Colors', uses: [],
+    gen: r => colorHsl(r) },
 
   // ── Text ──────────────────────────────────────────────────────────────────
   { id: 'words', label: 'Words (short text)', group: 'Text', uses: [],
@@ -1107,6 +1148,21 @@ export function suggestGenerator(name: string, typeName: string, isPk: boolean):
   if (has('cvv')) return 'cardCvv';
   if (has('expiry') || has('expiration')) return 'cardExpiry';
   if (has('card')) return 'creditCard';
+  // Phase 3 batch 2 — banks, national IDs, VATs, plates, airports, colors.
+  if (has('routing') || has('aba')) return 'abaRouting';
+  if (has('ssn') || has('social_security')) return 'usSsn';
+  if (has('pesel')) return 'plPesel';
+  if (has('steuerid') || has('steuer')) return 'deSteuerId';
+  if (has('nir')) return 'frNir';
+  if (has('dni') || has('nie')) return 'esDni';
+  if (has('ein')) return 'usEin';
+  if (has('nip')) return 'plVat';
+  if (has('siren')) return 'frVat';
+  if (has('ust')) return 'deVat';
+  if (has('plate')) return 'licensePlate';
+  if (has('airport') || has('iata')) return 'airport';
+  if (has('color') || has('colour')) return 'colorHex';
+  if (has('initials') || has('avatar')) return 'avatarInitials';
   if (n.includes('email')) return 'email';
   if (n.includes('first') && n.includes('name')) return 'firstName';
   if (n.includes('last') && n.includes('name')) return 'lastName';

@@ -546,3 +546,451 @@ export function cardExpiry(
 export function cardCvv(rnd: Rnd, brand = ''): string {
   return dgDigits(rnd, brand === 'amex' ? 4 : 3);
 }
+
+
+// ── Phase 3 batch 2 — banks, national IDs, VAT, plates, airports, colors ─────
+//
+// Same contract as batch 1: PURE functions over the seeded `rnd`, ported
+// line-for-line in `src-tauri/src/commands/datagen_ident.rs` with the SAME draw
+// order. National IDs and VATs are per-country generators (usSsn, plPesel, …)
+// rather than one locale-gated generator: the picker has no locale-gating
+// mechanism for generator ids, and the czBirthNumber/ukNino/jpMyNumber
+// precedent is one id per country. `valid: false` corrupts ONLY the check
+// digit where the standard defines one; generators over standards with no
+// public check digit (DE VAT, US EIN) have no toggle at all.
+
+const dgPad3 = (n: number) => String(n).padStart(3, '0');
+
+// ── US ABA routing number — 9 digits, 3-7-1 weighted checksum ───────────────
+
+/**
+ * ABA routing prefixes (the first two digits) actually assigned: 01–12 Federal
+ * Reserve banks, 21–32 thrift institutions, 61–72 electronic transactions.
+ * (80 is travelers' cheques — deliberately not generated.)
+ */
+export const ABA_PREFIXES: readonly string[] = [
+  ...Array.from({ length: 12 }, (_, i) => dgPad2(i + 1)),
+  ...Array.from({ length: 12 }, (_, i) => dgPad2(i + 21)),
+  ...Array.from({ length: 12 }, (_, i) => dgPad2(i + 61)),
+];
+
+/** Check digit (d9) of an 8-digit ABA body: 3(d1+d4+d7)+7(d2+d5+d8)+(d3+d6) ≡ 0 (mod 10). */
+export function abaCheckDigit(body8: string): number {
+  const d = (i: number) => body8.charCodeAt(i) - 48;
+  const sum = 3 * (d(0) + d(3) + d(6)) + 7 * (d(1) + d(4) + d(7)) + (d(2) + d(5));
+  return (10 - (sum % 10)) % 10;
+}
+
+/** ABA routing number: real prefix + 6 digits + check digit, or a wrong check. */
+export function abaRouting(rnd: Rnd, valid = true): string {
+  const body = dgPickArr(rnd, ABA_PREFIXES) + dgDigits(rnd, 6);
+  const c = abaCheckDigit(body);
+  return body + String(valid ? c : (c + 1) % 10);
+}
+
+// ── IBAN BBAN shapes (ISO 13616 per-country) ─────────────────────────────────
+//
+// The MOD-97 check digits themselves are computed by `iban()` above; this
+// draws the country-shaped body. CZ/GB/JP reproduce the pre-batch-2 registry
+// arms draw-for-draw (byte-identical output for the same seed). FR's BBAN
+// account field is officially alphanumeric — only the numeric subset is
+// drawn here (documented simplification; the check digit handles letters
+// either way).
+
+/**
+ * Draw the BBAN for `country` (CZ, GB, JP, DE, FR, ES, PL; anything else falls
+ * back to the CZ shape). Total IBAN lengths: CZ 24, GB 22, JP 19 (synthetic —
+ * Japan has no ISO IBAN scheme), DE 22, FR 27, ES 24, PL 28.
+ */
+export function ibanBban(rnd: Rnd, country: string): string {
+  switch (country) {
+    case 'GB': {
+      const bank = Array.from({ length: 4 }, () => dgPick(rnd, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')).join('');
+      return bank + dgDigits(rnd, 6) + dgDigits(rnd, 8);       // bank + sort code + account
+    }
+    case 'JP':
+      return dgDigits(rnd, 4) + dgDigits(rnd, 3) + dgDigits(rnd, 8); // bank + branch + account
+    case 'DE':
+      return dgDigits(rnd, 8) + dgDigits(rnd, 10);             // BLZ + account
+    case 'FR':
+      return dgDigits(rnd, 5) + dgDigits(rnd, 5) + dgDigits(rnd, 11) + dgDigits(rnd, 2);
+    case 'ES':
+      return dgDigits(rnd, 4) + dgDigits(rnd, 4) + dgDigits(rnd, 2) + dgDigits(rnd, 10);
+    case 'PL':
+      return dgDigits(rnd, 8) + dgDigits(rnd, 16);             // bank + account
+    default: // CZ
+      return String(dgInt(rnd, 1000, 9999)) + dgDigits(rnd, 16);
+  }
+}
+
+// ── US SSN — area/group/serial issuance rules (no check digit) ───────────────
+
+/**
+ * US Social Security number `AAA-GG-SSSS` honouring the SSA issuance rules:
+ * area is never 000, 666 or 9xx (drawn 001–899 with 666 redrawn), group never
+ * 00, serial never 0000. The SSN has NO check digit, so the `valid: false`
+ * form is structural — a 0000 serial — the same convention as ukNino's
+ * out-of-range suffix: same draws, one field forced invalid.
+ */
+export function usSsn(rnd: Rnd, valid = true): string {
+  let area: number;
+  do { area = dgInt(rnd, 1, 899); } while (area === 666);
+  const group = dgInt(rnd, 1, 99);
+  const drawn = dgInt(rnd, 1, 9999); // drawn either way — the toggle must not shift the stream
+  const serial = valid ? drawn : 0;
+  return `${dgPad3(area)}-${dgPad2(group)}-${String(serial).padStart(4, '0')}`;
+}
+
+// ── PL PESEL — 11 digits, weighted mod-10 check + birthdate coherence ────────
+
+const PESEL_WEIGHTS = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
+
+/** Check digit (the 11th) of a 10-digit PESEL prefix: Σ wᵢdᵢ mod 10, complemented. */
+export function peselCheckDigit(body10: string): number {
+  let sum = 0;
+  for (let i = 0; i < 10; i++) sum += (body10.charCodeAt(i) - 48) * PESEL_WEIGHTS[i];
+  return (10 - (sum % 10)) % 10;
+}
+
+/**
+ * PESEL: YYMMDD + 3-digit serial + gender digit + check. Birthdate coherence:
+ * years 00–24 are encoded as 2000s births (month + 20), 25–99 as 1900s births
+ * (the 1800/2100/2200 encodings are not drawn — the month offset is the only
+ * century signal and two centuries keep every produced value plausible).
+ * The check digit is corrupted when `!valid`.
+ */
+export function plPesel(rnd: Rnd, valid = true): string {
+  const yy = dgInt(rnd, 0, 99);
+  const mmBase = dgInt(rnd, 1, 12);
+  const mm = yy <= 24 ? mmBase + 20 : mmBase;
+  const dd = dgInt(rnd, 1, 28);
+  const body = dgPad2(yy) + dgPad2(mm) + dgPad2(dd) + dgDigits(rnd, 3) + String(dgInt(rnd, 0, 9));
+  const c = peselCheckDigit(body);
+  return body + String(valid ? c : (c + 1) % 10);
+}
+
+// ── DE Steuer-ID — 11 digits, ISO 7064 MOD 11,10 ─────────────────────────────
+
+/**
+ * Check digit (the 11th) of a German Steuerliche Identifikationsnummer over
+ * its first 10 digits — the ISO 7064 MOD 11,10 iterative algorithm the BZSt
+ * specifies. Known-good reference: 8609574271 → 9 (86095742719 is the worked
+ * example in the public documentation of the scheme).
+ */
+export function steuerIdCheckDigit(first10: string): number {
+  let p = 10;
+  for (let i = 0; i < 10; i++) {
+    let s = (first10.charCodeAt(i) - 48 + p) % 10;
+    if (s === 0) s = 10;
+    p = (2 * s) % 11;
+  }
+  return (11 - p) % 10;
+}
+
+/**
+ * Among the first 10 digits, exactly one digit value must appear two or three
+ * times and every other value exactly once — the structural rule the BZSt
+ * assigns by. Bodies failing it are redrawn (identically in Rust).
+ */
+export function steuerIdDigitsOk(first10: string): boolean {
+  const counts = new Map<string, number>();
+  for (const ch of first10) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let twice = 0;
+  for (const c of counts.values()) {
+    if (c === 1) continue;
+    if (c === 2 || c === 3) { twice++; continue; }
+    return false; // a value appearing 4+ times is never assigned
+  }
+  return twice === 1;
+}
+
+/** Steuer-ID: first digit 1–9, the one-repeated-digit rule, ISO 7064 check. */
+export function deSteuerId(rnd: Rnd, valid = true): string {
+  let body: string;
+  do {
+    body = String(dgInt(rnd, 1, 9)) + dgDigits(rnd, 9);
+  } while (!steuerIdDigitsOk(body));
+  const c = steuerIdCheckDigit(body);
+  return body + String(valid ? c : (c + 1) % 10);
+}
+
+// ── FR NIR (numéro de sécurité sociale) — 13 digits + 2-digit key ────────────
+
+/** NIR key: 97 − (the 13-digit number mod 97), computed digit by digit. */
+export function nirKey(body13: string): number {
+  let m = 0;
+  for (let i = 0; i < 13; i++) m = (m * 10 + (body13.charCodeAt(i) - 48)) % 97;
+  return 97 - m;
+}
+
+/**
+ * French NIR: sex (1/2) + YY + MM + department (01–95) + 3-digit commune +
+ * 3-digit order + the 2-digit key. SIMPLIFICATION: Corsica's 2A/2B (whose key
+ * arithmetic substitutes 19/18 with a million-place adjustment) are never
+ * drawn — only mainland departments 01–95 — and overseas 97x are out of scope.
+ * `!valid` shifts the key by one inside its 01–97 range.
+ */
+export function frNir(rnd: Rnd, valid = true): string {
+  const body = String(dgInt(rnd, 1, 2)) + dgPad2(dgInt(rnd, 0, 99)) + dgPad2(dgInt(rnd, 1, 12))
+    + dgPad2(dgInt(rnd, 1, 95)) + dgPad3(dgInt(rnd, 1, 999)) + dgPad3(dgInt(rnd, 1, 999));
+  const k = nirKey(body);
+  return body + dgPad2(valid ? k : (k % 97) + 1);
+}
+
+// ── ES DNI / NIE — letter = number mod 23 ────────────────────────────────────
+
+/** The DNI control-letter table (position = number mod 23). */
+export const DNI_LETTERS = 'TRWAGMYFPDXBNJZSQVHLCKE';
+
+/**
+ * Spanish DNI (8 digits + control letter) or NIE (X/Y/Z + 7 digits + letter,
+ * the prefix counting as 0/1/2 in the mod-23 number). Reference: 12345678 → Z.
+ * `!valid` steps the letter one position down the table.
+ */
+export function esDni(rnd: Rnd, valid = true): string {
+  const isNie = dgInt(rnd, 0, 1) === 1;
+  const prefix = isNie ? dgPick(rnd, 'XYZ') : '';
+  const digits7 = dgInt(rnd, 0, 9999999);
+  const last = dgInt(rnd, 0, 9); // the 8th digit for a DNI; unused draw for a NIE
+  const number = (isNie ? 'XYZ'.indexOf(prefix) * 10000000 : 0)
+    + (isNie ? digits7 : digits7 * 10 + last);
+  const idx = number % 23;
+  const letter = DNI_LETTERS[valid ? idx : (idx + 1) % 23];
+  return isNie
+    ? `${prefix}${String(digits7).padStart(7, '0')}${letter}`
+    : `${String(digits7).padStart(7, '0')}${last}${letter}`;
+}
+
+// ── VAT IDs ──────────────────────────────────────────────────────────────────
+
+/**
+ * German USt-IdNr: `DE` + 9 digits, the first never 0. There is NO public
+ * check digit for the German VAT id, so there is deliberately no `valid`
+ * toggle — same reasoning as `doi`.
+ */
+export function deVat(rnd: Rnd): string {
+  return 'DE' + String(dgInt(rnd, 1, 9)) + dgDigits(rnd, 8);
+}
+
+/** French TVA key for a 9-digit SIREN: (12 + 3 × (SIREN mod 97)) mod 97. */
+export function frVatKey(siren9: string): number {
+  let m = 0;
+  for (let i = 0; i < 9; i++) m = (m * 10 + (siren9.charCodeAt(i) - 48)) % 97;
+  return (12 + 3 * m) % 97;
+}
+
+/** French TVA intracommunautaire: `FR` + 2-digit key + 9-digit SIREN. */
+export function frVat(rnd: Rnd, valid = true): string {
+  const siren = dgDigits(rnd, 9);
+  const k = frVatKey(siren);
+  return `FR${dgPad2(valid ? k : (k + 1) % 97)}${siren}`;
+}
+
+/**
+ * Spanish VAT in the entity (CIF) shape: `ES` + a mercantile-entity letter
+ * (A–H only) + 7 digits + a DIGIT control. Simplifications, documented: the
+ * letter-control variant (which some entity letters require), the K/L/M/X
+ * letter prefixes and the individual ES+DNI-letter form are all out of scope.
+ * Control: odd-position digits (1-based) doubled and digit-summed, even ones
+ * added plain; control = (10 − total mod 10) mod 10.
+ */
+export const CIF_LETTERS = 'ABCDEFGH';
+export function esVat(rnd: Rnd, valid = true): string {
+  const letter = dgPick(rnd, CIF_LETTERS);
+  const body = String(dgInt(rnd, 0, 9999999)).padStart(7, '0');
+  let sum = 0;
+  for (let i = 0; i < 7; i++) {
+    let d = body.charCodeAt(i) - 48;
+    if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  const c = (10 - (sum % 10)) % 10;
+  return `ES${letter}${body}${valid ? c : (c + 1) % 10}`;
+}
+
+const PL_VAT_WEIGHTS = [6, 5, 7, 2, 3, 4, 5, 6, 7];
+
+/** Check digit (the 10th) of a Polish NIP body: Σ wᵢdᵢ mod 11 (10 = no check). */
+export function plVatCheckDigit(body9: string): number {
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += (body9.charCodeAt(i) - 48) * PL_VAT_WEIGHTS[i];
+  return sum % 11;
+}
+
+/**
+ * Polish NIP: `PL` + 9-digit body + mod-11 check. Bodies whose remainder is
+ * 10 have no check digit and are never issued — redrawn, identically in Rust.
+ * Reference: 1234563218 validates (check 8).
+ */
+export function plVat(rnd: Rnd, valid = true): string {
+  let body: string;
+  let c: number;
+  do {
+    body = dgDigits(rnd, 9);
+    c = plVatCheckDigit(body);
+  } while (c === 10);
+  return `PL${body}${valid ? c : (c + 1) % 10}`;
+}
+
+/**
+ * Real IRS campus prefix ranges for an Employer Identification Number
+ * (Andover 01–06, Atlanta 60/67, Austin 50/53, Brookhaven 02–05/11–13/…,
+ * Cincinnati 17/31, Fresno 88/94, Kansas City 43/48, Memphis 62/64, Ogden
+ * 80–88, Philadelphia 23/33/…, plus the internet-assigned 20–27/45–47/81–84).
+ * This list is a representative subset of the assigned prefixes, not all.
+ */
+export const EIN_PREFIXES: readonly string[] = [
+  '01', '02', '03', '04', '05', '06', '10', '11', '12', '13', '14', '15', '16',
+  '20', '21', '22', '23', '26', '27', '30', '31', '32', '33', '34', '35', '36',
+  '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48',
+  '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62',
+  '63', '64', '65', '66', '67', '68', '71', '72', '73', '74', '75', '76', '77',
+  '80', '81', '82', '83', '84', '85', '86', '87', '88', '90', '91', '92', '93',
+  '94', '95', '98', '99',
+];
+
+/** US EIN `XX-XXXXXXX` with a real campus prefix. No checksum → no toggle. */
+export function usEin(rnd: Rnd): string {
+  return `${dgPickArr(rnd, EIN_PREFIXES)}-${String(dgInt(rnd, 0, 9999999)).padStart(7, '0')}`;
+}
+
+// ── License plates (localized formats) ───────────────────────────────────────
+
+/** Real German registration-district codes (a representative subset). */
+export const DE_PLATE_DISTRICTS: readonly string[] = [
+  'B', 'M', 'K', 'F', 'S', 'H', 'D', 'N', 'E', 'L', 'A', 'C', 'W', 'DD', 'HH', 'DO',
+];
+const PLATE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+/** German plate: district + 1–2 letters + 1–4 digits (`B AB 1234`). */
+export function dePlate(rnd: Rnd): string {
+  const district = dgPickArr(rnd, DE_PLATE_DISTRICTS);
+  const n = dgInt(rnd, 1, 2);
+  let letters = '';
+  for (let i = 0; i < n; i++) letters += dgPick(rnd, PLATE_LETTERS);
+  return `${district} ${letters} ${dgInt(rnd, 1, 9999)}`;
+}
+
+// UK post-2001 letters exclude I and Q.
+const UK_PLATE_CHARS = 'ABCDEFGHJKLMNOPRSTUVWXYZ';
+
+/**
+ * UK post-2001 plate `AB51 CDE`: two local-tag letters (I and Q never used),
+ * the two-digit age identifier — one draw picks the half (51–75 September /
+ * 02–24 March series), one the year — then three letters.
+ */
+export function ukPlate(rnd: Rnd): string {
+  const a = dgPick(rnd, UK_PLATE_CHARS) + dgPick(rnd, UK_PLATE_CHARS);
+  const age = dgInt(rnd, 0, 1) === 0 ? String(dgInt(rnd, 51, 75)) : dgPad2(dgInt(rnd, 2, 24));
+  const tail = dgPick(rnd, UK_PLATE_CHARS) + dgPick(rnd, UK_PLATE_CHARS) + dgPick(rnd, UK_PLATE_CHARS);
+  return `${a}${age} ${tail}`;
+}
+
+/** Japanese plate issuing offices, romanized (the plates themselves use kanji). */
+export const JP_PLATE_OFFICES: readonly string[] = [
+  'SHINAGAWA', 'NERIMA', 'ADACHI', 'YOKOHAMA', 'NAGOYA', 'OSAKA', 'FUKUOKA', 'SAPPORO',
+];
+/** Real 3-digit classification numbers: 3xx ordinary cars, 5xx kei cars. */
+export const JP_PLATE_CLASSES: readonly string[] = [
+  '301', '302', '303', '305', '500', '501', '502', '503', '505',
+];
+
+/**
+ * Japanese plate, ASCII-SAFE variant: romanized office + real 3-digit class +
+ * one Latin letter standing in for the hiragana + `NN-NN`. The genuine format
+ * is 品川 500 あ 12-34; shipping test data into VARCHAR columns across engines
+ * argues for ASCII, and the hiragana slot carries no checksum so a Latin
+ * placeholder loses nothing. Documented simplification.
+ */
+export function jpPlate(rnd: Rnd): string {
+  const office = dgPickArr(rnd, JP_PLATE_OFFICES);
+  const cls = dgPickArr(rnd, JP_PLATE_CLASSES);
+  const letter = dgPick(rnd, PLATE_LETTERS);
+  const num = String(dgInt(rnd, 1, 9999)).padStart(4, '0');
+  return `${office} ${cls} ${letter} ${num.slice(0, 2)}-${num.slice(2)}`;
+}
+
+/** US plate, the generic 3-letters + 4-digits layout (`ABC 1234`). */
+export function usPlate(rnd: Rnd): string {
+  const letters = dgPick(rnd, PLATE_LETTERS) + dgPick(rnd, PLATE_LETTERS) + dgPick(rnd, PLATE_LETTERS);
+  return `${letters} ${String(dgInt(rnd, 0, 9999)).padStart(4, '0')}`;
+}
+
+// ── Airports — IATA code with its real coordinates, coherent by construction ──
+
+/**
+ * Fifty real international airports as `[IATA, lat, lon]` string triples.
+ * Coordinates stay STRINGS so both tiers emit the stored value verbatim — a
+ * float round-trip risks a formatting difference between JS and Rust.
+ */
+export const AIRPORTS: readonly (readonly [string, string, string])[] = [
+  ['JFK', '40.6413', '-73.7781'], ['LAX', '33.9416', '-118.4085'],
+  ['ORD', '41.9742', '-87.9073'], ['ATL', '33.6407', '-84.4277'],
+  ['DFW', '32.8998', '-97.0403'], ['DEN', '39.8561', '-104.6737'],
+  ['SFO', '37.6213', '-122.3790'], ['SEA', '47.4502', '-122.3088'],
+  ['MIA', '25.7959', '-80.2870'], ['BOS', '42.3656', '-71.0096'],
+  ['LHR', '51.4700', '-0.4543'], ['CDG', '49.0097', '2.5479'],
+  ['AMS', '52.3105', '4.7683'], ['FRA', '50.0379', '8.5622'],
+  ['MAD', '40.4983', '-3.5676'], ['BCN', '41.2974', '2.0833'],
+  ['FCO', '41.8003', '12.2389'], ['ZRH', '47.4647', '8.5492'],
+  ['VIE', '48.1103', '16.5697'], ['PRG', '50.1008', '14.2600'],
+  ['WAW', '52.1657', '20.9671'], ['IST', '41.2753', '28.7519'],
+  ['DXB', '25.2532', '55.3657'], ['DOH', '25.2731', '51.6081'],
+  ['SIN', '1.3644', '103.9915'], ['HKG', '22.3080', '113.9185'],
+  ['ICN', '37.4602', '126.4407'], ['NRT', '35.7720', '140.3929'],
+  ['HND', '35.5494', '139.7798'], ['PEK', '40.0799', '116.6031'],
+  ['PVG', '31.1443', '121.8083'], ['DEL', '28.5562', '77.1000'],
+  ['BOM', '19.0896', '72.8656'], ['BKK', '13.6900', '100.7501'],
+  ['KUL', '2.7456', '101.7099'], ['SYD', '-33.9399', '151.1753'],
+  ['MEL', '-37.6690', '144.8410'], ['AKL', '-37.0082', '174.7850'],
+  ['GRU', '-23.4356', '-46.4731'], ['EZE', '-34.8222', '-58.5358'],
+  ['MEX', '19.4363', '-99.0721'], ['YYZ', '43.6777', '-79.6248'],
+  ['YVR', '49.1967', '-123.1815'], ['JNB', '-26.1367', '28.2411'],
+  ['CAI', '30.1219', '31.4056'], ['LOS', '6.5774', '3.3212'],
+  ['NBO', '-1.3192', '36.9278'], ['CPH', '55.6180', '12.6560'],
+  ['ARN', '59.6519', '17.9186'], ['OSL', '60.1939', '11.1004'],
+];
+
+/**
+ * One coherent airport value: `JFK (40.6413, -73.7781)`. A single generator
+ * rather than a code/lat/lon pair — two generators would draw independently
+ * and the coordinates would not match the code, which is worse than one
+ * combined string in a VARCHAR column.
+ */
+export function airport(rnd: Rnd): string {
+  const [code, lat, lon] = dgPickArr(rnd, AIRPORTS);
+  return `${code} (${lat}, ${lon})`;
+}
+
+// ── Colors ───────────────────────────────────────────────────────────────────
+
+/** `#rrggbb` — the web/DB convention for a color column. */
+export function colorHex(rnd: Rnd): string {
+  let out = '#';
+  for (let i = 0; i < 6; i++) out += Math.floor(rnd() * 16).toString(16);
+  return out;
+}
+
+/** CSS `rgb(r, g, b)`. */
+export function colorRgb(rnd: Rnd): string {
+  return `rgb(${dgInt(rnd, 0, 255)}, ${dgInt(rnd, 0, 255)}, ${dgInt(rnd, 0, 255)})`;
+}
+
+/** CSS `hsl(h, s%, l%)`. */
+export function colorHsl(rnd: Rnd): string {
+  return `hsl(${dgInt(rnd, 0, 359)}, ${dgInt(rnd, 0, 100)}%, ${dgInt(rnd, 0, 100)}%)`;
+}
+
+// ── Avatar initials ──────────────────────────────────────────────────────────
+
+/**
+ * Two-letter initials from an already-drawn first/last name pair — the callers
+ * (registry entry and Rust dispatch) draw from the SAME firstNames/lastNames
+ * dictionary packs the name generators use, so the initials are consistent
+ * with what a sibling fullName column would draw on the same stream.
+ */
+export function avatarInitials(first: string, last: string): string {
+  const a = Array.from(first)[0] ?? '';
+  const b = Array.from(last)[0] ?? '';
+  return (a + b).toUpperCase();
+}

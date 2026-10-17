@@ -5,6 +5,25 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added — data generator, next generation (phase 3 batch 2: identifiers)
+
+- **Twenty new generators** (106 → **126 total**), all seeded-deterministic
+  and bit-identical between the TS engine and the Rust writer: **ABA routing
+  number** (checksum-valid), **IBAN formats for DE/FR/ES/PL** (the existing
+  IBAN generator gains them; CZ/GB/JP output unchanged for the same seed),
+  **US SSN** (real area/group rules), **PL PESEL**, **DE Steuer-ID**, **FR
+  NIR** (mainland departments), **ES DNI/NIE**, **VAT ids for DE / FR / ES /
+  PL** and **US EIN** (real campus prefixes), **license plates for DE / UK /
+  JP / US**, a coherent **airport generator** (50 real IATA codes with their
+  coordinates: `JFK (40.6413, -73.7781)`), **hex/RGB/HSL colors**, and
+  **avatar initials** drawn from the same seeded name pools. Check-digit
+  generators keep the `valid: false` negative toggle; every one is pinned by
+  reference vectors (official MOD-97 IBAN examples, PESEL 44051401359, DNI
+  12345678Z, ABA 021000021, …) verified in both languages, and
+  `suggestGenerator` maps `ssn`/`pesel`/`vat`/`ein`/`routing`/`iban`/`plate`/
+  `airport`/`color`/`initials` column names to them. New picker group:
+  **Colors**.
+
 ### Added — data generator, next generation (phase 2: scale)
 
 - **The row ceiling is gone.** Single-table runs accept any count up to
