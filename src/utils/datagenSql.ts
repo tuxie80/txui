@@ -79,6 +79,9 @@ export const SIZINGS: Sizing[] = [
   { id: 'extreme', label: '250 million',  rows: 250_000_000,   serverOnly: true },
   { id: 'absurd',  label: '500 million',  rows: 500_000_000,   serverOnly: true },
   { id: 'billion', label: '1 billion',    rows: 1_000_000_000, serverOnly: true },
+  { id: 'ten-billion',     label: '10 billion',    rows: 10_000_000_000,    serverOnly: true },
+  { id: 'hundred-billion', label: '100 billion',   rows: 100_000_000_000,   serverOnly: true },
+  { id: 'trillion',        label: '1 trillion',    rows: 1_000_000_000_000, serverOnly: true },
 ];
 
 /** Bytes a column of this type costs per row, roughly. */
@@ -112,10 +115,59 @@ export function estimateBytes(specs: ColumnSpec[], rows: number): number {
 }
 
 export function formatBytes(n: number): string {
+  if (n >= 1024 ** 5) return `${(n / 1024 ** 5).toFixed(1)} PiB`;
   if (n >= 1024 ** 4) return `${(n / 1024 ** 4).toFixed(1)} TiB`;
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`;
   if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MiB`;
   return `${(n / 1024).toFixed(0)} KiB`;
+}
+
+// ── the honesty gate ──────────────────────────────────────────────────────────
+
+/**
+ * Past this many rows the Run button arms only after the user types the row
+ * count back (the house typed-confirm pattern, as in data compare's APPLY).
+ * A billion is a loud choice already; past it the cost has to be *repeated by
+ * the user*, not merely shown — and the dialog states the estimated bytes and
+ * the ETA range alongside the box.
+ */
+export const TYPED_CONFIRM_THRESHOLD = 1_000_000_000;
+
+export function needsTypedConfirm(rows: number): boolean {
+  return rows > TYPED_CONFIRM_THRESHOLD;
+}
+
+/**
+ * Rows-per-second envelope for the server path, for the ETA the confirmation
+ * dialog states before a very large run. The fast ends are the local-fixture
+ * measurements (PostgreSQL ≈ 968k, MySQL ≈ 460k rows/s — see DataGenPanel);
+ * the slow ends assume real hardware, real indexes and a busy server. SQL
+ * Server is unmeasured, so its envelope is a conservative guess — say so in
+ * the comment, never on screen as if it were measured.
+ *
+ * Deliberately a RANGE: a single number would be a promise, and the honest
+ * answer at 10¹¹ rows is "hours, somewhere in this band".
+ */
+const SERVER_RPS: Record<string, { fast: number; slow: number }> = {
+  postgres:  { fast: 1_000_000, slow: 250_000 },
+  mysql:     { fast:   500_000, slow: 120_000 },
+  sqlserver: { fast:   400_000, slow:  80_000 },   // unmeasured — conservative guess
+};
+
+/** Optimistic/pessimistic wall-clock seconds for a server-path run. */
+export function etaRangeSeconds(engine: string, rows: number): { lo: number; hi: number } {
+  const r = SERVER_RPS[engine] ?? { fast: 500_000, slow: 100_000 };
+  return { lo: rows / r.fast, hi: rows / r.slow };
+}
+
+/** "17 minutes – 1.1 hours" — the ETA band for the typed-confirm dialog. */
+export function etaRangeText(engine: string, rows: number): string {
+  const { lo, hi } = etaRangeSeconds(engine, rows);
+  const fmt = (s: number) =>
+    s >= 3600 ? `${(s / 3600).toFixed(s >= 36_000 ? 0 : 1)} hours`
+    : s >= 60 ? `${Math.round(s / 60)} minutes`
+    : `${Math.max(1, Math.round(s))} seconds`;
+  return `${fmt(lo)} – ${fmt(hi)}`;
 }
 
 // ── chunking ────────────────────────────────────────────────────────────────
@@ -219,6 +271,28 @@ FROM sys.all_objects a CROSS JOIN sys.all_objects b`;
 // ── the value expressions ───────────────────────────────────────────────────
 
 /** A random float in [0,1) — the primitive everything else is built on. */
+//
+// Why there is no per-statement seed here, though two engines almost offer
+// one (Phase 2 asked; the answer is a documented refusal, not a half-feature):
+//
+//   PostgreSQL `setseed(x)` is SESSION state. Run as its own statement it
+//   lands on whichever pooled connection happens to pick it up — not
+//   necessarily the connection the INSERT then runs on. Folded into the
+//   statement as `WITH s AS (SELECT setseed(x)) INSERT … SELECT …, s`, the
+//   evaluation order of the CTE against the volatile `random()` calls in the
+//   main query is unspecified, so whether the seed is in effect depends on
+//   the planner. Both shapes are flaky; neither ships.
+//
+//   MySQL `RAND(N)` with a constant N is initialised once when the statement
+//   is prepared — so it IS repeatable, but per statement: every chunk would
+//   draw the identical sequence of values, chunk 2 reproducing chunk 1's
+//   randoms exactly (only columns mixed with the row number would differ).
+//   Re-seeding per chunk (`RAND(seed + c)`) is expressible, but then "the
+//   same seed" means something different from the row-by-row engine's seed,
+//   and partial determinism reads as a promise this path does not keep.
+//
+// So the module-header trade stands: the server path is non-deterministic,
+// and the UI says so.
 function rnd(engine: string): string {
   if (engine === 'mysql') return 'RAND()';
   if (engine === 'sqlite') return '(ABS(RANDOM()) / 9223372036854775807.0)';
@@ -706,8 +780,16 @@ function scrambleRangeSql(engine: string, i0: string, lo: number, m: number, see
 // ── the statement ───────────────────────────────────────────────────────────
 
 export interface ServerPlan {
-  /** One statement per chunk, in order. */
+  /**
+   * One statement per chunk, in order. Lazily materialised: a 1e12-row run is
+   * a million chunks, and building a million statements up front is the
+   * better part of a gigabyte of strings held for the whole run. Callers
+   * looping over chunks should use `statementAt(c)`; this view exists for the
+   * callers (tests) that genuinely iterate all of them.
+   */
   statements: string[];
+  /** The statement for chunk `c` (0-based), built on demand. */
+  statementAt(c: number): string;
   chunks: number;
   chunkRows: number;
   /** Generators with no server-side form — the caller must not pretend.
@@ -762,24 +844,33 @@ export function buildServerPlan(
     exprs.push(sql);
   }
   if (unsupported.length > 0) {
-    return { statements: [], chunks: 0, chunkRows: 0, unsupported };
+    return { statements: [], statementAt: () => '', chunks: 0, chunkRows: 0, unsupported };
   }
 
   const { chunks, chunkRows } = planChunks(specs, totalRows);
   const cols = specs.map(s => quoteIdent(s.name, engine)).join(', ');
-  const statements: string[] = [];
 
-  for (let c = 0; c < chunks; c++) {
+  // The arithmetic stays exact at the uncapped sizes: totals are capped at
+  // 1e15 by the panel (see MAX_ROWS there), comfortably under 2^53 ≈ 9.0e15,
+  // so `c * chunkRows` and `totalRows - offset` are exact f64 integers. Counts
+  // only — a row's identity is never carried in an f64 anywhere.
+  const at = (c: number): string => {
     const offset = c * chunkRows;
     const n = Math.min(chunkRows, totalRows - offset);
     const src = rowSource(engine, n, offset);
     // The row source is wrapped so its column is `i` whatever shape it took,
     // and so a MySQL `LIMIT` inside it cannot collide with anything outside.
-    statements.push(
-      `INSERT INTO ${table} (${cols})\nSELECT ${exprs.join(', ')}\nFROM (${src}) AS src`);
-  }
+    return `INSERT INTO ${table} (${cols})\nSELECT ${exprs.join(', ')}\nFROM (${src}) AS src`;
+  };
 
-  return { statements, chunks, chunkRows, unsupported: [] };
+  let cached: string[] | null = null;
+  return {
+    get statements() { return cached ??= Array.from({ length: chunks }, (_, c) => at(c)); },
+    statementAt: at,
+    chunks,
+    chunkRows,
+    unsupported: [],
+  };
 }
 
 /**

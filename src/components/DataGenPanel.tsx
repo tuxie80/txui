@@ -29,8 +29,11 @@ import {
 import { isoNow, logAudit } from '../utils/audit';
 import {
   SIZINGS, buildServerPlan, estimateBytes, formatBytes, shouldUseServer,
+  needsTypedConfirm, etaRangeText,
 } from '../utils/datagenSql';
 import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity';
+import { addLog } from '../store/logStore';
+import { fmtDuration } from '../utils/fmtDuration';
 import { FastGrid } from './FastGrid';
 
 /**
@@ -66,6 +69,7 @@ const SCALES = [
   { label: '5×', value: 5 },
   { label: '10×', value: 10 },
   { label: '50×', value: 50 },
+  { label: '100×', value: 100 },
 ];
 
 /**
@@ -111,8 +115,15 @@ const DEFAULT_NEW_COLS: NewCol[] = [
  * algorithm.
  */
 const MAX_ROWS_ROW_BY_ROW = 10_000_000;
-/** The ceiling overall — the server path reaches the top of the ladder. */
-const MAX_ROWS = 1_000_000_000;
+/**
+ * No real ceiling any more — this is a parser guard, not a policy. JS numbers
+ * are f64: integers are exact up to 2^53 ≈ 9.007e15, and 1e15 stays an order
+ * of magnitude under it, so chunk arithmetic (`c * chunkRows`) and progress
+ * counters never drift. Counts only — a row's identity is never an f64
+ * anywhere. Past 1e9 the Run button demands a typed confirmation
+ * (`needsTypedConfirm`), which is where the honesty lives, not in a cap.
+ */
+const MAX_ROWS = 1e15;
 
 export function DataGenPanel({ sessionId, engine, environment, readOnly, connectionName, schema, onClose, onSchemaChanged }: Props) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -144,8 +155,11 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   const [locale, setLocale] = useState('default');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number; rps: number } | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; rps: number; chunk?: number; chunks?: number } | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
+  // The typed confirmation for runs past a billion rows: the user types the
+  // exact row count back (the house pattern, as in data compare's APPLY).
+  const [confirmText, setConfirmText] = useState('');
   // Where sequences start: MAX(pk)+1 for existing tables (resolved on step 3)
   const [seqStart, setSeqStart] = useState(1);
   const [previewRows, setPreviewRows] = useState<unknown[][] | null>(null);
@@ -239,6 +253,24 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   const kitTotal = useMemo(
     () => Object.values(kitCounts).reduce((s, n) => s + n, 0),
     [kitCounts]);
+
+  // Estimated data size of the whole kit at the current counts — the typed
+  // confirmation states it, as the ladder does for a single table.
+  const kitBytes = useMemo(() => {
+    if (mode !== 'database') return 0;
+    const name = dbName.trim() || kit.defaultName;
+    return kit.tables.reduce((sum, t) =>
+      sum + estimateBytes(kitTableSpecs(name, t, engine), Math.max(1, kitCounts[t.name] ?? 1)), 0);
+  }, [mode, kit, dbName, engine, kitCounts]);
+
+  // The typed confirmation re-arms whenever the number it guards changes —
+  // typing "10000000000" must not unlock a run that has since become 1e11.
+  useEffect(() => { setConfirmText(''); }, [rowCount, kitTotal]);
+
+  /** The count the Run button gates on, and whether the user repeated it. */
+  const confirmRows = mode === 'database' ? kitTotal : rowCount;
+  const confirmNeeded = needsTypedConfirm(confirmRows);
+  const confirmOk = !confirmNeeded || confirmText.trim() === String(confirmRows);
 
   const kitDdl = useMemo(() => {
     if (mode !== 'database') return '';
@@ -408,6 +440,12 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       setError('Blocked: this connection is read-only.');
       return;
     }
+    // Same predicate the Run button used — a disabled control fires no hover,
+    // so the guard lives here too (and catches a stale click).
+    if (!confirmOk) {
+      setError(`Type ${String(rowCount)} in the confirmation box to run ${rowCount.toLocaleString()} rows.`);
+      return;
+    }
     if (environment === 'prod' && !await confirmDialog(
       `⚠ PRODUCTION\n\nInsert ${rowCount.toLocaleString()} generated rows into ${tableName.trim()}?`,
       { danger: true },
@@ -417,10 +455,22 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
     runKeyRef.current = runKey;
     setProgress({ done: 0, total: rowCount, rps: 0 });
 
-    const finish = (rows: number, ms: number, cancelled: boolean, err?: string) => {
+    /**
+     * `committed` is set only by the server path, where each chunk commits on
+     * its own: on cancel/failure the summary must say how much of the table is
+     * real, not gesture at "the last chunk boundary".
+     */
+    const finish = (rows: number, ms: number, cancelled: boolean, err?: string,
+      committed?: { done: number; total: number }) => {
       setProgress(null);
-      if (err) setError(err);
-      else if (cancelled) setSummary(`■ Cancelled after ${rows.toLocaleString()} rows (rolled back to the last chunk boundary)`);
+      if (err) setError(committed
+        ? `${err} — ${committed.done}/${committed.total} chunks committed before the failure; `
+          + `those ${rows.toLocaleString()} rows are in the table`
+        : err);
+      else if (cancelled) setSummary(committed
+        ? `■ Cancelled after ${rows.toLocaleString()} rows — ${committed.done}/${committed.total} chunks committed `
+          + '(each chunk commits on its own; only the in-flight chunk was rolled back)'
+        : `■ Cancelled after ${rows.toLocaleString()} rows (rolled back to the last chunk boundary)`);
       else {
         const rps = ms > 0 ? Math.round(rows / (ms / 1000)) : rows;
         setSummary(`✓ Inserted ${rows.toLocaleString()} rows into ${tableName.trim()} in ${(ms / 1000).toFixed(1)}s (${rps.toLocaleString()} rows/s)`);
@@ -485,26 +535,49 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
 
         const t0 = performance.now();
         let done = 0;
+        let committed = 0;
+        addLog(sessionId, {
+          level: 'info', action: 'DATAGEN',
+          detail: `server-side generation into ${qualifiedTable}`,
+          line: `data generator: ${rowCount.toLocaleString()} rows into ${qualifiedTable} on the server — `
+            + `${plan.chunks.toLocaleString()} chunks of ${plan.chunkRows.toLocaleString()} rows`,
+        });
         // The token of the chunk in flight, so Cancel can reach it. Without
         // this, cancelling only stopped the *next* chunk from starting and the
         // running one carried on to the end.
         try {
-          for (let c = 0; c < plan.statements.length; c++) {
+          // `statementAt`, not `statements`: a trillion-row run is a million
+          // chunks, and materialising a million statements up front is the
+          // better part of a gigabyte of strings held for hours.
+          for (let c = 0; c < plan.chunks; c++) {
             if (runKeyRef.current !== runKey) break;      // cancelled between chunks
             const token = `${runKey}:${c}`;
             chunkTokenRef.current = token;
-            await invoke('panel_query', { sessionId, sql: plan.statements[c], token });
-            done = Math.min(rowCount, (c + 1) * plan.chunkRows);
+            const tc = performance.now();
+            await invoke('panel_query', { sessionId, sql: plan.statementAt(c), token });
+            const chunkMs = Math.round(performance.now() - tc);
+            committed = c + 1;
+            const chunkRowsNow = Math.min(plan.chunkRows, rowCount - c * plan.chunkRows);
+            done = Math.min(rowCount, committed * plan.chunkRows);
+            addLog(sessionId, {
+              level: 'ok', action: 'DATAGEN', ms: chunkMs, rows: chunkRowsNow,
+              detail: `chunk ${committed}/${plan.chunks} into ${qualifiedTable}`,
+              line: `data generator chunk ${committed}/${plan.chunks}: ${chunkRowsNow.toLocaleString()} rows `
+                + `into ${qualifiedTable} in ${fmtDuration(chunkMs)}`,
+            });
             const secs = (performance.now() - t0) / 1000;
-            setProgress({ done, total: rowCount, rps: secs > 0 ? Math.round(done / secs) : 0 });
+            setProgress({ done, total: rowCount, rps: secs > 0 ? Math.round(done / secs) : 0,
+              chunk: committed, chunks: plan.chunks });
           }
-          finish(done, Math.round(performance.now() - t0), runKeyRef.current !== runKey);
+          finish(done, Math.round(performance.now() - t0), runKeyRef.current !== runKey, undefined,
+            { done: committed, total: plan.chunks });
         } catch (e) {
           // A cancelled chunk arrives here as an error; report it as the
           // cancellation it was rather than a failure.
           const cancelled = runKeyRef.current !== runKey;
           finish(done, Math.round(performance.now() - t0), cancelled,
-            cancelled ? undefined : errorDisplay(e));
+            cancelled ? undefined : errorDisplay(e),
+            { done: committed, total: plan.chunks });
         } finally {
           chunkTokenRef.current = null;
         }
@@ -547,13 +620,18 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       finish(0, 0, false, errorDisplay(e));
     }
   }, [mode, qualifiedTable, newCols, engine, sessionId, specs, rowCount, seed, seqStart, locale, useCopy,
-      tableName, connectionName, onSchemaChanged, environment, readOnly, serverVersionNum]);
+      tableName, connectionName, onSchemaChanged, environment, readOnly, serverVersionNum, confirmOk]);
 
   const runDatabase = useCallback(async () => {
     setError(null);
     setSummary(null);
     if (readOnly) {
       setError('Blocked: this connection is read-only.');
+      return;
+    }
+    // Same predicate the Create button used.
+    if (!confirmOk) {
+      setError(`Type ${String(kitTotal)} in the confirmation box to run ${kitTotal.toLocaleString()} rows.`);
       return;
     }
     const name = dbName.trim() || kit.defaultName;
@@ -620,7 +698,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       finish(0, 0, 0, false, errorDisplay(e));
     }
   }, [kit, dbName, engine, sessionId, kitCounts, kitTotal, seed, scale, locale, useCopy,
-      connectionName, onSchemaChanged, environment, readOnly]);
+      connectionName, onSchemaChanged, environment, readOnly, confirmOk]);
 
   const cancelRun = useCallback(() => {
     if (runKeyRef.current) {
@@ -676,11 +754,13 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
           <button className="toolbar-btn dg-run" onClick={() => setStep(3)}>Preview →</button>
         )}
         {step === 3 && (mode === 'database' ? (
-          <button className="toolbar-btn dg-run" onClick={runDatabase} disabled={!!dbProgress}>
+          <button className="toolbar-btn dg-run" onClick={runDatabase} disabled={!!dbProgress || !confirmOk}
+            title={confirmOk ? undefined : `Type ${String(kitTotal)} in the confirmation box below to arm this`}>
             {dbProgress ? 'Generating…' : `▶ Create ${engine === 'mysql' ? 'database' : 'schema'} & insert ${kitTotal.toLocaleString()} rows`}
           </button>
         ) : (
-          <button className="toolbar-btn dg-run" onClick={run} disabled={!!progress || !previewRows}>
+          <button className="toolbar-btn dg-run" onClick={run} disabled={!!progress || !previewRows || !confirmOk}
+            title={confirmOk ? undefined : `Type ${String(rowCount)} in the confirmation box below to arm this`}>
             {progress ? 'Inserting…' : `▶ ${mode === 'new' ? 'Create table & insert' : 'Insert'} ${rowCount.toLocaleString()} rows`}
           </button>
         ))}
@@ -1155,6 +1235,20 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
               + `-- FK columns pull real parent values${engine === 'postgres' && useCopy ? ', COPY fast path' : ''}, seed ${seed})`
             }</pre>
 
+            {confirmNeeded && (
+              <div className="td-apply">
+                <label className="td-confirm">
+                  <span>
+                    Type <code>{String(kitTotal)}</code> to run — {kitTotal.toLocaleString()} rows across{' '}
+                    {kit.tables.length} tables, ≈{formatBytes(kitBytes)} of data (indexes not included), on the
+                    row-by-row engine (kits have no server path), so expect this to take a long while.
+                  </span>
+                  <input value={confirmText} onChange={e => setConfirmText(e.target.value)}
+                    placeholder={String(kitTotal)} spellCheck={false} />
+                </label>
+              </div>
+            )}
+
             {dbProgress && (
               <div className="dg-progress">
                 <div className="dg-progress-block">
@@ -1165,7 +1259,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                     table {dbProgress.tableIdx + 1}/{dbProgress.tableCount}: <b>{dbProgress.label}</b>
                     {' · '}{dbProgress.totalDone.toLocaleString()} / {dbProgress.totalRows.toLocaleString()} rows
                     {dbProgress.rps > 0 && <> · {dbProgress.rps.toLocaleString()} rows/s
-                      · ETA {Math.max(0, Math.round((dbProgress.totalRows - dbProgress.totalDone) / dbProgress.rps))}s</>}
+                      · ETA {fmtDuration(Math.max(0, Math.round((dbProgress.totalRows - dbProgress.totalDone) / dbProgress.rps)) * 1000)}</>}
                   </span>
                 </div>
                 <button className="toolbar-btn dg-cancel" onClick={cancelRun}>■ Cancel</button>
@@ -1189,6 +1283,26 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
               </div>
             )}
 
+            {/* Past a billion rows the cost is repeated by the user, not merely
+                shown: the count typed back, with bytes and the ETA band stated
+                beside the box. */}
+            {confirmNeeded && (
+              <div className="td-apply">
+                <label className="td-confirm">
+                  <span>
+                    Type <code>{String(rowCount)}</code> to run — {rowCount.toLocaleString()} rows,
+                    ≈{formatBytes(estimateBytes(specs, rowCount))} of data (indexes not included), roughly{' '}
+                    {etaRangeText(engine, rowCount)} at measured server-path rates.
+                    {planPeek && planPeek.unsupported.length > 0
+                      ? ' A generator here has no SQL form, so the run falls back to row-by-row generation — much slower than that estimate at this size.'
+                      : ' Server-side runs are non-deterministic (RAND()) and commit chunk by chunk: Cancel keeps the committed chunks.'}
+                  </span>
+                  <input value={confirmText} onChange={e => setConfirmText(e.target.value)}
+                    placeholder={String(rowCount)} spellCheck={false} autoFocus />
+                </label>
+              </div>
+            )}
+
             {progress && (
               <div className="dg-progress">
                 <div className="dg-progress-bar">
@@ -1196,8 +1310,10 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                 </div>
                 <span>
                   {progress.done.toLocaleString()} / {progress.total.toLocaleString()} rows
+                  {progress.chunk != null && progress.chunks != null &&
+                    <> · chunk {progress.chunk.toLocaleString()}/{progress.chunks.toLocaleString()}</>}
                   {progress.rps > 0 && <> · {progress.rps.toLocaleString()} rows/s
-                    · ETA {Math.max(0, Math.round((progress.total - progress.done) / progress.rps))}s</>}
+                    · ETA {fmtDuration(Math.max(0, Math.round((progress.total - progress.done) / progress.rps)) * 1000)}</>}
                 </span>
                 <button className="toolbar-btn dg-cancel" onClick={cancelRun}>■ Cancel</button>
               </div>

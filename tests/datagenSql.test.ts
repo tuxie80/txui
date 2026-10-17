@@ -38,9 +38,11 @@ const SPECS = [
 
 // ── the ladder ──────────────────────────────────────────────────────────────
 
-test('the ladder has more than ten rungs and reaches a billion rows', () => {
+test('the ladder has more than ten rungs and reaches past a billion rows', () => {
   assert.ok(SIZINGS.length >= 10, `${SIZINGS.length} sizings`);
-  assert.equal(SIZINGS[SIZINGS.length - 1].rows, 1_000_000_000);
+  // The ceiling was removed in Phase 2b: the ladder now runs to a trillion.
+  assert.equal(SIZINGS[SIZINGS.length - 1].rows, 1_000_000_000_000);
+  assert.ok(SIZINGS.some(s => s.rows === 1_000_000_000), 'the billion rung stays');
   // Monotonic, or the picker is a lottery.
   for (let i = 1; i < SIZINGS.length; i++) {
     assert.ok(SIZINGS[i].rows > SIZINGS[i - 1].rows, SIZINGS[i].id);

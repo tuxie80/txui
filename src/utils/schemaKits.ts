@@ -354,7 +354,15 @@ export const SCHEMA_KITS: SchemaKit[] = [
 
 // ── Row-count resolution ──────────────────────────────────────────────────────
 
-/** Resolve per-table row counts for a kit at the given scale. */
+/**
+ * Resolve per-table row counts for a kit at the given scale.
+ *
+ * Deliberately UNCAPPED: the scale knob goes past 100× and per-table inputs
+ * are guarded only by the panel's 1e15 parser guard (f64 integers are exact
+ * to 2^53 ≈ 9.0e15, and the multiplications below stay far under it). A cap
+ * here would silently disagree with the inputs, which is worse than a large
+ * number the user typed themselves.
+ */
 export function resolveRowCounts(kit: SchemaKit, scale: number): Map<string, number> {
   const counts = new Map<string, number>();
   for (const t of kit.tables) {

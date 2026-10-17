@@ -9,6 +9,14 @@
 ///        bytes (adaptive), or PostgreSQL COPY FROM STDIN (fast path)
 ///        │  Channel events: progress {rows_done, rows_per_sec} / done
 ///
+/// `writers > 1` (Phase 2a) fans the pipeline out: N writer tasks on N pooled
+/// connections, writer w owning the row indices i with i % N == w. Each writer
+/// replays the SAME sequential RNG stream from row 0 and drops the rows it does
+/// not own, so a row's values are a pure function of (seed, row_idx) — a seeded
+/// run is bit-identical at any writer count. Chunks commit per writer, so an
+/// aborted parallel run leaves partial data behind; the abort report names each
+/// writer's committed count.
+///
 /// The RNG is a faithful port of the frontend's mulberry32 so a seed shown in
 /// the UI stays meaningful, and `generate_preview` uses the same engine as the
 /// real run — preview rows ARE the first inserted rows.
@@ -1371,6 +1379,12 @@ pub struct GenRun {
     pub create_ddl: Option<String>,
     /// PostgreSQL COPY FROM STDIN fast path
     pub use_copy: bool,
+    /// Parallel writers (Phase 2a): N pooled connections writing disjoint row
+    /// ranges (`row_idx % writers == writer_index`). Absent/1 = the original
+    /// single-writer pipeline, byte-identical; clamped to [1, MAX_WRITERS].
+    /// Ignored on SQL Server, whose session IS one pinned connection.
+    #[serde(default)]
+    pub writers: Option<u32>,
     pub run_key: String,
 }
 
@@ -1521,16 +1535,80 @@ fn spawn_generator(
     locale: String,
     fk_pools: Vec<Option<Vec<GenValue>>>,
 ) -> tokio::sync::mpsc::Receiver<Vec<Vec<GenValue>>> {
+    spawn_generator_partition(specs, total, seed, seq_start, locale, fk_pools, 0, 1)
+}
+
+/// Parallel writers (Phase 2a): absent/0/1 is today's single-writer pipeline.
+/// Capped at 8 — past that the server, not the client, is the wall, and each
+/// writer replays the full RNG stream (see below), so writer N costs N×
+/// generator CPU.
+const MAX_WRITERS: u32 = 8;
+
+fn effective_writers(writers: Option<u32>) -> u32 {
+    writers.unwrap_or(1).clamp(1, MAX_WRITERS)
+}
+
+/// Rows owned by writer `w` of `n` over `[0, total)` under the
+/// `i % n == w` partition. Summed over all writers this is exactly `total`.
+/// The production predicate is the modulo check in `spawn_generator_partition`;
+/// this counting twin exists so the tests can prove the split is disjoint and
+/// complete (and exact at u64 scale).
+#[cfg(test)]
+fn partition_count(total: u64, w: u32, n: u32) -> u64 {
+    debug_assert!(w < n);
+    total.saturating_sub(w as u64).saturating_add((n as u64) - 1) / n as u64
+}
+
+/// rows/s for progress events. Saturating: a speculative u64-scale row count
+/// must never overflow the ×1000 — the release profile is panic=abort, so an
+/// overflow here would crash the app, not print a wrong number.
+fn rate_per_sec(rows_done: u64, ms: u64) -> u64 {
+    rows_done.saturating_mul(1000) / ms.max(1)
+}
+
+/// The partitioned generator behind the parallel-writer path: writer
+/// `writer_index` of `writers` owns exactly the row indices `i` with
+/// `i % writers == writer_index` — a disjoint, complete split of `[0, total)`
+/// (asserted by the tests). `writers == 1` degrades to the exact chunk stream
+/// the original `spawn_generator` produced.
+///
+/// Row VALUES stay a pure function of `(seed, row_idx)`: the single-writer run
+/// draws one sequential mulberry32 stream, so each writer replays that same
+/// stream from row 0 and drops the rows it does not own — the draws still
+/// happen, keeping the stream position exact. Generation is ~10⁷ rows/s of CPU
+/// while the write it feeds is ~10⁵ rows/s of round-trips (docs/DATAGEN_DEEPDIVE
+/// §G2), so N writers paying N× generator CPU to remove the writer wall is the
+/// right trade — and it is what keeps a seeded run bit-identical at any writer
+/// count.
+#[allow(clippy::too_many_arguments)]
+fn spawn_generator_partition(
+    specs: Vec<ColumnSpec>,
+    total: u64,
+    seed: u32,
+    seq_start: i64,
+    locale: String,
+    fk_pools: Vec<Option<Vec<GenValue>>>,
+    writer_index: u32,
+    writers: u32,
+) -> tokio::sync::mpsc::Receiver<Vec<Vec<GenValue>>> {
+    debug_assert!(writers >= 1 && writer_index < writers);
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<Vec<GenValue>>>(2);
     tokio::task::spawn_blocking(move || {
         let mut rng = Rng(seed);
-        let mut produced: u64 = 0;
-        while produced < total {
-            let n = ((total - produced) as usize).min(CHUNK_ROWS);
-            let chunk: Vec<Vec<GenValue>> = (0..n)
-                .map(|k| gen_row(&specs, &mut rng, produced + k as u64, seq_start, &locale, &fk_pools, total, seed))
-                .collect();
-            produced += n as u64;
+        let mut row_idx: u64 = 0;
+        while row_idx < total {
+            let mut chunk: Vec<Vec<GenValue>> =
+                Vec::with_capacity(((total - row_idx).min(CHUNK_ROWS as u64)) as usize);
+            while row_idx < total && chunk.len() < CHUNK_ROWS {
+                let row = gen_row(&specs, &mut rng, row_idx, seq_start, &locale, &fk_pools, total, seed);
+                if writers == 1 || row_idx % writers as u64 == writer_index as u64 {
+                    chunk.push(row);
+                }
+                row_idx += 1;
+            }
+            if chunk.is_empty() {
+                break; // this writer owns no rows in the remainder (writers > total)
+            }
             if tx.blocking_send(chunk).is_err() {
                 return; // writer gone (cancel/error) — stop generating
             }
@@ -1539,12 +1617,72 @@ fn spawn_generator(
     rx
 }
 
+/// One cancel in, N out. `generate_data` registers a single oneshot in
+/// `ext_jobs` (so `cancel_datagen` and `cancel_session_work` keep working
+/// unchanged); for a parallel run this fan-out forwards that one signal to
+/// every writer, and a failed writer fires it too, so the rest stop at their
+/// next statement boundary.
+struct CancelFanout(std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>);
+
+impl CancelFanout {
+    fn with_receivers(n: u32) -> (Self, Vec<tokio::sync::oneshot::Receiver<()>>) {
+        let mut senders = Vec::with_capacity(n as usize);
+        let mut receivers = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            senders.push(tx);
+            receivers.push(rx);
+        }
+        (Self(std::sync::Mutex::new(senders)), receivers)
+    }
+
+    /// Idempotent: every registered writer is signalled, exactly once each.
+    fn fire(&self) {
+        if let Ok(mut senders) = self.0.lock() {
+            for tx in senders.drain(..) {
+                let _ = tx.send(());
+            }
+        }
+    }
+}
+
+/// Live per-writer counters shared between the writer tasks and the
+/// orchestrator. `done` tracks the writer's open chunk too (it feeds the live
+/// rate); `committed` advances only after a chunk's COMMIT — that is the
+/// number the abort report owes the user, because parallel per-chunk commits
+/// mean a failed run leaves partial data behind.
+struct WriterStats {
+    done: Vec<std::sync::atomic::AtomicU64>,
+    committed: Vec<std::sync::atomic::AtomicU64>,
+}
+
+impl WriterStats {
+    fn new(n: u32) -> Self {
+        Self {
+            done: (0..n).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+            committed: (0..n).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+        }
+    }
+    fn set_done(&self, w: usize, v: u64) {
+        self.done[w].store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn set_committed(&self, w: usize, v: u64) {
+        self.committed[w].store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn total_done(&self) -> u64 {
+        self.done.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).sum()
+    }
+    fn committed_snapshot(&self) -> Vec<u64> {
+        self.committed.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect()
+    }
+}
+
 fn send_progress(on_event: &Channel<GenEvent>, started: std::time::Instant, rows_done: u64, total: u64) {
     let ms = started.elapsed().as_millis().max(1) as u64;
     let _ = on_event.send(GenEvent::Progress {
         rows_done,
         rows_total: total,
-        rows_per_sec: rows_done * 1000 / ms,
+        rows_per_sec: rate_per_sec(rows_done, ms),
     });
 }
 
@@ -1594,6 +1732,12 @@ async fn write_chunk_my<F: Fn(u64) + Send + Sync>(
 /// writer differ, and the byte-cap/progress logic had already begun to drift
 /// between the copies. `$($use_copy)?` threads PG's COPY fast-path flag;
 /// MySQL has no equivalent argument.
+///
+/// `writers > 1` (Phase 2a) takes the parallel branch below: N writer tasks,
+/// each on its OWN pooled connection with its own partitioned sub-generator
+/// and adaptive sizing, one oneshot fan-out for cancel, and per-writer
+/// committed counts in the abort report. `writers == 1` runs the original
+/// single-writer body unchanged.
 macro_rules! gen_writer {
     ($name:ident, $pool:ty, $exec:path, $load_pools:path, $quote:literal, $write_chunk:ident $(, $use_copy:ident)?) => {
         async fn $name(
@@ -1602,6 +1746,7 @@ macro_rules! gen_writer {
             on_event: Channel<GenEvent>,
             mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
         ) -> Result<(), crate::apperror::AppError> {
+            let writers = effective_writers(run.writers);
             let started = std::time::Instant::now();
             let cols = column_list(&run.specs, $quote);
             let mut conn = pool.acquire().await?;
@@ -1609,22 +1754,116 @@ macro_rules! gen_writer {
                 $exec(&mut *conn, ddl).await.map(|_| ()).map_err(|e| format!("CREATE failed: {e}"))?;
             }
             let fk_pools = $load_pools(&mut conn, &run.specs).await?;
-            let mut rx = spawn_generator(run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools);
-            let mut rows_done: u64 = 0;
-            let mut rows_per_stmt: usize = 2_000;
+            if writers == 1 {
+                let mut rx = spawn_generator(run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools);
+                let mut rows_done: u64 = 0;
+                let mut rows_per_stmt: usize = 2_000;
+                let mut cancelled = false;
+                let progress = |done: u64| send_progress(&on_event, started, done, run.row_count);
+                while let Some(chunk) = rx.recv().await {
+                    if $write_chunk(&mut conn, &run.table, &cols, &chunk, $(run.$use_copy,)?
+                        &mut rows_per_stmt, &mut rows_done, &mut cancel_rx, &progress).await?
+                    {
+                        cancelled = true;
+                        break;
+                    }
+                }
+                rx.close();
+                let _ = on_event.send(GenEvent::Done {
+                    rows: rows_done, ms: started.elapsed().as_millis() as u64, cancelled,
+                });
+                return Ok(());
+            }
+
+            // ── Parallel writers ────────────────────────────────────────────
+            // The DDL is already applied and the FK pools loaded on `conn`;
+            // every writer clones the pools and acquires its own connection.
+            drop(conn);
+            $(let $use_copy = run.$use_copy;)?
+            let total = run.row_count;
+            let stats = std::sync::Arc::new(WriterStats::new(writers));
+            let (fanout, receivers) = CancelFanout::with_receivers(writers);
+            let fanout = std::sync::Arc::new(fanout);
+            let on_event = std::sync::Arc::new(on_event);
+            // The one registered cancel fans out to every writer; a failed
+            // writer fires the same fan-out to stop the rest.
+            let forwarder = {
+                let fanout = fanout.clone();
+                tokio::spawn(async move { let _ = cancel_rx.await; fanout.fire(); })
+            };
+            let mut set = tokio::task::JoinSet::new();
+            for (w, mut writer_cancel) in receivers.into_iter().enumerate() {
+                let pool = pool.clone();
+                let specs = run.specs.clone();
+                let table = run.table.clone();
+                let cols = cols.clone();
+                let locale = run.locale.clone();
+                let fk_pools = fk_pools.clone();
+                let stats = stats.clone();
+                let on_event = on_event.clone();
+                let (seed, seq_start) = (run.seed, run.seq_start);
+                set.spawn(async move {
+                    let mut conn = pool.acquire().await
+                        .map_err(|e| format!("writer {w}: connection acquire failed: {e}"))?;
+                    let mut rx = spawn_generator_partition(
+                        specs, total, seed, seq_start, locale, fk_pools, w as u32, writers);
+                    let mut rows_done: u64 = 0;
+                    let mut committed: u64 = 0;
+                    let mut rows_per_stmt: usize = 2_000;
+                    let progress = |done: u64| {
+                        stats.set_done(w, done);
+                        send_progress(&on_event, started, stats.total_done(), total);
+                    };
+                    let mut cancelled = false;
+                    while let Some(chunk) = rx.recv().await {
+                        if $write_chunk(&mut conn, &table, &cols, &chunk, $($use_copy,)?
+                            &mut rows_per_stmt, &mut rows_done, &mut writer_cancel, &progress)
+                            .await
+                            .map_err(|e| format!("writer {w}: {e}"))?
+                        {
+                            cancelled = true;
+                            break;
+                        }
+                        // COMMIT landed — only now does the chunk count as
+                        // committed, the number the abort report owes the user.
+                        committed += chunk.len() as u64;
+                        stats.set_committed(w, committed);
+                    }
+                    rx.close();
+                    Ok::<bool, crate::apperror::AppError>(cancelled)
+                });
+            }
+            let mut first_err: Option<String> = None;
             let mut cancelled = false;
-            let progress = |done: u64| send_progress(&on_event, started, done, run.row_count);
-            while let Some(chunk) = rx.recv().await {
-                if $write_chunk(&mut conn, &run.table, &cols, &chunk, $(run.$use_copy,)?
-                    &mut rows_per_stmt, &mut rows_done, &mut cancel_rx, &progress).await?
-                {
-                    cancelled = true;
-                    break;
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(Ok(was_cancelled)) => cancelled |= was_cancelled,
+                    Ok(Err(e)) => {
+                        if first_err.is_none() { first_err = Some(e.to_string()); }
+                        fanout.fire(); // stop the rest at their next statement
+                    }
+                    Err(e) => {
+                        if first_err.is_none() { first_err = Some(format!("a writer task failed: {e}")); }
+                        fanout.fire();
+                    }
                 }
             }
-            rx.close();
+            forwarder.abort();
+            let committed = stats.committed_snapshot();
+            let total_committed: u64 = committed.iter().sum();
+            if let Some(e) = first_err {
+                // Honesty over tidiness: per-chunk commits on N connections
+                // cannot be undone together, so say exactly what stayed.
+                let breakdown = committed.iter().enumerate()
+                    .map(|(w, n)| format!("writer {w} committed {n}"))
+                    .collect::<Vec<_>>().join(", ");
+                return Err(format!(
+                    "{e} — parallel run aborted; the committed chunks stay in the table \
+                     ({breakdown}; {total_committed} of {total} rows committed)"
+                ).into());
+            }
             let _ = on_event.send(GenEvent::Done {
-                rows: rows_done, ms: started.elapsed().as_millis() as u64, cancelled,
+                rows: total_committed, ms: started.elapsed().as_millis() as u64, cancelled,
             });
             Ok(())
         }
@@ -1735,6 +1974,9 @@ async fn write_sqlserver(
     let crate::db::types::LiveSession::SqlServer(s) = session.as_ref() else {
         return Err("not a SQL Server session".into());
     };
+    // `run.writers` is deliberately ignored: a SQL Server session IS one
+    // pinned connection (see the section header above), so there is no pool
+    // to parallelize across. The UI greys the control for this engine.
     let started = std::time::Instant::now();
     let cols = ms_column_list(&run.specs);
     if let Some(ddl) = &run.create_ddl {
@@ -1765,6 +2007,32 @@ async fn write_sqlserver(
     Ok(())
 }
 
+// ── MySQL LOAD DATA LOCAL INFILE: evaluated and DECLINED (Phase 2a, 2026-10-17)
+//
+// By the numbers, not by taste:
+//   • This row-by-row writer only ever serves runs BELOW the server-path
+//     threshold (SERVER_THRESHOLD = 200_000 rows, utils/datagenSql.ts); past
+//     that the panel switches to server-side INSERT…SELECT, measured
+//     ~285–300k rows/s (docs/DATAGEN_DEEPDIVE.md §G2). The whole tier this
+//     writer serves is ~1.5 s of inserting at the measured 137k rows/s
+//     (debug build, local PG, 200k×3 cols) — the single writer is not the
+//     wall where this path is actually used.
+//   • adapt() converges to its designed ceiling (10k rows / 4 MiB per
+//     statement) within a handful of statements on any connection faster
+//     than 50 ms/round-trip, so the client side is at maximum early in a
+//     run; LOAD DATA's estimated 300k–1M rows/s would shave ~1 s off a
+//     workload this path never sees at scale.
+//   • sqlx has no streaming LOCAL INFILE support (the client pushes the file
+//     inline in the protocol handshake), so the path would mean a SECOND
+//     MySQL driver — a whole extra auth/TLS/pool stack in the dependency
+//     tree for one fast path — and LOCAL INFILE is off by default on current
+//     MySQL (local_infile=0) and commonly stripped in hardened deployments,
+//     so the fast path would regularly not exist at runtime anyway.
+//   • When the single connection IS the wall (slow LAN / SSH tunnel, where
+//     per-statement RTT dominates), the parallel writers above multiply
+//     throughput without any new dependency.
+// Revisit only with a measured run where adaptive INSERT saturates below the
+// 200k threshold AND writers=MAX_WRITERS is already on.
 gen_writer!(write_mysql, sqlx::MySqlPool, crate::db::mysql::execute, load_fk_pools_my, '`', write_chunk_my);
 gen_writer!(write_postgres, sqlx::PgPool, crate::db::postgres::execute, load_fk_pools_pg, '"', write_chunk_pg, use_copy);
 
@@ -1924,7 +2192,7 @@ fn db_progress(
         rows_total,
         total_done,
         total_rows,
-        rows_per_sec: total_done * 1000 / ms,
+        rows_per_sec: rate_per_sec(total_done, ms),
     });
 }
 
@@ -2554,6 +2822,7 @@ mod tests {
                 locale: "default".into(),
                 create_ddl: Some("CREATE TABLE datagen_bench (id BIGINT PRIMARY KEY, email VARCHAR(255), created TIMESTAMP)".into()),
                 use_copy,
+                writers: None,
                 run_key: "test".into(),
             };
             let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -3147,4 +3416,171 @@ mod tests {
         }
     }
 
+}
+
+// ── Phase 2a tests: parallel writers + u64 scale ─────────────────────────────
+
+#[cfg(test)]
+mod parallel_writer_tests {
+    use super::*;
+
+    fn params() -> GenParams {
+        GenParams {
+            min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
+            ride_pings: None, ping_sec: None,
+            step: None, jitter_pct: None,
+            valid: None, brand: None, iban_country: None,
+        }
+    }
+
+    /// The mix a purity proof has to cover: an index-driven column (sequence),
+    /// plain RNG draws (int, email — dictionary-backed), an RNG null draw, and
+    /// the row_idx-scrambled unique paths.
+    fn specs() -> Vec<ColumnSpec> {
+        let mut nullable = params();
+        nullable.null_pct = 25.0;
+        vec![
+            ColumnSpec { name: "id".into(), type_name: "BIGINT".into(),
+                generator: "sequence".into(), params: params(), unique: false },
+            ColumnSpec { name: "n".into(), type_name: "INT".into(),
+                generator: "int".into(), params: params(), unique: true },
+            ColumnSpec { name: "email".into(), type_name: "VARCHAR(255)".into(),
+                generator: "email".into(), params: params(), unique: true },
+            ColumnSpec { name: "nick".into(), type_name: "VARCHAR(64)".into(),
+                generator: "username".into(), params: nullable, unique: false },
+        ]
+    }
+
+    fn literals(row: &[GenValue]) -> Vec<String> {
+        row.iter().map(|v| v.sql_literal(true)).collect()
+    }
+
+    #[test]
+    fn writers_clamp_to_1_through_8() {
+        assert_eq!(effective_writers(None), 1);
+        assert_eq!(effective_writers(Some(0)), 1);
+        assert_eq!(effective_writers(Some(1)), 1);
+        assert_eq!(effective_writers(Some(2)), 2);
+        assert_eq!(effective_writers(Some(8)), 8);
+        assert_eq!(effective_writers(Some(64)), MAX_WRITERS);
+    }
+
+    /// The `i % writers == w` partition: disjoint, and its union is every row.
+    #[test]
+    fn partition_covers_every_row_exactly_once() {
+        for writers in 1..=MAX_WRITERS {
+            for total in [0u64, 1, 2, 7, 8, 9, 10_000, 100_003, 100_000_000_000] {
+                let sum: u64 = (0..writers).map(|w| partition_count(total, w, writers)).sum();
+                assert_eq!(sum, total, "writers={writers} total={total}");
+            }
+            for i in 0..1_000u64 {
+                let owners = (0..writers).filter(|&w| i % writers as u64 == w as u64).count();
+                assert_eq!(owners, 1, "row {i} owned {owners}× with {writers} writers");
+            }
+        }
+    }
+
+    /// The guarantee the whole design rests on: value(row_idx) must not depend
+    /// on the writer count. Each writer replays the shared RNG stream and drops
+    /// the rows it does not own, so its kept rows must equal the single-writer
+    /// run's rows at the same indices, byte for byte.
+    #[test]
+    fn partitioned_values_are_identical_to_the_single_writer_run() {
+        let total = 500u64;
+        let s = specs();
+        let empty: Vec<Option<Vec<GenValue>>> = vec![None; s.len()];
+        let reference: Vec<Vec<String>> = {
+            let mut rng = Rng(42);
+            (0..total)
+                .map(|i| literals(&gen_row(&s, &mut rng, i, 1, "default", &empty, total, 42)))
+                .collect()
+        };
+        for writers in 2..=4u32 {
+            for w in 0..writers {
+                let mut rng = Rng(42);
+                for i in 0..total {
+                    let row = gen_row(&s, &mut rng, i, 1, "default", &empty, total, 42);
+                    if i % writers as u64 != w as u64 { continue; }
+                    assert_eq!(literals(&row), reference[i as usize],
+                        "writers={writers} writer={w} row {i}");
+                }
+            }
+        }
+    }
+
+    /// End to end through the REAL partitioned generator (the mpsc chunk
+    /// stream), not a re-simulation: reassembled by index math, the writers'
+    /// output is the single-writer stream, and the chunk sizes still respect
+    /// CHUNK_ROWS.
+    #[tokio::test]
+    async fn partitioned_generator_stream_matches_the_single_writer_stream() {
+        let total = 25_000u64; // spans multiple chunks per writer
+        let s = specs();
+        let empty: Vec<Option<Vec<GenValue>>> = vec![None; s.len()];
+        let mut reference: Vec<Vec<String>> = Vec::new();
+        let mut rx = spawn_generator(s.clone(), total, 42, 1, "default".into(), empty.clone());
+        while let Some(chunk) = rx.recv().await {
+            assert!(chunk.len() <= CHUNK_ROWS);
+            reference.extend(chunk.iter().map(|r| literals(r)));
+        }
+        assert_eq!(reference.len() as u64, total);
+
+        let writers = 3u32;
+        let mut merged: Vec<Option<Vec<String>>> = vec![None; total as usize];
+        for w in 0..writers {
+            let mut rx = spawn_generator_partition(
+                s.clone(), total, 42, 1, "default".into(), empty.clone(), w, writers);
+            let mut owned = 0u64;
+            while let Some(chunk) = rx.recv().await {
+                assert!(chunk.len() <= CHUNK_ROWS);
+                for row in chunk {
+                    // Writer w's k-th owned row is global index w + k·writers.
+                    merged[(w as u64 + owned * writers as u64) as usize] = Some(literals(&row));
+                    owned += 1;
+                }
+            }
+            assert_eq!(owned, partition_count(total, w, writers), "writer {w} row count");
+        }
+        for (i, row) in merged.into_iter().enumerate() {
+            assert_eq!(row.expect("every row owned by exactly one writer"), reference[i], "row {i}");
+        }
+    }
+
+    /// One registered cancel must reach every writer; firing twice is a no-op,
+    /// not a panic (a cancel racing a writer error fires twice by design).
+    #[test]
+    fn cancel_fanout_reaches_every_writer_once() {
+        let (fanout, mut receivers) = CancelFanout::with_receivers(3);
+        fanout.fire();
+        for rx in &mut receivers {
+            assert!(rx.try_recv().is_ok());
+        }
+        fanout.fire();
+    }
+
+    /// The count path is u64 end to end: a 1e11-row spec partitions exactly,
+    /// aggregates exactly, and the rate math saturates instead of overflowing —
+    /// panic=abort makes an overflow a crash, not a wrong number.
+    #[test]
+    fn u64_scale_math_holds_for_a_1e11_row_spec() {
+        let total = 100_000_000_000u64;
+        let sum: u64 = (0..MAX_WRITERS).map(|w| partition_count(total, w, MAX_WRITERS)).sum();
+        assert_eq!(sum, total);
+        assert_eq!(partition_count(total, 0, MAX_WRITERS), 12_500_000_000);
+        // Rate math: exact at real scale, saturating at the theoretical edge.
+        assert_eq!(rate_per_sec(total, 1_000), total);
+        assert_eq!(rate_per_sec(2_000, 1), 2_000_000);
+        assert_eq!(rate_per_sec(0, 0), 0);
+        assert_eq!(rate_per_sec(u64::MAX, 1), u64::MAX);
+        // Aggregated progress across writers stays exact at 1e11 rows.
+        let stats = WriterStats::new(MAX_WRITERS);
+        for w in 0..MAX_WRITERS as usize {
+            stats.set_done(w, partition_count(total, w as u32, MAX_WRITERS));
+            stats.set_committed(w, partition_count(total, w as u32, MAX_WRITERS));
+        }
+        assert_eq!(stats.total_done(), total);
+        let committed: u64 = stats.committed_snapshot().iter().sum();
+        assert_eq!(committed, total);
+    }
 }

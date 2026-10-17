@@ -5,6 +5,34 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added — data generator, next generation (phase 2: scale)
+
+- **The row ceiling is gone.** Single-table runs accept any count up to
+  10¹⁵ (parser guard), with new ladder rungs at **10 billion, 100 billion
+  and 1 trillion rows** and kit scales up to 100×. Above 1 billion rows a
+  typed confirmation ("type the exact row count") states the cost before it
+  runs: rows, ≈bytes (new PiB rung), an ETA range from measured server-path
+  rates, and the chunk-commit semantics.
+- **Honest chunked server runs.** The server-side path (MySQL / PostgreSQL /
+  SQL Server) already committed chunk by chunk; now every chunk logs its own
+  timed line to the session log, progress shows `chunk M/K` with a humanized
+  ETA, and Cancel/failure report exactly how many chunks (and rows) are
+  committed in the table. Statement strings are built lazily, so a
+  trillion-row plan no longer materialises ~a gigabyte of SQL up front.
+- **Parallel writers on the row-by-row engine** (`writers` 1–8, default 1 —
+  wire-compatible): each writer gets its own pooled connection, adaptive
+  batch size and per-chunk transaction, taking rows `i mod writers` from one
+  identical seeded stream — generated values are bit-identical at any writer
+  count (proven by tests). One cancel fans out to all writers; a writer
+  failure stops the run at statement boundaries and reports per-writer
+  committed counts. SQL Server keeps its single pinned connection.
+- **u64-scale hardening:** rate math that could wrap (and, with
+  `panic=abort`, crash the backend) on multi-billion-row runs now saturates.
+- Documented refusals, with reasons in the code: `LOAD DATA LOCAL INFILE`
+  (the tier it would serve is already ~1.5 s at measured rates; sqlx can't
+  stream local-infile) and per-chunk server-side determinism (PG `setseed()`
+  is unreliable on pooled sessions; MySQL `RAND(N)` would clone every chunk).
+
 ### Added — data generator, next generation (phase 0/1/3.1)
 
 Plan: `docs/plans/plan-datagen-nextgen.md` (DbSchema / Redgate / dbForge /
