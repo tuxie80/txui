@@ -22,11 +22,15 @@
 
 ## Install
 
-```bash
-# macOS · Linux — one-liner (checksum-verified, quarantine handled)
-curl -fsSL https://tuxie.eu/txui/install.sh | bash
+**macOS · Linux** — one-liner (checksum-verified, quarantine handled):
 
-# macOS — Homebrew
+```bash
+curl -fsSL https://tuxie.eu/txui/install.sh | bash
+```
+
+**macOS — Homebrew:**
+
+```bash
 brew install --cask tuxie80/tap/txui
 ```
 
