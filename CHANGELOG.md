@@ -5,6 +5,38 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added — data generator, next generation (phase 4: correlated rows & relational truth)
+
+- **Correlated personas.** The per-row locale pick now drives street shape,
+  coordinates (per-locale bounding box), currency and timezone alongside
+  names/phones/postcodes — a Czech row is Czech all the way across.
+  Fixed-locale server-side runs emit the same coherence in SQL; the mixed
+  locale falls back honestly.
+- **Cross-column formulas.** New `formula` generator referencing earlier
+  columns of the same row (`total = price * qty`, full-name concatenation, …)
+  — a safe parsed expression grammar (no `eval`, whitelisted functions,
+  NULL-propagating), validated before a run starts, with an SQL-expressible
+  subset so formulas survive the server-side path (base columns computed once
+  under aliases — no double-draw) and anything else falls back to the
+  row-by-row engine with a named reason. Bit-identical TS/Rust evaluation.
+- **FK correctness++.** Composite foreign keys pick one shared parent
+  **tuple** (correlation by construction, correlated NULLs); self-referencing
+  FKs (`manager_id`, demoed in the HR kit) point at strictly earlier ids;
+  table dependency cycles are detected and **refused with a readable cycle
+  report** instead of silently generating in a wrong order.
+- **FK pool ceiling gone.** Parent pools grew 10k → 100k, and beyond that a
+  seeded keyed-hash server-side subsample (`ORDER BY MD5(…)`) keeps same-seed
+  determinism — no silent cap, zipf skew intact.
+
+### Fixed — data generator
+
+- Kit FK pool loads double-quoted already-quoted identifiers, so **every**
+  whole-database kit run with FKs failed on MySQL/PostgreSQL/SQL Server
+  (latent since the initial import; no live kit test existed on those
+  engines). Quoting is now normalized exactly once.
+- TS `street` generator disagreed with the Rust writer's draw order; aligned
+  (TS-side street values change for a given seed — deliberate).
+
 ### Added — data generator, next generation (phase 3 batch 2: identifiers)
 
 - **Twenty new generators** (106 → **126 total**), all seeded-deterministic

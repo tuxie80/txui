@@ -38,6 +38,16 @@ export type DictName =
  * `addressFormat` uses named tokens — `{street} {streetKind} {num} {city}
  * {postcode} {country}` — substituted after the parts are drawn, so display
  * order (Japan is large→small) never changes the RNG draw order.
+ *
+ * The persona block (`currency`, `timezone`, `latMin`/`latMax`/`lonMin`/`lonMax`)
+ * extends the one row-level locale pick to money, zone and coordinates: a row
+ * that drew a Czech name gets CZK, Europe/Prague and a point inside the Czech
+ * bounding box. `default`'s persona values are INERT — the currencyCode/
+ * timezone/latitude generators keep their Phase-1 random/param behaviour under
+ * `default` and only pin the pack's values under a fixed locale (or a
+ * `mixed`-resolved one), so a default run stays byte-identical. The fields are
+ * present on `default` because the Rust tier deserialises one struct for every
+ * pack.
  */
 export interface LocaleMeta {
   phonePrefix: string;
@@ -47,6 +57,15 @@ export interface LocaleMeta {
   countryCode: string;
   ibanCountry: string;
   addressFormat: string;
+  /** ISO 4217 currency of the pack's country. */
+  currency: string;
+  /** IANA time zone of the pack's country. */
+  timezone: string;
+  /** Bounding box the persona coordinate generators draw inside. */
+  latMin: number;
+  latMax: number;
+  lonMin: number;
+  lonMax: number;
 }
 
 const DICTS = data as Record<string, Record<string, unknown>>;

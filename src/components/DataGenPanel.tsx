@@ -34,6 +34,7 @@ import {
 import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity';
 import { addLog } from '../store/logStore';
 import { fmtDuration } from '../utils/fmtDuration';
+import { validateFormula } from '../utils/datagenFormula';
 import { FastGrid } from './FastGrid';
 
 /**
@@ -1085,6 +1086,28 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                         <input className="dg-list-input" value={s.params.fkColumn ?? ''}
                           onChange={e => updateParam(i, 'fkColumn', e.target.value)}
                           placeholder="parent col (e.g. `id`)" style={{ maxWidth: 90 }} />
+                      </span>
+                    )}
+                    {g?.uses.includes('formula') && (
+                      // The expression over EARLIER columns, validated live
+                      // against the spec list to this column's left — an
+                      // unknown or later column is a config error here, never
+                      // a surprise mid-run (the Rust run commands reject it too).
+                      <span className="dg-params" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                        <input className="dg-list-input" style={{ maxWidth: 320 }}
+                          value={s.params.expr ?? ''}
+                          onChange={e => updateParam(i, 'expr', e.target.value)}
+                          placeholder="price * qty   ·   first_name || ' ' || last_name" />
+                        {(() => {
+                          const err = validateFormula(
+                            s.params.expr ?? '',
+                            specs.slice(0, i).map(x => x.name),
+                            specs.map(x => x.name),
+                          );
+                          return err
+                            ? <span className="dg-field-hint" style={{ color: 'var(--red)' }}>{err}</span>
+                            : null;
+                        })()}
                       </span>
                     )}
                     {g?.uses.includes('decimals') && (

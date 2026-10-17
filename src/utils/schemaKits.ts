@@ -19,8 +19,12 @@ export interface KitColumn {
   unique?: boolean;
   generator: string;
   params?: Partial<GenParams>;
-  /** FK to a table earlier in the kit (by bare name) */
-  fk?: { table: string; column: string; dist?: 'uniform' | 'zipf' };
+  /** FK to another table in the kit (by bare name) — or, for a
+   *  self-referencing FK like manager_id → employees.id, to THIS table.
+   *  Columns sharing the same `group` and target table form ONE composite
+   *  FK: the generator picks a single parent row and every column of the
+   *  group reads from that tuple, so the key stays correlated. */
+  fk?: { table: string; column: string; dist?: 'uniform' | 'zipf'; group?: string };
   /**
    * A database-computed column: the full DDL fragment after the name, per
    * engine, e.g. a generated spatial POINT from lat/lon. Excluded from inserts
@@ -184,13 +188,19 @@ export const SCHEMA_KITS: SchemaKit[] = [
       {
         name: 'employees',
         rows: { base: 3000 },
-        indexes: [['department_id'], ['hired_at']],
+        indexes: [['department_id'], ['manager_id'], ['hired_at']],
         columns: [
           { name: 'id', type: 'BIGINT', pk: true, generator: 'sequence' },
           { name: 'first_name', type: 'VARCHAR(100)', generator: 'firstName' },
           { name: 'last_name', type: 'VARCHAR(100)', generator: 'lastName' },
           { name: 'email', type: 'VARCHAR(255)', unique: true, generator: 'email' },
           { name: 'department_id', type: 'INT', generator: 'fk', fk: { table: 'departments', column: 'id' } },
+          // Self-referencing FK (Phase 4b): each employee points at a STRICTLY
+          // EARLIER employee id — zipf skews toward the low ids, so a few
+          // senior people manage most of the company; row 1 has no earlier
+          // row and ~15% of the rest roll NULL (top of the org chart).
+          { name: 'manager_id', type: 'BIGINT', nullable: true, generator: 'fk',
+            fk: { table: 'employees', column: 'id', dist: 'zipf' }, params: P({ nullPct: 15 }) },
           { name: 'title', type: 'VARCHAR(60)', generator: 'choice', params: P({ list: 'Engineer:35, Senior Engineer:20, Manager:12, Analyst:12, Specialist:10, Director:5, Intern:6' }) },
           { name: 'hired_at', type: 'DATE', generator: 'date', params: P({ dateFrom: '2015-01-01', dateTo: '2026-07-01' }) },
         ],
@@ -456,9 +466,21 @@ export function buildKitTableDdl(dbName: string, t: KitTable, engine: string): s
   }
   const pks = t.columns.filter(c => c.pk).map(c => qn(c.name));
   if (pks.length) lines.push(`  PRIMARY KEY (${pks.join(', ')})`);
+  // FK constraints: columns sharing an fk group (and target table) form ONE
+  // composite FOREIGN KEY — one constraint per group, columns in table order;
+  // ungrouped columns keep their per-column constraint.
+  const fkGroups = new Map<string, KitColumn[]>();
   for (const c of t.columns) {
     if (!c.fk) continue;
-    lines.push(`  FOREIGN KEY (${qn(c.name)}) REFERENCES ${qn(dbName)}.${qn(c.fk.table)} (${qn(c.fk.column)})`);
+    const key = c.fk.group ? `group:${c.fk.group}:${c.fk.table}` : `col:${c.name}`;
+    const g = fkGroups.get(key) ?? [];
+    g.push(c);
+    fkGroups.set(key, g);
+  }
+  for (const cols of fkGroups.values()) {
+    lines.push(`  FOREIGN KEY (${cols.map(c => qn(c.name)).join(', ')})`
+      + ` REFERENCES ${qn(dbName)}.${qn(cols[0].fk!.table)}`
+      + ` (${cols.map(c => qn(c.fk!.column)).join(', ')})`);
   }
   // MySQL allows INDEX inside CREATE TABLE; PG needs separate statements —
   // keep it simple and emit MySQL-style inline, PG appended via ';'-joined DDL.
@@ -495,6 +517,7 @@ export function kitTableSpecs(dbName: string, t: KitTable, engine: string): Colu
         fkTable: `${qn(dbName)}.${qn(c.fk.table)}`,
         fkColumn: qn(c.fk.column),
         dist: c.fk.dist ?? 'uniform',
+        ...(c.fk.group ? { fkGroup: c.fk.group } : {}),
       } : {}),
     },
   }));

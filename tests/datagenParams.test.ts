@@ -64,7 +64,7 @@ test('every generator produces a non-undefined value for the default params', ()
 
 test('every generator that declares a param group is in the picker groups', () => {
   const known = new Set(['range', 'dates', 'list', 'decimals', 'step', 'affix', 'geo', 'series', 'ride',
-    'validity', 'cardBrand', 'ibanCountry']);
+    'validity', 'cardBrand', 'ibanCountry', 'formula']);
   for (const g of GENERATORS) {
     for (const u of g.uses) {
       assert.ok(known.has(u), `${g.id} declares unknown param group ${u}`);

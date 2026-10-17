@@ -29,6 +29,8 @@ use crate::db::types::LiveSession;
 use crate::db::connection::get_session_pub;
 use crate::state::AppState;
 use super::datagen_ident;
+use super::datagen_formula;
+use super::datagen_fk::{self, FkPool, FkPools, FkSlot, SelfRefCtx};
 
 const CHUNK_ROWS: usize = 10_000;
 const STMT_BYTES_CAP: usize = 4 * 1024 * 1024; // stay far under max_allowed_packet
@@ -86,6 +88,17 @@ struct LocaleMeta {
     #[allow(dead_code)]
     iban_country: String,
     address_format: String,
+    // ── Persona block (Phase 4): the one row-level locale pick also drives
+    //    currency, timezone and the coordinate bounding box. `default`'s values
+    //    are INERT (the generators keep their Phase-1 random/param behaviour
+    //    under `default`); the fields exist on every pack because this struct
+    //    deserialises them all.
+    currency: String,
+    timezone: String,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
 }
 
 /// One locale's word lists (flattened) plus its optional metadata block.
@@ -190,6 +203,12 @@ pub struct GenParams {
     pub fk_table: Option<String>,
     #[serde(default)]
     pub fk_column: Option<String>,
+    /// Composite FK group (Phase 4b): columns sharing (fk_table, fk_group)
+    /// pick ONE parent row — the group's values come from the same tuple, so
+    /// a composite key stays correlated. Absent = independent per-column pick
+    /// (the legacy behavior, unchanged).
+    #[serde(default)]
+    pub fk_group: Option<String>,
     /// Stepping (sequence/cycle): distance between consecutive rows. The TS
     /// engine has always honored it; the Rust engine used to ignore it, so a
     /// stepped sequence previewed one way and inserted another (Phase 0 parity).
@@ -214,6 +233,22 @@ pub struct GenParams {
     /// IBAN country: "CZ" | "GB" | "JP". None → CZ (the Phase-1 default).
     #[serde(default)]
     pub iban_country: Option<String>,
+    // ── Phase 4 (correlated personas + formulas) — additive; absent keeps
+    //    every prior behavior byte-identical.
+    /// Geography params (latitude/longitude/latlon/wktPoint/geoJsonPoint under
+    /// the `default` locale): disc centre and spread. The TS engine has always
+    /// read them; the Rust writer learned them with the persona arms.
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lon: Option<f64>,
+    #[serde(default)]
+    pub radius_km: Option<f64>,
+    /// The `formula` generator's expression over earlier columns of the same
+    /// row (grammar in utils/datagenFormula.ts; evaluation in
+    /// datagen_formula.rs). A formula consumes no RNG draws.
+    #[serde(default)]
+    pub expr: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -231,8 +266,9 @@ pub struct ColumnSpec {
 
 // ── Values ────────────────────────────────────────────────────────────────────
 
+// pub(crate): datagen_fk's pool tuples hold these.
 #[derive(Debug, Clone)]
-enum GenValue {
+pub(crate) enum GenValue {
     Null,
     Int(i64),
     Float(f64),
@@ -944,6 +980,67 @@ fn ride_ping(row_idx: u64, p: &GenParams) -> RidePing {
     ping
 }
 
+// ── Persona geography + controlled-value helpers (Phase 4) ────────────────────
+//
+// The twins of `geoPointFor` and the CURRENCIES/TIMEZONES corpora in
+// utils/datagen.ts. Under `default` the coordinate generators keep the
+// params-driven disc (byte-identical to before); under a fixed or
+// `mixed`-resolved locale the row's persona owns the geography and the point
+// is drawn uniformly from the pack's bounding box — TWO draws either way, so
+// the seeded stream is identical whichever locale a run uses.
+
+/// Kilometres per degree of latitude (matches KM_PER_DEG in utils/datagen.ts).
+const KM_PER_DEG: f64 = 111.32;
+
+/// The corpora `currencyCode` / `timezone` draw from under `default`, in the
+/// Phase-1 order (mirrors CURRENCIES/TIMEZONES in utils/datagen.ts, in the
+/// same order for seeded parity; drift-guarded by tests/datagenPersona.test.ts).
+const CURRENCIES: &[&str] = &["CZK", "EUR", "USD", "GBP", "PLN", "CHF", "SEK", "NOK", "DKK", "HUF"];
+const TIMEZONES: &[&str] = &[
+    "Europe/Prague", "Europe/Berlin", "Europe/Vienna", "Europe/London", "Europe/Madrid",
+    "Europe/Rome", "Europe/Warsaw", "America/New_York", "America/Chicago",
+    "America/Los_Angeles", "Asia/Tokyo", "Asia/Singapore", "Australia/Sydney", "UTC",
+];
+
+/// `Math.round` — half towards +∞ (Rust's `f64::round` goes half away from
+/// zero, which splits the tiers on exact .5 negatives). Same helper lives in
+/// datagen_formula.rs for the formula evaluator.
+fn js_round6(v: f64) -> f64 {
+    (v * 1e6 + 0.5).floor() / 1e6
+}
+
+/// A point drawn uniformly from a disc around (lat, lon) — the faithful port
+/// of `geoPoint` in utils/datagen.ts: `sqrt(u)` for uniformity by area, the
+/// longitude offset divided by cos(latitude), longitude wrapped not clamped.
+fn geo_point(rng: &mut Rng, p: &GenParams) -> (f64, f64) {
+    let c_lat = p.lat.unwrap_or(0.0);
+    let c_lon = p.lon.unwrap_or(0.0);
+    let rad_deg = p.radius_km.unwrap_or(0.0).max(0.0) / KM_PER_DEG;
+    let w = rad_deg * rng.next().sqrt();
+    let t = 2.0 * std::f64::consts::PI * rng.next();
+    let d_lat = w * t.cos();
+    let cos_lat = (c_lat * std::f64::consts::PI / 180.0).cos();
+    let d_lon = (w * t.sin()) / (if cos_lat.abs() < 1e-6 { 1e-6 } else { cos_lat });
+    let lat = (c_lat + d_lat).clamp(-90.0, 90.0);
+    // f64 `%` is the remainder operator in both Rust and JS — the wrap matches.
+    let lon = ((c_lon + d_lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+    (lat, lon)
+}
+
+/// The point for a row of the coordinate generators: the params-driven disc
+/// under `default`, the persona pack's bounding box under any other (already
+/// row-resolved) locale. Two RNG draws on both paths.
+fn geo_point_for(rng: &mut Rng, p: &GenParams, locale: &str) -> (f64, f64) {
+    if locale == "default" {
+        return geo_point(rng, p);
+    }
+    let m = meta(locale);
+    (
+        m.lat_min + rng.next() * (m.lat_max - m.lat_min),
+        m.lon_min + rng.next() * (m.lon_max - m.lon_min),
+    )
+}
+
 fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParams, locale: &str) -> GenValue {
     match id {
         // Step-honoring, like the TS engine and the SQL row source: a stepped
@@ -1247,6 +1344,43 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
             let g = ride_ping(row_idx, p);
             GenValue::Str(format!("POINT({} {})", g.lon, g.lat))
         }
+        // ── Persona geography + controlled values (Phase 4; TS twins in
+        //    utils/datagen.ts, pinned in tests/datagenPersona.test.ts). Under
+        //    `default` byte-identical to Phase 1; a fixed/mixed-resolved pack
+        //    pins its currency/zone or its bounding box. All draw the SAME
+        //    number of times on both paths, so the stream never moves.
+        "latitude" => GenValue::Float(js_round6(geo_point_for(rng, p, locale).0)),
+        "longitude" => GenValue::Float(js_round6(geo_point_for(rng, p, locale).1)),
+        "latlon" => {
+            let (lat, lon) = geo_point_for(rng, p, locale);
+            GenValue::Str(format!("{},{}", js_round6(lat), js_round6(lon)))
+        }
+        "wktPoint" => {
+            // lon first — WKT/GeoJSON are x-then-y (see the TS twin).
+            let (lat, lon) = geo_point_for(rng, p, locale);
+            GenValue::Str(format!("POINT({} {})", js_round6(lon), js_round6(lat)))
+        }
+        "geoJsonPoint" => {
+            let (lat, lon) = geo_point_for(rng, p, locale);
+            GenValue::Str(format!(
+                "{{\"type\":\"Point\",\"coordinates\":[{},{}]}}",
+                js_round6(lon),
+                js_round6(lat)
+            ))
+        }
+        "currencyCode" => {
+            // Always draw (stream unchanged); a fixed pack pins its currency.
+            let c = CURRENCIES[(rng.next() * CURRENCIES.len() as f64).floor() as usize];
+            GenValue::Str(if locale == "default" { c.into() } else { meta(locale).currency.clone() })
+        }
+        "timezone" => {
+            let t = TIMEZONES[(rng.next() * TIMEZONES.len() as f64).floor() as usize];
+            GenValue::Str(if locale == "default" { t.into() } else { meta(locale).timezone.clone() })
+        }
+        // A formula consumes NO RNG draws — the placeholder is replaced by
+        // datagen_formula::apply_formulas as a post-pass over the built row
+        // (the '<fk>' precedent; a caller skipping the post-pass sees this).
+        "formula" => GenValue::Str(datagen_formula::FORMULA_PLACEHOLDER.into()),
         _ => GenValue::Null,
     }
 }
@@ -1256,27 +1390,67 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
 /// count (the uniqueness tag is zero-padded to its width); `seed` feeds the
 /// uniqueness scramble — both are pure in row_idx, never an RNG draw, so the
 /// seeded stream is identical whether or not a column is unique.
+///
+/// FK picks (Phase 4b): a Single column draws once from its own pool,
+/// unchanged since the pools shipped. A composite group's LEAD draws once and
+/// remembers the picked tuple index; MEMBER columns read the same tuple at
+/// their position WITHOUT drawing — the tuple stays correlated. A member's
+/// nullPct is ignored (no roll, no draw): the lead's nullPct governs the
+/// whole tuple, because an FK with one NULL column and one set column would
+/// be a correlated-nothing.
 #[allow(clippy::too_many_arguments)]
 fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
-           locale: &str, fk_pools: &[Option<Vec<GenValue>>], total: u64, seed: u32) -> Vec<GenValue> {
+           locale: &str, fk: &FkPools, total: u64, seed: u32) -> Vec<GenValue> {
     // Resolve the row's locale from `row_idx` alone (a pure hash, no RNG draw),
     // so a fixed locale is the identity here and its seeded stream is untouched.
     // Only `mixed` maps the row onto a single pack; every generator in the row
     // then localises through it, so the row is internally coherent.
     let row_locale = resolve_locale(locale, row_idx);
-    specs.iter().enumerate().map(|(idx, spec)| {
-        if spec.params.null_pct > 0.0 && rng.next() * 100.0 < spec.params.null_pct {
+    // The composite-group pick memory for this one row. Allocates only when
+    // the table actually has composite groups (a kit feature); the common
+    // single-FK path pays an empty Vec, which never touches the heap.
+    let mut picks: Vec<Option<usize>> =
+        if fk.group_lead.is_empty() { Vec::new() } else { vec![None; fk.group_lead.len()] };
+    let mut row: Vec<GenValue> = specs.iter().enumerate().map(|(idx, spec)| {
+        let slot = fk.slots.get(idx).copied().unwrap_or(FkSlot::Plain);
+        if !matches!(slot, FkSlot::Member(..))
+            && spec.params.null_pct > 0.0 && rng.next() * 100.0 < spec.params.null_pct
+        {
+            // A lead that rolls NULL voids the whole tuple for this row.
+            if let FkSlot::Lead(g) = slot { picks[g] = None; }
             return GenValue::Null;
         }
         if spec.generator == "fk" {
-            return match &fk_pools[idx] {
+            let pool_idx = match slot {
+                FkSlot::Single => Some(idx),
+                FkSlot::Lead(g) | FkSlot::Member(g, _) => Some(fk.group_lead[g]),
+                FkSlot::Plain => None,
+            };
+            return match (slot, pool_idx.and_then(|i| fk.pools.get(i)).and_then(|p| p.as_ref())) {
                 // dist=zipf skews the pick toward early pool entries — "a few
                 // parents own most children", how real data actually looks
-                Some(pool) if !pool.is_empty() => {
+                (FkSlot::Single, Some(FkPool::Tuples(rows))) if !rows.is_empty() => {
                     let t = shaped_unit(rng, spec.params.dist.as_deref());
-                    pool[(t * pool.len() as f64).floor() as usize].clone()
+                    rows[(t * rows.len() as f64).floor() as usize][0].clone()
                 }
-                _ => GenValue::Null, // parent empty → NULL (honest, not a fake id)
+                (FkSlot::Lead(g), Some(FkPool::Tuples(rows))) if !rows.is_empty() => {
+                    let t = shaped_unit(rng, spec.params.dist.as_deref());
+                    let pi = (t * rows.len() as f64).floor() as usize;
+                    picks[g] = Some(pi);
+                    rows[pi][0].clone()
+                }
+                (FkSlot::Member(g, pos), Some(FkPool::Tuples(rows))) => match picks[g] {
+                    Some(pi) => rows[pi].get(pos).cloned().unwrap_or(GenValue::Null),
+                    // The lead got NULL (roll or empty pool) — correlated NULL.
+                    None => GenValue::Null,
+                },
+                (FkSlot::Single, Some(FkPool::SelfSeq { start, step })) =>
+                    self_fk_value(rng, row_idx, *start, *step,
+                                  spec.params.null_pct > 0.0, spec.params.dist.as_deref()),
+                _ => {
+                    if let FkSlot::Lead(g) = slot { picks[g] = None; }
+                    GenValue::Null // parent empty → NULL (honest, not a fake id)
+                }
             };
         }
         let v = gen_value(&spec.generator, rng, row_idx, seq_start, &spec.params, row_locale);
@@ -1285,9 +1459,10 @@ fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
         // utils/datagen.ts (and `uniqueSqlWrap` in datagenSql.ts on the server
         // path). `sequence` and `cycle` are index-driven already: a sequence
         // is always unique; a cycle only while rows ≤ its length, which the
-        // panel reports per column rather than silently repeating.
+        // panel reports per column rather than silently repeating. `formula`
+        // passes through like `fk` — the expression decides the value.
         match spec.generator.as_str() {
-            "sequence" | "cycle" => return v,
+            "sequence" | "cycle" | "formula" => return v,
             _ => {}
         }
         match v {
@@ -1300,7 +1475,34 @@ fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
             GenValue::Str(s) => GenValue::Str(apply_unique_str(&s, row_idx, total, &spec.type_name)),
             other => other,
         }
-    }).collect()
+    }).collect();
+    // Phase 4: cross-column formulas consume NO RNG draws, so they evaluate as
+    // a post-pass over the row just built (columns already left to right) —
+    // the twin of the post-pass in TS `generateRows`. The seeded stream is
+    // identical whether or not a formula column exists.
+    datagen_formula::apply_formulas(specs, &mut row);
+    row
+}
+
+/// Two-pass self-reference pick (Phase 4b): row `row_idx` may only point at a
+/// STRICTLY earlier row's sequence value (`start + j·step`, `j < row_idx`) —
+/// no forward references, so plain insertion order satisfies the constraint
+/// (the sequence formula is the "first pass"; this pick is the second).
+/// `t < 1` for every distribution shape, so `j` is always strictly earlier.
+///
+/// Row 0 has no earlier row. The kit convention is that nullable columns
+/// carry nullPct > 0, and that is the proxy used here — the wire format has
+/// no nullability flag: a nullable row 0 gets NULL; a NOT NULL one (nullPct
+/// 0) points at its OWN id, a self-loop, which is valid and never violates
+/// the constraint.
+fn self_fk_value(rng: &mut Rng, row_idx: u64, start: i64, step: i64,
+                 nullable: bool, dist: Option<&str>) -> GenValue {
+    if row_idx == 0 {
+        return if nullable { GenValue::Null } else { GenValue::Int(start) };
+    }
+    let t = shaped_unit(rng, dist);
+    let j = (t * row_idx as f64).floor() as u64; // < row_idx, since t < 1
+    GenValue::Int(start + j as i64 * step)
 }
 
 // ── Preview ───────────────────────────────────────────────────────────────────
@@ -1319,13 +1521,16 @@ pub async fn generate_preview(
     // write. Absent (older callers) → the preview count.
     total_rows: Option<u64>,
 ) -> Result<Vec<Vec<serde_json::Value>>, crate::apperror::AppError> {
+    // A bad formula (unknown/later column, parse error) is a config error —
+    // named here, before a single row is produced.
+    datagen_formula::validate_specs(&specs)?;
     let n = count.min(PREVIEW_CAP);
     let locale = locale.unwrap_or_else(default_locale);
     let total = total_rows.unwrap_or(n as u64).max(n as u64);
     let mut rng = Rng(seed);
     // Preview is session-less — FK columns show <fk> placeholder (real pools
     // load at run time). Empty pools per column.
-    let empty: Vec<Option<Vec<GenValue>>> = vec![None; specs.len()];
+    let empty = FkPools::none(specs.len());
     Ok((0..n as u64)
         .map(|i| gen_row(&specs, &mut rng, i, seq_start, &locale, &empty, total, seed).iter().map(|v| v.to_json()).collect())
         .collect())
@@ -1419,6 +1624,9 @@ pub async fn generate_data(
         return Err("connection is read-only — data generation is blocked".into());
     }
     state.check_prod_bulk(&run.session_id, "data generation").await?;
+    // A bad formula (unknown/later column, parse error) is a config error —
+    // refuse the run before a single row is written.
+    datagen_formula::validate_specs(&run.specs)?;
     // Generation runs on its own pooled connections with its own transactions,
     // so it cannot join a pinned one. Writing anyway would put every generated
     // row outside the transaction the user believes they are inside — and a
@@ -1470,65 +1678,61 @@ async fn copy_pg(
     Ok(())
 }
 
-
-/// Quote one identifier with `quote`, doubling embedded quote chars — the
-/// same rule column_list applies to the INSERT head. A reserved-word or
-/// spaced FK column/table must not break (or worse, silently change) the
-/// pool query.
-fn qident(name: &str, quote: char) -> String {
-    format!("{q}{}{q}", name.replace(quote, &format!("{q}{q}", q = quote)), q = quote)
-}
-
-/// The FK pool query for one (table, column) pair.
-fn fk_pool_sql(table: &str, column: &str, quote: char) -> String {
-    let t = qident(table, quote);
-    let c = qident(column, quote);
-    format!("SELECT DISTINCT {c} FROM {t} WHERE {c} IS NOT NULL LIMIT 10000")
-}
-
-/// Load parent PK/value pools for every `fk` column (up to 10k distinct
-/// values each) so children reference real parent rows. A pool that FAILS to
-/// load is a hard error, not a silent None: every child row getting a NULL FK
-/// because of a mistyped column, discovered after inserting millions of rows,
-/// is worse than stopping.
-async fn load_fk_pools_my(conn: &mut sqlx::MySqlConnection, specs: &[ColumnSpec]) -> Result<Vec<Option<Vec<GenValue>>>, String> {
-    let mut out = Vec::with_capacity(specs.len());
-    for spec in specs {
-        out.push(match (&spec.params.fk_table, &spec.params.fk_column) {
-            (Some(t), Some(c)) if spec.generator == "fk" => {
-                let sql = fk_pool_sql(t, c, '`');
-                let r = crate::db::mysql::execute(&mut *conn, &sql).await
-                    .map_err(|e| format!("FK pool for column '{}' ({t}.{c}) failed: {e:#}", spec.name))?;
-                Some(r.rows.into_iter().filter_map(|row| json_to_genvalue(row.into_iter().next())).collect())
+/// Load parent value pools for every FK pick unit (`fk_groups`: one per
+/// single FK column, one per composite group) so children reference real
+/// parent rows. Phase 4b:
+///   • a group pointing at the table being generated resolves WITHOUT a query
+///     (`self_ref_pool` — the table is empty at load time);
+///   • a parent past FK_POOL_CAP distinct tuples is subsampled by a seeded
+///     keyed hash (`pool_sample_sql`) — the old silent 10k ceiling is gone;
+///   • a pool that FAILS to load is still a hard error, not a silent None:
+///     every child row getting a NULL FK because of a mistyped column,
+///     discovered after inserting millions of rows, is worse than stopping.
+async fn load_fk_pools_my(conn: &mut sqlx::MySqlConnection, specs: &[ColumnSpec], seed: u32,
+                          self_ref: Option<&SelfRefCtx<'_>>) -> Result<FkPools, String> {
+    let mut fk = FkPools::planned(specs);
+    for gi in 0..fk.groups.len() {
+        let g = fk.groups[gi].clone();
+        if let Some(ctx) = self_ref {
+            if let Some(pool) = datagen_fk::self_ref_pool(&g, ctx, '`')? {
+                fk.pools[g.lead] = Some(pool);
+                continue;
             }
-            _ => None,
-        });
+        }
+        let mut sql = datagen_fk::pool_select_sql(&g.table, &g.columns, '`');
+        let mut r = crate::db::mysql::execute(&mut *conn, &sql).await
+            .map_err(|e| format!("FK pool for column '{}' ({}) failed: {e:#}", specs[g.lead].name, g.table))?;
+        if r.rows.len() > datagen_fk::FK_POOL_CAP {
+            sql = datagen_fk::pool_sample_sql(&g.table, &g.columns, '`', seed);
+            r = crate::db::mysql::execute(&mut *conn, &sql).await
+                .map_err(|e| format!("FK pool sample for column '{}' ({}) failed: {e:#}", specs[g.lead].name, g.table))?;
+        }
+        fk.pools[g.lead] = Some(FkPool::Tuples(datagen_fk::rows_to_tuples(r.rows, g.columns.len())));
     }
-    Ok(out)
+    Ok(fk)
 }
-async fn load_fk_pools_pg(conn: &mut sqlx::PgConnection, specs: &[ColumnSpec]) -> Result<Vec<Option<Vec<GenValue>>>, String> {
-    let mut out = Vec::with_capacity(specs.len());
-    for spec in specs {
-        out.push(match (&spec.params.fk_table, &spec.params.fk_column) {
-            (Some(t), Some(c)) if spec.generator == "fk" => {
-                let sql = fk_pool_sql(t, c, '"');
-                let r = crate::db::postgres::execute(&mut *conn, &sql).await
-                    .map_err(|e| format!("FK pool for column '{}' ({t}.{c}) failed: {e:#}", spec.name))?;
-                Some(r.rows.into_iter().filter_map(|row| json_to_genvalue(row.into_iter().next())).collect())
+async fn load_fk_pools_pg(conn: &mut sqlx::PgConnection, specs: &[ColumnSpec], seed: u32,
+                          self_ref: Option<&SelfRefCtx<'_>>) -> Result<FkPools, String> {
+    let mut fk = FkPools::planned(specs);
+    for gi in 0..fk.groups.len() {
+        let g = fk.groups[gi].clone();
+        if let Some(ctx) = self_ref {
+            if let Some(pool) = datagen_fk::self_ref_pool(&g, ctx, '"')? {
+                fk.pools[g.lead] = Some(pool);
+                continue;
             }
-            _ => None,
-        });
+        }
+        let mut sql = datagen_fk::pool_select_sql(&g.table, &g.columns, '"');
+        let mut r = crate::db::postgres::execute(&mut *conn, &sql).await
+            .map_err(|e| format!("FK pool for column '{}' ({}) failed: {e:#}", specs[g.lead].name, g.table))?;
+        if r.rows.len() > datagen_fk::FK_POOL_CAP {
+            sql = datagen_fk::pool_sample_sql(&g.table, &g.columns, '"', seed);
+            r = crate::db::postgres::execute(&mut *conn, &sql).await
+                .map_err(|e| format!("FK pool sample for column '{}' ({}) failed: {e:#}", specs[g.lead].name, g.table))?;
+        }
+        fk.pools[g.lead] = Some(FkPool::Tuples(datagen_fk::rows_to_tuples(r.rows, g.columns.len())));
     }
-    Ok(out)
-}
-fn json_to_genvalue(v: Option<serde_json::Value>) -> Option<GenValue> {
-    match v {
-        Some(serde_json::Value::Number(n)) => n.as_i64().map(GenValue::Int)
-            .or_else(|| n.as_f64().map(GenValue::Float)),
-        Some(serde_json::Value::String(s)) => Some(GenValue::Str(s)),
-        Some(serde_json::Value::Bool(b)) => Some(GenValue::Bool(b)),
-        _ => None,
-    }
+    Ok(fk)
 }
 
 /// Quoted column list for the INSERT/COPY heads.
@@ -1547,7 +1751,7 @@ fn spawn_generator(
     seed: u32,
     seq_start: i64,
     locale: String,
-    fk_pools: Vec<Option<Vec<GenValue>>>,
+    fk_pools: FkPools,
 ) -> tokio::sync::mpsc::Receiver<Vec<Vec<GenValue>>> {
     spawn_generator_partition(specs, total, seed, seq_start, locale, fk_pools, 0, 1)
 }
@@ -1601,7 +1805,7 @@ fn spawn_generator_partition(
     seed: u32,
     seq_start: i64,
     locale: String,
-    fk_pools: Vec<Option<Vec<GenValue>>>,
+    fk_pools: FkPools,
     writer_index: u32,
     writers: u32,
 ) -> tokio::sync::mpsc::Receiver<Vec<Vec<GenValue>>> {
@@ -1767,7 +1971,17 @@ macro_rules! gen_writer {
             if let Some(ddl) = &run.create_ddl {
                 $exec(&mut *conn, ddl).await.map(|_| ()).map_err(|e| format!("CREATE failed: {e}"))?;
             }
-            let fk_pools = $load_pools(&mut conn, &run.specs).await?;
+            // Design-new-table mode starts from an EMPTY table: a
+            // self-referencing FK resolves arithmetically (FkPool::SelfSeq)
+            // instead of loading an empty pool. Fill-existing mode has no
+            // DDL and loads the pool from the rows already there, as before.
+            let self_ctx = run.create_ddl.as_ref().map(|_| SelfRefCtx {
+                table_key: datagen_fk::ident_key(&run.table, $quote),
+                seq_start: run.seq_start,
+                specs: &run.specs,
+            });
+            let fk_pools = $load_pools(&mut conn, &run.specs, run.seed, self_ctx.as_ref()).await?;
+            drop(self_ctx);
             if writers == 1 {
                 let mut rx = spawn_generator(run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools);
                 let mut rows_done: u64 = 0;
@@ -1910,34 +2124,36 @@ fn ms_column_list(specs: &[ColumnSpec]) -> String {
     specs.iter().map(|s| ms_ident(&s.name)).collect::<Vec<_>>().join(", ")
 }
 
-/// Parent value pools for `fk` columns.
-///
-/// `LIMIT 10000` is not T-SQL — the other engines' `fk_pool_sql` cannot be
-/// reused, and sending it produces *"Incorrect syntax near 'LIMIT'"*, which is
-/// exactly the failure this engine has already had once.
+/// Parent value pools for `fk` columns — the SQL Server twin of
+/// load_fk_pools_my/pg. The SQL differences (TOP instead of LIMIT, bracket
+/// quoting, HASHBYTES for the seeded sample) live in `datagen_fk`'s builders,
+/// which take the `[` quote style.
 async fn load_fk_pools_ms(
     session: &crate::db::sqlserver::SqlServerSession,
     specs: &[ColumnSpec],
-) -> Result<Vec<Option<Vec<GenValue>>>, String> {
-    let mut out = Vec::with_capacity(specs.len());
-    for spec in specs {
-        out.push(match (&spec.params.fk_table, &spec.params.fk_column) {
-            (Some(t), Some(c)) if spec.generator == "fk" => {
-                let col = ms_ident(c);
-                // The table may arrive qualified (`schema.table`), so each part
-                // is bracketed separately — `[sales.orders]` is one identifier
-                // with a dot in its name, which is not what was meant.
-                let tbl = t.split('.').map(ms_ident).collect::<Vec<_>>().join(".");
-                let sql = format!(
-                    "SELECT DISTINCT TOP (10000) {col} FROM {tbl} WHERE {col} IS NOT NULL");
-                let r = crate::db::sqlserver::execute(session, &sql).await
-                    .map_err(|e| format!("FK pool for column '{}' ({t}.{c}) failed: {e:#}", spec.name))?;
-                Some(r.rows.into_iter().filter_map(|row| json_to_genvalue(row.into_iter().next())).collect())
+    seed: u32,
+    self_ref: Option<&SelfRefCtx<'_>>,
+) -> Result<FkPools, String> {
+    let mut fk = FkPools::planned(specs);
+    for gi in 0..fk.groups.len() {
+        let g = fk.groups[gi].clone();
+        if let Some(ctx) = self_ref {
+            if let Some(pool) = datagen_fk::self_ref_pool(&g, ctx, '[')? {
+                fk.pools[g.lead] = Some(pool);
+                continue;
             }
-            _ => None,
-        });
+        }
+        let mut sql = datagen_fk::pool_select_sql(&g.table, &g.columns, '[');
+        let mut r = crate::db::sqlserver::execute(session, &sql).await
+            .map_err(|e| format!("FK pool for column '{}' ({}) failed: {e:#}", specs[g.lead].name, g.table))?;
+        if r.rows.len() > datagen_fk::FK_POOL_CAP {
+            sql = datagen_fk::pool_sample_sql(&g.table, &g.columns, '[', seed);
+            r = crate::db::sqlserver::execute(session, &sql).await
+                .map_err(|e| format!("FK pool sample for column '{}' ({}) failed: {e:#}", specs[g.lead].name, g.table))?;
+        }
+        fk.pools[g.lead] = Some(FkPool::Tuples(datagen_fk::rows_to_tuples(r.rows, g.columns.len())));
     }
-    Ok(out)
+    Ok(fk)
 }
 
 /// One chunk, in its own transaction.
@@ -1997,7 +2213,15 @@ async fn write_sqlserver(
         crate::db::sqlserver::execute(s, ddl).await
             .map(|_| ()).map_err(|e| format!("CREATE failed: {e}"))?;
     }
-    let fk_pools = load_fk_pools_ms(s, &run.specs).await?;
+    // Design-new-table mode: self-referencing FKs resolve arithmetically —
+    // see the gen_writer! call site for the why.
+    let self_ctx = run.create_ddl.as_ref().map(|_| SelfRefCtx {
+        table_key: datagen_fk::ident_key(&run.table, '['),
+        seq_start: run.seq_start,
+        specs: &run.specs,
+    });
+    let fk_pools = load_fk_pools_ms(s, &run.specs, run.seed, self_ctx.as_ref()).await?;
+    drop(self_ctx);
     let mut rx = spawn_generator(
         run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools);
     let mut rows_done: u64 = 0;
@@ -2106,10 +2330,11 @@ async fn write_chunk_pg<F: Fn(u64) + Send + Sync>(
 
 // ── Whole-database run (roadmap G3/G4) ────────────────────────────────────────
 //
-// One transactional-chunked run over MANY tables, parents first: the frontend
-// sends tables already topologically ordered by their FK graph. FK pools for a
-// child load right before that child generates — after its parents were
-// inserted — so children always reference real parent rows.
+// One transactional-chunked run over MANY tables, parents first: the table
+// order is topologically sorted in `generate_database` (stable — the kits
+// already arrive valid, and a cycle is refused with a readable report). FK
+// pools for a child load right before that child generates — after its
+// parents were inserted — so children always reference real parent rows.
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2131,7 +2356,10 @@ pub struct DbGenRun {
     pub session_id: Uuid,
     /// Statements run once, before any table (CREATE DATABASE/SCHEMA, USE …)
     pub pre_ddl: Vec<String>,
-    /// Topologically ordered: every FK parent precedes its children
+    /// The frontend sends these FK-topologically ordered; generate_database
+    /// re-sorts them server-side anyway (stable — a valid input is unchanged)
+    /// and REFUSES the run with a readable report on a dependency cycle
+    /// rather than inserting children before their parents.
     pub tables: Vec<TableRun>,
     pub seed: u32,
     /// One dictionary pack for the whole database run (Phase 2).
@@ -2175,6 +2403,33 @@ pub async fn generate_database(
     }
     let session = get_session_pub(run.session_id, &state.sessions).await?;
 
+    // Phase 4b: the FK graph is sorted server-side, not trusted. The sort is
+    // stable (an already-valid order — every shipped kit — comes back
+    // identical, so per-table seed offsets don't move), self-references and
+    // parents outside the run are not constraints, and a cycle is refused
+    // with a readable report instead of hanging or generating orphans.
+    let quote = match session.as_ref() {
+        LiveSession::Mysql(_) => '`',
+        LiveSession::Postgres(_) => '"',
+        LiveSession::SqlServer(_) => '[',
+        _ => return Err("data generation is not supported for this engine".into()),
+    };
+    let mut run = run;
+    {
+        let topo: Vec<datagen_fk::TopoTable> = run.tables.iter().map(|t| datagen_fk::TopoTable {
+            key: datagen_fk::ident_key(&t.table, quote),
+            label: t.label.clone(),
+            refs: datagen_fk::fk_groups(&t.specs).iter()
+                .map(|g| datagen_fk::ident_key(&g.table, quote))
+                .collect(),
+        }).collect();
+        let order = datagen_fk::topo_order(&topo)?;
+        if order.iter().enumerate().any(|(i, &o)| o != i) {
+            let mut slots: Vec<Option<TableRun>> = run.tables.drain(..).map(Some).collect();
+            run.tables = order.into_iter().map(|i| slots[i].take().expect("each index used once")).collect();
+        }
+    }
+
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     // Session-prefixed so `cancel_session_work` finds it on close.
     let run_key = crate::state::ext_job_key(run.session_id, &run.run_key);
@@ -2184,7 +2439,7 @@ pub async fn generate_database(
         LiveSession::Postgres(pool) => db_write_postgres(pool.clone(), run, on_event, cancel_rx).await,
         LiveSession::SqlServer(_) =>
             db_write_sqlserver(session.clone(), run, on_event, cancel_rx).await,
-        _ => Err("data generation is not supported for this engine".into()),
+        _ => unreachable!("the quote match above already rejected this engine"),
     };
     state.ext_jobs.write().await.remove(&run_key);
     result
@@ -2211,8 +2466,8 @@ fn db_progress(
 }
 
 /// The whole-database twin of gen_writer! — many tables, parents first
-/// (frontend sends them FK-topologically ordered), per-table seed offsets so
-/// the run stays reproducible; same engine-parameterization (WP-16 16.3).
+/// (sorted in generate_database), per-table seed offsets so the run stays
+/// reproducible; same engine-parameterization (WP-16 16.3).
 macro_rules! db_gen_writer {
     ($name:ident, $pool:ty, $exec:path, $load_pools:path, $quote:literal, $write_chunk:ident $(, $use_copy:ident)?) => {
         async fn $name(
@@ -2238,11 +2493,20 @@ macro_rules! db_gen_writer {
                         .map_err(|e| format!("CREATE {} failed: {e}", t.label))?;
                 }
                 // Parents are already inserted (topological order) — pools see them.
-                let fk_pools = $load_pools(&mut conn, &t.specs).await?;
+                // A self-referencing FK (manager_id → employees.id) resolves
+                // arithmetically instead: the table is empty at this point,
+                // so a loaded pool would be empty (Phase 4b).
+                let table_seed = run.seed.wrapping_add(ti as u32);
+                let self_ctx = SelfRefCtx {
+                    table_key: datagen_fk::ident_key(&t.table, $quote),
+                    seq_start: t.seq_start,
+                    specs: &t.specs,
+                };
+                let fk_pools = $load_pools(&mut conn, &t.specs, table_seed, Some(&self_ctx)).await?;
                 // Per-table seed offset: each table gets its own stream, still
                 // fully reproducible from the run seed.
                 let mut rx = spawn_generator(t.specs.clone(), t.row_count,
-                    run.seed.wrapping_add(ti as u32), t.seq_start, run.locale.clone(), fk_pools);
+                    table_seed, t.seq_start, run.locale.clone(), fk_pools);
                 let cols = column_list(&t.specs, $quote);
                 let mut rows_done: u64 = 0;
                 let mut rows_per_stmt: usize = 2_000;
@@ -2307,11 +2571,18 @@ async fn db_write_sqlserver(
             ms(s, ddl).await.map(|_| ())
                 .map_err(|e| format!("CREATE {} failed: {e}", t.label))?;
         }
-        // Parents are inserted first (the frontend sends the tables in FK
-        // topological order), so the pools see real parent rows.
-        let fk_pools = load_fk_pools_ms(s, &t.specs).await?;
+        // Parents are inserted first (the tables were topologically sorted in
+        // generate_database), so the pools see real parent rows. A
+        // self-referencing FK resolves arithmetically (FkPool::SelfSeq).
+        let table_seed = run.seed.wrapping_add(ti as u32);
+        let self_ctx = SelfRefCtx {
+            table_key: datagen_fk::ident_key(&t.table, '['),
+            seq_start: t.seq_start,
+            specs: &t.specs,
+        };
+        let fk_pools = load_fk_pools_ms(s, &t.specs, table_seed, Some(&self_ctx)).await?;
         let mut rx = spawn_generator(t.specs.clone(), t.row_count,
-            run.seed.wrapping_add(ti as u32), t.seq_start, run.locale.clone(), fk_pools);
+            table_seed, t.seq_start, run.locale.clone(), fk_pools);
         let cols = ms_column_list(&t.specs);
         let mut rows_done: u64 = 0;
         // Starts AT the cap rather than the shared 2,000 — a first statement of
@@ -2401,10 +2672,11 @@ mod mssql_datagen_live_tests {
     fn params(min: f64, max: f64) -> GenParams {
         GenParams {
             min, max, date_from: "2024-01-01".into(), date_to: "2024-12-31".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
+            expr: None, lat: None, lon: None, radius_km: None,
         }
     }
 
@@ -2536,7 +2808,7 @@ mod mssql_datagen_live_tests {
 
         // 2,500 rows — deliberately more than the 1000-row VALUES cap, so the
         // chunk really does have to split.
-        let fk_pools = load_fk_pools_ms(&s, &specs).await.expect("fk pools");
+        let fk_pools = load_fk_pools_ms(&s, &specs, 42, None).await.expect("fk pools");
         let mut rx = spawn_generator(specs.clone(), 2_500, 42, 1, "default".into(), fk_pools);
         let (_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
         let mut rows_per_stmt = MSSQL_MAX_VALUES_ROWS;
@@ -2585,10 +2857,11 @@ mod tests {
             min: 1.0, max: 1000.0,
             date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
             list: "new,active,disabled".into(), null_pct: 0.0, dist: None,
-            fk_table: None, fk_column: None,
+            fk_table: None, fk_column: None, fk_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
+            expr: None, lat: None, lon: None, radius_km: None,
         };
         vec![
             ColumnSpec { name: "id".into(), type_name: "BIGINT".into(), generator: "sequence".into(), params: p.clone(), unique: false },
@@ -2603,8 +2876,8 @@ mod tests {
         let mut a = Rng(42);
         let mut b = Rng(42);
         for i in 0..500 {
-            let ra: Vec<String> = gen_row(&s, &mut a, i, 1, "default", &[None,None,None], 500, 42).iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&s, &mut b, i, 1, "default", &[None,None,None], 500, 42).iter().map(|v| v.sql_literal(true)).collect();
+            let ra: Vec<String> = gen_row(&s, &mut a, i, 1, "default", &FkPools::none(3), 500, 42).iter().map(|v| v.sql_literal(true)).collect();
+            let rb: Vec<String> = gen_row(&s, &mut b, i, 1, "default", &FkPools::none(3), 500, 42).iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb);
         }
     }
@@ -2617,10 +2890,11 @@ mod tests {
     fn ride_port_matches_the_typescript_model() {
         let p = GenParams {
             min: 1.0, max: 1000.0, date_from: "2026-06-01".into(), date_to: "2026-07-01".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
             ride_pings: Some(200.0), ping_sec: Some(2.0),
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
+            expr: None, lat: None, lon: None, radius_km: None,
         };
         // (row, carId, lat, lon, speedKmh, headingDeg, epochSec)
         let cases: &[(u64, i64, f64, f64, f64, i64, i64)] = &[
@@ -2649,7 +2923,7 @@ mod tests {
     fn sequence_respects_start() {
         let s = specs();
         let mut rng = Rng(1);
-        let row = gen_row(&s, &mut rng, 0, 5_000, "default", &[None,None,None], 1, 1);
+        let row = gen_row(&s, &mut rng, 0, 5_000, "default", &FkPools::none(3), 1, 1);
         assert!(matches!(row[0], GenValue::Int(5_000)));
     }
 
@@ -2677,7 +2951,7 @@ mod tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_500u64 {
-            let row = gen_row(&s, &mut rng, i, 1, "default", &[None], 2_500, 42);
+            let row = gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 2_500, 42);
             let v = as_str(row.into_iter().next().unwrap());
             assert!(v.chars().count() <= 20, "row {i}: {v} ({} chars)", v.chars().count());
             assert!(seen.insert(v.clone()), "row {i}: duplicate {v}");
@@ -2695,7 +2969,7 @@ mod tests {
         let mut rng = Rng(7);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_500u64 {
-            let row = gen_row(&s, &mut rng, i, 1, "default", &[None], 2_500, 42);
+            let row = gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 2_500, 42);
             let v = as_str(row.into_iter().next().unwrap());
             assert!(v.chars().count() <= 24, "row {i}: {v} ({} chars)", v.chars().count());
             assert!(v.contains('@'), "row {i}: lost the domain: {v}");
@@ -2869,10 +3143,11 @@ mod tests {
     fn params() -> GenParams {
         GenParams {
             min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
+            expr: None, lat: None, lon: None, radius_km: None,
         }
     }
 
@@ -2942,7 +3217,7 @@ mod tests {
             dict("cs-CZ", "cities").iter().map(String::as_str).collect();
         let mut rng = Rng(12345);
         for i in 0..60 {
-            let row = gen_row(&name_spec, &mut rng, i, 1, "cs-CZ", &[None, None], 60, 12345);
+            let row = gen_row(&name_spec, &mut rng, i, 1, "cs-CZ", &FkPools::none(2), 60, 12345);
             if let GenValue::Str(city) = &row[1] {
                 assert!(cz_cities.contains(city.as_str()), "{city} is not a cs-CZ city");
             } else {
@@ -2952,12 +3227,12 @@ mod tests {
         // Same seed, different locale → different bytes (locale took effect).
         let default_row = {
             let mut r = Rng(999);
-            gen_row(&name_spec, &mut r, 0, 1, "default", &[None, None], 1, 999)
+            gen_row(&name_spec, &mut r, 0, 1, "default", &FkPools::none(2), 1, 999)
                 .iter().map(|v| v.sql_literal(true)).collect::<Vec<_>>()
         };
         let ja_row = {
             let mut r = Rng(999);
-            gen_row(&name_spec, &mut r, 0, 1, "ja-JP", &[None, None], 1, 999)
+            gen_row(&name_spec, &mut r, 0, 1, "ja-JP", &FkPools::none(2), 1, 999)
                 .iter().map(|v| v.sql_literal(true)).collect::<Vec<_>>()
         };
         assert_ne!(default_row, ja_row);
@@ -2973,9 +3248,9 @@ mod tests {
         let mut a = Rng(55);
         let mut b = Rng(55);
         for i in 0..30 {
-            let ra: Vec<String> = gen_row(&plain, &mut a, i, 1, "ja-JP", &[None, None], 30, 55)
+            let ra: Vec<String> = gen_row(&plain, &mut a, i, 1, "ja-JP", &FkPools::none(2), 30, 55)
                 .iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&plain, &mut b, i, 1, "default", &[None, None], 30, 55)
+            let rb: Vec<String> = gen_row(&plain, &mut b, i, 1, "default", &FkPools::none(2), 30, 55)
                 .iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb, "locale changed the draw order at row {i}");
         }
@@ -3139,8 +3414,8 @@ mod tests {
                 let mut a = Rng(321);
                 let mut b = Rng(321);
                 for i in 0..20 {
-                    let ra = gen_row(&s, &mut a, i, 1, loc, &[None, None], 20, 321)[1].sql_literal(true);
-                    let rb = gen_row(&s, &mut b, i, 1, "default", &[None, None], 20, 321)[1].sql_literal(true);
+                    let ra = gen_row(&s, &mut a, i, 1, loc, &FkPools::none(2), 20, 321)[1].sql_literal(true);
+                    let rb = gen_row(&s, &mut b, i, 1, "default", &FkPools::none(2), 20, 321)[1].sql_literal(true);
                     assert_eq!(ra, rb, "{id}/{loc} moved the RNG stream at row {i}");
                 }
             }
@@ -3178,7 +3453,7 @@ mod tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..300u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "mixed", &[None, None, None, None], 300, 42);
+            let row = gen_row(&specs, &mut rng, i, 1, "mixed", &FkPools::none(4), 300, 42);
             let pack = resolve_locale("mixed", i);
             seen.insert(pack);
             let m = meta(pack);
@@ -3208,29 +3483,32 @@ mod tests {
         let mut a = Rng(99);
         let mut b = Rng(99);
         for i in 0..100 {
-            let ra: Vec<String> = gen_row(&specs, &mut a, i, 1, "default", &[None, None, None], 100, 99)
+            let ra: Vec<String> = gen_row(&specs, &mut a, i, 1, "default", &FkPools::none(3), 100, 99)
                 .iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&specs, &mut b, i, 1, "default", &[None, None, None], 100, 99)
+            let rb: Vec<String> = gen_row(&specs, &mut b, i, 1, "default", &FkPools::none(3), 100, 99)
                 .iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb);
         }
     }
     /// WP-08 8.4: the FK pool query quotes both identifiers, so a
     /// reserved-word or backtick-carrying name cannot break out of (or
-    /// silently change) the statement.
+    /// silently change) the statement. Phase 4b moved the SQL to
+    /// datagen_fk::pool_select_sql — same quoting, but the silent 10k ceiling
+    /// became FK_POOL_CAP + 1 sentinel rows (past the cap the loader switches
+    /// to the seeded sample query).
     #[test]
     fn fk_pool_sql_quotes_reserved_and_hostile_identifiers() {
         assert_eq!(
-            fk_pool_sql("order", "key", '`'),
-            "SELECT DISTINCT `key` FROM `order` WHERE `key` IS NOT NULL LIMIT 10000"
+            datagen_fk::pool_select_sql("order", &["key".into()], '`'),
+            "SELECT DISTINCT `key` FROM `order` WHERE `key` IS NOT NULL LIMIT 100001"
         );
         assert_eq!(
-            fk_pool_sql("a`b", "c", '`'),
-            "SELECT DISTINCT `c` FROM `a``b` WHERE `c` IS NOT NULL LIMIT 10000"
+            datagen_fk::pool_select_sql("a`b", &["c".into()], '`'),
+            "SELECT DISTINCT `c` FROM `a``b` WHERE `c` IS NOT NULL LIMIT 100001"
         );
         assert_eq!(
-            fk_pool_sql("Order", "user", '"'),
-            "SELECT DISTINCT \"user\" FROM \"Order\" WHERE \"user\" IS NOT NULL LIMIT 10000"
+            datagen_fk::pool_select_sql("Order", &["user".into()], '"'),
+            "SELECT DISTINCT \"user\" FROM \"Order\" WHERE \"user\" IS NOT NULL LIMIT 100001"
         );
     }
 
@@ -3303,7 +3581,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<i64> = (0..10u64).map(|i| {
-            match gen_row(&s, &mut rng, i, 1, "default", &[None], 10, 42).into_iter().next().unwrap() {
+            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 10, 42).into_iter().next().unwrap() {
                 GenValue::Int(v) => v,
                 other => panic!("expected Int, got {other:?}"),
             }
@@ -3323,7 +3601,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<f64> = (0..6u64).map(|i| {
-            match gen_row(&s, &mut rng, i, 1, "default", &[None], 6, 42).into_iter().next().unwrap() {
+            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 6, 42).into_iter().next().unwrap() {
                 GenValue::Float(v) => v,
                 other => panic!("expected Float, got {other:?}"),
             }
@@ -3342,7 +3620,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<String> = (0..3u64).map(|i| {
-            as_str(gen_row(&s, &mut rng, i, 1, "default", &[None], 15, 42).into_iter().next().unwrap())
+            as_str(gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 15, 42).into_iter().next().unwrap())
         }).collect();
         assert_eq!(got, ["ABC_00", "ABC_01", "ABC_02"]);
     }
@@ -3356,7 +3634,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<String> = (0..3u64).map(|i| {
-            as_str(gen_row(&s, &mut rng, i, 1, "default", &[None], 15, 42).into_iter().next().unwrap())
+            as_str(gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 15, 42).into_iter().next().unwrap())
         }).collect();
         assert_eq!(got, [
             "jiri.watson85.00@fastmail.dev",
@@ -3441,10 +3719,11 @@ mod parallel_writer_tests {
     fn params() -> GenParams {
         GenParams {
             min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
+            expr: None, lat: None, lon: None, radius_km: None,
         }
     }
 
@@ -3503,7 +3782,7 @@ mod parallel_writer_tests {
     fn partitioned_values_are_identical_to_the_single_writer_run() {
         let total = 500u64;
         let s = specs();
-        let empty: Vec<Option<Vec<GenValue>>> = vec![None; s.len()];
+        let empty = FkPools::none(s.len());
         let reference: Vec<Vec<String>> = {
             let mut rng = Rng(42);
             (0..total)
@@ -3531,7 +3810,7 @@ mod parallel_writer_tests {
     async fn partitioned_generator_stream_matches_the_single_writer_stream() {
         let total = 25_000u64; // spans multiple chunks per writer
         let s = specs();
-        let empty: Vec<Option<Vec<GenValue>>> = vec![None; s.len()];
+        let empty = FkPools::none(s.len());
         let mut reference: Vec<Vec<String>> = Vec::new();
         let mut rx = spawn_generator(s.clone(), total, 42, 1, "default".into(), empty.clone());
         while let Some(chunk) = rx.recv().await {
@@ -3596,5 +3875,519 @@ mod parallel_writer_tests {
         assert_eq!(stats.total_done(), total);
         let committed: u64 = stats.committed_snapshot().iter().sum();
         assert_eq!(committed, total);
+    }
+}
+
+
+// ── Phase 4b tests: composite FKs, self-referencing FKs, pool picks ───────────
+//
+// The DB-facing halves (pool SQL, group planning, topo sort) are tested in
+// datagen_fk.rs; these drive `gen_row` itself with synthetic pools — no
+// server needed.
+
+#[cfg(test)]
+mod fk_phase4_tests {
+    use super::*;
+
+    fn params() -> GenParams {
+        GenParams {
+            min: 0.0, max: 100.0, date_from: "2024-01-01".into(), date_to: "2024-12-31".into(),
+            list: String::new(), null_pct: 0.0, dist: None,
+            fk_table: None, fk_column: None, fk_group: None,
+            ride_pings: None, ping_sec: None,
+            step: None, jitter_pct: None,
+            valid: None, brand: None, iban_country: None,
+            expr: None, lat: None, lon: None, radius_km: None,
+        }
+    }
+
+    fn fk_spec(name: &str, table: &str, column: &str, group: Option<&str>) -> ColumnSpec {
+        let mut p = params();
+        p.fk_table = Some(table.into());
+        p.fk_column = Some(column.into());
+        p.fk_group = group.map(str::to_string);
+        ColumnSpec { name: name.into(), type_name: "BIGINT".into(), generator: "fk".into(), params: p, unique: false }
+    }
+
+    fn as_int(v: &GenValue) -> i64 {
+        match v { GenValue::Int(i) => *i, other => panic!("expected Int, got {other:?}") }
+    }
+
+    /// A composite-FK pool: three parent rows whose halves are trivially
+    /// checkable for correlation (b = a² — any mixed-tuple pick breaks it).
+    fn composite_fk() -> (Vec<ColumnSpec>, FkPools) {
+        let specs = vec![
+            fk_spec("a", "`db`.`parent`", "`x`", Some("pk")),
+            fk_spec("b", "`db`.`parent`", "`y`", Some("pk")),
+        ];
+        let mut fk = FkPools::planned(&specs);
+        assert_eq!(fk.slots[0], FkSlot::Lead(0));
+        assert_eq!(fk.slots[1], FkSlot::Member(0, 1));
+        fk.pools[0] = Some(FkPool::Tuples(vec![
+            vec![GenValue::Int(1), GenValue::Int(1)],
+            vec![GenValue::Int(2), GenValue::Int(4)],
+            vec![GenValue::Int(3), GenValue::Int(9)],
+        ]));
+        (specs, fk)
+    }
+
+    #[test]
+    fn a_composite_fk_picks_one_parent_row_not_two_halves() {
+        let (specs, fk) = composite_fk();
+        let parent: std::collections::HashSet<(i64, i64)> = [(1, 1), (2, 4), (3, 9)].into_iter().collect();
+        let mut rng = Rng(42);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..2_000u64 {
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 42);
+            let (a, b) = (as_int(&row[0]), as_int(&row[1]));
+            // Every pair EXISTS in the parent set and the halves correlate —
+            // independent per-column picks would produce (2, 1), (3, 4), …
+            // within a handful of rows.
+            assert!(parent.contains(&(a, b)), "row {i}: ({a}, {b}) mixes parent tuples");
+            assert_eq!(b, a * a, "row {i}: halves of different parents");
+            seen.insert((a, b));
+        }
+        assert!(seen.len() > 1, "2,000 rows should visit more than one parent");
+    }
+
+    #[test]
+    fn composite_picks_are_seeded_deterministic() {
+        let (specs, fk) = composite_fk();
+        let run = |seed: u32| {
+            let mut rng = Rng(seed);
+            (0..100u64).map(|i| {
+                let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 100, seed);
+                (as_int(&row[0]), as_int(&row[1]))
+            }).collect::<Vec<_>>()
+        };
+        assert_eq!(run(7), run(7));
+        assert_ne!(run(7), run(8));
+    }
+
+    #[test]
+    fn zipf_still_skews_composite_picks_toward_early_parents() {
+        let (mut specs, fk) = composite_fk();
+        specs[0].params.dist = Some("zipf".into());
+        let mut rng = Rng(1);
+        let mut first_parent = 0u32;
+        for i in 0..2_000u64 {
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 1);
+            if as_int(&row[0]) == 1 { first_parent += 1; }
+            assert_eq!(as_int(&row[1]), as_int(&row[0]).pow(2), "row {i} lost correlation");
+        }
+        // Zipf (u²) puts ~1/3 of mass on the first third of a 3-entry pool —
+        // well above the uniform 1/3 boundary only because the pool is tiny;
+        // the assertion is that the skew mechanism is alive, not exact mass.
+        assert!(first_parent > 500, "zipf lost its skew: {first_parent}/2000");
+    }
+
+    #[test]
+    fn a_null_roll_on_the_lead_nulls_the_whole_tuple() {
+        let (mut specs, fk) = composite_fk();
+        specs[0].params.null_pct = 30.0;
+        // The member's nullPct is ignored: the lead's governs the tuple.
+        specs[1].params.null_pct = 90.0;
+        let mut rng = Rng(42);
+        let mut nulls = 0u32;
+        for i in 0..2_000u64 {
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 42);
+            match (&row[0], &row[1]) {
+                (GenValue::Null, GenValue::Null) => nulls += 1,
+                (GenValue::Int(a), GenValue::Int(b)) => assert_eq!(*b, a * a),
+                _ => panic!("row {i}: half-null tuple — correlation broken"),
+            }
+        }
+        // 30% ± noise — and NOT the member's 90%.
+        assert!((450..=800).contains(&nulls), "nulls {nulls} should track the lead's 30%");
+    }
+
+    /// Self-referencing FK (manager_id → employees.id): FkPool::SelfSeq is
+    /// what the loaders build for a group pointing at the table being
+    /// generated; these drive the pick itself.
+    fn employees(nullable: bool) -> (Vec<ColumnSpec>, FkPools) {
+        let mut id = ColumnSpec {
+            name: "id".into(), type_name: "BIGINT".into(), generator: "sequence".into(),
+            params: params(), unique: true,
+        };
+        id.params.fk_group = None;
+        let mut mgr = fk_spec("manager_id", "`hr`.`employees`", "`id`", None);
+        if nullable { mgr.params.null_pct = 20.0; }
+        let mut fk = FkPools::planned(&[id.clone(), mgr.clone()]);
+        fk.pools[1] = Some(FkPool::SelfSeq { start: 1, step: 1 });
+        (vec![id, mgr], fk)
+    }
+
+    #[test]
+    fn self_fk_points_strictly_earlier_and_row_zero_self_loops() {
+        let (specs, fk) = employees(false);
+        let mut rng = Rng(42);
+        for i in 0..5_000u64 {
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 5_000, 42);
+            let id = as_int(&row[0]);
+            assert_eq!(id, 1 + i as i64, "sequence id");
+            let mgr = as_int(&row[1]);
+            if i == 0 {
+                // NOT NULL row 0: its own id — a self-loop, always valid.
+                assert_eq!(mgr, 1, "row 0 must self-loop when the column is NOT NULL");
+            } else {
+                assert!(mgr < id, "row {i}: manager {mgr} is not strictly earlier than id {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn self_fk_nullable_column_gets_nulls_and_a_null_row_zero() {
+        let (specs, fk) = employees(true);
+        let mut rng = Rng(42);
+        let mut nulls = 0u32;
+        for i in 0..5_000u64 {
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 5_000, 42);
+            let id = as_int(&row[0]);
+            match &row[1] {
+                GenValue::Null => nulls += 1,
+                v => assert!(as_int(v) < id, "row {i}: forward reference"),
+            }
+        }
+        assert!(matches!(gen_row(&specs, &mut Rng(42), 0, 1, "default", &fk, 5_000, 42)[1], GenValue::Null),
+                "nullable row 0 gets NULL, not a self-loop");
+        // nullPct 20 over 5k rows: expect 1000, allow generous noise.
+        assert!((800..=1200).contains(&nulls), "nullPct ignored: {nulls}/5000 NULLs");
+    }
+
+    #[test]
+    fn self_fk_is_seeded_deterministic() {
+        let (specs, fk) = employees(false);
+        let run = |seed: u32| {
+            let mut rng = Rng(seed);
+            (0..200u64).map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 200, seed)[1]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(9), run(9));
+        assert_ne!(run(9), run(10));
+    }
+
+    /// Bit-identity anchor for the legacy single-column shape: the pool is
+    /// now stored as 1-tuples, so pin the exact picks for seed 42 — if the
+    /// tuple refactor shifted the RNG stream or the indexing, this moves.
+    #[test]
+    fn single_column_fk_picks_are_pinned() {
+        let specs = vec![fk_spec("parent_id", "`db`.`parent`", "`id`", None)];
+        let mut fk = FkPools::planned(&specs);
+        fk.pools[0] = Some(FkPool::Tuples(vec![
+            vec![GenValue::Int(7)], vec![GenValue::Int(8)],
+            vec![GenValue::Int(9)], vec![GenValue::Int(10)],
+        ]));
+        let mut rng = Rng(42);
+        let got: Vec<i64> = (0..12u64)
+            .map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 12, 42)[0]))
+            .collect();
+        assert_eq!(got, [9, 8, 10, 9, 7, 9, 8, 9, 10, 8, 7, 10]);
+    }
+
+    #[test]
+    fn zipf_fk_picks_are_pinned() {
+        let mut specs = vec![fk_spec("parent_id", "`db`.`parent`", "`id`", None)];
+        specs[0].params.dist = Some("zipf".into());
+        let mut fk = FkPools::planned(&specs);
+        fk.pools[0] = Some(FkPool::Tuples((1..=100i64).map(|i| vec![GenValue::Int(i)]).collect()));
+        let mut rng = Rng(42);
+        let got: Vec<i64> = (0..12u64)
+            .map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 12, 42)[0]))
+            .collect();
+        assert_eq!(got, [37, 21, 73, 45, 4, 28, 8, 40, 75, 23, 7, 78]);
+    }
+}
+
+// ── Phase 4a tests: correlated personas + cross-column formulas ──────────────
+//
+// The vectors here are pinned IDENTICALLY in tests/datagenPersona.test.ts and
+// tests/datagenFormula.test.ts (seeded TS runs) — if either tier drifts, one
+// side fails. Value comparison goes through sql_literal(true) so f64 text is
+// compared exactly as it would be written.
+
+#[cfg(test)]
+mod persona_formula_phase4_tests {
+    use super::*;
+
+    fn geo_params() -> GenParams {
+        // DEFAULT_PARAMS in utils/datagen.ts carries the Prague disc centre —
+        // the wire always does, so parity is measured against THAT, not the
+        // None fallbacks.
+        GenParams {
+            min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
+            list: String::new(), null_pct: 0.0, dist: None,
+            fk_table: None, fk_column: None, fk_group: None,
+            ride_pings: None, ping_sec: None,
+            step: None, jitter_pct: None,
+            valid: None, brand: None, iban_country: None,
+            expr: None, lat: Some(50.08), lon: Some(14.44), radius_km: Some(25.0),
+        }
+    }
+
+    fn pcol(name: &str, generator: &str) -> ColumnSpec {
+        ColumnSpec {
+            name: name.into(), type_name: "TEXT".into(),
+            generator: generator.into(), params: geo_params(), unique: false,
+        }
+    }
+
+    fn persona_specs() -> Vec<ColumnSpec> {
+        vec![
+            pcol("cur", "currencyCode"), pcol("tz", "timezone"),
+            pcol("lat", "latitude"), pcol("lon", "longitude"),
+            pcol("ll", "latlon"), pcol("st", "street"),
+        ]
+    }
+
+    fn lit_row(specs: &[ColumnSpec], seed: u32, i: u64, locale: &str) -> Vec<String> {
+        let mut rng = Rng(seed);
+        // Rows before i must consume the stream exactly as the run would.
+        let fk = FkPools::none(specs.len());
+        for j in 0..i {
+            gen_row(specs, &mut rng, j, 1, locale, &fk, 3, seed);
+        }
+        gen_row(specs, &mut rng, i, 1, locale, &fk, 3, seed)
+            .iter().map(|v| v.sql_literal(true)).collect()
+    }
+
+    /// Pinned in tests/datagenPersona.test.ts (same specs, seed 42).
+    #[test]
+    fn persona_values_match_the_typescript_engine_for_seed_42() {
+        let specs = persona_specs();
+        assert_eq!(lit_row(&specs, 42, 0, "cs-CZ"), [
+            "'CZK'", "'Europe/Prague'", "50.689689", "15.655032",
+            "'49.235802,16.319521'", "'Karmelitská náměstí 208'",
+        ]);
+        assert_eq!(lit_row(&specs, 42, 2, "cs-CZ"), [
+            "'CZK'", "'Europe/Prague'", "49.22006", "17.394615",
+            "'49.881142,12.273627'", "'Růžová nábřeží 42'",
+        ]);
+        assert_eq!(lit_row(&specs, 42, 0, "en-GB"), [
+            "'GBP'", "'Europe/London'", "57.401699", "-2.934075",
+            "'52.304406,-1.952553'", "'Oxford Avenue 208'",
+        ]);
+        assert_eq!(lit_row(&specs, 42, 1, "ja-JP"), [
+            "'JPY'", "'Asia/Tokyo'", "34.789224", "140.672404",
+            "'39.525686,129.06533'", "'御徒町 丁目 113'",
+        ]);
+    }
+
+    /// `default` is byte-identical to the pre-persona behaviour: the override
+    /// draws first and discards (the country/countryCode pattern). Pinned in
+    /// tests/datagenPersona.test.ts.
+    #[test]
+    fn persona_default_run_is_byte_identical() {
+        let specs = persona_specs();
+        assert_eq!(lit_row(&specs, 42, 0, "default"), [
+            "'SEK'", "'Europe/Warsaw'", "49.979805", "14.415665",
+            "'49.99686,14.310856'", "'South Road 208'",
+        ]);
+        assert_eq!(lit_row(&specs, 42, 2, "default"), [
+            "'CHF'", "'Europe/Prague'", "50.187401", "14.292533",
+            "'50.241178,14.483224'", "'Vodickova Boulevard 42'",
+        ]);
+    }
+
+    /// The override draws the SAME number of times on both paths, so a column
+    /// after the persona columns is identical whatever the locale.
+    /// The TS twin pins [830, 64, 645] (tests/datagenPersona.test.ts, seed
+    /// 321): the literals differ per tier because the `int` arm itself differs
+    /// (Rust floors over [min, max+1), TS rounds over [min, max]) — a
+    /// pre-existing difference, not a stream shift. The pinned property is
+    /// locale-invariance WITHIN the tier.
+    #[test]
+    fn persona_columns_do_not_move_the_stream() {
+        let specs = vec![
+            pcol("c", "currencyCode"), pcol("z", "timezone"), pcol("la", "latitude"),
+            ColumnSpec { name: "k".into(), type_name: "INT".into(),
+                generator: "int".into(), params: geo_params(), unique: false },
+        ];
+        for loc in ["default", "cs-CZ", "en-GB", "ja-JP", "mixed"] {
+            let fk = FkPools::none(specs.len());
+            let mut rng = Rng(321);
+            let got: Vec<String> = (0..3u64)
+                .map(|i| gen_row(&specs, &mut rng, i, 1, loc, &fk, 3, 321)[3].sql_literal(true))
+                .collect();
+            assert_eq!(got, ["831", "63", "645"], "{loc}");
+        }
+    }
+
+    /// Persona coordinates land inside the pack's bounding box on every row.
+    #[test]
+    fn persona_coords_stay_inside_the_pack_box() {
+        let specs = vec![pcol("lat", "latitude"), pcol("lon", "longitude")];
+        for loc in ["cs-CZ", "en-GB", "ja-JP"] {
+            let m = meta(loc);
+            let fk = FkPools::none(specs.len());
+            let mut rng = Rng(7);
+            for i in 0..200u64 {
+                let row = gen_row(&specs, &mut rng, i, 1, loc, &fk, 200, 7);
+                let (lat, lon) = match (&row[0], &row[1]) {
+                    (GenValue::Float(a), GenValue::Float(b)) => (*a, *b),
+                    other => panic!("expected floats, got {other:?}"),
+                };
+                assert!(lat >= m.lat_min - 1e-9 && lat <= m.lat_max + 1e-9, "{loc} lat {lat}");
+                assert!(lon >= m.lon_min - 1e-9 && lon <= m.lon_max + 1e-9, "{loc} lon {lon}");
+            }
+        }
+    }
+
+    /// The TS `street` generator now draws streets/streetKinds in the same
+    /// order — pinned in tests/datagenPersona.test.ts (seed 42).
+    #[test]
+    fn street_matches_the_typescript_engine() {
+        let specs = vec![pcol("s", "street")];
+        assert_eq!(lit_row(&specs, 42, 0, "default"), ["'Green Way 145'"]);
+        assert_eq!(lit_row(&specs, 42, 1, "default"), ["'River Drive 161'"]);
+        assert_eq!(lit_row(&specs, 42, 2, "default"), ["'Orchard Way 66'"]);
+    }
+
+    // ── formulas through gen_row ─────────────────────────────────────────────
+
+    fn fcol(name: &str, expr: &str) -> ColumnSpec {
+        let mut p = geo_params();
+        p.expr = Some(expr.into());
+        ColumnSpec { name: name.into(), type_name: "TEXT".into(),
+            generator: "formula".into(), params: p, unique: false }
+    }
+
+    /// The TS twin pins rows 0–2 identically (tests/datagenFormula.test.ts,
+    /// seed 42). Row 3 differs in the `qty` column ONLY: the Rust `int` arm
+    /// floors over [min, max+1) where the TS arm rounds over [min, max] — a
+    /// pre-existing difference between the two `int` arms, outside this
+    /// change. The formula's own arithmetic (total = price × qty of the SAME
+    /// row) holds on both tiers, and the deterministic columns pin cross-tier.
+    #[test]
+    fn formula_columns_evaluate_against_the_row() {
+        let mut p = geo_params();
+        p.min = 1.0;
+        p.max = 100.0;
+        let mut pq = geo_params();
+        pq.min = 1.0;
+        pq.max = 5.0;
+        let specs = vec![
+            ColumnSpec { name: "price".into(), type_name: "DECIMAL(10,2)".into(),
+                generator: "decimal".into(), params: p, unique: false },
+            ColumnSpec { name: "qty".into(), type_name: "INT".into(),
+                generator: "int".into(), params: pq, unique: false },
+            fcol("total", "price * qty"),
+            fcol("label", "'item-' || qty"),
+            ColumnSpec { name: "id".into(), type_name: "INT".into(),
+                generator: "sequence".into(), params: geo_params(), unique: false },
+            fcol("double_id", "id * 2 + 1"),
+        ];
+        let fk = FkPools::none(specs.len());
+        let mut rng = Rng(42);
+        let rows: Vec<Vec<String>> = (0..4u64)
+            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &fk, 4, 42)
+                .iter().map(|v| v.sql_literal(true)).collect())
+            .collect();
+        assert_eq!(rows, [
+            ["60.51", "3", "181.53", "'item-3'", "1", "3"],
+            ["85.39", "4", "341.56", "'item-4'", "2", "5"],
+            ["18.31", "3", "54.92999999999999", "'item-3'", "3", "7"],
+            // qty 4 here vs 3 in TS — the int-arm difference above; the row is
+            // still internally coherent (28.05 × 4 = 112.2, 'item-4').
+            ["28.05", "4", "112.2", "'item-4'", "4", "9"],
+        ]);
+    }
+
+    /// A formula can reference an EARLIER formula column (the post-pass runs
+    /// left to right). Pinned in tests/datagenFormula.test.ts (seed 7).
+    #[test]
+    fn formula_over_an_earlier_formula() {
+        let mut p = geo_params();
+        p.min = 1.0;
+        p.max = 9.0;
+        let specs = vec![
+            ColumnSpec { name: "a".into(), type_name: "INT".into(),
+                generator: "int".into(), params: p, unique: false },
+            fcol("b", "a * 10"),
+            fcol("c", "b + a"),
+        ];
+        let fk = FkPools::none(specs.len());
+        let mut rng = Rng(7);
+        let rows: Vec<Vec<String>> = (0..4u64)
+            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &fk, 4, 7)
+                .iter().map(|v| v.sql_literal(true)).collect())
+            .collect();
+        assert_eq!(rows, [
+            ["1", "10", "11"],
+            ["1", "10", "11"],
+            ["9", "90", "99"],
+            ["7", "70", "77"],
+        ]);
+    }
+
+    /// nullPct's NULL stands (the placeholder replacement skips it), and a
+    /// formula column consumes no draws — with nullPct 0 the trailing column
+    /// matches the formula-less stream. (The TS twin is in
+    /// tests/datagenFormula.test.ts; the null roll itself draws when
+    /// nullPct > 0, so the stream check must use 0.)
+    #[test]
+    fn formula_nullpct_wins_and_the_stream_is_unperturbed() {
+        let mut p = geo_params();
+        p.min = 1.0;
+        p.max = 9.0;
+        let mut nullp = geo_params();
+        nullp.min = 1.0;
+        nullp.max = 9.0;
+        nullp.null_pct = 100.0;
+        nullp.expr = Some("a * 10".into());
+        let nullrun = vec![
+            ColumnSpec { name: "a".into(), type_name: "INT".into(),
+                generator: "int".into(), params: p.clone(), unique: false },
+            ColumnSpec { name: "b".into(), type_name: "INT".into(),
+                generator: "formula".into(), params: nullp, unique: false },
+        ];
+        let fk = FkPools::none(nullrun.len());
+        let mut rng = Rng(7);
+        for i in 0..3u64 {
+            let row = gen_row(&nullrun, &mut rng, i, 1, "default", &fk, 3, 7);
+            assert_eq!(row[1].sql_literal(true), "NULL", "nullPct owns the cell");
+        }
+
+        let with = vec![
+            ColumnSpec { name: "a".into(), type_name: "INT".into(),
+                generator: "int".into(), params: p.clone(), unique: false },
+            fcol("b", "a * 10"),
+            ColumnSpec { name: "k".into(), type_name: "INT".into(),
+                generator: "int".into(), params: p.clone(), unique: false },
+        ];
+        let without = vec![
+            ColumnSpec { name: "a".into(), type_name: "INT".into(),
+                generator: "int".into(), params: p.clone(), unique: false },
+            ColumnSpec { name: "k".into(), type_name: "INT".into(),
+                generator: "int".into(), params: p, unique: false },
+        ];
+        let fkw = FkPools::none(with.len());
+        let fko = FkPools::none(without.len());
+        let mut rw = Rng(7);
+        let mut ro = Rng(7);
+        for i in 0..3u64 {
+            let w = gen_row(&with, &mut rw, i, 1, "default", &fkw, 3, 7);
+            let o = gen_row(&without, &mut ro, i, 1, "default", &fko, 3, 7);
+            assert_eq!(w[0].sql_literal(true), o[0].sql_literal(true), "stream shifted (a)");
+            assert_eq!(w[2].sql_literal(true), o[1].sql_literal(true), "stream shifted (k)");
+        }
+    }
+
+    /// A bad formula is a config error named by validate_specs — never a
+    /// panic or a silent wrong row mid-run.
+    #[test]
+    fn formula_config_errors_are_named_by_validate_specs() {
+        let base = ColumnSpec { name: "a".into(), type_name: "INT".into(),
+            generator: "int".into(), params: geo_params(), unique: false };
+        assert!(datagen_formula::validate_specs(&[base.clone(), fcol("b", "a * 2")]).is_ok());
+        let err = |specs: &[ColumnSpec]| datagen_formula::validate_specs(specs).unwrap_err();
+        assert!(err(&[base.clone(), fcol("b", "nope + 1")]).contains("unknown column \"nope\""));
+        assert!(err(&[fcol("b", "a + 1"), base.clone()]).contains("not an earlier column"));
+        assert!(err(&[base.clone(), fcol("b", "a **")]).contains("formula column \"b\""));
+        // An unvalidated spec degrades to NULL cells, not a writer-loop panic.
+        let specs = vec![base, fcol("b", "a **")];
+        let fk = FkPools::none(specs.len());
+        let mut rng = Rng(1);
+        let row = gen_row(&specs, &mut rng, 0, 1, "default", &fk, 1, 1);
+        assert_eq!(row[1].sql_literal(true), "NULL");
     }
 }

@@ -7,6 +7,7 @@
 import { quoteIdent, sqlLiteral as lit } from './sqlIdent.ts';
 import { ridePing } from './rideTracks.ts';
 import { dict, meta, DEFAULT_LOCALE, resolveRowLocale } from '../data/dictionaries.ts';
+import { parseFormula, evalFormula } from './datagenFormula.ts';
 import {
   gs1, luhnAppend, iban as ibanValue,
   rodneCislo, rodneCisloCheck,
@@ -66,6 +67,8 @@ export interface GenParams {
   dist?: 'uniform' | 'normal' | 'zipf';   // numeric/date shaping
   fkTable?: string;    // FK generator: parent table (quoted)
   fkColumn?: string;   // FK generator: parent column
+  /** Composite FK group (Phase 4b): columns sharing (fkTable, fkGroup) pick ONE parent row. */
+  fkGroup?: string;
 
   // ── precision ──────────────────────────────────────────────────────────
   /** Decimal places. 0 means integers; the default of 2 suits money. */
@@ -128,6 +131,16 @@ export interface GenParams {
   brand?: string;
   /** IBAN country: 'CZ' | 'GB' | 'JP'. Empty → CZ (the Phase-1 default). */
   ibanCountry?: string;
+
+  // ── cross-column formulas (Phase 4) ──────────────────────────────────────
+  /**
+   * The `formula` generator's expression over EARLIER columns of the same row
+   * (`price * qty`, `first_name || ' ' || last_name`). Grammar, evaluation and
+   * error rules live in utils/datagenFormula.ts (no eval, NULL on type error);
+   * a formula consumes NO seeded-RNG draws, so both engines evaluate it as a
+   * post-pass over the row just built and the stream is unperturbed.
+   */
+  expr?: string;
 }
 
 export const DEFAULT_PARAMS: GenParams = {
@@ -154,7 +167,7 @@ export const DEFAULT_PARAMS: GenParams = {
 /** Which parameter inputs a generator wants the UI to show. */
 export type ParamGroup =
   | 'range' | 'dates' | 'list' | 'decimals' | 'step' | 'affix' | 'geo' | 'series' | 'ride'
-  | 'validity' | 'cardBrand' | 'ibanCountry';
+  | 'validity' | 'cardBrand' | 'ibanCountry' | 'formula';
 
 export interface Generator {
   id: string;
@@ -238,6 +251,28 @@ function geoPoint(rng: Rng, p: GenParams): { lat: number; lon: number } {
     // Wrap rather than clamp: longitude is a circle, and clamping at ±180
     // would pile points onto the date line.
     lon: ((((cLon + dLon) + 180) % 360) + 360) % 360 - 180,
+  };
+}
+
+/**
+ * The point for a row of the coordinate generators (Phase 4 personas).
+ *
+ * Under `default` this is the params-driven disc (`geoPoint`) — byte-identical
+ * to Phase 1. Under a fixed locale (or a `mixed`-resolved pack) the row's
+ * persona owns the geography, so the point is drawn uniformly from the pack's
+ * bounding box instead: a row that drew a Czech name lands inside Czechia.
+ * Both paths consume exactly TWO draws, so the seeded stream — and every
+ * column after this one — is identical whichever locale a run uses.
+ */
+function geoPointFor(rng: Rng, p: GenParams, loc: string): { lat: number; lon: number } {
+  // `loc` may arrive undefined (the Generator.gen signature's fifth argument is
+  // documented to fall back to `default` then — the module-header contract).
+  const eff = loc ?? DEFAULT_LOCALE;
+  if (eff === DEFAULT_LOCALE) return geoPoint(rng, p);
+  const m = meta(eff);
+  return {
+    lat: m.latMin + rng() * (m.latMax - m.latMin),
+    lon: m.lonMin + rng() * (m.lonMax - m.lonMin),
   };
 }
 
@@ -333,6 +368,15 @@ function fillPattern(pat: string, rng: Rng): string {
 // under `default`. A fixed locale overrides the pick with its own code; this
 // list stays the `default` corpus, so a default run is byte-identical.
 const ISO2 = ['CZ','DE','AT','PL','SK','FR','ES','IT','NL','BE','DK','SE','NO','FI','IE','PT','CH','HU','HR','SI','GB','US'];
+
+// The corpora `currencyCode` / `timezone` draw from under `default`, in the
+// Phase-1 order — a fixed locale (or a `mixed`-resolved pack) overrides the
+// drawn value with the pack's own, exactly the country/countryCode pattern, so
+// the draw count and the default run are byte-identical. Mirrored as
+// `CURRENCIES`/`TIMEZONES` in datagen.rs (drift-guarded by
+// tests/datagenPersona.test.ts).
+export const CURRENCIES = ['CZK','EUR','USD','GBP','PLN','CHF','SEK','NOK','DKK','HUF'];
+export const TIMEZONES = ['Europe/Prague','Europe/Berlin','Europe/Vienna','Europe/London','Europe/Madrid','Europe/Rome','Europe/Warsaw','America/New_York','America/Chicago','America/Los_Angeles','Asia/Tokyo','Asia/Singapore','Australia/Sydney','UTC'];
 
 /**
  * Tiny reverse-regex expander — a faithful port of `expand_regex` in
@@ -571,7 +615,10 @@ function intrinsicCapacity(g: string): number | null {
 export function applyUnique(spec: ColumnSpec, v: unknown, rowIdx: number, total: number, seed: number): unknown {
   if (v === null || v === undefined) return v;
   const g = spec.generator;
-  if (g === 'sequence' || g === 'cycle' || g === 'fk' || g === 'httpStatus') return v;
+  // `formula` passes through: the expression decides the value (it may well be
+  // unique by construction, e.g. over a unique input), and tagging it would
+  // corrupt the computation. uniqueRowReason says so on the summary step.
+  if (g === 'sequence' || g === 'cycle' || g === 'fk' || g === 'httpStatus' || g === 'formula') return v;
   if (typeof v === 'number') {
     const intr = INTRINSIC_UNIQUE[g];
     if (intr) {
@@ -608,6 +655,7 @@ export function uniqueRowReason(spec: ColumnSpec, rows: number): string | null {
   const g = spec.generator;
   if (g === 'sequence') return null;
   if (g === 'fk') return 'uniqueness is not applied to FK columns — values come from the parent pool';
+  if (g === 'formula') return 'uniqueness is not applied to formula columns — the expression decides the value';
   if (g === 'cycle') {
     const n = cycleLength(spec.params);
     return rows <= n ? null : `a cycle of ${n} value${n === 1 ? '' : 's'} repeats from row ${n + 1}`;
@@ -708,18 +756,21 @@ export const GENERATORS: Generator[] = [
     gen: r => `Q${int(r, 1, 4)}` },
 
   // ── Geography ─────────────────────────────────────────────────────────────
+  // The coordinate family routes through `geoPointFor`: the params-driven disc
+  // under `default` (byte-identical to Phase 1), the persona's bounding box
+  // under a fixed/mixed-resolved locale — two RNG draws either way.
   { id: 'latitude', label: 'Latitude', group: 'Geography', uses: ['geo'],
-    gen: (r, _i, p) => round(geoPoint(r, p).lat, 6) },
+    gen: (r, _i, p, _n, loc) => round(geoPointFor(r, p, loc).lat, 6) },
   { id: 'longitude', label: 'Longitude', group: 'Geography', uses: ['geo'],
-    gen: (r, _i, p) => round(geoPoint(r, p).lon, 6) },
+    gen: (r, _i, p, _n, loc) => round(geoPointFor(r, p, loc).lon, 6) },
   { id: 'latlon', label: 'Latitude, longitude (one column)', group: 'Geography', uses: ['geo'],
-    gen: (r, _i, p) => { const g = geoPoint(r, p); return `${round(g.lat, 6)},${round(g.lon, 6)}`; } },
+    gen: (r, _i, p, _n, loc) => { const g = geoPointFor(r, p, loc); return `${round(g.lat, 6)},${round(g.lon, 6)}`; } },
   { id: 'wktPoint', label: 'WKT POINT (PostGIS-ready)', group: 'Geography', uses: ['geo'],
     // lon first: WKT and GeoJSON are both x-then-y, and getting this backwards
     // puts Prague in Somalia without anything erroring.
-    gen: (r, _i, p) => { const g = geoPoint(r, p); return `POINT(${round(g.lon, 6)} ${round(g.lat, 6)})`; } },
+    gen: (r, _i, p, _n, loc) => { const g = geoPointFor(r, p, loc); return `POINT(${round(g.lon, 6)} ${round(g.lat, 6)})`; } },
   { id: 'geoJsonPoint', label: 'GeoJSON Point', group: 'Geography', uses: ['geo'],
-    gen: (r, _i, p) => { const g = geoPoint(r, p);
+    gen: (r, _i, p, _n, loc) => { const g = geoPointFor(r, p, loc);
       return JSON.stringify({ type: 'Point', coordinates: [round(g.lon, 6), round(g.lat, 6)] }); } },
   { id: 'altitude', label: 'Altitude (metres)', group: 'Geography', uses: ['range'],
     gen: (r, _i, p) => Math.round(p.min + shaped(r, p.dist) * (p.max - p.min)) },
@@ -731,7 +782,13 @@ export const GENERATORS: Generator[] = [
       return loc === DEFAULT_LOCALE ? c : meta(loc).countryCode;
     } },
   { id: 'timezone', label: 'Time zone', group: 'Geography', uses: [],
-    gen: r => pick(r, ['Europe/Prague','Europe/Berlin','Europe/Vienna','Europe/London','Europe/Madrid','Europe/Rome','Europe/Warsaw','America/New_York','America/Chicago','America/Los_Angeles','Asia/Tokyo','Asia/Singapore','Australia/Sydney','UTC']) },
+    // Always draw (RNG stream unchanged); a fixed pack pins its own zone,
+    // `default` keeps the random pick — the country/countryCode pattern, so a
+    // default run is byte-identical to before personas drove the zone.
+    gen: (r, _i, _p, _n, loc) => {
+      const t = pick(r, TIMEZONES);
+      return (loc ?? DEFAULT_LOCALE) === DEFAULT_LOCALE ? t : meta(loc).timezone;
+    } },
   { id: 'city', label: 'City', group: 'Geography', uses: [],
     gen: (r, _i, _p, _n, loc) => pick(r, dict('cities', loc)) },
   { id: 'country', label: 'Country', group: 'Geography', uses: [],
@@ -742,7 +799,13 @@ export const GENERATORS: Generator[] = [
       return loc === DEFAULT_LOCALE ? c : meta(loc).countryName;
     } },
   { id: 'street', label: 'Street address', group: 'Geography', uses: [],
-    gen: (r, _i, _p, _n, loc) => `${pick(r, dict('cities', loc))} St ${int(r, 1, 240)}` },
+    // Street name + kind from the pack's own lists, number drawn FIRST —
+    // the exact draw order and shape of the Rust arm (a city + " St" here used
+    // to disagree with the inserted rows).
+    gen: (r, _i, _p, _n, loc) => {
+      const num = int(r, 1, 240);
+      return `${pick(r, dict('streets', loc))} ${pick(r, dict('streetKinds', loc))} ${num}`;
+    } },
   { id: 'address', label: 'Full address (locale-aware)', group: 'Geography', uses: [],
     // Street + city + postcode + country composed in the pack's conventional
     // order (Japan runs country→…→number). The parts are drawn in a FIXED order
@@ -1103,7 +1166,21 @@ export const GENERATORS: Generator[] = [
       return at(pos);
     } },
   { id: 'currencyCode', label: 'Currency code', group: 'Controlled', uses: [],
-    gen: r => pick(r, ['CZK','EUR','USD','GBP','PLN','CHF','SEK','NOK','DKK','HUF']) },
+    // Always draw (RNG stream unchanged); a fixed pack pins its own currency
+    // (a Czech persona pays in CZK), `default` keeps the random pick —
+    // byte-identical to before personas drove the currency.
+    gen: (r, _i, _p, _n, loc) => {
+      const c = pick(r, CURRENCIES);
+      return (loc ?? DEFAULT_LOCALE) === DEFAULT_LOCALE ? c : meta(loc).currency;
+    } },
+  { id: 'formula', label: 'Formula (expression over earlier columns)', group: 'Controlled', uses: ['formula'],
+    // A formula consumes NO RNG draws — it is a pure function of the row's
+    // earlier values — so the registry entry is a placeholder and
+    // `generateRows` evaluates every formula column as a post-pass over the
+    // row just built (utils/datagenFormula.ts). The Rust engine does the same
+    // in gen_row; the placeholder is what a caller that skipped the post-pass
+    // would see, the '<fk>' precedent.
+    gen: () => '<formula>' },
   { id: 'regex', label: 'Pattern (reverse regex)', group: 'Controlled', uses: ['list'],
     // Reverse-expands the pattern (e.g. `[A-Z]{2}-\d{4}` → `QW-8130`), matching
     // the Rust volume tier exactly. It used to return the pattern verbatim.
@@ -1230,6 +1307,16 @@ export function generateRows(
   specs: ColumnSpec[], count: number, seed: number, locale: string = DEFAULT_LOCALE,
 ): unknown[][] {
   const rng = makeRng(seed);
+  // Formula columns are parsed ONCE per run (the AST is row-independent) and
+  // evaluated as a post-pass: a formula consumes no RNG draws, so the stream
+  // above is identical whether or not a formula column exists. An invalid
+  // expression yields NULL cells here — the config error itself is surfaced
+  // earlier (validateFormula in the panel; the Rust preview/run commands
+  // reject the spec), and this engine never throws into a row loop.
+  const formulas = specs
+    .map((s, idx) => ({ s, idx, parsed: s.generator === 'formula' ? parseFormula(s.params.expr ?? '') : null }))
+    .filter(f => f.parsed !== null);
+  const colIndex = new Map(specs.map((s, idx) => [s.name, idx]));
   const rows: unknown[][] = [];
   for (let i = 0; i < count; i++) {
     // Resolve the row's locale from `rowIdx` alone — a pure hash, never an RNG
@@ -1237,7 +1324,7 @@ export function generateRows(
     // untouched. Only `mixed` maps each row onto a single pack, and every
     // generator in the row then localises through the same pack (coherence).
     const rowLocale = resolveRowLocale(locale, i);
-    rows.push(specs.map(spec => {
+    const row = specs.map(spec => {
       if (spec.params.nullPct > 0 && rng() * 100 < spec.params.nullPct) return null;
       const g = GENERATOR_MAP.get(spec.generator);
       const v = g ? g.gen(rng, i, spec.params, count, rowLocale) : null;
@@ -1246,7 +1333,20 @@ export function generateRows(
       // and inserted as duplicates only on the Rust path… or the reverse.
       // Preview ≡ insert is the whole point of the shared engine.
       return spec.unique ? applyUnique(spec, v, i, count, seed) : v;
-    }));
+    });
+    for (const f of formulas) {
+      // The null-roll's NULL stands (nullPct owns it); only the placeholder
+      // is replaced. Left to right, so a formula can reference an EARLIER
+      // formula column's computed value.
+      if (row[f.idx] !== '<formula>') continue;
+      row[f.idx] = f.parsed!.ok
+        ? evalFormula(f.parsed!.ast, name => {
+          const j = colIndex.get(name);
+          return j === undefined ? undefined : row[j];
+        })
+        : null;
+    }
+    rows.push(row);
   }
   return rows;
 }

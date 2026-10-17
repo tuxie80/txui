@@ -834,7 +834,13 @@
       "countryName": "Czechia",
       "countryCode": "CZ",
       "ibanCountry": "CZ",
-      "addressFormat": "{street} {streetKind} {num}, {postcode} {city}, {country}"
+      "addressFormat": "{street} {streetKind} {num}, {postcode} {city}, {country}",
+      "currency": "CZK",
+      "timezone": "Europe/Prague",
+      "latMin": 48.55,
+      "latMax": 51.06,
+      "lonMin": 12.09,
+      "lonMax": 18.86
     }
   },
   "cs-CZ": {
@@ -1245,7 +1251,13 @@
       "countryName": "Czechia",
       "countryCode": "CZ",
       "ibanCountry": "CZ",
-      "addressFormat": "{street} {streetKind} {num}, {postcode} {city}, {country}"
+      "addressFormat": "{street} {streetKind} {num}, {postcode} {city}, {country}",
+      "currency": "CZK",
+      "timezone": "Europe/Prague",
+      "latMin": 48.55,
+      "latMax": 51.06,
+      "lonMin": 12.09,
+      "lonMax": 18.86
     }
   },
   "en-GB": {
@@ -1662,7 +1674,13 @@
       "countryName": "United Kingdom",
       "countryCode": "GB",
       "ibanCountry": "GB",
-      "addressFormat": "{num} {street} {streetKind}, {city}, {postcode}, {country}"
+      "addressFormat": "{num} {street} {streetKind}, {city}, {postcode}, {country}",
+      "currency": "GBP",
+      "timezone": "Europe/London",
+      "latMin": 49.9,
+      "latMax": 58.7,
+      "lonMin": -8.2,
+      "lonMax": 1.8
     }
   },
   "ja-JP": {
@@ -2053,7 +2071,13 @@
       "countryName": "Japan",
       "countryCode": "JP",
       "ibanCountry": "JP",
-      "addressFormat": "{country} 〒{postcode} {city}{street}{streetKind}{num}"
+      "addressFormat": "{country} 〒{postcode} {city}{street}{streetKind}{num}",
+      "currency": "JPY",
+      "timezone": "Asia/Tokyo",
+      "latMin": 30.0,
+      "latMax": 45.6,
+      "lonMin": 129.0,
+      "lonMax": 146.0
     }
   }
 }

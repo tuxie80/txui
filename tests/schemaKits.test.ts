@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SCHEMA_KITS, buildKitPreDdl, buildKitTableDdl,
+  SCHEMA_KITS, buildKitPreDdl, buildKitTableDdl, kitTableSpecs,
 } from '../src/utils/schemaKits.ts';
 
 
@@ -78,4 +78,72 @@ test('the other engines keep their own types and shapes', () => {
   assert.match(buildKitTableDdl('k', { name: 't', columns: cols } as never, 'mysql').join('\n'),
     /BOOLEAN/);
   assert.deepEqual(buildKitPreDdl('k', 'postgres'), ['CREATE SCHEMA IF NOT EXISTS "k"']);
+});
+
+
+// ── Phase 4b: composite FKs and self-referencing FKs ─────────────────────────
+
+test('columns sharing an fk group form ONE composite FOREIGN KEY', () => {
+  const table = {
+    name: 'shipment_items',
+    columns: [
+      { name: 'shipment_id', type: 'BIGINT', generator: 'fk', fk: { table: 'shipments', column: 'id', group: 'sh' } },
+      { name: 'warehouse_id', type: 'INT', generator: 'fk', fk: { table: 'shipments', column: 'wid', group: 'sh' } },
+      { name: 'sku', type: 'VARCHAR(20)', generator: 'fk', fk: { table: 'products', column: 'sku' } },
+    ],
+  } as never;
+  const ddl = buildKitTableDdl('k', table, 'mysql').join('\n');
+  // One constraint for the group, both columns in table order, one target tuple.
+  assert.match(ddl, /FOREIGN KEY \(`shipment_id`, `warehouse_id`\) REFERENCES `k`\.`shipments` \(`id`, `wid`\)/);
+  // …and the ungrouped FK keeps its own per-column constraint.
+  assert.match(ddl, /FOREIGN KEY \(`sku`\) REFERENCES `k`\.`products` \(`sku`\)/);
+  assert.equal((ddl.match(/FOREIGN KEY/g) ?? []).length, 2, ddl);
+});
+
+test('a group name shared across target tables does NOT merge', () => {
+  const table = {
+    name: 't',
+    columns: [
+      { name: 'a', type: 'BIGINT', generator: 'fk', fk: { table: 't1', column: 'x', group: 'g' } },
+      { name: 'b', type: 'BIGINT', generator: 'fk', fk: { table: 't2', column: 'y', group: 'g' } },
+    ],
+  } as never;
+  const ddl = buildKitTableDdl('k', table, 'postgres').join('\n');
+  assert.match(ddl, /FOREIGN KEY \("a"\) REFERENCES "k"\."t1" \("x"\)/);
+  assert.match(ddl, /FOREIGN KEY \("b"\) REFERENCES "k"\."t2" \("y"\)/);
+});
+
+test('the group marker reaches the generator as fkGroup', () => {
+  const table = {
+    name: 't',
+    columns: [
+      { name: 'a', type: 'BIGINT', generator: 'fk', fk: { table: 'p', column: 'x', group: 'g' } },
+      { name: 'b', type: 'BIGINT', generator: 'fk', fk: { table: 'p', column: 'y', group: 'g' } },
+      { name: 'c', type: 'BIGINT', generator: 'fk', fk: { table: 'q', column: 'z' } },
+    ],
+  } as never;
+  const specs = kitTableSpecs('db', table, 'mysql');
+  assert.equal(specs[0].params.fkGroup, 'g');
+  assert.equal(specs[1].params.fkGroup, 'g');
+  assert.equal(specs[2].params.fkGroup, undefined, 'ungrouped FKs send no group');
+});
+
+test('the HR kit has the self-referencing manager FK', () => {
+  const kit = SCHEMA_KITS.find(k => k.id === 'hr')!;
+  const employees = kit.tables.find(t => t.name === 'employees')!;
+  const mgr = employees.columns.find(c => c.name === 'manager_id')!;
+  assert.equal(mgr.fk?.table, 'employees', 'points at its own table');
+  assert.equal(mgr.fk?.column, 'id');
+  assert.ok(mgr.nullable, 'row 1 and the top of the org chart need NULL');
+  // The DDL is a legal self-referencing constraint on every engine…
+  for (const engine of ['mysql', 'postgres', 'sqlserver']) {
+    const ddl = buildKitTableDdl('hr_demo', employees, engine).join('\n');
+    assert.match(ddl, /FOREIGN KEY.*REFERENCES.*employees/, engine);
+  }
+  // …and the generator spec resolves the self-reference by table name.
+  const specs = kitTableSpecs('hr_demo', employees, 'postgres');
+  const mgrSpec = specs.find(s => s.name === 'manager_id')!;
+  assert.equal(mgrSpec.params.fkTable, '"hr_demo"."employees"');
+  assert.equal(mgrSpec.params.fkColumn, '"id"');
+  assert.equal(mgrSpec.params.dist, 'zipf');
 });

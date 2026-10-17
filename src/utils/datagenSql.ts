@@ -44,8 +44,15 @@
  */
 import { quoteIdent, sqlLiteral } from './sqlIdent.ts';
 import type { ColumnSpec } from './datagen.ts';
-import { cycleLength, parenLen, scrambleA, SCRAMBLE_M_CAP, uniqueTagWidth } from './datagen.ts';
+import {
+  cycleLength, parenLen, scrambleA, SCRAMBLE_M_CAP, uniqueTagWidth,
+  CURRENCIES, TIMEZONES,
+} from './datagen.ts';
 import { dict, meta, DEFAULT_LOCALE, MIXED_LOCALE } from '../data/dictionaries.ts';
+import {
+  parseFormula, referencedColumns, FORMULA_FUNCTIONS,
+} from './datagenFormula.ts';
+import type { FormulaNode } from './datagenFormula.ts';
 
 // ── how much ────────────────────────────────────────────────────────────────
 
@@ -396,6 +403,10 @@ const HEAD = 10;
 const LOCALE_AWARE_GENERATORS = new Set([
   'firstName', 'lastName', 'fullName', 'email', 'username',
   'city', 'country', 'countryCode', 'company', 'phone', 'postcode', 'address',
+  // Phase-4 personas: under `mixed` these draw from the row's per-row pack
+  // (currency/timezone pinned, coordinates inside the pack's bounding box) —
+  // as inexpressible set-based as the name lists.
+  'currencyCode', 'timezone', 'latitude', 'longitude',
 ]);
 
 /**
@@ -485,6 +496,16 @@ export function valueSql(
       // Only a fixed pack has a single ISO-2 (a constant). `default` draws over
       // the full ISO list, which has no compact set-based form → fall back.
       return locale === DEFAULT_LOCALE ? null : sqlLiteral(meta(locale).countryCode, engine);
+    case 'currencyCode':
+      // `default` draws from the list (a pickFrom like any other); a fixed
+      // pack pins its own currency — a constant. `mixed` returned null above.
+      return locale === DEFAULT_LOCALE
+        ? pickFrom(engine, CURRENCIES)
+        : sqlLiteral(meta(locale).currency, engine);
+    case 'timezone':
+      return locale === DEFAULT_LOCALE
+        ? pickFrom(engine, TIMEZONES)
+        : sqlLiteral(meta(locale).timezone, engine);
     case 'company':   return pickFrom(engine, COMPANIES);
     case 'words':     return concat(engine, [pickFrom(engine, WORDS), sqlLiteral(' ', engine), pickFrom(engine, WORDS)]);
     case 'email':
@@ -565,6 +586,18 @@ export function valueSql(
     // are what people generate ten million of.
     case 'latitude':
     case 'longitude': {
+      // Persona bounding box (Phase 4): under a fixed locale the point comes
+      // from the pack's box, which is a plain `min + RAND() * span` — happily
+      // set-based. (`mixed` already returned null above: the box is per-row.)
+      if (locale !== DEFAULT_LOCALE) {
+        const m = meta(locale);
+        const lo = generatorId === 'latitude' ? m.latMin : m.lonMin;
+        // Rounded to kill the f64 subtraction noise (45.6 − 30 → 15.6000…01):
+        // the box edges are data, and the emitted statement is read by people.
+        const span = Math.round((generatorId === 'latitude' ? m.latMax - m.latMin : m.lonMax - m.lonMin) * 1e10) / 1e10;
+        const v = `(${lo} + ${r} * ${span})`;
+        return engine === 'postgres' ? `round(${v}::numeric, 6)` : `ROUND(${v}, 6)`;
+      }
       const lat = p?.lat ?? 0, lon = p?.lon ?? 0;
       const radDeg = Math.max(0, p?.radiusKm ?? 0) / 111.32;
       // One `r` per call, and this expression uses two draws — that is
@@ -777,6 +810,188 @@ function scrambleRangeSql(engine: string, i0: string, lo: number, m: number, see
   return `(${lo} + ${modExpr(engine, `${a} * ${i0} + ${b}`, m)})`;
 }
 
+// ── cross-column formulas (Phase 4) ─────────────────────────────────────────
+//
+// A `formula` column's expression references EARLIER columns of the same row.
+// On the server path those references resolve to the aliases of a wrapping
+// subquery (buildServerPlan emits the two-level form only when a formula is
+// present) — NEVER to an inlined copy of the referenced column's expression,
+// which would draw fresh RAND()s and produce a `total` that disagrees with
+// the `price`/`qty` actually inserted: the exact anti-correlation the
+// generator exists to avoid.
+//
+// The expressible subset: literals, refs, + - * / % (numeric), || (concat),
+// and the FORMULA_FUNCTIONS whose `sql` flag is set — with `+` claimed only
+// when static kinds decide its runtime branch (both numbers → add; a known
+// string on either side → concat) and `substr` only with non-negative integer
+// literal bounds. Anything else returns null → the column is reported
+// unsupported and the run falls back to the row-by-row engine.
+
+/** The static value kind of a referenced column, from its generator. */
+type FormulaKind = 'num' | 'str' | 'bool' | 'unknown';
+
+const NUMERIC_GENERATORS = new Set([
+  'sequence', 'int', 'decimal', 'money', 'percent', 'rating', 'bitflags',
+  'series', 'seriesInt', 'randomWalk', 'epoch', 'durationSec',
+  'latitude', 'longitude', 'altitude',
+  'rideCarId', 'rideLat', 'rideLon', 'rideSpeed', 'rideHeading', 'httpStatus',
+]);
+
+/**
+ * What a column's generator produces. `fk`/`formula` are unknown (a pool value
+ * or a computed one). Everything unlisted produces strings — including
+ * `choice`/`regex`, whose values ARE strings at runtime even when they look
+ * numeric, so `+` on them concatenates on both paths (and arithmetic on them
+ * is refused here, falling back to the row engine's strict parse).
+ */
+function formulaRefKind(generatorId: string): FormulaKind {
+  if (NUMERIC_GENERATORS.has(generatorId)) return 'num';
+  if (generatorId === 'bool') return 'bool';
+  if (generatorId === 'fk' || generatorId === 'formula') return 'unknown';
+  return 'str';
+}
+
+/**
+ * The SQL expression for a parsed formula. `ref(name)` resolves a column to
+ * its wrapping-subquery alias and static kind, or null when it cannot be
+ * referenced (unknown/later column, another formula column, or a column with
+ * no SQL form of its own). Returns null when the expression is outside the
+ * expressible subset — the caller reports it unsupported WITH the reason.
+ */
+export function formulaSql(
+  engine: string,
+  node: FormulaNode,
+  ref: (name: string) => { sql: string; kind: FormulaKind } | null,
+): string | null {
+  /** The node, its SQL and its kind — or null when inexpressible. */
+  function go(n: FormulaNode): { sql: string; kind: FormulaKind } | null {
+    switch (n.t) {
+      case 'num': return { sql: String(n.v), kind: 'num' };
+      case 'str': return { sql: sqlLiteral(n.v, engine), kind: 'str' };
+      case 'col': return ref(n.name);
+      case 'neg': {
+        const a = go(n.a);
+        return a && a.kind === 'num' ? { sql: `(-(${a.sql}))`, kind: 'num' } : null;
+      }
+      case 'bin': {
+        const a = go(n.a), b = go(n.b);
+        if (!a || !b) return null;
+        const bothNum = a.kind === 'num' && b.kind === 'num';
+        // Concatenation: NULL propagates in PG/MySQL/SQLite (matching the row
+        // engines); T-SQL's CONCAT maps NULL to '', so a concat formula is
+        // unsupported there rather than silently different.
+        const cat = (): { sql: string; kind: FormulaKind } | null => {
+          if (engine === 'sqlserver') return null;
+          if (a.kind === 'bool' || b.kind === 'bool' || a.kind === 'unknown' || b.kind === 'unknown') return null;
+          const asText = (x: { sql: string; kind: FormulaKind }) =>
+            x.kind === 'num' ? castText(engine, x.sql) : x.sql;
+          return { sql: concat(engine, [asText(a), asText(b)]), kind: 'str' };
+        };
+        switch (n.op) {
+          case '||': return cat();
+          case '+':
+            // The runtime branch (add vs concat) is decided per row from the
+            // values; SQL can only commit when the static kinds decide it too.
+            if (bothNum) return { sql: `(${a.sql} + ${b.sql})`, kind: 'num' };
+            if (a.kind === 'str' || b.kind === 'str') return cat();
+            return null;
+          case '-': return bothNum ? { sql: `(${a.sql} - ${b.sql})`, kind: 'num' } : null;
+          case '*': return bothNum ? { sql: `(${a.sql} * ${b.sql})`, kind: 'num' } : null;
+          // NULLIF guards division/remainder by zero: the row engines yield
+          // NULL there, and a bare `/` would ERROR mid-run on PostgreSQL.
+          case '/': return bothNum ? { sql: `(${a.sql} / NULLIF(${b.sql}, 0))`, kind: 'num' } : null;
+          case '%': {
+            if (!bothNum) return null;
+            const denom = `NULLIF(${b.sql}, 0)`;
+            return {
+              sql: engine === 'sqlserver' || engine === 'sqlite'
+                ? `((${a.sql}) % ${denom})`
+                : `MOD((${a.sql}), ${denom})`,
+              kind: 'num',
+            };
+          }
+        }
+        return null;
+      }
+      case 'fn': {
+        if (!FORMULA_FUNCTIONS[n.name]?.sql) return null;   // e.g. slugify
+        const args = n.args.map(go);
+        if (args.some(x => x === null)) return null;
+        const a = args as { sql: string; kind: FormulaKind }[];
+        const numArgs = a.every(x => x.kind === 'num');
+        const asStr = (x: { sql: string; kind: FormulaKind }) =>
+          x.kind === 'str' ? x.sql : x.kind === 'num' ? castText(engine, x.sql) : null;
+        switch (n.name) {
+          case 'abs':
+            return numArgs ? { sql: `ABS(${a[0].sql})`, kind: 'num' } : null;
+          case 'round': {
+            if (!numArgs) return null;
+            if (a.length === 1) {
+              return { sql: engine === 'sqlserver' ? `ROUND(${a[0].sql}, 0)` : `ROUND(${a[0].sql})`, kind: 'num' };
+            }
+            // PG's two-arg round exists only for numeric, so cast explicitly.
+            return { sql: engine === 'postgres' ? `round((${a[0].sql})::numeric, ${a[1].sql})` : `ROUND(${a[0].sql}, ${a[1].sql})`, kind: 'num' };
+          }
+          case 'floor':
+            return numArgs ? { sql: `FLOOR(${a[0].sql})`, kind: 'num' } : null;
+          case 'ceil':
+            return numArgs
+              ? { sql: `${engine === 'sqlite' ? 'CEIL' : 'CEILING'}(${a[0].sql})`, kind: 'num' }
+              : null;
+          case 'min': case 'max': {
+            if (!numArgs) return null;
+            // MySQL LEAST/GREATEST and SQLite's multi-arg min/max propagate
+            // NULL like the row engines; PostgreSQL's and SQL Server's IGNORE
+            // NULLs, so the CASE restores the row engines' answer.
+            const f = n.name === 'min' ? 'LEAST' : 'GREATEST';
+            const list = a.map(x => x.sql).join(', ');
+            const core = engine === 'sqlite'
+              ? `${n.name}(${list})`
+              : `${f}(${list})`;
+            if (engine === 'mysql' || engine === 'sqlite') return { sql: core, kind: 'num' };
+            const guard = a.map(x => `${x.sql} IS NULL`).join(' OR ');
+            return { sql: `(CASE WHEN ${guard} THEN NULL ELSE ${core} END)`, kind: 'num' };
+          }
+          case 'length': {
+            const s = asStr(a[0]);
+            if (s === null) return null;
+            const f = engine === 'mysql' ? 'CHAR_LENGTH' : engine === 'sqlserver' ? 'LEN' : 'LENGTH';
+            return { sql: `${f}(${s})`, kind: 'num' };
+          }
+          case 'upper': case 'lower': {
+            const s = asStr(a[0]);
+            return s === null ? null : { sql: `${n.name.toUpperCase()}(${s})`, kind: 'str' };
+          }
+          case 'substr': {
+            // Literal, non-negative integer bounds only: the runtime clamps
+            // computed/negative starts, and each SQL engine does something
+            // different with them — refuse rather than pick one.
+            const s = asStr(a[0]);
+            const start = n.args[1];
+            const len = n.args[2];
+            if (s === null) return null;
+            if (start.t !== 'num' || !Number.isInteger(start.v) || start.v < 1) return null;
+            if (len !== undefined && (len.t !== 'num' || !Number.isInteger(len.v) || len.v < 0)) return null;
+            const f = engine === 'sqlite' ? 'substr' : 'SUBSTRING';
+            const lenV = len && len.t === 'num' ? len.v : undefined;
+            return {
+              sql: lenV === undefined ? `${f}(${s}, ${start.v})` : `${f}(${s}, ${start.v}, ${lenV})`,
+              kind: 'str',
+            };
+          }
+          case 'coalesce':
+            // Mixed kinds coerce inside the DB — the honest approximation the
+            // non-deterministic server tier already allows.
+            return { sql: `COALESCE(${a.map(x => x.sql).join(', ')})`, kind: 'unknown' };
+          default:
+            return null;
+        }
+      }
+    }
+  }
+  return go(node)?.sql ?? null;
+}
+
 // ── the statement ───────────────────────────────────────────────────────────
 
 export interface ServerPlan {
@@ -822,26 +1037,111 @@ export function buildServerPlan(
 ): ServerPlan {
   const unsupported: { column: string; generator: string; reason?: string }[] = [];
   const exprs: string[] = [];
+  const hasFormula = specs.some(s => s.generator === 'formula');
+  // The inner SELECT's aliased base expressions — only populated (and only
+  // emitted) when a formula column needs them.
+  const inner: { alias: string; sql: string }[] = [];
 
-  for (const spec of specs) {
-    const sql = valueSql(engine, spec.generator, spec, 'i', serverVersionNum, locale);
-    if (sql === null) {
-      unsupported.push({ column: spec.name, generator: spec.generator });
-      continue;
+  if (!hasFormula) {
+    for (const spec of specs) {
+      const sql = valueSql(engine, spec.generator, spec, 'i', serverVersionNum, locale);
+      if (sql === null) {
+        unsupported.push({ column: spec.name, generator: spec.generator });
+        continue;
+      }
+      if (spec.unique) {
+        const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed);
+        if (wrapped === null) {
+          unsupported.push({
+            column: spec.name, generator: spec.generator,
+            reason: uniqueSqlRefusalReason(spec, totalRows),
+          });
+          continue;
+        }
+        exprs.push(wrapped);
+        continue;
+      }
+      exprs.push(sql);
     }
-    if (spec.unique) {
-      const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed);
-      if (wrapped === null) {
+  } else {
+    // With formula columns the statement is TWO levels: an inner SELECT
+    // computes every non-formula column ONCE under an alias, and the outer
+    // SELECT references those aliases — so the values a formula reads are the
+    // values actually inserted (inlining a referenced column's expression
+    // would draw fresh RAND()s and corrupt the very correlation the formula
+    // exists to create).
+    const refByName = new Map<string, { sql: string; kind: FormulaKind }>();
+    const formulas: { idx: number; spec: ColumnSpec }[] = [];
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i];
+      if (spec.generator === 'formula') { formulas.push({ idx: i, spec }); continue; }
+      const sql = valueSql(engine, spec.generator, spec, 'i', serverVersionNum, locale);
+      if (sql === null) {
+        unsupported.push({ column: spec.name, generator: spec.generator });
+        continue;
+      }
+      let final = sql;
+      if (spec.unique) {
+        const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed);
+        if (wrapped === null) {
+          unsupported.push({
+            column: spec.name, generator: spec.generator,
+            reason: uniqueSqlRefusalReason(spec, totalRows),
+          });
+          continue;
+        }
+        final = wrapped;
+      }
+      const alias = `c${i}`;
+      inner.push({ alias, sql: final });
+      refByName.set(spec.name, { sql: `s.${alias}`, kind: formulaRefKind(spec.generator) });
+      exprs[i] = `s.${alias}`;
+    }
+    const allNames = specs.map(s => s.name);
+    for (const { idx, spec } of formulas) {
+      const src = spec.params.expr ?? '';
+      const parsed = parseFormula(src);
+      if (!parsed.ok) {
+        unsupported.push({ column: spec.name, generator: 'formula', reason: parsed.error });
+        continue;
+      }
+      // A formula may reference an earlier FORMULA column on the row-by-row
+      // paths; on the server path that value lives in no subquery, so it is
+      // refused by name rather than dropped into a wrong statement.
+      const viaFormula = referencedColumns(parsed.ast)
+        .find(n => specs.find(s2 => s2.name === n)?.generator === 'formula');
+      if (viaFormula) {
         unsupported.push({
-          column: spec.name, generator: spec.generator,
-          reason: uniqueSqlRefusalReason(spec, totalRows),
+          column: spec.name, generator: 'formula',
+          reason: `"${viaFormula}" is itself a formula — not SQL-expressible; the run falls back to row-by-row`,
         });
         continue;
       }
-      exprs.push(wrapped);
-      continue;
+      // Unknown/later column references — the same config error the panel
+      // shows inline, here as the refusal reason.
+      const earlier = new Set(specs.slice(0, idx).map(s => s.name));
+      const badRef = referencedColumns(parsed.ast).find(n => !earlier.has(n));
+      if (badRef) {
+        unsupported.push({
+          column: spec.name, generator: 'formula',
+          reason: allNames.includes(badRef)
+            ? `"${badRef}" is not an earlier column`
+            : `unknown column "${badRef}"`,
+        });
+        continue;
+      }
+      const sql = formulaSql(engine, parsed.ast, name => refByName.get(name) ?? null);
+      if (sql === null) {
+        unsupported.push({
+          column: spec.name, generator: 'formula',
+          reason: 'the expression is outside the SQL-expressible subset; the run falls back to row-by-row',
+        });
+        continue;
+      }
+      // unique is NOT applied to formula columns on any path (applyUnique /
+      // gen_row pass them through) — the expression decides the value.
+      exprs[idx] = sql;
     }
-    exprs.push(sql);
   }
   if (unsupported.length > 0) {
     return { statements: [], statementAt: () => '', chunks: 0, chunkRows: 0, unsupported };
@@ -860,7 +1160,17 @@ export function buildServerPlan(
     const src = rowSource(engine, n, offset);
     // The row source is wrapped so its column is `i` whatever shape it took,
     // and so a MySQL `LIMIT` inside it cannot collide with anything outside.
-    return `INSERT INTO ${table} (${cols})\nSELECT ${exprs.join(', ')}\nFROM (${src}) AS src`;
+    if (!hasFormula) {
+      return `INSERT INTO ${table} (${cols})\nSELECT ${exprs.join(', ')}\nFROM (${src}) AS src`;
+    }
+    const innerSql = inner.map(x => `${x.sql} AS ${x.alias}`).join(', ');
+    // No base columns at all (every column is a formula over literals): no
+    // inner level is needed — such formulas reference nothing by definition.
+    if (inner.length === 0) {
+      return `INSERT INTO ${table} (${cols})\nSELECT ${exprs.join(', ')}\nFROM (${src}) AS src`;
+    }
+    return `INSERT INTO ${table} (${cols})\nSELECT ${exprs.join(', ')}\n`
+      + `FROM (SELECT ${innerSql} FROM (${src}) AS src) AS s`;
   };
 
   let cached: string[] | null = null;
