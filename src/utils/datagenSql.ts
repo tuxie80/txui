@@ -44,6 +44,7 @@
  */
 import { quoteIdent, sqlLiteral } from './sqlIdent.ts';
 import type { ColumnSpec } from './datagen.ts';
+import { cycleLength, parenLen, scrambleA, SCRAMBLE_M_CAP, uniqueTagWidth } from './datagen.ts';
 import { dict, meta, DEFAULT_LOCALE, MIXED_LOCALE } from '../data/dictionaries.ts';
 
 // ── how much ────────────────────────────────────────────────────────────────
@@ -266,6 +267,36 @@ function pickFrom(engine: string, items: string[]): string {
   return `json_extract(${json}, '$[' || CAST(ABS(RANDOM()) % ${n} AS TEXT) || ']')`;
 }
 
+/** `x mod m` in the engine's spelling — T-SQL and SQLite have no MOD() function. */
+function modExpr(engine: string, x: string, m: number): string {
+  return engine === 'sqlserver' || engine === 'sqlite' ? `((${x}) % ${m})` : `MOD((${x}), ${m})`;
+}
+
+/** A random forward shift in [0, j% of n) — the cycle generator's jitter. */
+function jitterShift(engine: string, r: string, jPct: number, n: number): string {
+  const f = jPct / 100;
+  if (engine === 'postgres') return `floor(${r} * ${f} * ${n})::int`;
+  if (engine === 'sqlserver') return `CAST(FLOOR(${r} * ${f} * ${n}) AS int)`;
+  if (engine === 'sqlite') return `CAST(${r} * ${f} * ${n} AS INTEGER)`;
+  return `FLOOR(${r} * ${f} * ${n})`;
+}
+
+/**
+ * Element `posExpr` (0-based) of a literal list, per engine — the
+ * deterministic twin of `pickFrom`, which draws at random.
+ */
+function indexFrom(engine: string, items: string[], posExpr: string): string {
+  const lits = items.map(v => sqlLiteral(v, engine));
+  if (engine === 'mysql') return `ELT((${posExpr}) + 1, ${lits.join(', ')})`;
+  if (engine === 'postgres') return `(ARRAY[${lits.join(', ')}])[(${posExpr}) + 1]`;
+  if (engine === 'sqlserver') {
+    const doc = sqlLiteral(JSON.stringify(items), 'sqlserver');
+    return `JSON_VALUE(${doc}, '$[' + CAST((${posExpr}) AS varchar(10)) + ']')`;
+  }
+  const json = sqlLiteral(JSON.stringify(items), 'sqlite');
+  return `json_extract(${json}, '$[' || CAST((${posExpr}) AS TEXT) || ']')`;
+}
+
 // Drawn from the SAME shared JSON dictionaries as the in-browser and Rust
 // engines — no hand-copied arrays — but capped to a bounded head per list.
 //
@@ -331,7 +362,26 @@ export function valueSql(
   if (locale === MIXED_LOCALE && LOCALE_AWARE_GENERATORS.has(generatorId)) return null;
 
   switch (generatorId) {
-    case 'sequence': return rowExpr;
+    // The row source is 1-based; the in-browser engines count rows from 0, so
+    // the stepped form is `1 + (i − 1)·step` — the same values, both tiers.
+    case 'sequence': {
+      const step = Math.max(1, Math.round(p?.step ?? 1));
+      return step === 1 ? rowExpr : `((${rowExpr} - 1) * ${step} + 1)`;
+    }
+    case 'cycle': {
+      // Round-robin: position (i − 1) mod n, where n is the list length or the
+      // stepped range size — deterministic, unlike pickFrom's random draw.
+      const items = (p?.list ?? '').split(',').map(s => s.trim()).filter(Boolean);
+      const j = Math.max(0, p?.jitterPct ?? 0);
+      const base = `(${rowExpr} - 1)`;
+      const pos = (n: number) => modExpr(engine,
+        j > 0 ? `${base} + ${jitterShift(engine, r, j, n)}` : base, n);
+      if (items.length) return indexFrom(engine, items, pos(items.length));
+      const step = Math.max(1, Math.round(p?.step ?? 1));
+      const lo = Math.round(p?.min ?? 1), hi = Math.round(p?.max ?? 1000);
+      const n = Math.max(1, Math.floor((hi - lo) / step) + 1);
+      return `(${lo} + ${pos(n)} * ${step})`;
+    }
     case 'int':      return int(p?.min ?? 1, p?.max ?? 1000);
     case 'decimal': {
       const min = p?.min ?? 0, max = p?.max ?? 1000;
@@ -547,6 +597,112 @@ function castText(engine: string, expr: string): string {
   return `CAST(${expr} AS TEXT)`;
 }
 
+// ── uniqueness on the server path ─────────────────────────────────────────────
+//
+// The row-by-row engines guarantee a `unique` column by construction (the
+// multiplicative scramble for numbers, the zero-padded row-index tag for
+// strings — see applyUnique in utils/datagen.ts). The server path used to
+// ignore the flag entirely and ship duplicates at exactly the sizes uniqueness
+// matters for. The constructions are SQL-expressible (MOD + arithmetic), so
+// they are spelled here; a generator whose uniqueness has no faithful SQL form
+// is refused with a named reason and the run falls back to row-by-row.
+
+/** String generators with a server form the uniqueness tag can hang off. */
+const STRING_UNIQUE_SQL = new Set([
+  'firstName', 'lastName', 'fullName', 'city', 'country', 'company', 'words', 'choice',
+]);
+
+/** Zero-padded row index, width-stable across the run — the sortable tag. */
+function padExpr(engine: string, x: string, w: number): string {
+  if (engine === 'mysql') return `LPAD(CAST(${x} AS CHAR), ${w}, '0')`;
+  if (engine === 'postgres') return `LPAD((${x})::text, ${w}, '0')`;
+  // w ≤ 10 (a billion rows is ten digits), so ten literal zeroes always suffice.
+  if (engine === 'sqlserver') return `RIGHT('0000000000' + CAST((${x}) AS nvarchar(10)), ${w})`;
+  return `substr('0000000000' || CAST((${x}) AS TEXT), -${w})`;
+}
+
+/** Why a `unique` column was refused on the server path — for the plan's unsupported list. */
+export function uniqueSqlRefusalReason(spec: ColumnSpec, totalRows: number): string {
+  const g = spec.generator;
+  if (g === 'bool') return 'a boolean has two values';
+  if (g === 'cycle') {
+    return `a cycle of ${cycleLength(spec.params)} value(s) repeats within ${totalRows.toLocaleString('en-US')} rows`;
+  }
+  if (g === 'int' || g === 'decimal' || g === 'money' || g === 'percent') {
+    return 'the configured range holds a single value';
+  }
+  return 'uniqueness has no faithful server-side form for this generator';
+}
+
+/**
+ * The SQL form of the uniqueness construction, wrapped around a column's value
+ * expression. `null` means unique cannot be guaranteed server-side — a real
+ * answer, not a failure: the caller reports the column (with
+ * `uniqueSqlRefusalReason`) and falls back to row-by-row generation rather
+ * than silently producing duplicates.
+ *
+ * The scramble constants and arithmetic are shared with the row-by-row engines
+ * (`scrambleA` / `SCRAMBLE_M_CAP` in datagen.ts); a < 2^21 and the 1e9-row cap
+ * keep `a·i + b` inside what both an f64 and a bigint represent exactly.
+ */
+export function uniqueSqlWrap(
+  engine: string,
+  spec: ColumnSpec,
+  baseSql: string,
+  rowExpr: string,
+  totalRows: number,
+  seed: number,
+): string | null {
+  const g = spec.generator;
+  // Already unique by construction: a sequence is the row number; the server
+  // email/username forms already carry the row number; a UUID collides on
+  // average at 2^61 rows, not at any size this tool generates.
+  if (g === 'sequence' || g === 'email' || g === 'username' || g === 'uuid') return baseSql;
+  if (g === 'bool') return null;
+  // Round-robin is unique exactly while the run fits in one lap.
+  if (g === 'cycle') return totalRows <= cycleLength(spec.params) ? baseSql : null;
+
+  const i0 = `(${rowExpr} - 1)`;   // the row source is 1-based; the scramble counts from 0
+  if (g === 'int') {
+    let lo = Math.round(spec.params.min), hi = Math.round(spec.params.max);
+    if (hi < lo) [lo, hi] = [hi, lo];
+    const m = Math.max(1, Math.min(hi - lo + 1, SCRAMBLE_M_CAP));
+    if (m <= 1) return null;   // a one-value range cannot be unique past row 1
+    return scrambleRangeSql(engine, i0, lo, m, seed);
+  }
+  if (g === 'decimal' || g === 'money' || g === 'percent') {
+    const d = g === 'percent' ? 1 : 2;   // the rounding the value arm itself uses
+    const lo = g === 'percent' ? 0 : spec.params.min;
+    const hi = g === 'percent' ? 100 : spec.params.max;
+    const grid = 10 ** d;
+    const m = Math.max(1, Math.min(Math.round((hi - lo) * grid) + 1, SCRAMBLE_M_CAP));
+    if (m <= 1) return null;
+    const scr = scrambleRangeSql(engine, i0, 0, m, seed);
+    // A decimal divisor forces float/numeric division — T-SQL's int/int would
+    // truncate the fraction away.
+    return engine === 'postgres'
+      ? `round((${lo} + (${scr})::numeric / ${grid}.0)::numeric, ${d})`
+      : `ROUND(${lo} + (${scr}) / ${grid}.0, ${d})`;
+  }
+  if (STRING_UNIQUE_SQL.has(g)) {
+    const w = uniqueTagWidth(totalRows);
+    let s = concat(engine, [baseSql, sqlLiteral('_', engine), padExpr(engine, i0, w)]);
+    // The declared VARCHAR(n) is a hard ceiling: keep the tag and give way at
+    // the base's LEFT edge — RIGHT(x, n) of the concatenation does exactly that.
+    const max = parenLen(spec.typeName);
+    if (max !== null) s = engine === 'sqlite' ? `substr(${s}, -${max})` : `RIGHT(${s}, ${max})`;
+    return s;
+  }
+  return null;
+}
+
+/** `lo + ((a·i + b) mod m)` — the multiplicative scramble, in SQL. */
+function scrambleRangeSql(engine: string, i0: string, lo: number, m: number, seed: number): string {
+  const a = scrambleA(m);
+  const b = seed % m;
+  return `(${lo} + ${modExpr(engine, `${a} * ${i0} + ${b}`, m)})`;
+}
+
 // ── the statement ───────────────────────────────────────────────────────────
 
 export interface ServerPlan {
@@ -554,8 +710,11 @@ export interface ServerPlan {
   statements: string[];
   chunks: number;
   chunkRows: number;
-  /** Generators with no server-side form — the caller must not pretend. */
-  unsupported: { column: string; generator: string }[];
+  /** Generators with no server-side form — the caller must not pretend.
+   *  `reason` is set when the generator HAS a SQL form but the column's
+   *  `unique` flag does not — the run falls back to row-by-row, which can
+   *  guarantee uniqueness, rather than shipping silent duplicates. */
+  unsupported: { column: string; generator: string; reason?: string }[];
 }
 
 /**
@@ -575,14 +734,29 @@ export function buildServerPlan(
   serverVersionNum?: number,
   /** Dictionary pack the name/place/company columns inline. */
   locale: string = DEFAULT_LOCALE,
+  /** Seeds the uniqueness permutation (the scramble's b). The server path is
+   *  non-deterministic anyway; this just decorrelates runs. */
+  seed = 0,
 ): ServerPlan {
-  const unsupported: { column: string; generator: string }[] = [];
+  const unsupported: { column: string; generator: string; reason?: string }[] = [];
   const exprs: string[] = [];
 
   for (const spec of specs) {
     const sql = valueSql(engine, spec.generator, spec, 'i', serverVersionNum, locale);
     if (sql === null) {
       unsupported.push({ column: spec.name, generator: spec.generator });
+      continue;
+    }
+    if (spec.unique) {
+      const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed);
+      if (wrapped === null) {
+        unsupported.push({
+          column: spec.name, generator: spec.generator,
+          reason: uniqueSqlRefusalReason(spec, totalRows),
+        });
+        continue;
+      }
+      exprs.push(wrapped);
       continue;
     }
     exprs.push(sql);
@@ -618,8 +792,12 @@ export function buildServerPlan(
 export const SERVER_THRESHOLD = 200_000;
 
 export function shouldUseServer(engine: string, rows: number): boolean {
-  if (engine !== 'mysql' && engine !== 'postgres' && engine !== 'sqlite'
-      && engine !== 'sqlserver') return false;
+  // SQLite is deliberately NOT here: its panel capability is off (the
+  // row-by-row writer has no SQLite arm, so the panel could only ever work
+  // past 200k rows — half a panel), which made this arm unreachable dead code.
+  // The rowSource/valueSql SQLite forms stay as tested library functions; the
+  // routing decision is what must not drift.
+  if (engine !== 'mysql' && engine !== 'postgres' && engine !== 'sqlserver') return false;
   return rows >= SERVER_THRESHOLD;
 }
 

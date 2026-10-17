@@ -3,6 +3,47 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added — data generator, next generation (phase 0/1/3.1)
+
+Plan: `docs/plans/plan-datagen-nextgen.md` (DbSchema / Redgate / dbForge /
+Mockaroo / Faker competitive research inside).
+
+- **Eleven new identifier generators** (94 → 106 total), all seeded-deterministic
+  and bit-identical between the TS engine and the Rust writer: **UUID v7** and
+  **ULID** (time-ordered — +1 ms per row from a base epoch, so generated ids
+  sort in row order), **nanoID**, **IMEI** (Luhn, real RBI prefixes), **VIN**
+  (ISO 3779 check digit, real WMIs), **ISIN** (Luhn over expanded digits),
+  **DOI**, **Bitcoin address** (true base58check with an inline double-SHA-256,
+  proven against the known all-zero-hash160 address), **Ethereum address**,
+  and coherent **card expiry (MM/YY)** + **CVV** (4 digits for Amex) pairing
+  the existing card generator. Every check-digit generator keeps the
+  `valid: false` toggle for negative testing, and `suggestGenerator` maps
+  `imei`/`vin`/`isin`/`cvv`/`expiry`/`btc`… column names to them.
+- **Uniqueness by construction, on every path.** The old `unique` flag was a
+  row-index suffix applied only by the Rust writer (the TS preview dropped it,
+  the server-side path ignored it). Now: numeric uniques use a **multiplicative
+  scramble** of the row index into the range (`min + ((a·i + b) mod m)`, a
+  coprime chosen per range — O(1), stateless, bijective) implemented
+  identically in TS, Rust and SQL (`MOD` over the row source), so a
+  billion-row server-side run keeps uniqueness; string uniques get a
+  **zero-padded, sortable suffix** (`.000042` before the `@` for emails,
+  left-edge truncation kept for VARCHAR(n)); a generator that cannot guarantee
+  uniqueness (bool, 7-value httpStatus, a cycle shorter than the run) says so
+  in a greyed per-column note on the preview step instead of shipping
+  duplicates silently. Drift-guarded: a test extracts the scramble constants
+  from both tiers and compares them.
+- **New `cycle` generator** — round-robin over a list or a stepped range,
+  optional jitter; SQL-expressible, so it survives the server path.
+- **Path parity fixes:** the Rust `sequence` generator honors `step` (TS
+  always did); the TS preview applies the same uniqueness tags as the insert
+  (preview ≡ insert, byte-for-byte); the panel finally passes the PostgreSQL
+  server version to the planner, so `gen_random_uuid()` columns are offered
+  the fast server path on PG ≥ 13 instead of never; the planner's SQLite arm
+  is removed from `shouldUseServer` (no SQLite writer exists — a capability
+  that can only half-work is a bug, not a feature).
+
 ## [1.3.0] - 2026-10-17
 
 ### Added — geospatial, end to end

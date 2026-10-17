@@ -12,6 +12,8 @@ import {
   rodneCislo, rodneCisloCheck,
   NINO_FIRST, NINO_SECOND, NINO_SUFFIX, ninoPrefixOk,
   myNumber, czVat, gbVat, jpCorporateNumber,
+  uuidV7, ulid, nanoId, imei, vin, isin, doi,
+  btcAddress, ethAddress, cardExpiry, cardCvv,
 } from './datagenStandards.ts';
 
 // ── Seeded RNG (mulberry32) ───────────────────────────────────────────────────
@@ -433,10 +435,212 @@ function ridePingFor(rowIdx: number, p: GenParams) {
   });
 }
 
+// ── Uniqueness by construction (never by retry) ──────────────────────────────
+//
+// Mirrored exactly in src-tauri/src/commands/datagen.rs (the constants are
+// drift-guarded by tests/datagenParity.test.ts) and spelled in SQL for the
+// server-side path by `uniqueSqlWrap` in utils/datagenSql.ts. Three shapes:
+//
+//   - integers: the row index is PERMUTED into [min, max] — a multiplicative
+//     scramble `min + ((a·i + b) mod m)` with `a` coprime to the range size m,
+//     a bijection over [0, m): O(1), stateless, reversible;
+//   - decimals: the same scramble over the 2-decimal grid of [min, max];
+//   - strings: the row index as a zero-padded suffix (`.NNN` before `@` for
+//     emails), wide enough for the run's last row so the values stay sortable.
+//
+// The constants are chosen so `a·i + b` stays exact in an f64 AND an i64:
+// a < 2^21, i < 2^31 (the 1e9-row cap) and b < m ≤ 2^31 − 1 keep the product
+// under 2^52, which both arithmetics represent exactly.
+export const SCRAMBLE_M_CAP = 2_147_483_647;   // 2^31 − 1
+export const SCRAMBLE_A_START = 2_097_151;     // 2^21 − 1 (odd; walk down by 2)
+
+function gcd(a: number, b: number): number {
+  while (b) { const t = b; b = a % b; a = t; }
+  return Math.abs(a);
+}
+
+/** The multiplier: the largest odd a ≤ SCRAMBLE_A_START coprime to `m`. */
+export function scrambleA(m: number): number {
+  if (m <= 1) return 1;
+  let a = SCRAMBLE_A_START;
+  while (gcd(a, m) !== 1) a -= 2;
+  return a;
+}
+
+/** Row `i` permuted within [0, m) — a bijection whenever m ≥ 1. */
+export function scrambleIndex(i: number, m: number, seed: number): number {
+  if (m <= 1) return 0;
+  const a = scrambleA(m);
+  const b = seed % m;
+  return (a * (i % m) + b) % m;
+}
+
+/** A unique integer in [min, max] — the scrambled row index. */
+export function uniqueIntValue(i: number, seed: number, min: number, max: number): number {
+  let lo = Math.round(min), hi = Math.round(max);
+  if (hi < lo) [lo, hi] = [hi, lo];
+  // A range wider than the cap is served by its first M_CAP values: still
+  // inside [min, max], still a bijection, still exact in an f64.
+  const m = Math.max(1, Math.min(hi - lo + 1, SCRAMBLE_M_CAP));
+  return lo + scrambleIndex(i, m, seed);
+}
+
+/** A unique decimal in [min, max] on the `decimals` grid (2 matches the Rust twin). */
+export function uniqueDecimalValue(i: number, seed: number, min: number, max: number, decimals = 2): number {
+  const grid = 10 ** decimals;
+  const span = Math.round((max - min) * grid) + 1;
+  const m = Math.max(1, Math.min(span, SCRAMBLE_M_CAP));
+  return round(min + scrambleIndex(i, m, seed) / grid, decimals);
+}
+
+/** Width of the uniqueness tag: the digits of the run's last row number. */
+export function uniqueTagWidth(total: number): number {
+  return Math.max(1, String(Math.max(0, Math.trunc(total) - 1)).length);
+}
+
+/** The row-index tag, zero-padded to the run width so the values stay sortable. */
+export function uniqueTag(rowIdx: number, total: number): string {
+  return String(rowIdx).padStart(uniqueTagWidth(total), '0');
+}
+
+/** The declared length in a parenthesised type name — "VARCHAR(20)" → 20. */
+export function parenLen(typeName: string): number | null {
+  const open = typeName.indexOf('(');
+  if (open < 0) return null;
+  const close = typeName.indexOf(')', open);
+  if (close < 0) return null;
+  const t = typeName.slice(open + 1, close).trim();
+  return /^\d+$/.test(t) ? Number(t) : null;
+}
+
+/**
+ * The string uniqueness tag: `.NNN` before the `@` of an email, `_NNN`
+ * otherwise. The tag is never truncated — the BASE's left edge gives way when
+ * a VARCHAR(n) is tight, because uniqueness is what the tag is for.
+ */
+export function applyUniqueStr(s: string, rowIdx: number, total: number, typeName: string): string {
+  const tag = uniqueTag(rowIdx, total);
+  const at = s.indexOf('@');
+  const base = at >= 0 ? `${s.slice(0, at)}.${tag}` : `${s}_${tag}`;
+  const domain = at >= 0 ? s.slice(at) : '';
+  const max = parenLen(typeName);
+  if (max !== null) {
+    const keep = Math.max(0, max - [...domain].length);
+    const chars = [...base];
+    if (chars.length > keep) return chars.slice(chars.length - keep).join('') + domain;
+  }
+  return base + domain;
+}
+
+/**
+ * Number generators that take the decimal scramble branch — the ones the Rust
+ * writer types as Float (decimal, rideLat/Lon/Speed) plus TS-only float
+ * producers (money, latitude, longitude), so both tiers pick the same branch.
+ */
+const FLOAT_UNIQUE_GENS = new Set([
+  'decimal', 'money', 'latitude', 'longitude', 'rideLat', 'rideLon', 'rideSpeed',
+]);
+
+/**
+ * Numeric generators whose domain is intrinsic — params.min/max do not apply,
+ * so the scramble runs over the real domain: [lo, hi] at `decimals` precision.
+ */
+const INTRINSIC_UNIQUE: Record<string, [number, number, number]> = {
+  percent: [0, 100, 1],      // what the generator itself produces
+  rating: [1, 5, 0],         // whole stars
+  bitflags: [0, 255, 0],
+};
+
+/** Distinct-value capacity of an intrinsic-domain generator. */
+function intrinsicCapacity(g: string): number | null {
+  const intr = INTRINSIC_UNIQUE[g];
+  if (intr) return Math.round((intr[1] - intr[0]) * 10 ** intr[2]) + 1;
+  if (g === 'httpStatus') return 7;   // seven codes; no range to scramble over
+  return null;
+}
+
+/**
+ * Apply a column's `unique` flag — the twin of the unique block in Rust's
+ * `gen_row`. `sequence` and `cycle` are index-driven already (a sequence is
+ * always unique; a cycle only while rows ≤ its length — the panel says so),
+ * `fk` values come from the parent pool, and booleans/httpStatus cannot be
+ * unique past their handful of values; all of them pass through unchanged and
+ * `uniqueRowReason` says why.
+ */
+export function applyUnique(spec: ColumnSpec, v: unknown, rowIdx: number, total: number, seed: number): unknown {
+  if (v === null || v === undefined) return v;
+  const g = spec.generator;
+  if (g === 'sequence' || g === 'cycle' || g === 'fk' || g === 'httpStatus') return v;
+  if (typeof v === 'number') {
+    const intr = INTRINSIC_UNIQUE[g];
+    if (intr) {
+      return intr[2] === 0
+        ? uniqueIntValue(rowIdx, seed, intr[0], intr[1])
+        : uniqueDecimalValue(rowIdx, seed, intr[0], intr[1], intr[2]);
+    }
+    return FLOAT_UNIQUE_GENS.has(g)
+      ? uniqueDecimalValue(rowIdx, seed, spec.params.min, spec.params.max, 2)
+      : uniqueIntValue(rowIdx, seed, spec.params.min, spec.params.max);
+  }
+  if (typeof v === 'string') return applyUniqueStr(v, rowIdx, total, spec.typeName);
+  return v;
+}
+
+/** Values a `cycle` column visits before repeating: list length, or the stepped range size. */
+export function cycleLength(p: GenParams): number {
+  const items = p.list.split(',').map(s => s.trim()).filter(Boolean);
+  if (items.length) return items.length;
+  const step = Math.max(1, Math.round(p.step ?? 1));
+  return Math.max(1, Math.floor((Math.round(p.max) - Math.round(p.min)) / step) + 1);
+}
+
+/** Date-family generators whose string value a uniqueness tag would corrupt. */
+const DATE_TEXT_GENS = new Set(['date', 'timestamp', 'timestampStep', 'dateStep', 'businessHours', 'timeOfDay', 'rideTimestamp']);
+
+/**
+ * Why a `unique` column cannot be guaranteed unique on the row-by-row paths
+ * (TS preview ≡ Rust insert) — or null when it can. The panel shows this per
+ * column on the summary step rather than shipping duplicates silently.
+ */
+export function uniqueRowReason(spec: ColumnSpec, rows: number): string | null {
+  if (!spec.unique) return null;
+  const g = spec.generator;
+  if (g === 'sequence') return null;
+  if (g === 'fk') return 'uniqueness is not applied to FK columns — values come from the parent pool';
+  if (g === 'cycle') {
+    const n = cycleLength(spec.params);
+    return rows <= n ? null : `a cycle of ${n} value${n === 1 ? '' : 's'} repeats from row ${n + 1}`;
+  }
+  if (DATE_TEXT_GENS.has(g)) {
+    return 'uniqueness appends a _NNN tag to the value — only safe in a text column';
+  }
+  const probe = GENERATOR_MAP.get(g)?.gen(makeRng(1), 0, spec.params, Math.max(1, rows), DEFAULT_LOCALE);
+  if (typeof probe === 'boolean') {
+    return rows > 2 ? 'a boolean has two values — cannot be unique past 2 rows' : null;
+  }
+  if (g === 'httpStatus') {
+    return rows > 7 ? 'only seven HTTP status codes are generated — duplicates from row 8' : null;
+  }
+  if (typeof probe === 'number') {
+    const p = spec.params;
+    const intr = intrinsicCapacity(g);
+    const m = intr ?? (FLOAT_UNIQUE_GENS.has(g)
+      ? Math.max(1, Math.min(Math.round((p.max - p.min) * 100) + 1, SCRAMBLE_M_CAP))
+      : Math.max(1, Math.min(Math.round(p.max) - Math.round(p.min) + 1, SCRAMBLE_M_CAP)));
+    return rows <= m ? null
+      : `the range holds ${m.toLocaleString('en-US')} distinct values for ${rows.toLocaleString('en-US')} rows`
+        + ` — duplicates from row ${(m + 1).toLocaleString('en-US')}`;
+  }
+  // Strings get the suffix tag, which always guarantees uniqueness.
+  return null;
+}
+
 export const GENERATORS: Generator[] = [
   // ── Numbers ───────────────────────────────────────────────────────────────
   { id: 'sequence', label: 'Sequence (1, 2, 3…)', group: 'Numbers', uses: ['step'],
-    gen: (_r, i, p) => 1 + i * (p.step ?? 1) },
+    // Rounded like the Rust and SQL spellings, so a fractional step cannot
+    // split the tiers apart.
+    gen: (_r, i, p) => 1 + i * Math.max(1, Math.round(p.step ?? 1)) },
   { id: 'int', label: 'Integer (range)', group: 'Numbers', uses: ['range'],
     gen: (r, _i, p) => Math.round(p.min + shaped(r, p.dist) * (p.max - p.min)) },
   { id: 'decimal', label: 'Decimal (range)', group: 'Numbers', uses: ['range', 'decimals'],
@@ -680,6 +884,33 @@ export const GENERATORS: Generator[] = [
     gen: r => `${int(r, 0, 4)}.${int(r, 0, 20)}.${int(r, 0, 40)}` },
   { id: 'hashHex', label: 'Hex hash (64 chars)', group: 'Identifiers', uses: [],
     gen: r => Array.from({ length: 64 }, () => Math.floor(r() * 16).toString(16)).join('') },
+  // ── Identifier pack 2 (datagenStandards.ts) — time-ordered ids take their
+  //    base epoch from the dates range (default 2026-01-01) and tick +1 ms per
+  //    row, so generated ids sort in row order and stay seeded-deterministic.
+  { id: 'uuidV7', label: 'UUID v7 (time-ordered)', group: 'Identifiers', uses: ['dates'],
+    gen: (r, i, p) => uuidV7(r, p.dateFrom ? Date.parse(p.dateFrom + 'T00:00:00Z') : Date.UTC(2026, 0, 1), i) },
+  { id: 'ulid', label: 'ULID (time-ordered)', group: 'Identifiers', uses: ['dates'],
+    gen: (r, i, p) => ulid(r, p.dateFrom ? Date.parse(p.dateFrom + 'T00:00:00Z') : Date.UTC(2026, 0, 1), i) },
+  { id: 'nanoId', label: 'Nano ID (URL-safe)', group: 'Identifiers', uses: [],
+    gen: r => nanoId(r) },
+  { id: 'imei', label: 'IMEI (Luhn)', group: 'Identifiers', uses: ['validity'],
+    gen: (r, _i, p) => imei(r, p.valid !== false) },
+  { id: 'vin', label: 'VIN (ISO 3779)', group: 'Identifiers', uses: ['validity'],
+    gen: (r, _i, p) => vin(r, p.valid !== false) },
+  { id: 'isin', label: 'ISIN (Luhn)', group: 'Identifiers', uses: ['validity'],
+    gen: (r, _i, p) => isin(r, p.valid !== false) },
+  { id: 'doi', label: 'DOI', group: 'Identifiers', uses: [],
+    gen: r => doi(r) },
+  { id: 'btcAddress', label: 'Bitcoin address (base58check)', group: 'Identifiers', uses: [],
+    gen: r => btcAddress(r) },
+  { id: 'ethAddress', label: 'Ethereum address (lowercase)', group: 'Identifiers', uses: [],
+    gen: r => ethAddress(r) },
+  { id: 'cardExpiry', label: 'Card expiry (MM/YY)', group: 'Identifiers', uses: ['dates'],
+    gen: (r, _i, p) => cardExpiry(r,
+      p.dateFrom ? new Date(p.dateFrom + 'T00:00:00Z').getUTCFullYear() : 2026,
+      p.dateTo ? new Date(p.dateTo + 'T00:00:00Z').getUTCFullYear() : 2030) },
+  { id: 'cardCvv', label: 'Card CVV', group: 'Identifiers', uses: ['cardBrand'],
+    gen: (r, _i, p) => cardCvv(r, p.brand ?? '') },
 
   // ── National IDs ─ locale-authentic, correct check algorithms. The `valid`
   //    toggle emits a structurally-shaped value that FAILS the check.
@@ -804,6 +1035,32 @@ export const GENERATORS: Generator[] = [
       for (const it of parsed) { t -= it.weight; if (t <= 0) return it.value; }
       return parsed[parsed.length - 1].value;
     } },
+  { id: 'cycle', label: 'Cycle — round-robin over a list or range', group: 'Controlled',
+    uses: ['list', 'range', 'step'],
+    // Deterministic rotation: row i takes position i mod n, where n is the
+    // list length or the stepped min–max range size (an empty list selects the
+    // range form). The server path spells the same thing with MOD. `jitterPct`
+    // shifts each row's position forward by up to that percentage of the cycle
+    // length — one RNG draw per row when enabled, none when zero, so the
+    // seeded stream is stable either way and both tiers draw in lockstep.
+    gen: (r, i, p) => {
+      const items = p.list.split(',').map(s => s.trim()).filter(Boolean);
+      let n: number;
+      let at: (k: number) => unknown;
+      if (items.length) {
+        n = items.length;
+        at = k => items[k];
+      } else {
+        const step = Math.max(1, Math.round(p.step ?? 1));
+        const lo = Math.round(p.min);
+        n = Math.max(1, Math.floor((Math.round(p.max) - lo) / step) + 1);
+        at = k => lo + k * step;
+      }
+      let pos = i % n;
+      const j = p.jitterPct ?? 0;
+      if (j > 0) pos = (pos + Math.floor(r() * (j / 100) * n)) % n;
+      return at(pos);
+    } },
   { id: 'currencyCode', label: 'Currency code', group: 'Controlled', uses: [],
     gen: r => pick(r, ['CZK','EUR','USD','GBP','PLN','CHF','SEK','NOK','DKK','HUF']) },
   { id: 'regex', label: 'Pattern (reverse regex)', group: 'Controlled', uses: ['list'],
@@ -838,6 +1095,17 @@ export function suggestGenerator(name: string, typeName: string, isPk: boolean):
   if (has('nino')) return 'ukNino';
   if (has('mynumber') || has('kojin')) return 'jpMyNumber';
   if (has('vat') || has('dic')) return 'gbVat';
+  if (has('uuid7') || has('uuid_v7')) return 'uuidV7';
+  if (has('ulid')) return 'ulid';
+  if (has('nanoid') || has('nano_id')) return 'nanoId';
+  if (has('imei')) return 'imei';
+  if (has('vin')) return 'vin';
+  if (has('isin')) return 'isin';
+  if (has('doi')) return 'doi';
+  if (has('bitcoin') || has('btc')) return 'btcAddress';
+  if (has('ethereum') || has('eth')) return 'ethAddress';
+  if (has('cvv')) return 'cardCvv';
+  if (has('expiry') || has('expiration')) return 'cardExpiry';
   if (has('card')) return 'creditCard';
   if (n.includes('email')) return 'email';
   if (n.includes('first') && n.includes('name')) return 'firstName';
@@ -889,7 +1157,7 @@ export interface ColumnSpec {
   typeName: string;     // display / DDL type
   generator: string;    // generator id
   params: GenParams;
-  unique?: boolean;     // enforce uniqueness (backend mixes in the row index)
+  unique?: boolean;     // uniqueness by construction — see applyUnique (scramble / zero-padded tag)
 }
 
 /**
@@ -916,7 +1184,12 @@ export function generateRows(
     rows.push(specs.map(spec => {
       if (spec.params.nullPct > 0 && rng() * 100 < spec.params.nullPct) return null;
       const g = GENERATOR_MAP.get(spec.generator);
-      return g ? g.gen(rng, i, spec.params, count, rowLocale) : null;
+      const v = g ? g.gen(rng, i, spec.params, count, rowLocale) : null;
+      // The same uniqueness construction the Rust writer applies in gen_row —
+      // it used to be dropped here, so a "unique" column previewed as unique
+      // and inserted as duplicates only on the Rust path… or the reverse.
+      // Preview ≡ insert is the whole point of the shared engine.
+      return spec.unique ? applyUnique(spec, v, i, count, seed) : v;
     }));
   }
   return rows;

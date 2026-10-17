@@ -22,6 +22,7 @@ pub mod quality;
 pub mod audit;
 pub mod dump;
 pub mod datagen;
+pub mod datagen_ident;
 pub mod watch;
 pub mod vacuum;
 pub mod kill;

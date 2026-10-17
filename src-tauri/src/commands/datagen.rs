@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::db::types::LiveSession;
 use crate::db::connection::get_session_pub;
 use crate::state::AppState;
+use super::datagen_ident;
 
 const CHUNK_ROWS: usize = 10_000;
 const STMT_BYTES_CAP: usize = 4 * 1024 * 1024; // stay far under max_allowed_packet
@@ -181,6 +182,15 @@ pub struct GenParams {
     pub fk_table: Option<String>,
     #[serde(default)]
     pub fk_column: Option<String>,
+    /// Stepping (sequence/cycle): distance between consecutive rows. The TS
+    /// engine has always honored it; the Rust engine used to ignore it, so a
+    /// stepped sequence previewed one way and inserted another (Phase 0 parity).
+    #[serde(default)]
+    pub step: Option<f64>,
+    /// Cycle generator: shift each row's position forward by up to this
+    /// percentage of the cycle length (one RNG draw per row when > 0).
+    #[serde(default)]
+    pub jitter_pct: Option<f64>,
     /// Vehicle-track generators: pings per ride and the ping interval.
     #[serde(default)]
     pub ride_pings: Option<f64>,
@@ -350,6 +360,94 @@ fn paren_len(type_name: &str) -> Option<usize> {
     let open = type_name.find('(')?;
     let close = type_name[open..].find(')')? + open;
     type_name[open + 1..close].trim().parse().ok()
+}
+
+// ── Uniqueness by construction (never by retry) ──────────────────────────────
+//
+// Mirrored exactly in utils/datagen.ts (the constants are drift-guarded by
+// tests/datagenParity.test.ts) and spelled in SQL for the server-side path by
+// `uniqueSqlWrap` in utils/datagenSql.ts. Three shapes:
+//
+//   - integers: the row index is PERMUTED into [min, max] — a multiplicative
+//     scramble `min + ((a·i + b) mod m)` with `a` coprime to the range size m,
+//     a bijection over [0, m): O(1), stateless, reversible;
+//   - decimals: the same scramble over the 2-decimal grid of [min, max];
+//   - strings: the row index as a zero-padded suffix (`.NNN` before `@` for
+//     emails), wide enough for the run's last row so the values stay sortable.
+//
+// The constants are chosen so `a·i + b` stays exact in an i64 AND an f64:
+// a < 2^21, i < 2^31 (the 1e9-row cap) and b < m ≤ 2^31 − 1 keep the product
+// under 2^52, which both arithmetics represent exactly.
+const SCRAMBLE_M_CAP: i64 = 2_147_483_647; // 2^31 − 1
+const SCRAMBLE_A_START: i64 = 2_097_151;   // 2^21 − 1 (odd; walk down by 2)
+
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 { let t = b; b = a % b; a = t; }
+    a.abs()
+}
+
+/// The multiplier: the largest odd a ≤ SCRAMBLE_A_START coprime to `m`.
+fn scramble_a(m: i64) -> i64 {
+    if m <= 1 { return 1; }
+    let mut a = SCRAMBLE_A_START;
+    while gcd(a, m) != 1 { a -= 2; }
+    a
+}
+
+/// Row `i` permuted within [0, m) — a bijection (gcd(a, m) = 1).
+fn scramble_index(i: u64, m: i64, seed: u32) -> i64 {
+    if m <= 1 { return 0; }
+    let a = scramble_a(m);
+    let b = seed as i64 % m;
+    (a * (i as i64 % m) + b).rem_euclid(m)
+}
+
+/// A unique integer in [min, max] — the scrambled row index.
+fn unique_int(i: u64, seed: u32, min: f64, max: f64) -> i64 {
+    let (mut lo, mut hi) = (min.round() as i64, max.round() as i64);
+    if hi < lo { std::mem::swap(&mut lo, &mut hi); }
+    // A range wider than the cap is served by its first M_CAP values: still
+    // inside [min, max], still a bijection, still exact in an f64.
+    let m = hi.saturating_sub(lo).saturating_add(1).min(SCRAMBLE_M_CAP).max(1);
+    lo + scramble_index(i, m, seed)
+}
+
+/// A unique decimal in [min, max] on the `decimals` grid (2 matches the JS twin).
+fn unique_decimal(i: u64, seed: u32, min: f64, max: f64, decimals: u32) -> f64 {
+    let grid = 10f64.powi(decimals as i32);
+    let span = ((max - min) * grid).round() + 1.0;
+    let m = span.min(SCRAMBLE_M_CAP as f64).max(1.0) as i64;
+    let v = min + scramble_index(i, m, seed) as f64 / grid;
+    (v * grid).round() / grid
+}
+
+/// Width of the uniqueness tag: the digits of the run's last row number.
+fn unique_tag_width(total: u64) -> usize {
+    total.saturating_sub(1).to_string().len().max(1)
+}
+
+/// The string uniqueness tag: `.NNN` before the `@` of an email, `_NNN`
+/// otherwise, zero-padded to the run width so the values sort. The tag is
+/// never truncated — the base's LEFT edge gives way when a VARCHAR(n) is
+/// tight, because uniqueness is what the tag is for.
+fn apply_unique_str(s: &str, row_idx: u64, total: u64, type_name: &str) -> String {
+    let tag = format!("{:0>width$}", row_idx, width = unique_tag_width(total));
+    let (base, domain) = match s.find('@') {
+        Some(at) => (format!("{}.{tag}", &s[..at]), s[at..].to_string()),
+        None => (format!("{s}_{tag}"), String::new()),
+    };
+    // The tag grows with the row count — a 17-char ISBN in a VARCHAR(20) fits
+    // `_099` but overflows at `_100` ("Data too long" mid-run). Shrink the
+    // base's LEFT edge (never the tag) so base+domain fits.
+    if let Some(max) = paren_len(type_name) {
+        let keep = max.saturating_sub(domain.chars().count());
+        let base_chars: Vec<char> = base.chars().collect();
+        if base_chars.len() > keep {
+            let trimmed: String = base_chars[base_chars.len() - keep..].iter().collect();
+            return format!("{trimmed}{domain}");
+        }
+    }
+    format!("{base}{domain}")
 }
 
 /// Tiny reverse-regex expander: literals, [a-z]/[0-9]/[A-Z] classes with
@@ -840,7 +938,38 @@ fn ride_ping(row_idx: u64, p: &GenParams) -> RidePing {
 
 fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParams, locale: &str) -> GenValue {
     match id {
-        "sequence" => GenValue::Int(seq_start + row_idx as i64),
+        // Step-honoring, like the TS engine and the SQL row source: a stepped
+        // sequence used to preview stepped and insert contiguous (Phase 0).
+        "sequence" => {
+            let step = p.step.unwrap_or(1.0).round().max(1.0) as i64;
+            GenValue::Int(seq_start + row_idx as i64 * step)
+        }
+        // Round-robin: row i takes position i mod n (the server path spells the
+        // same thing with MOD). `jitter_pct` shifts each row's position forward
+        // by up to that percentage of the cycle length — one RNG draw per row
+        // when enabled, none when zero, so the seeded stream is stable either
+        // way and both tiers draw in lockstep.
+        "cycle" => {
+            let items: Vec<&str> = p.list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let step = p.step.unwrap_or(1.0).round().max(1.0) as i64;
+            let lo = p.min.round() as i64;
+            let n = if !items.is_empty() {
+                items.len()
+            } else {
+                (((p.max.round() as i64 - lo) / step) + 1).max(1) as usize
+            };
+            let mut pos = (row_idx % n as u64) as usize;
+            let j = p.jitter_pct.unwrap_or(0.0);
+            if j > 0.0 {
+                let shift = (rng.next() * (j / 100.0) * n as f64).floor() as usize;
+                pos = (pos + shift) % n;
+            }
+            if !items.is_empty() {
+                GenValue::Str(items[pos].to_string())
+            } else {
+                GenValue::Int(lo + pos as i64 * step)
+            }
+        }
         "int" => {
             let t = shaped_unit(rng, p.dist.as_deref());
             GenValue::Int((p.min + t * (p.max - p.min + 1.0)).floor() as i64)
@@ -1023,6 +1152,32 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
             };
             GenValue::Str(format!("{bank}{country}{loc}{branch}"))
         }
+        // ── Identifier pack 2 (commands/datagen_ident.rs — bit-identical ports
+        //    of utils/datagenStandards.ts). Time-ordered ids take the dates
+        //    range's `from` as base epoch and tick +1 ms per row, matching the
+    //    TS registry entries.
+        "uuidV7" => {
+            let (from, _) = date_range_ms(p);
+            GenValue::Str(datagen_ident::uuid_v7(&mut || rng.next(), from.max(0) as u64, row_idx))
+        }
+        "ulid" => {
+            let (from, _) = date_range_ms(p);
+            GenValue::Str(datagen_ident::ulid(&mut || rng.next(), from.max(0) as u64, row_idx))
+        }
+        "nanoId" => GenValue::Str(datagen_ident::nano_id(&mut || rng.next(), 21)),
+        "imei" => GenValue::Str(datagen_ident::imei(&mut || rng.next(), valid_of(p))),
+        "vin" => GenValue::Str(datagen_ident::vin(&mut || rng.next(), valid_of(p))),
+        "isin" => GenValue::Str(datagen_ident::isin(&mut || rng.next(), valid_of(p))),
+        "doi" => GenValue::Str(datagen_ident::doi(&mut || rng.next())),
+        "btcAddress" => GenValue::Str(datagen_ident::btc_address(&mut || rng.next())),
+        "ethAddress" => GenValue::Str(datagen_ident::eth_address(&mut || rng.next())),
+        "cardExpiry" => {
+            let fy: i64 = p.date_from[..4].parse().unwrap_or(2026);
+            let ty: i64 = p.date_to[..4].parse().unwrap_or(2030);
+            GenValue::Str(datagen_ident::card_expiry(&mut || rng.next(), fy, ty, fy, 1))
+        }
+        "cardCvv" => GenValue::Str(datagen_ident::card_cvv(
+            &mut || rng.next(), p.brand.as_deref().unwrap_or(""))),
         "czBirthNumber" => {
             let mut prefix;
             loop {
@@ -1075,9 +1230,13 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
 }
 
 /// One row, consuming the RNG in spec order (matches generateRows in TS:
-/// the null-roll only draws when nullPct > 0).
+/// the null-roll only draws when nullPct > 0). `total` is the whole run's row
+/// count (the uniqueness tag is zero-padded to its width); `seed` feeds the
+/// uniqueness scramble — both are pure in row_idx, never an RNG draw, so the
+/// seeded stream is identical whether or not a column is unique.
+#[allow(clippy::too_many_arguments)]
 fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
-           locale: &str, fk_pools: &[Option<Vec<GenValue>>]) -> Vec<GenValue> {
+           locale: &str, fk_pools: &[Option<Vec<GenValue>>], total: u64, seed: u32) -> Vec<GenValue> {
     // Resolve the row's locale from `row_idx` alone (a pure hash, no RNG draw),
     // so a fixed locale is the identity here and its seeded stream is untouched.
     // Only `mixed` maps the row onto a single pack; every generator in the row
@@ -1100,29 +1259,23 @@ fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
         }
         let v = gen_value(&spec.generator, rng, row_idx, seq_start, &spec.params, row_locale);
         if !spec.unique { return v; }
-        // Guarantee uniqueness by mixing the row index: ints become an
-        // ascending sequence; strings get an index tag (before '@' for emails).
+        // Uniqueness by construction — the twin of `applyUnique` in
+        // utils/datagen.ts (and `uniqueSqlWrap` in datagenSql.ts on the server
+        // path). `sequence` and `cycle` are index-driven already: a sequence
+        // is always unique; a cycle only while rows ≤ its length, which the
+        // panel reports per column rather than silently repeating.
+        match spec.generator.as_str() {
+            "sequence" | "cycle" => return v,
+            _ => {}
+        }
         match v {
-            GenValue::Int(_) => GenValue::Int(seq_start + row_idx as i64),
-            GenValue::Str(s) => {
-                let (base, domain) = match s.find('@') {
-                    Some(at) => (format!("{}.{row_idx}", &s[..at]), s[at..].to_string()),
-                    None => (format!("{s}_{row_idx}"), String::new()),
-                };
-                // The tag grows with the row index — a 17-char ISBN in a
-                // VARCHAR(20) fits `_99` but overflows at `_100` ("Data too
-                // long" mid-run). Shrink the base's LEFT edge (never the tag
-                // — uniqueness is what the tag is for) so base+domain fits.
-                if let Some(max) = paren_len(&spec.type_name) {
-                    let keep = max.saturating_sub(domain.chars().count());
-                    let base_chars: Vec<char> = base.chars().collect();
-                    if base_chars.len() > keep {
-                        let trimmed: String = base_chars[base_chars.len() - keep..].iter().collect();
-                        return GenValue::Str(format!("{trimmed}{domain}"));
-                    }
-                }
-                GenValue::Str(format!("{base}{domain}"))
-            }
+            // The row index permuted into [min, max] by the scramble — not
+            // seq_start + row_idx as before (that ignored the configured
+            // range; cross-run continuation past existing values is a separate
+            // Phase-1 checkbox, resolve_sequence_start is untouched).
+            GenValue::Int(_) => GenValue::Int(unique_int(row_idx, seed, spec.params.min, spec.params.max)),
+            GenValue::Float(_) => GenValue::Float(unique_decimal(row_idx, seed, spec.params.min, spec.params.max, 2)),
+            GenValue::Str(s) => GenValue::Str(apply_unique_str(&s, row_idx, total, &spec.type_name)),
             other => other,
         }
     }).collect()
@@ -1139,15 +1292,20 @@ pub async fn generate_preview(
     seq_start: i64,
     // Absent (older callers) → the default mixed corpus.
     locale: Option<String>,
+    // The run's real row count — the uniqueness tag is padded to ITS width, so
+    // a 15-row preview of a 2500-row run shows the values the insert will
+    // write. Absent (older callers) → the preview count.
+    total_rows: Option<u64>,
 ) -> Result<Vec<Vec<serde_json::Value>>, crate::apperror::AppError> {
     let n = count.min(PREVIEW_CAP);
     let locale = locale.unwrap_or_else(default_locale);
+    let total = total_rows.unwrap_or(n as u64).max(n as u64);
     let mut rng = Rng(seed);
     // Preview is session-less — FK columns show <fk> placeholder (real pools
     // load at run time). Empty pools per column.
     let empty: Vec<Option<Vec<GenValue>>> = vec![None; specs.len()];
     Ok((0..n as u64)
-        .map(|i| gen_row(&specs, &mut rng, i, seq_start, &locale, &empty).iter().map(|v| v.to_json()).collect())
+        .map(|i| gen_row(&specs, &mut rng, i, seq_start, &locale, &empty, total, seed).iter().map(|v| v.to_json()).collect())
         .collect())
 }
 
@@ -1370,7 +1528,7 @@ fn spawn_generator(
         while produced < total {
             let n = ((total - produced) as usize).min(CHUNK_ROWS);
             let chunk: Vec<Vec<GenValue>> = (0..n)
-                .map(|k| gen_row(&specs, &mut rng, produced + k as u64, seq_start, &locale, &fk_pools))
+                .map(|k| gen_row(&specs, &mut rng, produced + k as u64, seq_start, &locale, &fk_pools, total, seed))
                 .collect();
             produced += n as u64;
             if tx.blocking_send(chunk).is_err() {
@@ -1963,6 +2121,7 @@ mod mssql_datagen_live_tests {
             min, max, date_from: "2024-01-01".into(), date_to: "2024-12-31".into(),
             list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
             ride_pings: None, ping_sec: None,
+            step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
         }
     }
@@ -2146,6 +2305,7 @@ mod tests {
             list: "new,active,disabled".into(), null_pct: 0.0, dist: None,
             fk_table: None, fk_column: None,
             ride_pings: None, ping_sec: None,
+            step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
         };
         vec![
@@ -2161,8 +2321,8 @@ mod tests {
         let mut a = Rng(42);
         let mut b = Rng(42);
         for i in 0..500 {
-            let ra: Vec<String> = gen_row(&s, &mut a, i, 1, "default", &[None,None,None]).iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&s, &mut b, i, 1, "default", &[None,None,None]).iter().map(|v| v.sql_literal(true)).collect();
+            let ra: Vec<String> = gen_row(&s, &mut a, i, 1, "default", &[None,None,None], 500, 42).iter().map(|v| v.sql_literal(true)).collect();
+            let rb: Vec<String> = gen_row(&s, &mut b, i, 1, "default", &[None,None,None], 500, 42).iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb);
         }
     }
@@ -2177,6 +2337,7 @@ mod tests {
             min: 1.0, max: 1000.0, date_from: "2026-06-01".into(), date_to: "2026-07-01".into(),
             list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
             ride_pings: Some(200.0), ping_sec: Some(2.0),
+            step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
         };
         // (row, carId, lat, lon, speedKmh, headingDeg, epochSec)
@@ -2206,7 +2367,7 @@ mod tests {
     fn sequence_respects_start() {
         let s = specs();
         let mut rng = Rng(1);
-        let row = gen_row(&s, &mut rng, 0, 5_000, "default", &[None,None,None]);
+        let row = gen_row(&s, &mut rng, 0, 5_000, "default", &[None,None,None], 1, 1);
         assert!(matches!(row[0], GenValue::Int(5_000)));
     }
 
@@ -2234,7 +2395,7 @@ mod tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_500u64 {
-            let row = gen_row(&s, &mut rng, i, 1, "default", &[None]);
+            let row = gen_row(&s, &mut rng, i, 1, "default", &[None], 2_500, 42);
             let v = as_str(row.into_iter().next().unwrap());
             assert!(v.chars().count() <= 20, "row {i}: {v} ({} chars)", v.chars().count());
             assert!(seen.insert(v.clone()), "row {i}: duplicate {v}");
@@ -2252,7 +2413,7 @@ mod tests {
         let mut rng = Rng(7);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_500u64 {
-            let row = gen_row(&s, &mut rng, i, 1, "default", &[None]);
+            let row = gen_row(&s, &mut rng, i, 1, "default", &[None], 2_500, 42);
             let v = as_str(row.into_iter().next().unwrap());
             assert!(v.chars().count() <= 24, "row {i}: {v} ({} chars)", v.chars().count());
             assert!(v.contains('@'), "row {i}: lost the domain: {v}");
@@ -2427,6 +2588,7 @@ mod tests {
             min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
             list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None,
             ride_pings: None, ping_sec: None,
+            step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
         }
     }
@@ -2497,7 +2659,7 @@ mod tests {
             dict("cs-CZ", "cities").iter().map(String::as_str).collect();
         let mut rng = Rng(12345);
         for i in 0..60 {
-            let row = gen_row(&name_spec, &mut rng, i, 1, "cs-CZ", &[None, None]);
+            let row = gen_row(&name_spec, &mut rng, i, 1, "cs-CZ", &[None, None], 60, 12345);
             if let GenValue::Str(city) = &row[1] {
                 assert!(cz_cities.contains(city.as_str()), "{city} is not a cs-CZ city");
             } else {
@@ -2507,12 +2669,12 @@ mod tests {
         // Same seed, different locale → different bytes (locale took effect).
         let default_row = {
             let mut r = Rng(999);
-            gen_row(&name_spec, &mut r, 0, 1, "default", &[None, None])
+            gen_row(&name_spec, &mut r, 0, 1, "default", &[None, None], 1, 999)
                 .iter().map(|v| v.sql_literal(true)).collect::<Vec<_>>()
         };
         let ja_row = {
             let mut r = Rng(999);
-            gen_row(&name_spec, &mut r, 0, 1, "ja-JP", &[None, None])
+            gen_row(&name_spec, &mut r, 0, 1, "ja-JP", &[None, None], 1, 999)
                 .iter().map(|v| v.sql_literal(true)).collect::<Vec<_>>()
         };
         assert_ne!(default_row, ja_row);
@@ -2528,9 +2690,9 @@ mod tests {
         let mut a = Rng(55);
         let mut b = Rng(55);
         for i in 0..30 {
-            let ra: Vec<String> = gen_row(&plain, &mut a, i, 1, "ja-JP", &[None, None])
+            let ra: Vec<String> = gen_row(&plain, &mut a, i, 1, "ja-JP", &[None, None], 30, 55)
                 .iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&plain, &mut b, i, 1, "default", &[None, None])
+            let rb: Vec<String> = gen_row(&plain, &mut b, i, 1, "default", &[None, None], 30, 55)
                 .iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb, "locale changed the draw order at row {i}");
         }
@@ -2694,8 +2856,8 @@ mod tests {
                 let mut a = Rng(321);
                 let mut b = Rng(321);
                 for i in 0..20 {
-                    let ra = gen_row(&s, &mut a, i, 1, loc, &[None, None])[1].sql_literal(true);
-                    let rb = gen_row(&s, &mut b, i, 1, "default", &[None, None])[1].sql_literal(true);
+                    let ra = gen_row(&s, &mut a, i, 1, loc, &[None, None], 20, 321)[1].sql_literal(true);
+                    let rb = gen_row(&s, &mut b, i, 1, "default", &[None, None], 20, 321)[1].sql_literal(true);
                     assert_eq!(ra, rb, "{id}/{loc} moved the RNG stream at row {i}");
                 }
             }
@@ -2733,7 +2895,7 @@ mod tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..300u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "mixed", &[None, None, None, None]);
+            let row = gen_row(&specs, &mut rng, i, 1, "mixed", &[None, None, None, None], 300, 42);
             let pack = resolve_locale("mixed", i);
             seen.insert(pack);
             let m = meta(pack);
@@ -2763,9 +2925,9 @@ mod tests {
         let mut a = Rng(99);
         let mut b = Rng(99);
         for i in 0..100 {
-            let ra: Vec<String> = gen_row(&specs, &mut a, i, 1, "default", &[None, None, None])
+            let ra: Vec<String> = gen_row(&specs, &mut a, i, 1, "default", &[None, None, None], 100, 99)
                 .iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&specs, &mut b, i, 1, "default", &[None, None, None])
+            let rb: Vec<String> = gen_row(&specs, &mut b, i, 1, "default", &[None, None, None], 100, 99)
                 .iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb);
         }
@@ -2805,6 +2967,183 @@ mod tests {
             assert_eq!(cold.speed_kmh.to_bits(), want.speed_kmh.to_bits(), "row {i} speed");
             assert_eq!(cold.heading_deg, want.heading_deg, "row {i} heading");
             assert_eq!(cold.epoch_sec, want.epoch_sec, "row {i} epoch");
+        }
+    }
+
+    // ── Phase 0/1: path parity + uniqueness by construction ─────────────────
+    // The pinned vectors below are shared with tests/datagenParity.test.ts —
+    // if either engine drifts, one side fails.
+
+    /// The sequence used to ignore `step` here while the TS engine honored it —
+    /// stepped on preview, contiguous on insert (Phase 0, BUG 1).
+    #[test]
+    fn sequence_honours_step() {
+        let mut p = params();
+        p.step = Some(5.0);
+        let mut rng = Rng(1);
+        for (i, want) in [1i64, 6, 11, 16].iter().enumerate() {
+            match gen_value("sequence", &mut rng, i as u64, 1, &p, "default") {
+                GenValue::Int(v) => assert_eq!(v, *want, "row {i}"),
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }
+    }
+
+    /// The scramble is a bijection over [0, m): m rows, m distinct values.
+    #[test]
+    fn scramble_is_a_full_permutation_of_the_range() {
+        for m in [1i64, 2, 3, 17, 97, 1000, 999_983] {
+            let seen: std::collections::HashSet<i64> =
+                (0..m as u64).map(|i| scramble_index(i, m, 42)).collect();
+            assert_eq!(seen.len(), m as usize, "m={m} is not a bijection");
+            assert!(seen.iter().all(|&v| (0..m).contains(&v)), "m={m} escapes [0, m)");
+        }
+        // The invariants the SQL spelling and the f64 twin rely on.
+        assert_eq!(SCRAMBLE_A_START, 2_097_151);
+        assert_eq!(SCRAMBLE_M_CAP, 2_147_483_647);
+        let a = scramble_a(1_000_000);
+        assert!(a < (1 << 21) && a % 2 == 1 && gcd(a, 1_000_000) == 1);
+        // a·i + b stays under 2^53: exact in an f64 AND an i64.
+        assert!((SCRAMBLE_A_START as u128) * (SCRAMBLE_M_CAP as u128) < (1u128 << 53));
+    }
+
+    /// Unique ints: the whole [10, 29] range exactly once, in the order the TS
+    /// engine produces for seed 42 (pinned in tests/datagenParity.test.ts).
+    #[test]
+    fn unique_int_scramble_matches_the_typescript_engine() {
+        let mut p = params();
+        p.min = 10.0;
+        p.max = 29.0;
+        let s = vec![ColumnSpec {
+            name: "n".into(), type_name: "INT".into(),
+            generator: "int".into(), params: p, unique: true,
+        }];
+        let mut rng = Rng(42);
+        let got: Vec<i64> = (0..10u64).map(|i| {
+            match gen_row(&s, &mut rng, i, 1, "default", &[None], 10, 42).into_iter().next().unwrap() {
+                GenValue::Int(v) => v,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }).collect();
+        assert_eq!(got, [12, 23, 14, 25, 16, 27, 18, 29, 20, 11]);
+    }
+
+    /// Unique decimals land on the 2-decimal grid, pinned against TS (seed 42).
+    #[test]
+    fn unique_decimal_scramble_matches_the_typescript_engine() {
+        let mut p = params();
+        p.min = 1.0;
+        p.max = 2.0;
+        let s = vec![ColumnSpec {
+            name: "d".into(), type_name: "DECIMAL(10,2)".into(),
+            generator: "decimal".into(), params: p, unique: true,
+        }];
+        let mut rng = Rng(42);
+        let got: Vec<f64> = (0..6u64).map(|i| {
+            match gen_row(&s, &mut rng, i, 1, "default", &[None], 6, 42).into_iter().next().unwrap() {
+                GenValue::Float(v) => v,
+                other => panic!("expected Float, got {other:?}"),
+            }
+        }).collect();
+        assert_eq!(got, [1.42, 1.29, 1.16, 1.03, 1.91, 1.78]);
+    }
+
+    /// Unique strings: zero-padded to the run width, pinned against TS.
+    #[test]
+    fn unique_strings_are_zero_padded_and_pinned() {
+        let mut p = params();
+        p.list = "ABC".into();
+        let s = vec![ColumnSpec {
+            name: "c".into(), type_name: "VARCHAR(20)".into(),
+            generator: "choice".into(), params: p, unique: true,
+        }];
+        let mut rng = Rng(42);
+        let got: Vec<String> = (0..3u64).map(|i| {
+            as_str(gen_row(&s, &mut rng, i, 1, "default", &[None], 15, 42).into_iter().next().unwrap())
+        }).collect();
+        assert_eq!(got, ["ABC_00", "ABC_01", "ABC_02"]);
+    }
+
+    /// Email keeps the tag before the '@', padded, pinned against TS (seed 42).
+    #[test]
+    fn unique_email_tag_is_pinned_to_the_typescript_engine() {
+        let s = vec![ColumnSpec {
+            name: "e".into(), type_name: "VARCHAR(255)".into(),
+            generator: "email".into(), params: params(), unique: true,
+        }];
+        let mut rng = Rng(42);
+        let got: Vec<String> = (0..3u64).map(|i| {
+            as_str(gen_row(&s, &mut rng, i, 1, "default", &[None], 15, 42).into_iter().next().unwrap())
+        }).collect();
+        assert_eq!(got, [
+            "jiri.watson85.00@fastmail.dev",
+            "iris.jelinek28.01@inbox.me",
+            "jackson.price25.02@mailbox.cz",
+        ]);
+    }
+
+    /// The tag is as wide as the run, and truncation still shrinks the base,
+    /// never the tag.
+    #[test]
+    fn unique_tag_width_tracks_the_run_size() {
+        assert_eq!(unique_tag_width(1), 1);
+        assert_eq!(unique_tag_width(15), 2);
+        assert_eq!(unique_tag_width(2_500), 4);
+        assert_eq!(apply_unique_str("ABC", 7, 2_500, "VARCHAR(20)"), "ABC_0007");
+        // 17-char base + `_0007` = 22 > VARCHAR(20): two chars off the LEFT.
+        assert_eq!(
+            apply_unique_str("978-12-34567-89-0", 7, 2_500, "VARCHAR(20)"),
+            "8-12-34567-89-0_0007");
+        assert_eq!(
+            apply_unique_str("a.b@example.com", 3, 15, "VARCHAR(255)"),
+            "a.b.03@example.com");
+    }
+
+    /// Cycle: wraparound + the stepped range form, pinned against TS.
+    #[test]
+    fn cycle_wraps_around_and_matches_the_typescript_engine() {
+        let mut p = params();
+        p.list = "a,b,c".into();
+        let got: Vec<String> = (0..7u64).map(|i| {
+            // jitter off: no draws, the seed is irrelevant
+            let mut rng = Rng(42);
+            as_str(gen_value("cycle", &mut rng, i, 1, &p, "default"))
+        }).collect();
+        assert_eq!(got, ["a", "b", "c", "a", "b", "c", "a"]);
+
+        let mut p2 = params();
+        p2.list = String::new();
+        p2.min = 5.0;
+        p2.max = 25.0;
+        p2.step = Some(5.0);
+        let got: Vec<i64> = (0..8u64).map(|i| {
+            let mut rng = Rng(42);
+            match gen_value("cycle", &mut rng, i, 1, &p2, "default") {
+                GenValue::Int(v) => v,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }).collect();
+        assert_eq!(got, [5, 10, 15, 20, 25, 5, 10, 15]);
+    }
+
+    /// A jittered cycle draws once per row from the shared seeded stream —
+    /// pinned against the TS engine (seed 42), so the streams stay in lockstep.
+    #[test]
+    fn cycle_jitter_is_seeded_and_bounded() {
+        let mut p = params();
+        p.list = "a,b,c,d".into();
+        p.jitter_pct = Some(50.0);
+        let mut rng = Rng(42);
+        let got: Vec<String> = (0..10u64)
+            .map(|i| as_str(gen_value("cycle", &mut rng, i, 1, &p, "default")))
+            .collect();
+        assert_eq!(got, ["b", "b", "d", "a", "a", "c", "c", "a", "b", "b"]);
+        // Jitter bound: the shift is under 50% of the 4-item cycle, so row i
+        // never lands further than (i mod 4) + 1 positions ahead (mod 4).
+        for (i, v) in got.iter().enumerate() {
+            let base = i % 4;
+            let pos = "abcd".find(v.as_str().chars().next().unwrap()).unwrap();
+            assert!((pos + 4 - base) % 4 <= 1, "row {i}: {v} jumped too far");
         }
     }
 

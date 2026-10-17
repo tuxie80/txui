@@ -17,7 +17,7 @@ import type { TableMeta } from '../types/browser';
 import type { QueryResult } from '../types';
 import {
   GENERATORS, GENERATOR_MAP, DEFAULT_PARAMS, suggestGenerator,
-  buildInserts, buildCreateTable, quoteIdent,
+  buildInserts, buildCreateTable, quoteIdent, uniqueRowReason,
 } from '../utils/datagen';
 import { CHART_PRESETS, presetParams } from '../utils/chartPresets';
 import type { ColumnSpec } from '../utils/datagen';
@@ -67,6 +67,15 @@ const SCALES = [
   { label: '10×', value: 10 },
   { label: '50×', value: 50 },
 ];
+
+/**
+ * `server_version_num` per PostgreSQL session, probed once and cached — the
+ * same shape as `store/serverFlavors`. The server-side plan gates
+ * `gen_random_uuid()` on ≥ 13; before this probe existed the panel passed
+ * `undefined`, which counts as "too old", so uuid columns never took the
+ * server path at all.
+ */
+const PG_VERSION_CACHE = new Map<string, number>();
 
 interface Props {
   sessionId: string;
@@ -199,6 +208,27 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       .catch(() => {/* leave the picker empty; manual schema.table still works */});
   }, [sessionId, engine]);
 
+  // PostgreSQL server_version_num, probed once per session. Until it lands the
+  // server plan treats the server as pre-13 (no gen_random_uuid) — cautious
+  // and recoverable, never the other way round.
+  const [serverVersionNum, setServerVersionNum] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (engine !== 'postgres') { setServerVersionNum(undefined); return; }
+    const cached = PG_VERSION_CACHE.get(sessionId);
+    if (cached !== undefined) { setServerVersionNum(cached); return; }
+    let alive = true;
+    invoke<QueryResult>('monitor_query', {
+      sessionId, sql: "SELECT current_setting('server_version_num')",
+    }).then(r => {
+      const v = Number(r.rows[0]?.[0]);
+      if (Number.isFinite(v)) {
+        PG_VERSION_CACHE.set(sessionId, v);
+        if (alive) setServerVersionNum(v);
+      }
+    }).catch(() => { /* unknown → the planner assumes the oldest */ });
+    return () => { alive = false; };
+  }, [sessionId, engine]);
+
   const kit = useMemo(() => SCHEMA_KITS.find(k => k.id === kitId) ?? SCHEMA_KITS[0], [kitId]);
 
   // Kit or scale change → recompute per-table row counts (still editable)
@@ -298,8 +328,11 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       if (!alive) return;
       setSeqStart(start);
       try {
+        // totalRows rides along so the zero-padded uniqueness tag is as wide
+        // in the preview as in the real run — preview ≡ insert, verbatim.
         const rows = await invoke<unknown[][]>('generate_preview', {
           specs, count: Math.min(15, rowCount), seed, seqStart: start, locale,
+          totalRows: rowCount,
         });
         if (alive) setPreviewRows(rows);
       } catch (e) {
@@ -333,6 +366,40 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       + (engine === 'postgres' && useCopy ? ' (COPY fast path)' : ''));
     return parts.join('\n\n');
   }, [step, mode, qualifiedTable, newCols, specs, engine, rowCount, previewRows, useCopy]);
+
+  /**
+   * The server plan, computed on step 3 so the uniqueness notes below know
+   * which path a run would actually take — and whether a `unique` column would
+   * force the row-by-row fallback (plan.unsupported with a reason).
+   */
+  const planPeek = useMemo(() => {
+    if (step !== 3 || mode === 'database') return null;
+    if (mode === 'new' || !shouldUseServer(engine, rowCount)) return null;
+    return buildServerPlan(engine, qualifiedTable, specs, rowCount, serverVersionNum, locale, seed);
+  }, [step, mode, engine, rowCount, qualifiedTable, specs, serverVersionNum, locale, seed]);
+
+  /**
+   * Per-column honesty about the `unique` checkbox. A column whose generator
+   * cannot guarantee uniqueness on the path the run will take gets a greyed
+   * note with the reason — the alternative is shipping duplicates silently,
+   * which is the one thing a "unique" flag must never do.
+   */
+  const uniqueNotes = useMemo(() => {
+    if (step !== 3 || mode === 'database') return [];
+    const notes: { col: string; text: string }[] = [];
+    for (const s of specs) {
+      if (!s.unique) continue;
+      const serverBlock = planPeek?.unsupported.find(u => u.column === s.name && u.reason);
+      const rowReason = uniqueRowReason(s, rowCount);
+      const parts: string[] = [];
+      if (serverBlock) {
+        parts.push(`server-side generation cannot guarantee it (${serverBlock.reason}) — the run falls back to row-by-row`);
+      }
+      if (rowReason) parts.push(rowReason);
+      if (parts.length) notes.push({ col: s.name, text: parts.join('; ') });
+    }
+    return notes;
+  }, [step, mode, specs, rowCount, planPeek]);
 
   const run = useCallback(async () => {
     setError(null);
@@ -394,7 +461,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
     }
 
     if (mode !== 'new' && shouldUseServer(engine, rowCount)) {
-      const plan = buildServerPlan(engine, qualifiedTable, specs, rowCount, undefined, locale);
+      const plan = buildServerPlan(engine, qualifiedTable, specs, rowCount, serverVersionNum, locale, seed);
       if (plan.unsupported.length === 0) {
         // Chunk independence is the safety property here: each statement
         // commits on its own, so Cancel leaves a usable table instead of an
@@ -444,7 +511,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
         return;
       }
       setError(`Generating ${rowCount.toLocaleString()} rows on the server needs every column to `
-        + `have a SQL form, and ${plan.unsupported.map(u => `${u.column} (${u.generator})`).join(', ')} `
+        + `have a SQL form, and ${plan.unsupported.map(u => `${u.column} (${u.generator})${u.reason ? ` — ${u.reason}` : ''}`).join(', ')} `
         + 'does not. Falling back to row-by-row generation, which is slower at this size — '
         + 'or pick a different generator for that column.');
     }
@@ -480,7 +547,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       finish(0, 0, false, errorDisplay(e));
     }
   }, [mode, qualifiedTable, newCols, engine, sessionId, specs, rowCount, seed, seqStart, locale, useCopy,
-      tableName, connectionName, onSchemaChanged, environment, readOnly]);
+      tableName, connectionName, onSchemaChanged, environment, readOnly, serverVersionNum]);
 
   const runDatabase = useCallback(async () => {
     setError(null);
@@ -1115,6 +1182,12 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
               {preview && <FastGrid columns={preview.columns} rows={preview.rows} />}
             </div>
             <pre className="dg-sql">{sqlPreview}</pre>
+
+            {uniqueNotes.length > 0 && (
+              <div className="dg-field-hint">
+                {uniqueNotes.map(n => <div key={n.col}>⚠ <b>{n.col}</b>: {n.text}</div>)}
+              </div>
+            )}
 
             {progress && (
               <div className="dg-progress">
