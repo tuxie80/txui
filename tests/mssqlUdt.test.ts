@@ -299,3 +299,17 @@ test('blocked when the builder refuses — the builder reason is passed through'
   assert.match(a.reason ?? '', /multi-statement batch/);
   assert.equal(a.derived, null);
 });
+
+test('wkt mode wraps with ToString() under the same gate rules', () => {
+  const a = viewAsGeoAction('sqlserver', GEO_COLS, SQL, 'wkt');
+  assert.equal(a.show, true);
+  assert.equal(a.reason, null);
+  assert.ok(a.derived);
+  assert.match(a.derived.sql, /txui_geo\.\[geom\]\.ToString\(\) AS \[geom\]/);
+  assert.match(a.logLine ?? '', /\.ToString\(\) → WKT text/);
+  // The gate rules are mode-independent: no statement still greys and explains.
+  const blocked = viewAsGeoAction('sqlserver', GEO_COLS, undefined, 'wkt');
+  assert.equal(blocked.show, true);
+  assert.match(blocked.reason ?? '', /No originating statement/);
+  assert.equal(blocked.derived, null);
+});

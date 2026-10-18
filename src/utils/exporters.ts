@@ -285,7 +285,9 @@ export const COPY_CONFIRM_ROWS = 10_000;
 /** The confirmDialog text for a copy larger than COPY_CONFIRM_ROWS. */
 export function copyConfirmMessage(rows: number): string {
   return `Copy ${rows.toLocaleString('en-US')} rows to the clipboard?\n\n`
-    + 'Serializing a result this large pauses the UI while it runs.';
+    + 'Serializing a result this large pauses the UI while it runs.\n\n'
+    + 'To keep the data without the clipboard detour, cancel and use Export ▾ '
+    + 'instead — it writes the same rows straight to a file.';
 }
 
 export function serialize(

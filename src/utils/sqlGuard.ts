@@ -82,8 +82,169 @@ function copyWrites(blanked: string): boolean {
  * defaults apply.
  */
 export function isWriteStatement(sql: string, engine?: string): boolean {
-  return blank(exposeVersionedComments(sql), engine).split(';')
-    .some(s => statementIsWrite(s, engine));
+  // exposeVersionedComments and blank both preserve string length, so raw and
+  // blanked indices align — the PG branch relies on that to cut both at the
+  // same `;`s (mirrors split_aligned in sqlguard.rs).
+  const src = exposeVersionedComments(sql);
+  const b = blank(src, engine);
+  if (engine === 'postgres') {
+    // The read-only-backstop flips hide from blanked text (quoted GUC names,
+    // SET SESSION CHARACTERISTICS), so PG SETs are additionally judged on the
+    // RAW statement — mirrors is_write_for in sqlguard.rs.
+    return splitAligned(src, b).some(([raw, bl]) =>
+      statementIsWrite(bl, engine) || (/^\s*set\b/i.test(bl) && pgSetFlipsReadonly(raw)));
+  }
+  return b.split(';').some(s => statementIsWrite(s, engine));
+}
+
+/** Cut `raw` and its blanked form into per-statement pairs — the blanked
+ *  `;`s are safe split points for both because blanking preserves length
+ *  (string/comment content no longer contains any). Mirror of
+ *  `split_aligned` in sqlguard.rs. */
+function splitAligned(raw: string, blanked: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  let start = 0;
+  for (let i = 0; i < blanked.length; i++) {
+    if (blanked[i] === ';') {
+      out.push([raw.slice(start, i), blanked.slice(start, i)]);
+      start = i + 1;
+    }
+  }
+  out.push([raw.slice(start), blanked.slice(start)]);
+  return out;
+}
+
+/** Token of the PG SET-target scan (mirror of PgTok/pg_set_tokens in
+ *  sqlguard.rs): words and "quoted" identifiers are kept lowercased — the
+ *  quoted form is the whole point, since blanking erases it — while
+ *  '…'/$tag$ strings and comments collapse to `other`. */
+type PgTok =
+  | { readonly t: 'word' | 'quoted'; readonly v: string }
+  | { readonly t: 'dot' }
+  | { readonly t: 'other' };
+
+function pgSetTokens(raw: string): PgTok[] {
+  const out: PgTok[] = [];
+  const n = raw.length;
+  let i = 0;
+  while (i < n) {
+    const c = raw[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '-' && raw[i + 1] === '-') {
+      const nl = raw.indexOf('\n', i);
+      i = nl === -1 ? n : nl;
+      continue;
+    }
+    // PG block comments nest (Dialect::nested_comments for postgres).
+    if (c === '/' && raw[i + 1] === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (raw[i] === '/' && raw[i + 1] === '*') { depth++; i += 2; }
+        else if (raw[i] === '*' && raw[i + 1] === '/') { depth--; i += 2; }
+        else i++;
+      }
+      continue;
+    }
+    // '…' string, incl. the E'…' prefix whose backslash escapes — a SET
+    // target never contains one, but the VALUE does, and an escaped quote
+    // mis-skipped would leak string content into the token stream.
+    if (c === "'" || ((c === 'E' || c === 'e') && raw[i + 1] === "'")) {
+      const escaped = c !== "'";
+      i += escaped ? 2 : 1;
+      while (i < n) {
+        if (escaped && raw[i] === '\\') { i += 2; continue; }
+        if (raw[i] === "'") {
+          if (raw[i + 1] === "'") { i += 2; continue; }
+          i++;
+          break;
+        }
+        i++;
+      }
+      out.push({ t: 'other' });
+      continue;
+    }
+    if (c === '$') {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_]/.test(raw[j])) j++;
+      if (raw[j] === '$') {
+        const tag = raw.slice(i, j + 1);
+        const close = raw.indexOf(tag, j + 1);
+        i = close === -1 ? n : close + tag.length;
+        out.push({ t: 'other' });
+        continue;
+      }
+      i++; // a lone $ is punctuation
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      let name = '';
+      while (i < n) {
+        if (raw[i] === '"') {
+          if (raw[i + 1] === '"') { name += '"'; i += 2; continue; }
+          i++;
+          break;
+        }
+        name += raw[i];
+        i++;
+      }
+      // GUC names compare case-insensitively even when quoted.
+      out.push({ t: 'quoted', v: name.toLowerCase() });
+      continue;
+    }
+    if (/[A-Za-z0-9_]/.test(c)) {
+      let w = '';
+      while (i < n && /[A-Za-z0-9_]/.test(raw[i])) { w += raw[i].toLowerCase(); i++; }
+      out.push({ t: 'word', v: w });
+      continue;
+    }
+    if (c === '.') out.push({ t: 'dot' });
+    i++;
+  }
+  return out;
+}
+
+/** PostgreSQL-only: does this RAW (single) statement flip the driver-level
+ *  read-only backstop the pool sets at connect? Catches every spelling of
+ *  SET [SESSION|LOCAL] (default_)transaction_read_only — bare, "quoted", or
+ *  the last component of a dotted name — plus SET SESSION CHARACTERISTICS AS
+ *  TRANSACTION … READ WRITE, which never names the GUC. Mirror of
+ *  `pg_set_flips_readonly` in sqlguard.rs. */
+function pgSetFlipsReadonly(raw: string): boolean {
+  const toks = pgSetTokens(raw);
+  const word = (i: number): string | undefined => {
+    const t = toks[i];
+    return t && t.t === 'word' ? t.v : undefined;
+  };
+  const component = (i: number): string | undefined => {
+    const t = toks[i];
+    return t && (t.t === 'word' || t.t === 'quoted') ? t.v : undefined;
+  };
+  if (word(0) !== 'set') return false;
+  let i = 1;
+  if (word(i) === 'session' || word(i) === 'local') {
+    if (word(i + 1) === 'characteristics') {
+      // Only the READ WRITE mode undoes the backstop; READ ONLY and the
+      // ISOLATION LEVEL / DEFERRABLE modes stay allowed.
+      for (let j = i + 2; j + 1 < toks.length; j++) {
+        if (word(j) === 'read' && word(j + 1) === 'write') return true;
+      }
+      return false;
+    }
+    i += 1;
+  }
+  // configuration_parameter := component (. component)*
+  let last = component(i);
+  if (last === undefined) return false;
+  let j = i + 1;
+  while (toks[j]?.t === 'dot') {
+    const nx = component(j + 1);
+    if (nx === undefined) break;
+    last = nx;
+    j += 2;
+  }
+  return last === 'transaction_read_only' || last === 'default_transaction_read_only';
 }
 
 /** One blanked statement — mirror of `statement_is_write` in sqlguard.rs. */
@@ -93,12 +254,12 @@ function statementIsWrite(blanked: string, engine?: string): boolean {
   const kw = /^[a-z]+/i.exec(head)?.[0].toLowerCase() ?? '';
 
   if (kw === 'set') {
-    // SET GLOBAL/PERSIST already matched via WRITE_RE. On PostgreSQL,
-    // SET [SESSION|LOCAL] (default_)transaction_read_only flips the
-    // driver-level read-only backstop the pool sets at connect — a write as
-    // far as the guard is concerned (pg_set_readonly in sqlguard.rs).
-    return engine === 'postgres'
-      && /^set\s+(?:(?:session|local)\s+)?(?:default_transaction_read_only|transaction_read_only)\b/i.test(head);
+    // SET GLOBAL/PERSIST already matched via WRITE_RE. On PostgreSQL the
+    // read-only-backstop flips (SET (default_)transaction_read_only in all
+    // its quoted/dotted spellings, SET SESSION CHARACTERISTICS … READ WRITE)
+    // are judged on the RAW statement by pgSetFlipsReadonly in
+    // isWriteStatement — on blanked text a quoted GUC name is invisible.
+    return false;
   }
   if (kw === 'copy') {
     // COPY … FROM loads rows in; COPY … TO exports. Only the FROM/TO at paren

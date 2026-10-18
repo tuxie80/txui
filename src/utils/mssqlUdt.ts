@@ -16,7 +16,8 @@
  *   - **wkt**: `col.ToString()` → nvarchar WKT. The frontend has no WKT
  *     parser, so this is a readable text view only — but it is the mode that
  *     also covers hierarchyid, which has no STAsBinary (a wkb wrap over a
- *     hierarchyid column fails with Msg 195 and the caller offers wkt).
+ *     hierarchyid column fails with Msg 195; the grid's "View as text (WKT)"
+ *     button is the remedy).
  *
  * Execution goes through the normal query path — this module only builds SQL.
  * The result is deliberately honest about its strategy and clause handling so
@@ -336,18 +337,20 @@ export interface ViewAsGeoAction {
 }
 
 /**
- * Should the result toolbar offer "View as geo", and may it run? The button is
- * hidden only when it is irrelevant (not SQL Server, or the result has no udt
- * columns); when it is relevant but cannot run, the reason comes back so the
- * UI greys the button and explains — a blocked feature is shown, never hidden.
- * wkb only: STAsBinary lands in the existing 0x-hex → parseWkbHex stack; a
- * hierarchyid column fails server-side (Msg 195) and that error surfaces as
- * any query error would.
+ * Should the result toolbar offer the derived-query action, and may it run?
+ * The button is hidden only when it is irrelevant (not SQL Server, or the
+ * result has no udt columns); when it is relevant but cannot run, the reason
+ * comes back so the UI greys the button and explains — a blocked feature is
+ * shown, never hidden. `mode` selects the wrap: wkb (STAsBinary → the
+ * existing 0x-hex → parseWkbHex stack — the map lights up) or wkt
+ * (ToString → readable text; also the mode that covers hierarchyid, which
+ * has no STAsBinary).
  */
 export function viewAsGeoAction(
   engine: string | undefined,
   columns: readonly ColumnLike[],
   sourceSql: string | undefined,
+  mode: UdtViewMode = 'wkb',
 ): ViewAsGeoAction {
   const none: ViewAsGeoAction = { show: false, reason: null, derived: null, logLine: null };
   if (engine !== 'sqlserver') return none;
@@ -359,7 +362,7 @@ export function viewAsGeoAction(
       derived: null, logLine: null,
     };
   }
-  const r = buildUdtDerivedQuery(sourceSql, columns, 'wkb');
+  const r = buildUdtDerivedQuery(sourceSql, columns, mode);
   if (!r.ok) return { show: true, reason: r.reason, derived: null, logLine: null };
   return { show: true, reason: null, derived: r.query, logLine: r.logLine };
 }

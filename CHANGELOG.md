@@ -250,6 +250,26 @@ Mockaroo / Faker competitive research inside).
   is removed from `shouldUseServer` (no SQLite writer exists — a capability
   that can only half-work is a bug, not a feature).
 
+### Added — geospatial leftovers (2026-10-18)
+
+- **SQL Server "⬡ View as text (WKT)"**: the second derived-query toolbar
+  action the 1.3.0 docs already advertised — wraps each udt column with
+  `ToString()` instead of `STAsBinary()` (same gate, same new-tab derived
+  path, greyed with the reason when unwrappable). Readable WKT text, and the
+  mode that also covers hierarchyid columns, which have no STAsBinary.
+
+### Fixed — security
+
+- **PostgreSQL read-only enforcement bypasses closed**: the server-side
+  guard (and its client mirror, kept in sync) now judges `SET` on the raw
+  statement — `SET "transaction_read_only" = off` (quoted/dotted GUC names
+  survived the old blanked-text check) and `SET SESSION CHARACTERISTICS AS
+  TRANSACTION READ WRITE` (never names the GUC) can no longer flip a
+  read-only pool back to writable. `READ ONLY`, `ISOLATION LEVEL`,
+  `DEFERRABLE` and lookalike words inside strings/comments stay allowed;
+  MySQL/MariaDB are unaffected per the 2026-10-15 owner decision.
+- Copy-all confirmation now names the save-to-file alternative explicitly.
+
 ## [1.3.0] - 2026-10-17
 
 ### Added — geospatial, end to end

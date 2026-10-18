@@ -39,9 +39,12 @@ pub(crate) struct Dialect {
     /// MySQL/T-SQL `$` is an identifier character, so blanking between two
     /// `$a$` tokens would hide the statements between them.
     dollar_strings: bool,
-    /// Semantic, not lexical: on PostgreSQL `SET [SESSION|LOCAL]
-    /// (default_)transaction_read_only` flips the driver-level read-only
-    /// backstop off, so `statement_is_write` treats it as a write.
+    /// Semantic, not lexical: on PostgreSQL, flipping the driver-level
+    /// read-only backstop off classifies as a write. `is_write_for` judges
+    /// these on the RAW statement (`pg_set_flips_readonly`), because the
+    /// spellings hide from blanked text: `SET "transaction_read_only" = off`
+    /// blanks the quoted GUC name away, and `SET SESSION CHARACTERISTICS AS
+    /// TRANSACTION READ WRITE` never names the GUC at all.
     ///
     /// PG-only by owner decision (2026-10-15): MySQL/MariaDB's
     /// `SET SESSION transaction_read_only = 0` is deliberately NOT blocked —
@@ -343,23 +346,11 @@ fn statement_is_write(blanked: &str, d: &Dialect) -> bool {
         // session/user variables do not.
         let second = word_after(blanked, kw.len());
         if matches!(second.as_str(), "global" | "persist" | "persist_only") { return true; }
-        if d.pg_set_readonly {
-            // SET [SESSION|LOCAL] {default_transaction_read_only|
-            // transaction_read_only} flips the driver-level read-only
-            // backstop the pool sets at startup — on a read-only PG
-            // connection this one statement undoes the safety net, so it
-            // classifies as a write like SET GLOBAL does on MySQL.
-            let mut words = blanked
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .filter(|w| !w.is_empty())
-                .map(|w| w.to_lowercase());
-            words.next(); // "set"
-            let mut name = words.next().unwrap_or_default();
-            if name == "session" || name == "local" {
-                name = words.next().unwrap_or_default();
-            }
-            return name == "default_transaction_read_only" || name == "transaction_read_only";
-        }
+        // PostgreSQL's read-only-backstop flips (SET [SESSION|LOCAL]
+        // (default_)transaction_read_only in all its quoted/dotted spellings,
+        // and SET SESSION CHARACTERISTICS … READ WRITE) are judged on the RAW
+        // statement by pg_set_flips_readonly in is_write_for — on blanked text
+        // a quoted GUC name is invisible.
         return false;
     }
     if kw == "start" {
@@ -447,7 +438,172 @@ pub fn is_write(sql: &str) -> bool {
 /// escapes, dollar quotes — see `Dialect`).
 pub fn is_write_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool {
     let d = Dialect::for_engine(engine);
-    blank_dialect(sql, &d).split(';').any(|s| statement_is_write(s, &d))
+    let blanked = blank_dialect(sql, &d);
+    if d.pg_set_readonly {
+        // The read-only-backstop flips hide from blanked text (quoted GUC
+        // names, SET SESSION CHARACTERISTICS), so PostgreSQL SET statements
+        // are additionally judged on the RAW statement. Blanking preserves
+        // character count exactly, so raw and blanked split identically.
+        return split_aligned(sql, &blanked).into_iter().any(|(raw, bl)| {
+            statement_is_write(bl, &d)
+                || (first_word(bl) == "set" && pg_set_flips_readonly(raw))
+        });
+    }
+    blanked.split(';').any(|s| statement_is_write(s, &d))
+}
+
+/// Split `raw` and its blanked form into per-statement pairs. Blanking maps
+/// every input char to exactly one output char, so both strings cut at the
+/// same character positions — the `;`s in `blanked` (string/comment content
+/// no longer contains any) are safe split points for both.
+fn split_aligned<'a>(raw: &'a str, blanked: &'a str) -> Vec<(&'a str, &'a str)> {
+    let rb: Vec<usize> = raw.char_indices().map(|(i, _)| i)
+        .chain(std::iter::once(raw.len())).collect();
+    let bb: Vec<usize> = blanked.char_indices().map(|(i, _)| i)
+        .chain(std::iter::once(blanked.len())).collect();
+    debug_assert_eq!(rb.len(), bb.len());
+    let mut out = Vec::new();
+    let mut start = 0; // char index of the current segment
+    for (ci, c) in blanked.chars().enumerate() {
+        if c == ';' {
+            out.push((&raw[rb[start]..rb[ci]], &blanked[bb[start]..bb[ci]]));
+            start = ci + 1;
+        }
+    }
+    out.push((&raw[rb[start]..], &blanked[bb[start]..]));
+    out
+}
+
+/// Token of the PG SET-target scan: words and `"quoted"` identifiers are kept
+/// (lowercased) — the quoted form is the whole point, since blanking erases
+/// it — while `'…'`/`$tag$` strings and comments collapse to `Other`.
+#[derive(PartialEq)]
+enum PgTok { Word(String), Quoted(String), Dot, Other }
+
+fn pg_set_tokens(raw: &str) -> Vec<PgTok> {
+    let cs: Vec<char> = raw.chars().collect();
+    let n = cs.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = cs[i];
+        if c.is_whitespace() { i += 1; continue; }
+        if c == '-' && i + 1 < n && cs[i + 1] == '-' {
+            while i < n && cs[i] != '\n' { i += 1; }
+            continue;
+        }
+        // PG block comments nest (Dialect::nested_comments for Postgres).
+        if c == '/' && i + 1 < n && cs[i + 1] == '*' {
+            i += 2;
+            let mut depth = 1i32;
+            while i < n && depth > 0 {
+                if cs[i] == '/' && i + 1 < n && cs[i + 1] == '*' { depth += 1; i += 2; }
+                else if cs[i] == '*' && i + 1 < n && cs[i + 1] == '/' { depth -= 1; i += 2; }
+                else { i += 1; }
+            }
+            continue;
+        }
+        // '…' string, incl. the E'…' prefix whose backslash escapes — a SET
+        // target never contains one, but the VALUE does, and an escaped quote
+        // mis-skipped would leak string content into the token stream.
+        if c == '\'' || ((c == 'E' || c == 'e') && i + 1 < n && cs[i + 1] == '\'') {
+            let escaped = c != '\'';
+            i += if escaped { 2 } else { 1 };
+            while i < n {
+                if escaped && cs[i] == '\\' && i + 1 < n { i += 2; continue; }
+                if cs[i] == '\'' {
+                    if i + 1 < n && cs[i + 1] == '\'' { i += 2; continue; }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push(PgTok::Other);
+            continue;
+        }
+        if c == '$' {
+            if let Some(tag) = dollar_tag(&cs, i) {
+                let body_start = i + tag.len();
+                let end = find_seq(&cs, &tag, body_start)
+                    .map(|p| p + tag.len()).unwrap_or(n);
+                i = end;
+                out.push(PgTok::Other);
+                continue;
+            }
+            i += 1; // a lone $ is punctuation
+            continue;
+        }
+        if c == '"' {
+            i += 1;
+            let mut name = String::new();
+            while i < n {
+                if cs[i] == '"' {
+                    if i + 1 < n && cs[i + 1] == '"' { name.push('"'); i += 2; continue; }
+                    i += 1;
+                    break;
+                }
+                name.push(cs[i]);
+                i += 1;
+            }
+            // GUC names compare case-insensitively even when quoted.
+            out.push(PgTok::Quoted(name.to_lowercase()));
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            let mut w = String::new();
+            while i < n && (cs[i].is_ascii_alphanumeric() || cs[i] == '_') {
+                w.push(cs[i].to_ascii_lowercase());
+                i += 1;
+            }
+            out.push(PgTok::Word(w));
+            continue;
+        }
+        if c == '.' { out.push(PgTok::Dot); }
+        i += 1;
+    }
+    out
+}
+
+/// PostgreSQL-only: does this RAW (single) statement flip the driver-level
+/// read-only backstop the pool sets at connect? Catches every spelling of
+///   SET [SESSION|LOCAL] {default_transaction_read_only|transaction_read_only}
+/// — bare, `"quoted"` (GUC names compare case-insensitively even quoted), or
+/// as the last component of a `dotted.name` — plus
+///   SET SESSION CHARACTERISTICS AS TRANSACTION … READ WRITE
+/// which never names the GUC at all. Blocking a custom `x.transaction_read_only`
+/// placeholder with it is the safe direction (a false positive blocks a SET,
+/// a false negative undoes the read-only backstop). The value is never
+/// inspected: even `= on` is refused, matching the historical posture.
+fn pg_set_flips_readonly(raw: &str) -> bool {
+    let toks = pg_set_tokens(raw);
+    let word = |i: usize| -> Option<&str> {
+        match toks.get(i) { Some(PgTok::Word(w)) => Some(w), _ => None }
+    };
+    let component = |i: usize| -> Option<&str> {
+        match toks.get(i) { Some(PgTok::Word(w)) | Some(PgTok::Quoted(w)) => Some(w), _ => None }
+    };
+    if word(0) != Some("set") { return false; }
+    let mut i = 1;
+    if matches!(word(i), Some("session") | Some("local")) {
+        if word(i + 1) == Some("characteristics") {
+            // SET SESSION CHARACTERISTICS AS TRANSACTION <mode>[, …] — only
+            // the READ WRITE mode undoes the backstop; READ ONLY and the
+            // ISOLATION LEVEL / DEFERRABLE modes stay allowed.
+            return toks[i + 2..].windows(2).any(|w| matches!(w,
+                [PgTok::Word(a), PgTok::Word(b)] if a == "read" && b == "write"));
+        }
+        i += 1;
+    }
+    // configuration_parameter := component (. component)*
+    let mut last = match component(i) { Some(c) => c, None => return false };
+    let mut j = i + 1;
+    while toks.get(j) == Some(&PgTok::Dot) {
+        match component(j + 1) {
+            Some(c) => { last = c; j += 2; }
+            None => break,
+        }
+    }
+    last == "transaction_read_only" || last == "default_transaction_read_only"
 }
 
 /// Read-family statements (SELECT/WITH/TABLE/VALUES/SHOW/DESCRIBE/EXPLAIN) —
@@ -1058,6 +1214,68 @@ mod dialect_tests {
         // the rule is PG-only — other engines have no such backstop here
         assert!(!is_write_for(Some(Mysql), "SET SESSION sql_mode = 'x'"));
         assert!(!is_write("SET default_transaction_read_only = off"));
+    }
+
+    /// The flip spellings that hide from blanked text: a QUOTED GUC name is
+    /// erased by blanking (PG's `"…"` is an identifier, not a string), and
+    /// SET SESSION CHARACTERISTICS never names the GUC at all. Both used to
+    /// sail past the guard and undo the pool's read-only backstop.
+    #[test]
+    fn pg_set_readonly_quoted_and_characteristics_spelling_is_a_write() {
+        for sql in [
+            // quoted GUC names — GUC lookup is case-insensitive even quoted
+            r#"SET "transaction_read_only" = off"#,
+            r#"SET "TRANSACTION_READ_ONLY" = off"#,
+            r#"SET SESSION "default_transaction_read_only" TO 'off'"#,
+            r#"set local "transaction_read_only" = on"#,
+            // dotted spellings — a custom `x.transaction_read_only`
+            // placeholder is not the real GUC, but doubt blocks (safe side)
+            r#"SET foo."transaction_read_only" = off"#,
+            r#"SET "foo".transaction_read_only = off"#,
+            r#"SET "foo"."default_transaction_read_only" = off"#,
+            // SET SESSION CHARACTERISTICS AS TRANSACTION … READ WRITE
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "set session characteristics as transaction read write",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE, DEFERRABLE",
+            // behind comments and stacked behind a read
+            "SET /* x */ SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "-- lead\nSET \"transaction_read_only\" = off",
+            "SELECT 1; SET \"transaction_read_only\" = off",
+            "SELECT 1; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        ] {
+            assert!(is_write_for(Some(Postgres), sql), "{sql}");
+        }
+    }
+
+    /// The legitimate neighbors: READ ONLY / ISOLATION LEVEL characteristics,
+    /// ordinary (and quoted) session GUCs, and the flip words inside strings
+    /// or comments must NOT be blocked — a read-only PG session whose every
+    /// SET errors would be useless.
+    #[test]
+    fn pg_set_readonly_neighbors_stay_reads() {
+        for sql in [
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY, DEFERRABLE",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+            "SET search_path = public",
+            r#"SET "search_path" = 'read write'"#,   // quoted GUC, value names the words
+            r#"SET "my ext"."read write" = 'x'"#,    // quoted custom GUC named like the mode
+            "SET TIME ZONE 'UTC'",
+            "SELECT 'SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE'",
+            "SELECT 1 -- SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "SET work_mem = '64MB'",
+            "SET SESSION statement_timeout = 1000",
+        ] {
+            assert!(!is_write_for(Some(Postgres), sql), "{sql} was called a write");
+        }
+        // non-PG engines never take this branch (owner decision: MySQL's
+        // session read-only switch stays user-managed)
+        assert!(!is_write_for(Some(Mysql),
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"));
+        assert!(!is_write_for(Some(Mysql), r#"SET "transaction_read_only" = off"#));
     }
 
     /// The engine-less wrappers keep the historical MySQL-leaning behavior so

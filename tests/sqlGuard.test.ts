@@ -296,6 +296,58 @@ test('PG SET of the driver read-only backstop is a write', () => {
   assert.ok(!isWriteStatement("SET SESSION sql_mode = 'x'", 'mysql'));
 });
 
+// The flip spellings that hide from blanked text (mirrors
+// pg_set_readonly_quoted_and_characteristics_spelling_is_a_write in
+// sqlguard.rs): a QUOTED GUC name is erased by blanking, and SET SESSION
+// CHARACTERISTICS never names the GUC at all.
+test('PG read-only backstop flip via quoted/dotted GUC or CHARACTERISTICS is a write', () => {
+  const writes = [
+    // quoted GUC names — GUC lookup is case-insensitive even quoted
+    'SET "transaction_read_only" = off',
+    'SET "TRANSACTION_READ_ONLY" = off',
+    'SET SESSION "default_transaction_read_only" TO \'off\'',
+    'set local "transaction_read_only" = on',
+    // dotted spellings — a custom placeholder is not the real GUC, but
+    // doubt blocks (safe side)
+    'SET foo."transaction_read_only" = off',
+    'SET "foo".transaction_read_only = off',
+    'SET "foo"."default_transaction_read_only" = off',
+    // SET SESSION CHARACTERISTICS AS TRANSACTION … READ WRITE
+    'SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE',
+    'set session characteristics as transaction read write',
+    'SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE',
+    'SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE, DEFERRABLE',
+    // behind comments and stacked behind a read
+    'SET /* x */ SESSION CHARACTERISTICS AS TRANSACTION READ WRITE',
+    '-- lead\nSET "transaction_read_only" = off',
+    'SELECT 1; SET "transaction_read_only" = off',
+    'SELECT 1; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE',
+  ];
+  for (const sql of writes) assert.ok(isWriteStatement(sql, 'postgres'), sql);
+});
+
+test('PG read-only backstop neighbors stay reads', () => {
+  const reads = [
+    'SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY',
+    'SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE',
+    'SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED',
+    'SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY, DEFERRABLE',
+    'SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY',
+    'SET search_path = public',
+    'SET "search_path" = \'read write\'',   // quoted GUC, value names the words
+    'SET "my ext"."read write" = \'x\'',    // quoted custom GUC named like the mode
+    "SET TIME ZONE 'UTC'",
+    "SELECT 'SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE'",
+    'SELECT 1 -- SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE',
+    "SET work_mem = '64MB'",
+    'SET SESSION statement_timeout = 1000',
+  ];
+  for (const sql of reads) assert.ok(!isWriteStatement(sql, 'postgres'), sql);
+  // non-PG engines never take this branch
+  assert.ok(!isWriteStatement('SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE', 'mysql'));
+  assert.ok(!isWriteStatement('SET "transaction_read_only" = off', 'mysql'));
+});
+
 // ── TS↔RS divergence fixes ──────────────────────────────────────────────────
 
 test('isWriteStatement splits on ; — a write behind a leading SELECT', () => {

@@ -275,7 +275,10 @@ async fn export_geoparquet(
 /// the engine's catalog; the output path must not exist yet.
 ///
 /// Progress rides `on_event` as [`GeoExportEvent`]s: validating → running →
-/// progress (the output file's size, ~4×/s) → done / error.
+/// progress (the output file's size, ~4×/s) → done / error. There is no
+/// cancel: the COPY runs inside one blocking duckdb-rs call on the session
+/// connection, and DuckDB exposes no interrupt handle for it — the running
+/// task can only be watched, not stopped.
 #[tauri::command]
 pub async fn duckdb_export_geoparquet(
     session_id: Uuid,

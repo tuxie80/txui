@@ -46,4 +46,6 @@ test('copy confirm threshold and message', async () => {
   const msg = copyConfirmMessage(87_234);
   assert.match(msg, /87,234 rows/);
   assert.match(msg, /pauses the UI/);
+  // …and names the save-to-file escape hatch (the explicit user choice).
+  assert.match(msg, /Export ▾/);
 });

@@ -45,9 +45,9 @@ interface Props {
   sourceSql?: string;
   /**
    * Runs a derived query in a new tab through the normal execute path — the
-   * SQL Server "⬡ View as geo" action (same shape as the map's "View in
-   * WGS 84"). Absent on surfaces that cannot open tabs; the button then
-   * greys itself out with the reason.
+   * SQL Server "⬡ View as geo" / "⬡ View as text (WKT)" actions (same shape
+   * as the map's "View in WGS 84"). Absent on surfaces that cannot open tabs;
+   * the button then greys itself out with the reason.
    */
   onRunDerived?: (sql: string, label: string) => void;
 }
@@ -195,20 +195,25 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
   }, [result.columns, sortedRows]);
 
   // SQL Server UDT columns arrive undecodable (`<udt: N bytes>`) — "View as
-  // geo" re-runs the statement as a derived query with STAsBinary() wraps.
-  // The pure gate decides show/block; no onRunDerived means this surface
-  // cannot open tabs, which is a block reason, not a disappearance.
-  const geoAction = useMemo(() => {
+  // geo" re-runs the statement as a derived query with STAsBinary() wraps,
+  // "View as text (WKT)" with ToString() (readable text; also covers
+  // hierarchyid, which has no STAsBinary). The pure gate decides show/block;
+  // no onRunDerived means this surface cannot open tabs, which is a block
+  // reason, not a disappearance.
+  const geoGate = useCallback((mode: 'wkb' | 'wkt') => {
     const gate = viewAsGeoAction(
       engine,
       result.columns.map(c => ({ name: c.name, typeName: c.type_name })),
       sourceSql,
+      mode,
     );
     if (gate.show && gate.reason === null && !onRunDerived) {
       return { ...gate, reason: 'This surface cannot open a query tab for the derived query.' };
     }
     return gate;
   }, [engine, result.columns, sourceSql, onRunDerived]);
+  const geoAction = useMemo(() => geoGate('wkb'), [geoGate]);
+  const wktAction = useMemo(() => geoGate('wkt'), [geoGate]);
 
   if (result.rows.length === 0) {
     return <div className="empty-result">Query returned 0 rows.</div>;
@@ -255,6 +260,20 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
               }
             }}
           >⬡ View as geo</button>
+        )}
+        {wktAction.show && (
+          <button
+            className={`toolbar-btn${wktAction.reason ? ' unavail' : ''}`}
+            data-tip={wktAction.reason
+              ?? 'Re-run as a derived query in a new tab: each udt column wrapped with .ToString() → WKT text — readable, not drawn (there is no WKT parser); also the mode that covers hierarchyid columns, which have no STAsBinary. Your SQL is not changed.'}
+            onClick={() => {
+              if (wktAction.reason !== null || !wktAction.derived) return;
+              onRunDerived?.(wktAction.derived.sql, 'View as text (WKT)');
+              if (wktAction.derived.clauseNotes.length > 0) {
+                note(wktAction.derived.clauseNotes.join(' · '));
+              }
+            }}
+          >⬡ View as text (WKT)</button>
         )}
         <div style={{ flex: 1 }} />
         {agg && agg.count > 0 && (
