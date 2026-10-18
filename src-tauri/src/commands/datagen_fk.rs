@@ -448,7 +448,7 @@ mod tests {
             params: GenParams {
                 min: 0.0, max: 100.0, date_from: "2024-01-01".into(), date_to: "2024-12-31".into(),
                 list: String::new(), null_pct: 0.0, dist: None,
-                fk_table: None, fk_column: None, fk_group: None,
+                fk_table: None, fk_column: None, fk_group: None, unique_group: None,
                 step: None, jitter_pct: None, ride_pings: None, ping_sec: None,
                 valid: None, brand: None, iban_country: None,
                 lat: None, lon: None, radius_km: None, expr: None,

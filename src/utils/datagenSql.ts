@@ -46,6 +46,7 @@ import { quoteIdent, sqlLiteral } from './sqlIdent.ts';
 import type { ColumnSpec } from './datagen.ts';
 import {
   cycleLength, parenLen, scrambleA, SCRAMBLE_M_CAP, uniqueTagWidth,
+  uniqueGroupMembers, validateUniqueGroups,
   CURRENCIES, TIMEZONES,
 } from './datagen.ts';
 import { dict, meta, DEFAULT_LOCALE, MIXED_LOCALE } from '../data/dictionaries.ts';
@@ -751,6 +752,11 @@ export function uniqueSqlRefusalReason(spec: ColumnSpec, totalRows: number): str
  * The scramble constants and arithmetic are shared with the row-by-row engines
  * (`scrambleA` / `SCRAMBLE_M_CAP` in datagen.ts); a < 2^21 and the 1e9-row cap
  * keep `a·i + b` inside what both an f64 and a bigint represent exactly.
+ *
+ * `uniqueOffset` is the cross-run continuation base (the existing row count of
+ * a fill-existing target — see the uniqueness header in datagen.ts): the row
+ * source counts from `1 + offset`, so the scramble and the tag start past the
+ * slots previous runs occupied. 0 (the default) emits byte-identical SQL.
  */
 export function uniqueSqlWrap(
   engine: string,
@@ -759,6 +765,7 @@ export function uniqueSqlWrap(
   rowExpr: string,
   totalRows: number,
   seed: number,
+  uniqueOffset = 0,
 ): string | null {
   const g = spec.generator;
   // Already unique by construction: a sequence is the row number; the server
@@ -769,7 +776,10 @@ export function uniqueSqlWrap(
   // Round-robin is unique exactly while the run fits in one lap.
   if (g === 'cycle') return totalRows <= cycleLength(spec.params) ? baseSql : null;
 
-  const i0 = `(${rowExpr} - 1)`;   // the row source is 1-based; the scramble counts from 0
+  const off = Math.max(0, Math.trunc(uniqueOffset));
+  // The row source is 1-based; the scramble counts from 0 — and from `off`
+  // when continuing a populated table (i_eff = i − 1 + off).
+  const i0 = off > 0 ? `(${rowExpr} - 1 + ${off})` : `(${rowExpr} - 1)`;
   if (g === 'int') {
     let lo = Math.round(spec.params.min), hi = Math.round(spec.params.max);
     if (hi < lo) [lo, hi] = [hi, lo];
@@ -792,7 +802,9 @@ export function uniqueSqlWrap(
       : `ROUND(${lo} + (${scr}) / ${grid}.0, ${d})`;
   }
   if (STRING_UNIQUE_SQL.has(g)) {
-    const w = uniqueTagWidth(totalRows);
+    // Width of the run's last tag — with the continuation base added, so a
+    // tag like (offset + total − 1) always fits the padding.
+    const w = uniqueTagWidth(totalRows + off);
     let s = concat(engine, [baseSql, sqlLiteral('_', engine), padExpr(engine, i0, w)]);
     // The declared VARCHAR(n) is a hard ceiling: keep the tag and give way at
     // the base's LEFT edge — RIGHT(x, n) of the concatenation does exactly that.
@@ -1034,6 +1046,10 @@ export function buildServerPlan(
   /** Seeds the uniqueness permutation (the scramble's b). The server path is
    *  non-deterministic anyway; this just decorrelates runs. */
   seed = 0,
+  /** Cross-run continuation base: the existing row count of a fill-existing
+   *  target. Unique scrambles/tags start at row i + offset; 0 (default) is
+   *  byte-identical to the offset-less plan. */
+  uniqueOffset = 0,
 ): ServerPlan {
   const unsupported: { column: string; generator: string; reason?: string }[] = [];
   const exprs: string[] = [];
@@ -1042,15 +1058,40 @@ export function buildServerPlan(
   // emitted) when a formula column needs them.
   const inner: { alias: string; sql: string }[] = [];
 
+  // Composite uniqueness groups: a config error (single-member group, an
+  // anchor that cannot carry uniqueness, a member with the flag off) refuses
+  // the server plan with the reason — the run falls back to the row-by-row
+  // engine, whose validate_unique_groups rejects it by name before a row is
+  // written. A VALID group's non-anchor members generate freely (no wrap);
+  // the anchor alone carries the uniqueness, so the combination is unique.
+  for (const p of validateUniqueGroups(specs)) {
+    unsupported.push({
+      column: p.column,
+      generator: specs.find(s => s.name === p.column)?.generator ?? 'unknown',
+      reason: p.reason,
+    });
+  }
+  const freeMembers = uniqueGroupMembers(specs);
+  // Row-index-driven generators whose server spelling embeds the row number:
+  // on a continuation run (offset > 0) the number must count past the rows
+  // already in the table, or the "already unique by construction" passthrough
+  // would collide with exactly them.
+  const off = Math.max(0, Math.trunc(uniqueOffset));
+  const ROW_NUMBER_GENS = new Set(['sequence', 'email', 'username']);
+  const rowExprFor = (i: number, spec: ColumnSpec) =>
+    spec.unique && off > 0 && !freeMembers.has(i) && ROW_NUMBER_GENS.has(spec.generator)
+      ? `(i + ${off})` : 'i';
+
   if (!hasFormula) {
-    for (const spec of specs) {
-      const sql = valueSql(engine, spec.generator, spec, 'i', serverVersionNum, locale);
+    for (let si = 0; si < specs.length; si++) {
+      const spec = specs[si];
+      const sql = valueSql(engine, spec.generator, spec, rowExprFor(si, spec), serverVersionNum, locale);
       if (sql === null) {
         unsupported.push({ column: spec.name, generator: spec.generator });
         continue;
       }
-      if (spec.unique) {
-        const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed);
+      if (spec.unique && !freeMembers.has(si)) {
+        const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed, off);
         if (wrapped === null) {
           unsupported.push({
             column: spec.name, generator: spec.generator,
@@ -1075,14 +1116,14 @@ export function buildServerPlan(
     for (let i = 0; i < specs.length; i++) {
       const spec = specs[i];
       if (spec.generator === 'formula') { formulas.push({ idx: i, spec }); continue; }
-      const sql = valueSql(engine, spec.generator, spec, 'i', serverVersionNum, locale);
+      const sql = valueSql(engine, spec.generator, spec, rowExprFor(i, spec), serverVersionNum, locale);
       if (sql === null) {
         unsupported.push({ column: spec.name, generator: spec.generator });
         continue;
       }
       let final = sql;
-      if (spec.unique) {
-        const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed);
+      if (spec.unique && !freeMembers.has(i)) {
+        const wrapped = uniqueSqlWrap(engine, spec, sql, 'i', totalRows, seed, off);
         if (wrapped === null) {
           unsupported.push({
             column: spec.name, generator: spec.generator,

@@ -19,6 +19,7 @@ import type { QueryResult } from '../types';
 import {
   GENERATORS, GENERATOR_MAP, DEFAULT_PARAMS, suggestGenerator,
   buildInserts, buildCreateTable, quoteIdent, uniqueRowReason,
+  uniqueGroups, validateUniqueGroups,
 } from '../utils/datagen';
 import { CHART_PRESETS, presetParams } from '../utils/chartPresets';
 import type { ColumnSpec } from '../utils/datagen';
@@ -179,6 +180,13 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   const [confirmText, setConfirmText] = useState('');
   // Where sequences start: MAX(pk)+1 for existing tables (resolved on step 3)
   const [seqStart, setSeqStart] = useState(1);
+  // Cross-run continuation for unique columns: the existing row COUNT of a
+  // fill-existing target (resolved on step 3 via resolve_unique_offset). 0 =
+  // fresh-table values, byte-identical to the pre-continuation behavior;
+  // uniqueProbeFailed means the probe could not answer and the run keeps the
+  // old behavior with an honest per-column note.
+  const [uniqueOffset, setUniqueOffset] = useState(0);
+  const [uniqueProbeFailed, setUniqueProbeFailed] = useState(false);
   const [previewRows, setPreviewRows] = useState<unknown[][] | null>(null);
   // Generation runs in the backend and keeps going without this panel, so the
   // close-guard has to know about it (and how to cancel it).
@@ -489,7 +497,8 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
 
   // Preview comes from the SAME Rust engine as the run — these rows ARE the
   // first rows that will be inserted. Sequences resolve MAX(pk)+1 first so
-  // the preview shows the real ids.
+  // the preview shows the real ids; unique columns resolve the existing row
+  // COUNT so the scramble/tag continue past the rows already there.
   useEffect(() => {
     if (step !== 3 || mode === 'database') { setPreviewRows(null); return; }
     let alive = true;
@@ -503,14 +512,29 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
           });
         } catch { /* empty/new table → 1 */ }
       }
+      let offset = 0;
+      let probeFailed = false;
+      if (mode === 'existing' && specs.some(s => s.unique)) {
+        try {
+          offset = await invoke<number>('resolve_unique_offset', {
+            sessionId, table: qualifiedTable,
+          });
+        } catch {
+          // Unanswerable (unsupported engine, permissions): keep the
+          // pre-continuation behavior and say so per column on this step.
+          probeFailed = true;
+        }
+      }
       if (!alive) return;
       setSeqStart(start);
+      setUniqueOffset(offset);
+      setUniqueProbeFailed(probeFailed);
       try {
         // totalRows rides along so the zero-padded uniqueness tag is as wide
         // in the preview as in the real run — preview ≡ insert, verbatim.
         const rows = await invoke<unknown[][]>('generate_preview', {
           specs, count: Math.min(15, rowCount), seed, seqStart: start, locale,
-          totalRows: rowCount,
+          totalRows: rowCount, uniqueOffset: offset,
         });
         if (alive) setPreviewRows(rows);
       } catch (e) {
@@ -553,8 +577,21 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   const planPeek = useMemo(() => {
     if (step !== 3 || mode === 'database') return null;
     if (mode === 'new' || !shouldUseServer(engine, rowCount)) return null;
-    return buildServerPlan(engine, qualifiedTable, specs, rowCount, serverVersionNum, locale, seed);
-  }, [step, mode, engine, rowCount, qualifiedTable, specs, serverVersionNum, locale, seed]);
+    return buildServerPlan(engine, qualifiedTable, specs, rowCount, serverVersionNum, locale, seed, uniqueOffset);
+  }, [step, mode, engine, rowCount, qualifiedTable, specs, serverVersionNum, locale, seed, uniqueOffset]);
+
+  /**
+   * Composite uniqueness groups: config errors block the run (shown red on
+   * this step); the group map drives the member notes below.
+   */
+  const uniqueGroupProblems = useMemo(() => validateUniqueGroups(specs), [specs]);
+  const groupOf = useMemo(() => {
+    const m = new Map<number, { name: string; anchor: number }>();
+    for (const g of uniqueGroups(specs)) {
+      for (const i of g.members) m.set(i, { name: g.name, anchor: g.anchor });
+    }
+    return m;
+  }, [specs]);
 
   /**
    * Per-column honesty about the `unique` checkbox. A column whose generator
@@ -565,19 +602,32 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   const uniqueNotes = useMemo(() => {
     if (step !== 3 || mode === 'database') return [];
     const notes: { col: string; text: string }[] = [];
-    for (const s of specs) {
-      if (!s.unique) continue;
-      const serverBlock = planPeek?.unsupported.find(u => u.column === s.name && u.reason);
-      const rowReason = uniqueRowReason(s, rowCount);
+    specs.forEach((s, si) => {
+      if (!s.unique) return;
+      const grp = groupOf.get(si);
       const parts: string[] = [];
-      if (serverBlock) {
-        parts.push(`server-side generation cannot guarantee it (${serverBlock.reason}) — the run falls back to row-by-row`);
+      if (grp && grp.anchor !== si) {
+        // A group member generates freely — the combination is unique because
+        // the anchor is. Say so, rather than implying this column alone is.
+        parts.push(`unique as a combination — group "${grp.name}" is carried by `
+          + `"${specs[grp.anchor].name}"; this column's own values may repeat`);
+      } else {
+        const serverBlock = planPeek?.unsupported.find(u => u.column === s.name && u.reason);
+        const rowReason = uniqueRowReason(s, rowCount, uniqueOffset);
+        if (serverBlock) {
+          parts.push(`server-side generation cannot guarantee it (${serverBlock.reason}) — the run falls back to row-by-row`);
+        }
+        if (rowReason) parts.push(rowReason);
+        if (grp) parts.push(`carries unique group "${grp.name}" — the combination of its members is unique`);
       }
-      if (rowReason) parts.push(rowReason);
+      if (mode === 'existing' && uniqueProbeFailed) {
+        parts.push('the existing rows could not be counted — this run is unique by itself, '
+          + 'but may repeat values already in the table');
+      }
       if (parts.length) notes.push({ col: s.name, text: parts.join('; ') });
-    }
+    });
     return notes;
-  }, [step, mode, specs, rowCount, planPeek]);
+  }, [step, mode, specs, rowCount, planPeek, groupOf, uniqueOffset, uniqueProbeFailed]);
 
   const run = useCallback(async () => {
     setError(null);
@@ -590,6 +640,13 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
     // so the guard lives here too (and catches a stale click).
     if (!confirmOk) {
       setError(`Type ${String(rowCount)} in the confirmation box to run ${rowCount.toLocaleString()} rows.`);
+      return;
+    }
+    // A malformed composite uniqueness group is a config error — the Rust
+    // writer would reject the run anyway; say it here, before anything starts.
+    if (uniqueGroupProblems.length) {
+      setError(`Fix the unique group${uniqueGroupProblems.length > 1 ? 's' : ''} first: `
+        + uniqueGroupProblems.map(p => `${p.column} — ${p.reason}`).join('; '));
       return;
     }
     if (environment === 'prod' && !await confirmDialog(
@@ -657,7 +714,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
     }
 
     if (mode !== 'new' && shouldUseServer(engine, rowCount)) {
-      const plan = buildServerPlan(engine, qualifiedTable, specs, rowCount, serverVersionNum, locale, seed);
+      const plan = buildServerPlan(engine, qualifiedTable, specs, rowCount, serverVersionNum, locale, seed, uniqueOffset);
       if (plan.unsupported.length === 0) {
         // Chunk independence is the safety property here: each statement
         // commits on its own, so Cancel leaves a usable table instead of an
@@ -753,6 +810,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
           rowCount,
           seed,
           seqStart,
+          uniqueOffset: mode === 'existing' ? uniqueOffset : 0,
           locale,
           createDdl: mode === 'new'
             ? buildCreateTable(qualifiedTable, newCols.filter(c => c.name.trim()), engine)
@@ -766,7 +824,8 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
       finish(0, 0, false, errorDisplay(e));
     }
   }, [mode, qualifiedTable, newCols, engine, sessionId, specs, rowCount, seed, seqStart, locale, useCopy,
-      tableName, connectionName, onSchemaChanged, environment, readOnly, serverVersionNum, confirmOk]);
+      tableName, connectionName, onSchemaChanged, environment, readOnly, serverVersionNum, confirmOk,
+      uniqueOffset, uniqueGroupProblems]);
 
   const runDatabase = useCallback(async () => {
     setError(null);
@@ -1455,6 +1514,15 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
                       <input type="checkbox" checked={!!s.unique}
                         onChange={e => updateSpec(i, { unique: e.target.checked })} /> uniq
                     </label>
+                    {s.unique && (
+                      <input className="dg-list-input" style={{ maxWidth: 72 }}
+                        placeholder="group" spellCheck={false}
+                        title={'Unique group — unique-checked columns sharing a name are unique as a '
+                          + 'COMBINATION (unique (a, b)). The widest-domain member carries the '
+                          + 'uniqueness machinery; the others generate freely.'}
+                        value={s.params.uniqueGroup ?? ''}
+                        onChange={e => updateParam(i, 'uniqueGroup', e.target.value)} />
+                    )}
                   </div>
                 );
               })}
@@ -1511,6 +1579,12 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
               {preview && <FastGrid columns={preview.columns} rows={preview.rows} />}
             </div>
             <pre className="dg-sql">{sqlPreview}</pre>
+
+            {uniqueGroupProblems.length > 0 && (
+              <div className="dg-field-hint" style={{ color: 'var(--red)' }}>
+                {uniqueGroupProblems.map(p => <div key={p.column}>⛔ <b>{p.column}</b>: {p.reason}</div>)}
+              </div>
+            )}
 
             {uniqueNotes.length > 0 && (
               <div className="dg-field-hint">

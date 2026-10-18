@@ -885,6 +885,7 @@ pub fn run() {
             generate_database,
             cancel_datagen,
             resolve_sequence_start,
+            resolve_unique_offset,
             // "Mimic existing data" profiling (read-only, per-column sampled)
             datagen_profile_table,
             run_watched,

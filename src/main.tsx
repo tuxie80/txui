@@ -8,6 +8,7 @@ import { installInputBehaviour } from './utils/inputBehaviour'
 import { hydrateFolderMeta } from './store/folderMeta'
 import { invoke } from '@tauri-apps/api/core'
 import { getPref, PREFS } from './store/preferences'
+import { maybeRunSmoke } from './utils/smoke'
 
 // Before the first render: no autofill, autocorrect, capitalisation or
 // spellcheck on any text box in the app. See utils/inputBehaviour.ts.
@@ -25,6 +26,10 @@ invoke('set_connect_timeout', { secs: getPref(PREFS.connectTimeoutSecs) }).catch
 // Same reasoning for the query deadline: a query can be run before Settings is
 // ever opened, and the backend would otherwise be holding the compiled 0.
 invoke('set_query_timeout', { secs: getPref(PREFS.queryTimeoutSecs) }).catch(() => {})
+
+// Release smoke self-test (runs only when the harness sets the flag;
+// see utils/smoke.ts + dev/release_smoke.sh).
+maybeRunSmoke()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

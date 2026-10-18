@@ -25,7 +25,7 @@
  *
  * Pure and dependency-free — driven by `node --test`.
  */
-import { DEFAULT_PARAMS, GENERATOR_MAP, sanitizeGenParams } from './datagen.ts';
+import { DEFAULT_PARAMS, GENERATOR_MAP, sanitizeGenParams, validateUniqueGroups } from './datagen.ts';
 import type { ColumnSpec } from './datagen.ts';
 
 export interface GenerateSpec {
@@ -154,6 +154,12 @@ export function parseGenerateSpec(text: string): ParsedGenerateSpec {
         ...(obj.unique === true ? { unique: true } : {}),
       });
     }
+  }
+
+  // Composite uniqueness groups are config-checked here too — headless, a bad
+  // group must fail the parse, not die mid-run in the writer's own validation.
+  if (!errors.length) {
+    errors.push(...validateUniqueGroups(specs).map(p => `${p.column}: ${p.reason}`));
   }
 
   if (errors.length) return { ok: false, errors };

@@ -307,3 +307,98 @@ test('SQLite is not routed to the server path — the row-by-row writer has no a
   assert.equal(shouldUseServer('mysql', 1_000_000_000), true);
   assert.equal(shouldUseServer('sqlserver', 1_000_000_000), true);
 });
+
+// ── cross-run continuation (the existing-row offset) ────────────────────────
+//
+// A unique run against a POPULATED table continues past the rows already
+// there: i_eff = i + offset, where offset = COUNT(*) probed by
+// resolve_unique_offset. Offset 0 is byte-identical to the pre-continuation
+// behavior; the guarantee holds against rows the generator itself wrote with
+// the same seed and range (the occupied region of the permutation is exactly
+// slots 0..k−1), and the panel says so when the probe cannot answer.
+
+test('offset 0 is byte-identical to the offset-less behavior', () => {
+  const spec = col('n', 'INT', 'int', P({ min: 10, max: 29 }), true);
+  assert.deepEqual(generateRows([spec], 20, 42), generateRows([spec], 20, 42, 'default', 0));
+  const s = col('c', 'VARCHAR(20)', 'choice', P({ list: 'ABC' }), true);
+  assert.deepEqual(generateRows([s], 15, 42), generateRows([s], 15, 42, 'default', 0));
+  // …and the SQL spelling is unchanged too (no offset term emitted).
+  assert.equal(uniqueSqlWrap('mysql', spec, 'x', 'i', 1000, 42, 0),
+    uniqueSqlWrap('mysql', spec, 'x', 'i', 1000, 42));
+});
+
+test('the offset is a pure shift: run two continues where run one stopped', () => {
+  const spec = col('n', 'INT', 'int', P({ min: 10, max: 29 }), true);
+  const fresh = generateRows([spec], 20, 42).map(r => r[0] as number);
+  const continued = generateRows([spec], 10, 42, 'default', 10).map(r => r[0] as number);
+  assert.deepEqual(continued, fresh.slice(10), 'i_eff = i + offset');
+  // Two back-to-back 10-row runs over the 20-value range never meet.
+  const run1 = generateRows([spec], 10, 42).map(r => r[0]);
+  assert.deepEqual(new Set([...run1, ...continued]).size, 20);
+});
+
+test('the offset keeps the exactness invariant at scale', () => {
+  // a·((i + offset) mod m) + b stays < 2^52 at any offset because the mod
+  // happens first — assert the bound directly, with a near-ceiling offset.
+  const off = 999_999_999_999_990;   // near the 1e15 row-count ceiling
+  const m = SCRAMBLE_M_CAP;
+  for (const i of [0, 1, 5_000_000]) {
+    const v = scrambleIndex(i + off, m, 42);
+    assert.ok(v >= 0 && v < m);
+    assert.ok(SCRAMBLE_A_START * v + 42 < 2 ** 53, 'f64/i64-exact at any offset');
+  }
+  // And values stay distinct over a wide range.
+  const spec = col('n', 'INT', 'int', P({ min: 0, max: 100_000 }), true);
+  const rows = generateRows([spec], 200, 42, 'default', off).map(r => r[0]);
+  assert.equal(new Set(rows).size, 200);
+});
+
+test('the string tag counts from the offset and its width covers the last tag', () => {
+  // total 15 + offset 95 → last tag 109 → width 3 (pinned in the Rust twin
+  // unique_offset_widens_the_string_tag).
+  const spec = col('c', 'VARCHAR(20)', 'choice', P({ list: 'ABC' }), true);
+  const rows = generateRows([spec], 15, 42, 'default', 95);
+  assert.equal(rows[0][0], 'ABC_095');
+  assert.equal(rows[14][0], 'ABC_109');
+  // Sortable still: lexicographic order is row order.
+  const tags = rows.map(r => r[0] as string);
+  assert.deepEqual([...tags].sort(), tags);
+});
+
+test('uniqueSqlWrap: the scramble and the tag start at i − 1 + offset', () => {
+  const spec = col('n', 'INT', 'int', P({ min: 10, max: 29 }), true);
+  assert.equal(uniqueSqlWrap('mysql', spec, 'x', 'i', 1000, 42, 5),
+    '(10 + MOD((2097151 * (i - 1 + 5) + 2), 20))');
+  assert.equal(uniqueSqlWrap('sqlserver', spec, 'x', 'i', 1000, 42, 5),
+    '(10 + ((2097151 * (i - 1 + 5) + 2) % 20))');
+  // The string tag: index shifted, width grown to cover offset + total.
+  const s = col('c', 'VARCHAR(30)', 'choice', P({ list: 'x,y' }), true);
+  assert.equal(uniqueSqlWrap('mysql', s, 'base', 'i', 300_000, 1, 95),
+    "RIGHT(CONCAT(base, '_', LPAD(CAST((i - 1 + 95) AS CHAR), 6, '0')), 30)");
+});
+
+test('the server plan offsets the embedded row number of sequence/email/username', () => {
+  // These are unique by construction BECAUSE they carry the row number — on a
+  // populated table that number must count past the rows already there.
+  const specs = [
+    col('id', 'BIGINT', 'sequence', P({ step: 2 }), true),
+    col('e', 'VARCHAR(255)', 'email', P(), true),
+  ];
+  const plan = buildServerPlan('mysql', 't', specs, 300_000, undefined, 'default', 1, 1_000);
+  assert.deepEqual(plan.unsupported, []);
+  assert.match(plan.statements[0], /\(\(i \+ 1000\) - 1\) \* 2 \+ 1/, 'sequence continues past the count');
+  assert.match(plan.statements[0], /CAST\(\(i \+ 1000\) AS CHAR\)/, 'email embeds the shifted row number');
+  // Offset 0 leaves the plan byte-identical to today.
+  const fresh = buildServerPlan('mysql', 't', specs, 300_000, undefined, 'default', 1);
+  const zero = buildServerPlan('mysql', 't', specs, 300_000, undefined, 'default', 1, 0);
+  assert.deepEqual(zero.statements, fresh.statements);
+});
+
+test('uniqueRowReason counts existing rows against the range capacity', () => {
+  const spec = col('n', 'INT', 'int', P({ min: 1, max: 100 }), true);
+  assert.equal(uniqueRowReason(spec, 50, 50), null, '50 + 50 fits 100');
+  assert.match(uniqueRowReason(spec, 50, 51)!, /already has 51 rows/, '50 + 51 does not');
+  // The offset-less message is byte-identical to before.
+  assert.equal(uniqueRowReason(spec, 101),
+    'the range holds 100 distinct values for 101 rows — duplicates from row 101');
+});

@@ -49,6 +49,14 @@ test('unique ints are the scrambled row index — pinned against Rust (BUG 2)', 
   assert.ok(all.every(v => v >= 10 && v <= 29));
 });
 
+test('a continuation offset shifts the same permutation — pinned against Rust', () => {
+  // Same spec and seed with the existing-row offset 5 (i_eff = i + 5);
+  // the Rust twin is unique_offset_continues_the_permutation_pinned.
+  const spec = col('n', 'INT', 'int', P({ min: 10, max: 29 }), true);
+  const rows = generateRows([spec], 10, 42, 'default', 5);
+  assert.deepEqual(rows.map(r => r[0]), [27, 18, 29, 20, 11, 22, 13, 24, 15, 26]);
+});
+
 test('unique decimals land on the 2-decimal grid — pinned against Rust', () => {
   const spec = col('d', 'DECIMAL(10,2)', 'decimal', P({ min: 1, max: 2 }), true);
   const rows = generateRows([spec], 6, 42);

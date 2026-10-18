@@ -34,7 +34,9 @@ export function normalizePresetName(name: string): string | null {
  * The FK address fields (fkTable/fkColumn/fkGroup) are NOT captured: they name
  * a parent in this one schema, and carried into a preset they would silently
  * point every reuse at that same table. The FK *shape* (dist, nullPct) is
- * kept; the address is dialed per column, as before.
+ * kept; the address is dialed per column, as before. `uniqueGroup` is stripped
+ * for the same reason — it names a scope of sibling columns in this one spec,
+ * and a preset reuse would silently join (or single-handedly form) that group.
  */
 export function capturePreset(name: string, spec: ColumnSpec): GenPreset | { error: string } {
   const n = normalizePresetName(name);
@@ -46,6 +48,7 @@ export function capturePreset(name: string, spec: ColumnSpec): GenPreset | { err
   delete params.fkTable;
   delete params.fkColumn;
   delete params.fkGroup;
+  delete params.uniqueGroup;
   return { name: n, generator: spec.generator, params };
 }
 
@@ -114,6 +117,7 @@ export function parsePresets(raw: unknown): GenPreset[] {
     delete params.fkTable;
     delete params.fkColumn;
     delete params.fkGroup;
+    delete params.uniqueGroup;
     out.push({ name, generator, params });
   }
   // Names are the identity; a corrupt file with duplicates keeps the last.

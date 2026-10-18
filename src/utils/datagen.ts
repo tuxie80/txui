@@ -69,6 +69,14 @@ export interface GenParams {
   fkColumn?: string;   // FK generator: parent column
   /** Composite FK group (Phase 4b): columns sharing (fkTable, fkGroup) pick ONE parent row. */
   fkGroup?: string;
+  /**
+   * Composite uniqueness group: columns with `unique` on that share a group
+   * name are unique as a COMBINATION. The first member in spec order is the
+   * anchor — it carries the uniqueness machinery (scramble/tag) — and the
+   * other members generate freely, so their distributions are untouched.
+   * Mirrors the fkGroup lead/member precedent. See uniqueGroups.
+   */
+  uniqueGroup?: string;
 
   // ── precision ──────────────────────────────────────────────────────────
   /** Decimal places. 0 means integers; the default of 2 suits money. */
@@ -496,9 +504,26 @@ function ridePingFor(rowIdx: number, p: GenParams) {
 // The constants are chosen so `a·i + b` stays exact in an f64 AND an i64:
 // a < 2^21, i < 2^31 (the 1e9-row cap) and b < m ≤ 2^31 − 1 keep the product
 // under 2^52, which both arithmetics represent exactly.
+//
+// Cross-run continuation (fill-existing mode): the caller passes `offset` =
+// the table's existing row COUNT (resolve_unique_offset probes COUNT(*)), and
+// every row-index-driven form uses i_eff = i + offset — the scramble input,
+// the string tag and its width base. The occupied region of a scramble domain
+// after k same-seed/same-range generated rows is exactly slots 0..k−1 of the
+// permutation, so starting at k is collision-free by bijectivity while
+// k + rows ≤ m (a scrambled column's MAX says nothing about occupied slots —
+// that is why the offset is the count, not resolve_sequence_start's MAX+1).
+// Offset 0 (new table, or a probe that could not answer) is byte-identical
+// to the pre-continuation behavior, and exactness is unaffected: the scramble
+// reduces i mod m before multiplying, so a·(i_eff mod m) + b < 2^52 holds at
+// any offset. The guarantee covers rows this generator wrote (same seed and
+// range); against foreign data the per-column note says so honestly.
+//
+// Composite groups (`params.uniqueGroup`): columns sharing a group name are
+// unique as a COMBINATION — the first member in spec order anchors (carries
+// the machinery above), the rest generate freely. See uniqueGroups.
 export const SCRAMBLE_M_CAP = 2_147_483_647;   // 2^31 − 1
 export const SCRAMBLE_A_START = 2_097_151;     // 2^21 − 1 (odd; walk down by 2)
-
 function gcd(a: number, b: number): number {
   while (b) { const t = b; b = a % b; a = t; }
   return Math.abs(a);
@@ -611,27 +636,174 @@ function intrinsicCapacity(g: string): number | null {
  * `fk` values come from the parent pool, and booleans/httpStatus cannot be
  * unique past their handful of values; all of them pass through unchanged and
  * `uniqueRowReason` says why.
+ *
+ * `offset` is the cross-run continuation base (existing row count of the
+ * target table — see the header comment): the scramble input and the string
+ * tag start at rowIdx + offset. Composite-group MEMBERS never reach here —
+ * generateRows passes them through untouched (the anchor carries the group).
  */
-export function applyUnique(spec: ColumnSpec, v: unknown, rowIdx: number, total: number, seed: number): unknown {
+export function applyUnique(
+  spec: ColumnSpec, v: unknown, rowIdx: number, total: number, seed: number, offset = 0,
+): unknown {
   if (v === null || v === undefined) return v;
   const g = spec.generator;
   // `formula` passes through: the expression decides the value (it may well be
   // unique by construction, e.g. over a unique input), and tagging it would
   // corrupt the computation. uniqueRowReason says so on the summary step.
   if (g === 'sequence' || g === 'cycle' || g === 'fk' || g === 'httpStatus' || g === 'formula') return v;
+  // The effective row index: past the slots previous runs of this table
+  // occupied. `iEff % m` inside the scramble keeps a·i + b < 2^52 at any offset.
+  const iEff = rowIdx + Math.max(0, Math.trunc(offset));
   if (typeof v === 'number') {
     const intr = INTRINSIC_UNIQUE[g];
     if (intr) {
       return intr[2] === 0
-        ? uniqueIntValue(rowIdx, seed, intr[0], intr[1])
-        : uniqueDecimalValue(rowIdx, seed, intr[0], intr[1], intr[2]);
+        ? uniqueIntValue(iEff, seed, intr[0], intr[1])
+        : uniqueDecimalValue(iEff, seed, intr[0], intr[1], intr[2]);
     }
     return FLOAT_UNIQUE_GENS.has(g)
-      ? uniqueDecimalValue(rowIdx, seed, spec.params.min, spec.params.max, 2)
-      : uniqueIntValue(rowIdx, seed, spec.params.min, spec.params.max);
+      ? uniqueDecimalValue(iEff, seed, spec.params.min, spec.params.max, 2)
+      : uniqueIntValue(iEff, seed, spec.params.min, spec.params.max);
   }
-  if (typeof v === 'string') return applyUniqueStr(v, rowIdx, total, spec.typeName);
+  // The tag's width grows with the continuation base too, so the run's last
+  // tag (total − 1 + offset) always fits.
+  if (typeof v === 'string') return applyUniqueStr(v, iEff, total + iEff - rowIdx, spec.typeName);
   return v;
+}
+
+// ── Composite uniqueness groups (unique (tenant_id, seq)) ────────────────────
+//
+// The lead/member precedent of composite FKs (`fkGroup` / fk_groups in
+// datagen_fk.rs), applied to uniqueness: columns with `unique` on that share a
+// `params.uniqueGroup` name guarantee the COMBINATION is unique. Making every
+// member individually unique would be the cheap wrong answer (it changes each
+// member's distribution); instead exactly ONE member — the anchor — carries
+// the uniqueness machinery, and the other members generate exactly as if the
+// flag were off. The combination is unique because the anchor component is.
+//
+// The anchor is the member with the LARGEST uniqueness capacity (ties break
+// to spec order): for (tenant_id, seq) the sequence anchors wherever the
+// columns sit — spec order cannot be the rule because an existing table's
+// column order is fixed. Capacity is computed from a small static
+// classification mirrored field-for-field in datagen.rs (drift-pinned by
+// tests): generators the machinery cannot carry (fk/formula/httpStatus/bool)
+// have 0 and never anchor; a string-tag-able generator and sequence are
+// unbounded; int/decimal/intrinsic domains report their real range size.
+
+export interface UniqueGroup {
+  name: string;
+  /** Member column indices, in spec order. */
+  members: number[];
+  /** The member carrying the uniqueness machinery (largest capacity). */
+  anchor: number;
+}
+
+/**
+ * Generators whose value the uniqueness machinery cannot carry — applyUnique's
+ * passthrough list (fk/formula/httpStatus pass the value through unchanged)
+ * plus bool, whose two values cannot permute. `sequence` and `cycle` pass
+ * through too but ARE index-driven (unique already), so they anchor fine.
+ * Mirrored by UNANCHORABLE_GENS in datagen.rs.
+ */
+const UNANCHORABLE_GENS = new Set(['fk', 'formula', 'httpStatus', 'bool']);
+
+/**
+ * How many distinct values the uniqueness machinery can guarantee for this
+ * column — the anchor-selection metric for composite groups. `Infinity` for
+ * the forms that never run out (the string tag, sequence, uuid);
+ * `uniqueRowReason` uses the same domain math for its per-column capacity
+ * note. Mirrored by `unique_anchor_capacity` in datagen.rs.
+ */
+export function uniqueAnchorCapacity(spec: ColumnSpec): number {
+  const g = spec.generator;
+  if (UNANCHORABLE_GENS.has(g)) return 0;
+  if (g === 'cycle') return cycleLength(spec.params);
+  const intr = intrinsicCapacity(g);
+  if (intr !== null) return intr;
+  if (g === 'int') {
+    const lo = Math.round(spec.params.min), hi = Math.round(spec.params.max);
+    return Math.max(1, Math.min(Math.abs(hi - lo) + 1, SCRAMBLE_M_CAP));
+  }
+  if (FLOAT_UNIQUE_GENS.has(g)) {
+    return Math.max(1, Math.min(Math.round((spec.params.max - spec.params.min) * 100) + 1, SCRAMBLE_M_CAP));
+  }
+  return Infinity;   // strings (tagged), sequence, uuid — never exhausted
+}
+
+/**
+ * The composite uniqueness groups of a spec list. Membership requires BOTH
+ * `unique` on and a non-blank group name; a named column with the flag off is
+ * a validation error (validateUniqueGroups), not a member.
+ */
+export function uniqueGroups(specs: ColumnSpec[]): UniqueGroup[] {
+  const groups: UniqueGroup[] = [];
+  specs.forEach((s, i) => {
+    const name = s.params.uniqueGroup?.trim();
+    if (!name || !s.unique) return;
+    const g = groups.find(x => x.name === name);
+    if (g) {
+      g.members.push(i);
+      // The largest-capacity member anchors; ties keep the earlier column.
+      if (uniqueAnchorCapacity(s) > uniqueAnchorCapacity(specs[g.anchor])) g.anchor = i;
+    } else {
+      groups.push({ name, members: [i], anchor: i });
+    }
+  });
+  return groups;
+}
+
+export interface UniqueGroupProblem {
+  /** The column the message is about (a member, or the group's first member). */
+  column: string;
+  reason: string;
+}
+
+/**
+ * Config errors in the unique groups of a spec list — every problem, not just
+ * the first (a spec file is fixed in an editor). A group needs ≥ 2 members,
+ * each member needs `unique` on, and at least one member must be able to
+ * anchor (carry the uniqueness machinery). Mirrored by
+ * `validate_unique_groups` in datagen.rs, which rejects a bad run before a
+ * row is written.
+ */
+export function validateUniqueGroups(specs: ColumnSpec[]): UniqueGroupProblem[] {
+  const problems: UniqueGroupProblem[] = [];
+  specs.forEach(s => {
+    const g = s.params.uniqueGroup?.trim();
+    if (g && !s.unique) {
+      problems.push({
+        column: s.name,
+        reason: `names unique group "${g}" but its unique flag is off — a group member must be unique-checked`,
+      });
+    }
+  });
+  for (const g of uniqueGroups(specs)) {
+    if (g.members.length < 2) {
+      problems.push({
+        column: specs[g.members[0]].name,
+        reason: `unique group "${g.name}" has a single member — a group needs at least two columns `
+          + '(a lone column is just unique; clear the group name)',
+      });
+      continue;
+    }
+    if (uniqueAnchorCapacity(specs[g.anchor]) === 0) {
+      problems.push({
+        column: specs[g.anchor].name,
+        reason: `no member of unique group "${g.name}" can carry uniqueness (fk/formula/httpStatus/bool `
+          + 'columns generate freely) — give the group an int, decimal, string or sequence column',
+      });
+    }
+  }
+  return problems;
+}
+
+/** Column indices that generate freely because their group's anchor carries the uniqueness. */
+export function uniqueGroupMembers(specs: ColumnSpec[]): Set<number> {
+  const free = new Set<number>();
+  for (const g of uniqueGroups(specs)) {
+    for (const m of g.members) if (m !== g.anchor) free.add(m);
+  }
+  return free;
 }
 
 /** Values a `cycle` column visits before repeating: list length, or the stepped range size. */
@@ -649,8 +821,13 @@ const DATE_TEXT_GENS = new Set(['date', 'timestamp', 'timestampStep', 'dateStep'
  * Why a `unique` column cannot be guaranteed unique on the row-by-row paths
  * (TS preview ≡ Rust insert) — or null when it can. The panel shows this per
  * column on the summary step rather than shipping duplicates silently.
+ *
+ * `existingRows` is the continuation base (COUNT(*) of a fill-existing
+ * target): the range-capacity check must hold for existing + new rows
+ * together, because the continuation offset only helps while their sum fits
+ * the scramble domain.
  */
-export function uniqueRowReason(spec: ColumnSpec, rows: number): string | null {
+export function uniqueRowReason(spec: ColumnSpec, rows: number, existingRows = 0): string | null {
   if (!spec.unique) return null;
   const g = spec.generator;
   if (g === 'sequence') return null;
@@ -676,6 +853,13 @@ export function uniqueRowReason(spec: ColumnSpec, rows: number): string | null {
     const m = intr ?? (FLOAT_UNIQUE_GENS.has(g)
       ? Math.max(1, Math.min(Math.round((p.max - p.min) * 100) + 1, SCRAMBLE_M_CAP))
       : Math.max(1, Math.min(Math.round(p.max) - Math.round(p.min) + 1, SCRAMBLE_M_CAP)));
+    const existing = Math.max(0, Math.trunc(existingRows));
+    if (existing > 0) {
+      return existing + rows <= m ? null
+        : `the range holds ${m.toLocaleString('en-US')} distinct values and the table already has `
+          + `${existing.toLocaleString('en-US')} rows — this run's ${rows.toLocaleString('en-US')} `
+          + `cannot all fit; duplicates once past ${m.toLocaleString('en-US')}`;
+    }
     return rows <= m ? null
       : `the range holds ${m.toLocaleString('en-US')} distinct values for ${rows.toLocaleString('en-US')} rows`
         + ` — duplicates from row ${(m + 1).toLocaleString('en-US')}`;
@@ -1302,9 +1486,17 @@ export interface ColumnSpec {
  * The draw order is unchanged — locale only swaps which list a `pick` reads,
  * never how many times the RNG is advanced — so the seeded parity with the
  * Rust engine holds per locale.
+ *
+ * `uniqueOffset` is the cross-run continuation base (existing row count of a
+ * fill-existing target; 0 elsewhere — byte-identical to the offset-less
+ * behavior): unique columns start their scramble/tag at row `i + offset`.
+ * Composite-group members (uniqueGroupMembers) generate freely — the group's
+ * anchor carries the uniqueness, and a member's values and RNG draws are
+ * exactly the non-unique run's.
  */
 export function generateRows(
   specs: ColumnSpec[], count: number, seed: number, locale: string = DEFAULT_LOCALE,
+  uniqueOffset = 0,
 ): unknown[][] {
   const rng = makeRng(seed);
   // Formula columns are parsed ONCE per run (the AST is row-independent) and
@@ -1317,6 +1509,9 @@ export function generateRows(
     .map((s, idx) => ({ s, idx, parsed: s.generator === 'formula' ? parseFormula(s.params.expr ?? '') : null }))
     .filter(f => f.parsed !== null);
   const colIndex = new Map(specs.map((s, idx) => [s.name, idx]));
+  // Composite uniqueness groups: non-anchor members pass the unique
+  // application by — their values (and draws) are the non-unique run's.
+  const groupMembers = uniqueGroupMembers(specs);
   const rows: unknown[][] = [];
   for (let i = 0; i < count; i++) {
     // Resolve the row's locale from `rowIdx` alone — a pure hash, never an RNG
@@ -1324,7 +1519,7 @@ export function generateRows(
     // untouched. Only `mixed` maps each row onto a single pack, and every
     // generator in the row then localises through the same pack (coherence).
     const rowLocale = resolveRowLocale(locale, i);
-    const row = specs.map(spec => {
+    const row = specs.map((spec, si) => {
       if (spec.params.nullPct > 0 && rng() * 100 < spec.params.nullPct) return null;
       const g = GENERATOR_MAP.get(spec.generator);
       const v = g ? g.gen(rng, i, spec.params, count, rowLocale) : null;
@@ -1332,7 +1527,7 @@ export function generateRows(
       // it used to be dropped here, so a "unique" column previewed as unique
       // and inserted as duplicates only on the Rust path… or the reverse.
       // Preview ≡ insert is the whole point of the shared engine.
-      return spec.unique ? applyUnique(spec, v, i, count, seed) : v;
+      return spec.unique && !groupMembers.has(si) ? applyUnique(spec, v, i, count, seed, uniqueOffset) : v;
     });
     for (const f of formulas) {
       // The null-roll's NULL stands (nullPct owns it); only the placeholder
@@ -1395,7 +1590,7 @@ const PARAM_NUMBER_KEYS = [
 ] as const;
 const PARAM_STRING_KEYS = [
   'dateFrom', 'dateTo', 'list', 'prefix', 'suffix',
-  'fkTable', 'fkColumn', 'fkGroup', 'expr', 'brand', 'ibanCountry',
+  'fkTable', 'fkColumn', 'fkGroup', 'uniqueGroup', 'expr', 'brand', 'ibanCountry',
 ] as const;
 const PARAM_ENUMS: Record<string, readonly string[]> = {
   dist: ['uniform', 'normal', 'zipf'],

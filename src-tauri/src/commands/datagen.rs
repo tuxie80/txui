@@ -209,6 +209,12 @@ pub struct GenParams {
     /// (the legacy behavior, unchanged).
     #[serde(default)]
     pub fk_group: Option<String>,
+    /// Composite uniqueness group: columns with `unique` on that share a group
+    /// name are unique as a COMBINATION — the first member in spec order (the
+    /// anchor) carries the scramble/tag, the rest generate freely. Mirrors the
+    /// fk_group lead/member precedent; see unique_groups below.
+    #[serde(default)]
+    pub unique_group: Option<String>,
     /// Stepping (sequence/cycle): distance between consecutive rows. The TS
     /// engine has always honored it; the Rust engine used to ignore it, so a
     /// stepped sequence previewed one way and inserted another (Phase 0 parity).
@@ -492,6 +498,151 @@ fn apply_unique_str(s: &str, row_idx: u64, total: u64, type_name: &str) -> Strin
         }
     }
     format!("{base}{domain}")
+}
+
+// ── Composite uniqueness groups (unique (tenant_id, seq)) ────────────────────
+//
+// The lead/member precedent of composite FKs (`fk_group` / fk_groups in
+// datagen_fk.rs), applied to uniqueness: columns with `unique` on that share a
+// `params.unique_group` name guarantee the COMBINATION is unique. Making every
+// member individually unique would be the cheap wrong answer (it changes each
+// member's distribution); instead exactly ONE member — the anchor — carries
+// the uniqueness machinery above, and the other members generate exactly as
+// if the flag were off. Mirrored by uniqueGroups/validateUniqueGroups in
+// utils/datagen.ts.
+//
+// The anchor is the member with the LARGEST uniqueness capacity (ties break
+// to spec order): for (tenant_id, seq) the sequence anchors wherever the
+// columns sit — spec order cannot be the rule because an existing table's
+// column order is fixed. Capacity comes from a small static classification
+// mirrored field-for-field from utils/datagen.ts (drift-pinned by tests).
+
+/// One composite uniqueness group: member column indices in spec order;
+/// `anchor` is the member carrying the uniqueness machinery.
+pub struct UniqueGroup {
+    pub name: String,
+    pub members: Vec<usize>,
+    pub anchor: usize,
+}
+
+/// The composite uniqueness groups of a spec list. Membership requires BOTH
+/// `unique` on and a non-blank group name; a named column with the flag off
+/// is a validation error (validate_unique_groups), not a member.
+pub fn unique_groups(specs: &[ColumnSpec]) -> Vec<UniqueGroup> {
+    let mut groups: Vec<UniqueGroup> = Vec::new();
+    for (i, s) in specs.iter().enumerate() {
+        let Some(name) = s.params.unique_group.as_deref().map(str::trim).filter(|g| !g.is_empty())
+        else { continue };
+        if !s.unique { continue; }
+        match groups.iter_mut().find(|g| g.name == name) {
+            Some(g) => {
+                g.members.push(i);
+                // The largest-capacity member anchors; ties keep the earlier column.
+                if unique_anchor_capacity(s) > unique_anchor_capacity(&specs[g.anchor]) {
+                    g.anchor = i;
+                }
+            }
+            None => groups.push(UniqueGroup { name: name.into(), members: vec![i], anchor: i }),
+        }
+    }
+    groups
+}
+
+/// Generators whose value the uniqueness machinery cannot carry — the
+/// passthrough list of TS applyUnique (fk/formula/httpStatus return the value
+/// unchanged) plus bool, whose two values cannot permute. `sequence` and
+/// `cycle` pass through too but ARE index-driven (unique already), so they
+/// anchor fine. Mirrored from UNANCHORABLE_GENS in utils/datagen.ts.
+const UNANCHORABLE_GENS: &[&str] = &["fk", "formula", "httpStatus", "bool"];
+
+/// Number generators that take the decimal-grid branch — the TS twin's
+/// FLOAT_UNIQUE_GENS (utils/datagen.ts), kept in lockstep by the pinned
+/// capacity tests on both sides.
+const FLOAT_UNIQUE_GENS_RS: &[&str] =
+    &["decimal", "money", "latitude", "longitude", "rideLat", "rideLon", "rideSpeed"];
+
+/// Generators with an intrinsic domain (params.min/max do not apply) — the TS
+/// twin's INTRINSIC_UNIQUE capacities. httpStatus is NOT here: its seven
+/// values pass through unchanged (it sits in UNANCHORABLE_GENS).
+fn intrinsic_capacity(g: &str) -> Option<u64> {
+    match g {
+        "percent" => Some(1_001),   // 0–100 at 1 decimal
+        "rating" => Some(5),        // whole stars 1–5
+        "bitflags" => Some(256),    // 0–255
+        _ => None,
+    }
+}
+
+/// How many distinct values the uniqueness machinery can guarantee for this
+/// column — the anchor-selection metric. u64::MAX stands for the TS twin's
+/// Infinity (the string tag, sequence, uuid — never exhausted). Mirrored from
+/// `uniqueAnchorCapacity` in utils/datagen.ts.
+pub fn unique_anchor_capacity(spec: &ColumnSpec) -> u64 {
+    let g = spec.generator.as_str();
+    if UNANCHORABLE_GENS.contains(&g) { return 0; }
+    if g == "cycle" {
+        let items = spec.params.list.split(',').map(str::trim).filter(|s| !s.is_empty()).count();
+        if items > 0 { return items as u64; }
+        let step = spec.params.step.unwrap_or(1.0).round().max(1.0) as i64;
+        let lo = spec.params.min.round() as i64;
+        let hi = spec.params.max.round() as i64;
+        return ((hi - lo).div_euclid(step).max(0) + 1) as u64;
+    }
+    if let Some(cap) = intrinsic_capacity(g) { return cap; }
+    if g == "int" {
+        // Inverted bounds swap, like unique_int (and the TS metric's abs).
+        let (mut lo, mut hi) = (spec.params.min.round() as i64, spec.params.max.round() as i64);
+        if hi < lo { std::mem::swap(&mut lo, &mut hi); }
+        return hi.saturating_sub(lo).saturating_add(1).max(1).min(SCRAMBLE_M_CAP) as u64;
+    }
+    if FLOAT_UNIQUE_GENS_RS.contains(&g) {
+        let span = ((spec.params.max - spec.params.min) * 100.0).round() as i64 + 1;
+        return span.max(1).min(SCRAMBLE_M_CAP) as u64;
+    }
+    u64::MAX   // strings (tagged), sequence, uuid — never exhausted
+}
+
+/// Config errors in the spec list's unique groups — every problem, not just
+/// the first. Called by generate_preview/generate_data before a row is
+/// written; the TS twin (validateUniqueGroups) blocks the run in the panel.
+pub fn validate_unique_groups(specs: &[ColumnSpec]) -> Result<(), String> {
+    let mut problems: Vec<String> = Vec::new();
+    for s in specs {
+        let g = s.params.unique_group.as_deref().map(str::trim).filter(|g| !g.is_empty());
+        if let (Some(g), false) = (g, s.unique) {
+            problems.push(format!(
+                "column \"{}\" names unique group \"{g}\" but its unique flag is off — \
+                 a group member must be unique-checked", s.name));
+        }
+    }
+    for g in unique_groups(specs) {
+        if g.members.len() < 2 {
+            problems.push(format!(
+                "unique group \"{}\" has a single member (\"{}\") — a group needs at least \
+                 two columns (a lone column is just unique; clear the group name)",
+                g.name, specs[g.members[0]].name));
+            continue;
+        }
+        if unique_anchor_capacity(&specs[g.anchor]) == 0 {
+            problems.push(format!(
+                "no member of unique group \"{}\" can carry uniqueness (fk/formula/httpStatus/bool \
+                 columns generate freely) — give the group an int, decimal, string or sequence column",
+                g.name));
+        }
+    }
+    if problems.is_empty() { Ok(()) } else { Err(problems.join("\n")) }
+}
+
+/// Non-anchor members generate freely: their `unique` flag is cleared before
+/// the row loop, so gen_row passes them through (the anchor alone guarantees
+/// the combination — and a member's values and RNG draws are exactly the
+/// non-unique run's). Validation must already have passed.
+fn normalize_unique_groups(specs: &mut [ColumnSpec]) {
+    for g in unique_groups(specs) {
+        for &m in g.members.iter() {
+            if m != g.anchor { specs[m].unique = false; }
+        }
+    }
 }
 
 /// Tiny reverse-regex expander: literals, [a-z]/[0-9]/[A-Z] classes with
@@ -1390,6 +1541,9 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
 /// count (the uniqueness tag is zero-padded to its width); `seed` feeds the
 /// uniqueness scramble — both are pure in row_idx, never an RNG draw, so the
 /// seeded stream is identical whether or not a column is unique.
+/// `unique_offset` is the cross-run continuation base (the target table's
+/// existing row count): unique forms run on row_idx + offset, and the tag
+/// width base grows by it too; 0 is byte-identical to the offset-less engine.
 ///
 /// FK picks (Phase 4b): a Single column draws once from its own pool,
 /// unchanged since the pools shipped. A composite group's LEAD draws once and
@@ -1400,7 +1554,7 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
 /// be a correlated-nothing.
 #[allow(clippy::too_many_arguments)]
 fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
-           locale: &str, fk: &FkPools, total: u64, seed: u32) -> Vec<GenValue> {
+           locale: &str, fk: &FkPools, total: u64, seed: u32, unique_offset: u64) -> Vec<GenValue> {
     // Resolve the row's locale from `row_idx` alone (a pure hash, no RNG draw),
     // so a fixed locale is the identity here and its seeded stream is untouched.
     // Only `mixed` maps the row onto a single pack; every generator in the row
@@ -1466,13 +1620,23 @@ fn gen_row(specs: &[ColumnSpec], rng: &mut Rng, row_idx: u64, seq_start: i64,
             _ => {}
         }
         match v {
-            // The row index permuted into [min, max] by the scramble — not
-            // seq_start + row_idx as before (that ignored the configured
-            // range; cross-run continuation past existing values is a separate
-            // Phase-1 checkbox, resolve_sequence_start is untouched).
-            GenValue::Int(_) => GenValue::Int(unique_int(row_idx, seed, spec.params.min, spec.params.max)),
-            GenValue::Float(_) => GenValue::Float(unique_decimal(row_idx, seed, spec.params.min, spec.params.max, 2)),
-            GenValue::Str(s) => GenValue::Str(apply_unique_str(&s, row_idx, total, &spec.type_name)),
+            // The row index permuted into [min, max] by the scramble.
+            // Cross-run continuation: i_eff = row_idx + unique_offset (the
+            // table's existing row COUNT, probed by resolve_unique_offset)
+            // starts the permutation past the slots previous same-seed runs
+            // occupied; offset 0 is byte-identical to the pre-continuation
+            // behavior. The mod-m inside the scramble keeps a·i + b < 2^52 at
+            // any offset. The string tag's width base grows the same way, so
+            // the last tag (total − 1 + offset) always fits.
+            GenValue::Int(_) => {
+                GenValue::Int(unique_int(row_idx.saturating_add(unique_offset), seed, spec.params.min, spec.params.max))
+            }
+            GenValue::Float(_) => {
+                GenValue::Float(unique_decimal(row_idx.saturating_add(unique_offset), seed, spec.params.min, spec.params.max, 2))
+            }
+            GenValue::Str(s) => GenValue::Str(apply_unique_str(
+                &s, row_idx.saturating_add(unique_offset),
+                total.saturating_add(unique_offset), &spec.type_name)),
             other => other,
         }
     }).collect();
@@ -1520,10 +1684,18 @@ pub async fn generate_preview(
     // a 15-row preview of a 2500-row run shows the values the insert will
     // write. Absent (older callers) → the preview count.
     total_rows: Option<u64>,
+    // Cross-run continuation base: the existing row count of a fill-existing
+    // target (resolve_unique_offset). Absent/0 → fresh-table values.
+    unique_offset: Option<u64>,
 ) -> Result<Vec<Vec<serde_json::Value>>, crate::apperror::AppError> {
     // A bad formula (unknown/later column, parse error) is a config error —
-    // named here, before a single row is produced.
+    // named here, before a single row is produced. Same for a malformed
+    // composite uniqueness group.
     datagen_formula::validate_specs(&specs)?;
+    validate_unique_groups(&specs)?;
+    let mut specs = specs;
+    normalize_unique_groups(&mut specs);
+    let unique_offset = unique_offset.unwrap_or(0);
     let n = count.min(PREVIEW_CAP);
     let locale = locale.unwrap_or_else(default_locale);
     let total = total_rows.unwrap_or(n as u64).max(n as u64);
@@ -1532,8 +1704,33 @@ pub async fn generate_preview(
     // load at run time). Empty pools per column.
     let empty = FkPools::none(specs.len());
     Ok((0..n as u64)
-        .map(|i| gen_row(&specs, &mut rng, i, seq_start, &locale, &empty, total, seed).iter().map(|v| v.to_json()).collect())
+        .map(|i| gen_row(&specs, &mut rng, i, seq_start, &locale, &empty, total, seed, unique_offset).iter().map(|v| v.to_json()).collect())
         .collect())
+}
+
+/// `SELECT COUNT(*)` — the cross-run continuation base for unique columns on a
+/// fill-existing run: the scramble/tag start at row index `i + count`, past
+/// the permutation slots the previous same-seed runs occupied (see the
+/// uniqueness header above). `table` arrives pre-quoted.
+#[tauri::command]
+pub async fn resolve_unique_offset(
+    session_id: Uuid,
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<u64, crate::apperror::AppError> {
+    let session = get_session_pub(session_id, &state.sessions).await?;
+    let query = format!("SELECT COUNT(*) FROM {table}");
+    let r = match session.as_ref() {
+        LiveSession::Mysql(pool) => crate::db::mysql::execute(pool, &query).await,
+        LiveSession::Postgres(pool) => crate::db::postgres::execute(pool, &query).await,
+        LiveSession::SqlServer(s) => crate::db::sqlserver::execute(s, &query).await,
+        _ => return Err("not supported for this engine".into()),
+    }?;
+    let v = r.rows.first().and_then(|row| row.first()).cloned().unwrap_or(serde_json::json!(0));
+    Ok(v.as_u64()
+        .or_else(|| v.as_i64().map(|n| n.max(0) as u64))
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0))
 }
 
 /// `COALESCE(MAX(col), 0) + 1` — fill-existing runs start sequences after the
@@ -1591,6 +1788,12 @@ pub struct GenRun {
     pub row_count: u64,
     pub seed: u32,
     pub seq_start: i64,
+    /// Cross-run continuation base for unique columns (the target table's
+    /// existing row count, probed via resolve_unique_offset): the scramble/tag
+    /// start at row `i + unique_offset`. Absent/0 → fresh-table values,
+    /// byte-identical to before.
+    #[serde(default)]
+    pub unique_offset: u64,
     /// Dictionary pack for name/place/company columns (Phase 2).
     #[serde(default = "default_locale")]
     pub locale: String,
@@ -1625,8 +1828,10 @@ pub async fn generate_data(
     }
     state.check_prod_bulk(&run.session_id, "data generation").await?;
     // A bad formula (unknown/later column, parse error) is a config error —
-    // refuse the run before a single row is written.
+    // refuse the run before a single row is written. Same for a malformed
+    // composite uniqueness group.
     datagen_formula::validate_specs(&run.specs)?;
+    validate_unique_groups(&run.specs)?;
     // Generation runs on its own pooled connections with its own transactions,
     // so it cannot join a pinned one. Writing anyway would put every generated
     // row outside the transaction the user believes they are inside — and a
@@ -1745,6 +1950,7 @@ fn column_list(specs: &[ColumnSpec], quote: char) -> String {
 
 /// Generator task: chunks through a bounded channel — the generator runs at
 /// most one chunk ahead of the writer, so memory stays O(chunk) at any count.
+#[allow(clippy::too_many_arguments)]
 fn spawn_generator(
     specs: Vec<ColumnSpec>,
     total: u64,
@@ -1752,8 +1958,9 @@ fn spawn_generator(
     seq_start: i64,
     locale: String,
     fk_pools: FkPools,
+    unique_offset: u64,
 ) -> tokio::sync::mpsc::Receiver<Vec<Vec<GenValue>>> {
-    spawn_generator_partition(specs, total, seed, seq_start, locale, fk_pools, 0, 1)
+    spawn_generator_partition(specs, total, seed, seq_start, locale, fk_pools, 0, 1, unique_offset)
 }
 
 /// Parallel writers (Phase 2a): absent/0/1 is today's single-writer pipeline.
@@ -1800,7 +2007,7 @@ fn rate_per_sec(rows_done: u64, ms: u64) -> u64 {
 /// count.
 #[allow(clippy::too_many_arguments)]
 fn spawn_generator_partition(
-    specs: Vec<ColumnSpec>,
+    mut specs: Vec<ColumnSpec>,
     total: u64,
     seed: u32,
     seq_start: i64,
@@ -1808,8 +2015,13 @@ fn spawn_generator_partition(
     fk_pools: FkPools,
     writer_index: u32,
     writers: u32,
+    unique_offset: u64,
 ) -> tokio::sync::mpsc::Receiver<Vec<Vec<GenValue>>> {
     debug_assert!(writers >= 1 && writer_index < writers);
+    // Composite uniqueness groups: non-anchor members generate freely — the
+    // flag is cleared here (validation ran at the command boundary), so
+    // gen_row passes them through and the anchor alone carries the group.
+    normalize_unique_groups(&mut specs);
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<Vec<GenValue>>>(2);
     tokio::task::spawn_blocking(move || {
         let mut rng = Rng(seed);
@@ -1818,7 +2030,7 @@ fn spawn_generator_partition(
             let mut chunk: Vec<Vec<GenValue>> =
                 Vec::with_capacity(((total - row_idx).min(CHUNK_ROWS as u64)) as usize);
             while row_idx < total && chunk.len() < CHUNK_ROWS {
-                let row = gen_row(&specs, &mut rng, row_idx, seq_start, &locale, &fk_pools, total, seed);
+                let row = gen_row(&specs, &mut rng, row_idx, seq_start, &locale, &fk_pools, total, seed, unique_offset);
                 if writers == 1 || row_idx % writers as u64 == writer_index as u64 {
                     chunk.push(row);
                 }
@@ -1983,7 +2195,7 @@ macro_rules! gen_writer {
             let fk_pools = $load_pools(&mut conn, &run.specs, run.seed, self_ctx.as_ref()).await?;
             drop(self_ctx);
             if writers == 1 {
-                let mut rx = spawn_generator(run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools);
+                let mut rx = spawn_generator(run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools, run.unique_offset);
                 let mut rows_done: u64 = 0;
                 let mut rows_per_stmt: usize = 2_000;
                 let mut cancelled = false;
@@ -2029,12 +2241,12 @@ macro_rules! gen_writer {
                 let fk_pools = fk_pools.clone();
                 let stats = stats.clone();
                 let on_event = on_event.clone();
-                let (seed, seq_start) = (run.seed, run.seq_start);
+                let (seed, seq_start, unique_offset) = (run.seed, run.seq_start, run.unique_offset);
                 set.spawn(async move {
                     let mut conn = pool.acquire().await
                         .map_err(|e| format!("writer {w}: connection acquire failed: {e}"))?;
                     let mut rx = spawn_generator_partition(
-                        specs, total, seed, seq_start, locale, fk_pools, w as u32, writers);
+                        specs, total, seed, seq_start, locale, fk_pools, w as u32, writers, unique_offset);
                     let mut rows_done: u64 = 0;
                     let mut committed: u64 = 0;
                     let mut rows_per_stmt: usize = 2_000;
@@ -2223,7 +2435,8 @@ async fn write_sqlserver(
     let fk_pools = load_fk_pools_ms(s, &run.specs, run.seed, self_ctx.as_ref()).await?;
     drop(self_ctx);
     let mut rx = spawn_generator(
-        run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools);
+        run.specs.clone(), run.row_count, run.seed, run.seq_start, run.locale.clone(), fk_pools,
+        run.unique_offset);
     let mut rows_done: u64 = 0;
     // Start at the cap rather than the shared 2,000: the first statement would
     // otherwise be rejected before the adaptive sizing ever ran.
@@ -2504,9 +2717,10 @@ macro_rules! db_gen_writer {
                 };
                 let fk_pools = $load_pools(&mut conn, &t.specs, table_seed, Some(&self_ctx)).await?;
                 // Per-table seed offset: each table gets its own stream, still
-                // fully reproducible from the run seed.
+                // fully reproducible from the run seed. Kits always create
+                // fresh tables, so there is nothing to continue past (0).
                 let mut rx = spawn_generator(t.specs.clone(), t.row_count,
-                    table_seed, t.seq_start, run.locale.clone(), fk_pools);
+                    table_seed, t.seq_start, run.locale.clone(), fk_pools, 0);
                 let cols = column_list(&t.specs, $quote);
                 let mut rows_done: u64 = 0;
                 let mut rows_per_stmt: usize = 2_000;
@@ -2581,8 +2795,9 @@ async fn db_write_sqlserver(
             specs: &t.specs,
         };
         let fk_pools = load_fk_pools_ms(s, &t.specs, table_seed, Some(&self_ctx)).await?;
+        // Kits always create fresh tables — nothing to continue past (0).
         let mut rx = spawn_generator(t.specs.clone(), t.row_count,
-            table_seed, t.seq_start, run.locale.clone(), fk_pools);
+            table_seed, t.seq_start, run.locale.clone(), fk_pools, 0);
         let cols = ms_column_list(&t.specs);
         let mut rows_done: u64 = 0;
         // Starts AT the cap rather than the shared 2,000 — a first statement of
@@ -2672,7 +2887,7 @@ mod mssql_datagen_live_tests {
     fn params(min: f64, max: f64) -> GenParams {
         GenParams {
             min, max, date_from: "2024-01-01".into(), date_to: "2024-12-31".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -2809,7 +3024,7 @@ mod mssql_datagen_live_tests {
         // 2,500 rows — deliberately more than the 1000-row VALUES cap, so the
         // chunk really does have to split.
         let fk_pools = load_fk_pools_ms(&s, &specs, 42, None).await.expect("fk pools");
-        let mut rx = spawn_generator(specs.clone(), 2_500, 42, 1, "default".into(), fk_pools);
+        let mut rx = spawn_generator(specs.clone(), 2_500, 42, 1, "default".into(), fk_pools, 0);
         let (_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
         let mut rows_per_stmt = MSSQL_MAX_VALUES_ROWS;
         let mut rows_done = 0u64;
@@ -2857,7 +3072,7 @@ mod tests {
             min: 1.0, max: 1000.0,
             date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
             list: "new,active,disabled".into(), null_pct: 0.0, dist: None,
-            fk_table: None, fk_column: None, fk_group: None,
+            fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -2876,8 +3091,8 @@ mod tests {
         let mut a = Rng(42);
         let mut b = Rng(42);
         for i in 0..500 {
-            let ra: Vec<String> = gen_row(&s, &mut a, i, 1, "default", &FkPools::none(3), 500, 42).iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&s, &mut b, i, 1, "default", &FkPools::none(3), 500, 42).iter().map(|v| v.sql_literal(true)).collect();
+            let ra: Vec<String> = gen_row(&s, &mut a, i, 1, "default", &FkPools::none(3), 500, 42, 0).iter().map(|v| v.sql_literal(true)).collect();
+            let rb: Vec<String> = gen_row(&s, &mut b, i, 1, "default", &FkPools::none(3), 500, 42, 0).iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb);
         }
     }
@@ -2890,7 +3105,7 @@ mod tests {
     fn ride_port_matches_the_typescript_model() {
         let p = GenParams {
             min: 1.0, max: 1000.0, date_from: "2026-06-01".into(), date_to: "2026-07-01".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: Some(200.0), ping_sec: Some(2.0),
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -2923,7 +3138,7 @@ mod tests {
     fn sequence_respects_start() {
         let s = specs();
         let mut rng = Rng(1);
-        let row = gen_row(&s, &mut rng, 0, 5_000, "default", &FkPools::none(3), 1, 1);
+        let row = gen_row(&s, &mut rng, 0, 5_000, "default", &FkPools::none(3), 1, 1, 0);
         assert!(matches!(row[0], GenValue::Int(5_000)));
     }
 
@@ -2951,7 +3166,7 @@ mod tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_500u64 {
-            let row = gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 2_500, 42);
+            let row = gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 2_500, 42, 0);
             let v = as_str(row.into_iter().next().unwrap());
             assert!(v.chars().count() <= 20, "row {i}: {v} ({} chars)", v.chars().count());
             assert!(seen.insert(v.clone()), "row {i}: duplicate {v}");
@@ -2969,7 +3184,7 @@ mod tests {
         let mut rng = Rng(7);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_500u64 {
-            let row = gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 2_500, 42);
+            let row = gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 2_500, 42, 0);
             let v = as_str(row.into_iter().next().unwrap());
             assert!(v.chars().count() <= 24, "row {i}: {v} ({} chars)", v.chars().count());
             assert!(v.contains('@'), "row {i}: lost the domain: {v}");
@@ -3107,6 +3322,7 @@ mod tests {
                 row_count: 200_000,
                 seed: 42,
                 seq_start: 1,
+                unique_offset: 0,
                 locale: "default".into(),
                 create_ddl: Some("CREATE TABLE datagen_bench (id BIGINT PRIMARY KEY, email VARCHAR(255), created TIMESTAMP)".into()),
                 use_copy,
@@ -3143,7 +3359,7 @@ mod tests {
     fn params() -> GenParams {
         GenParams {
             min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -3217,7 +3433,7 @@ mod tests {
             dict("cs-CZ", "cities").iter().map(String::as_str).collect();
         let mut rng = Rng(12345);
         for i in 0..60 {
-            let row = gen_row(&name_spec, &mut rng, i, 1, "cs-CZ", &FkPools::none(2), 60, 12345);
+            let row = gen_row(&name_spec, &mut rng, i, 1, "cs-CZ", &FkPools::none(2), 60, 12345, 0);
             if let GenValue::Str(city) = &row[1] {
                 assert!(cz_cities.contains(city.as_str()), "{city} is not a cs-CZ city");
             } else {
@@ -3227,12 +3443,12 @@ mod tests {
         // Same seed, different locale → different bytes (locale took effect).
         let default_row = {
             let mut r = Rng(999);
-            gen_row(&name_spec, &mut r, 0, 1, "default", &FkPools::none(2), 1, 999)
+            gen_row(&name_spec, &mut r, 0, 1, "default", &FkPools::none(2), 1, 999, 0)
                 .iter().map(|v| v.sql_literal(true)).collect::<Vec<_>>()
         };
         let ja_row = {
             let mut r = Rng(999);
-            gen_row(&name_spec, &mut r, 0, 1, "ja-JP", &FkPools::none(2), 1, 999)
+            gen_row(&name_spec, &mut r, 0, 1, "ja-JP", &FkPools::none(2), 1, 999, 0)
                 .iter().map(|v| v.sql_literal(true)).collect::<Vec<_>>()
         };
         assert_ne!(default_row, ja_row);
@@ -3248,9 +3464,9 @@ mod tests {
         let mut a = Rng(55);
         let mut b = Rng(55);
         for i in 0..30 {
-            let ra: Vec<String> = gen_row(&plain, &mut a, i, 1, "ja-JP", &FkPools::none(2), 30, 55)
+            let ra: Vec<String> = gen_row(&plain, &mut a, i, 1, "ja-JP", &FkPools::none(2), 30, 55, 0)
                 .iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&plain, &mut b, i, 1, "default", &FkPools::none(2), 30, 55)
+            let rb: Vec<String> = gen_row(&plain, &mut b, i, 1, "default", &FkPools::none(2), 30, 55, 0)
                 .iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb, "locale changed the draw order at row {i}");
         }
@@ -3414,8 +3630,8 @@ mod tests {
                 let mut a = Rng(321);
                 let mut b = Rng(321);
                 for i in 0..20 {
-                    let ra = gen_row(&s, &mut a, i, 1, loc, &FkPools::none(2), 20, 321)[1].sql_literal(true);
-                    let rb = gen_row(&s, &mut b, i, 1, "default", &FkPools::none(2), 20, 321)[1].sql_literal(true);
+                    let ra = gen_row(&s, &mut a, i, 1, loc, &FkPools::none(2), 20, 321, 0)[1].sql_literal(true);
+                    let rb = gen_row(&s, &mut b, i, 1, "default", &FkPools::none(2), 20, 321, 0)[1].sql_literal(true);
                     assert_eq!(ra, rb, "{id}/{loc} moved the RNG stream at row {i}");
                 }
             }
@@ -3453,7 +3669,7 @@ mod tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..300u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "mixed", &FkPools::none(4), 300, 42);
+            let row = gen_row(&specs, &mut rng, i, 1, "mixed", &FkPools::none(4), 300, 42, 0);
             let pack = resolve_locale("mixed", i);
             seen.insert(pack);
             let m = meta(pack);
@@ -3483,9 +3699,9 @@ mod tests {
         let mut a = Rng(99);
         let mut b = Rng(99);
         for i in 0..100 {
-            let ra: Vec<String> = gen_row(&specs, &mut a, i, 1, "default", &FkPools::none(3), 100, 99)
+            let ra: Vec<String> = gen_row(&specs, &mut a, i, 1, "default", &FkPools::none(3), 100, 99, 0)
                 .iter().map(|v| v.sql_literal(true)).collect();
-            let rb: Vec<String> = gen_row(&specs, &mut b, i, 1, "default", &FkPools::none(3), 100, 99)
+            let rb: Vec<String> = gen_row(&specs, &mut b, i, 1, "default", &FkPools::none(3), 100, 99, 0)
                 .iter().map(|v| v.sql_literal(true)).collect();
             assert_eq!(ra, rb);
         }
@@ -3581,7 +3797,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<i64> = (0..10u64).map(|i| {
-            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 10, 42).into_iter().next().unwrap() {
+            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 10, 42, 0).into_iter().next().unwrap() {
                 GenValue::Int(v) => v,
                 other => panic!("expected Int, got {other:?}"),
             }
@@ -3601,7 +3817,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<f64> = (0..6u64).map(|i| {
-            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 6, 42).into_iter().next().unwrap() {
+            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 6, 42, 0).into_iter().next().unwrap() {
                 GenValue::Float(v) => v,
                 other => panic!("expected Float, got {other:?}"),
             }
@@ -3620,7 +3836,7 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<String> = (0..3u64).map(|i| {
-            as_str(gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 15, 42).into_iter().next().unwrap())
+            as_str(gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 15, 42, 0).into_iter().next().unwrap())
         }).collect();
         assert_eq!(got, ["ABC_00", "ABC_01", "ABC_02"]);
     }
@@ -3634,13 +3850,253 @@ mod tests {
         }];
         let mut rng = Rng(42);
         let got: Vec<String> = (0..3u64).map(|i| {
-            as_str(gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 15, 42).into_iter().next().unwrap())
+            as_str(gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 15, 42, 0).into_iter().next().unwrap())
         }).collect();
         assert_eq!(got, [
             "jiri.watson85.00@fastmail.dev",
             "iris.jelinek28.01@inbox.me",
             "jackson.price25.02@mailbox.cz",
         ]);
+    }
+
+    // ── Cross-run continuation (the existing-row offset) ─────────────────────
+
+    /// Offset 5 over m=20, seed 42 — pinned in tests/datagenParity.test.ts.
+    /// a·i mod 20 = 11·i mod 20, so row i continues at i_eff = i + 5.
+    #[test]
+    fn unique_offset_continues_the_permutation_pinned() {
+        let mut p = params();
+        p.min = 10.0;
+        p.max = 29.0;
+        let s = vec![ColumnSpec {
+            name: "n".into(), type_name: "INT".into(),
+            generator: "int".into(), params: p, unique: true,
+        }];
+        let mut rng = Rng(42);
+        let got: Vec<i64> = (0..10u64).map(|i| {
+            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 10, 42, 5).into_iter().next().unwrap() {
+                GenValue::Int(v) => v,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }).collect();
+        assert_eq!(got, [27, 18, 29, 20, 11, 22, 13, 24, 15, 26]);
+    }
+
+    /// The continuation property itself: a run with offset k produces exactly
+    /// the values a fresh run produces at rows k.. — so two back-to-back
+    /// same-seed runs over the same range never collide while their combined
+    /// count fits the range (a bijection over disjoint index windows).
+    #[test]
+    fn unique_offset_is_a_pure_shift_and_stays_disjoint() {
+        let mut p = params();
+        p.min = 10.0;
+        p.max = 29.0;   // m = 20
+        let s = vec![ColumnSpec {
+            name: "n".into(), type_name: "INT".into(),
+            generator: "int".into(), params: p, unique: true,
+        }];
+        let val = |i: u64, off: u64| {
+            let mut rng = Rng(42);
+            match gen_row(&s, &mut rng, i, 1, "default", &FkPools::none(1), 20, 42, off)
+                .into_iter().next().unwrap()
+            {
+                GenValue::Int(v) => v,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        };
+        for i in 0..10u64 {
+            assert_eq!(val(i, 10), val(i + 10, 0), "offset must be a pure shift");
+        }
+        let first: std::collections::BTreeSet<i64> = (0..10).map(|i| val(i, 0)).collect();
+        let second: std::collections::BTreeSet<i64> = (0..10).map(|i| val(i, 10)).collect();
+        assert!(first.is_disjoint(&second), "two 10-row runs over 20 values must not meet");
+        // Exactness at scale: an offset near the 1e15 row-count ceiling still
+        // lands in range and distinct (the mod-m inside keeps a·i + b < 2^52).
+        let mut wide = params();
+        wide.min = 0.0;
+        wide.max = 100_000.0;
+        let ws = vec![ColumnSpec {
+            name: "n".into(), type_name: "INT".into(),
+            generator: "int".into(), params: wide, unique: true,
+        }];
+        let big: std::collections::BTreeSet<i64> = (0..200u64).map(|i| {
+            let mut rng = Rng(42);
+            match gen_row(&ws, &mut rng, i, 1, "default", &FkPools::none(1), 200, 42, 999_999_999_999_990)
+                .into_iter().next().unwrap()
+            {
+                GenValue::Int(v) => v,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }).collect();
+        assert_eq!(big.len(), 200);
+        assert!(big.iter().all(|&v| (0..=100_000).contains(&v)));
+    }
+
+    /// The string tag counts from the offset too, and its width covers the
+    /// run's last tag (total − 1 + offset) — pinned in datagenUnique.test.ts.
+    #[test]
+    fn unique_offset_widens_the_string_tag() {
+        let mut p = params();
+        p.list = "ABC".into();
+        let s = vec![ColumnSpec {
+            name: "c".into(), type_name: "VARCHAR(20)".into(),
+            generator: "choice".into(), params: p, unique: true,
+        }];
+        let mut rng = Rng(42);
+        // total 15 + offset 95 → last tag 109, so the width is 3.
+        let got = as_str(gen_row(&s, &mut rng, 0, 1, "default", &FkPools::none(1), 15, 42, 95)
+            .into_iter().next().unwrap());
+        assert_eq!(got, "ABC_095");
+    }
+
+    // ── Composite uniqueness groups ──────────────────────────────────────────
+
+    fn group_spec(name: &str, generator: &str, unique: bool, group: Option<&str>) -> ColumnSpec {
+        let mut s = ColumnSpec {
+            name: name.into(), type_name: "INT".into(),
+            generator: generator.into(), params: params(), unique,
+        };
+        s.params.unique_group = group.map(str::to_string);
+        s
+    }
+
+    /// Equal capacities keep the earlier column as anchor; a later member with
+    /// a larger domain takes the anchor over (the (tenant_id, seq) shape:
+    /// tenant's 3 values can never anchor 50 rows, the sequence's 1000 can).
+    #[test]
+    fn unique_groups_anchor_on_capacity_ties_break_to_spec_order() {
+        let specs = vec![
+            group_spec("tenant_id", "int", true, Some("g")),
+            group_spec("other", "int", false, None),
+            group_spec("seq", "int", true, Some("g")),
+            group_spec("note", "int", true, Some(" h ")),   // trimmed
+            group_spec("tag", "int", true, Some("h")),
+        ];
+        let groups = unique_groups(&specs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "g");
+        assert_eq!(groups[0].members, vec![0, 2]);
+        assert_eq!(groups[0].anchor, 0, "equal capacities → the earlier column anchors");
+        assert_eq!(groups[1].name, "h");
+        assert_eq!(groups[1].members, vec![3, 4]);
+        assert_eq!(groups[1].anchor, 3);
+
+        // A narrow first member and a wide second one: the WIDE one anchors,
+        // wherever the columns sit (an existing table's order is fixed).
+        let mut narrow_first = vec![
+            group_spec("tenant_id", "int", true, Some("g")),
+            group_spec("seq", "int", true, Some("g")),
+        ];
+        narrow_first[0].params.min = 1.0;
+        narrow_first[0].params.max = 3.0;
+        narrow_first[1].params.min = 1.0;
+        narrow_first[1].params.max = 1_000_000.0;
+        assert_eq!(unique_groups(&narrow_first)[0].anchor, 1);
+        // A sequence is unbounded — it out-anchors any ranged int.
+        let mut with_seq = narrow_first.clone();
+        with_seq[0].generator = "sequence".into();
+        assert_eq!(unique_groups(&with_seq)[0].anchor, 0);
+    }
+
+    /// The capacity metric itself, mirrored from uniqueAnchorCapacity in
+    /// utils/datagen.ts (the TS side pins the same numbers).
+    #[test]
+    fn unique_anchor_capacity_matches_the_typescript_metric() {
+        let cap = |generator: &str, min: f64, max: f64| {
+            let mut s = group_spec("c", generator, true, None);
+            s.params.min = min;
+            s.params.max = max;
+            unique_anchor_capacity(&s)
+        };
+        assert_eq!(cap("bool", 0.0, 1.0), 0);
+        assert_eq!(cap("fk", 0.0, 1.0), 0);
+        assert_eq!(cap("formula", 0.0, 1.0), 0);
+        assert_eq!(cap("httpStatus", 0.0, 1.0), 0);
+        assert_eq!(cap("int", 1.0, 1000.0), 1000);
+        assert_eq!(cap("int", 10.0, 29.0), 20);
+        assert_eq!(cap("int", 0.0, f64::MAX), SCRAMBLE_M_CAP as u64);
+        assert_eq!(cap("decimal", 1.0, 2.0), 101);
+        assert_eq!(cap("percent", 0.0, 0.0), 1_001, "intrinsic domain, params ignored");
+        assert_eq!(cap("rating", 0.0, 0.0), 5);
+        assert_eq!(cap("bitflags", 0.0, 0.0), 256);
+        assert_eq!(cap("sequence", 0.0, 0.0), u64::MAX);
+        assert_eq!(cap("email", 0.0, 0.0), u64::MAX);
+        let mut cyc = group_spec("c", "cycle", true, None);
+        cyc.params.list = "a,b,c".into();
+        assert_eq!(unique_anchor_capacity(&cyc), 3);
+    }
+
+    /// Validation: single-member group, flag-off member and an all-unanchorable
+    /// group are all named errors; a valid group passes.
+    #[test]
+    fn validate_unique_groups_names_every_bad_shape() {
+        let single = vec![group_spec("seq", "int", true, Some("g"))];
+        let err = validate_unique_groups(&single).unwrap_err();
+        assert!(err.contains("single member"), "{err}");
+
+        let off = vec![
+            group_spec("tenant_id", "int", false, Some("g")),
+            group_spec("seq", "int", true, Some("g")),
+        ];
+        let err = validate_unique_groups(&off).unwrap_err();
+        assert!(err.contains("unique flag is off"), "{err}");
+
+        // No member can carry uniqueness: bool (2 values) + httpStatus
+        // (7 values, passes through) — capacity 0 across the group.
+        let bad_anchor = vec![
+            group_spec("flag", "bool", true, Some("g")),
+            group_spec("status", "httpStatus", true, Some("g")),
+        ];
+        let err = validate_unique_groups(&bad_anchor).unwrap_err();
+        assert!(err.contains("no member of unique group"), "{err}");
+
+        let good = vec![
+            group_spec("tenant_id", "int", true, Some("g")),
+            group_spec("seq", "int", true, Some("g")),
+        ];
+        assert!(validate_unique_groups(&good).is_ok());
+    }
+
+    /// After normalization the member's `unique` is cleared, so gen_row passes
+    /// it through: the member's values (and draws) are exactly the non-unique
+    /// run's, and the (member, anchor) pairs are unique because the anchor is.
+    /// Anchor values pinned in tests/datagenUniqueGroups.test.ts (m=1000,
+    /// a=2097151 ≡ 151 mod 1000, b=42 → 1 + (151·i + 42) mod 1000).
+    #[test]
+    fn group_member_passes_through_and_the_anchor_carries_uniqueness() {
+        let mut specs = vec![
+            group_spec("tenant_id", "int", true, Some("g")),
+            group_spec("seq", "int", true, Some("g")),
+        ];
+        specs[0].params.min = 1.0;
+        specs[0].params.max = 3.0;
+        specs[1].params.min = 1.0;
+        specs[1].params.max = 1000.0;
+        validate_unique_groups(&specs).unwrap();
+        normalize_unique_groups(&mut specs);
+        assert!(!specs[0].unique, "the member's flag is cleared");
+        assert!(specs[1].unique, "the anchor keeps its flag");
+
+        let mut rng = Rng(42);
+        let rows: Vec<Vec<GenValue>> = (0..50u64)
+            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &FkPools::none(2), 50, 42, 0))
+            .collect();
+        let pairs: std::collections::BTreeSet<(i64, i64)> = rows.iter().map(|r| {
+            match (&r[0], &r[1]) {
+                (GenValue::Int(a), GenValue::Int(b)) => (*a, *b),
+                other => panic!("expected ints, got {other:?}"),
+            }
+        }).collect();
+        assert_eq!(pairs.len(), 50, "the combination must be unique");
+        // The anchor's first five values, pinned against the TS engine.
+        let anchors: Vec<i64> = rows.iter().take(5).map(|r| match &r[1] {
+            GenValue::Int(v) => *v,
+            other => panic!("expected Int, got {other:?}"),
+        }).collect();
+        assert_eq!(anchors, [43, 194, 345, 496, 647]);
+        // The member's distribution is the plain int generator's: values in
+        // [1, 3], untouched by any uniqueness machinery.
+        assert!(rows.iter().all(|r| matches!(&r[0], GenValue::Int(v) if (1..=3).contains(v))));
     }
 
     /// The tag is as wide as the run, and truncation still shrinks the base,
@@ -3719,7 +4175,7 @@ mod parallel_writer_tests {
     fn params() -> GenParams {
         GenParams {
             min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
-            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None,
+            list: String::new(), null_pct: 0.0, dist: None, fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -3786,14 +4242,14 @@ mod parallel_writer_tests {
         let reference: Vec<Vec<String>> = {
             let mut rng = Rng(42);
             (0..total)
-                .map(|i| literals(&gen_row(&s, &mut rng, i, 1, "default", &empty, total, 42)))
+                .map(|i| literals(&gen_row(&s, &mut rng, i, 1, "default", &empty, total, 42, 0)))
                 .collect()
         };
         for writers in 2..=4u32 {
             for w in 0..writers {
                 let mut rng = Rng(42);
                 for i in 0..total {
-                    let row = gen_row(&s, &mut rng, i, 1, "default", &empty, total, 42);
+                    let row = gen_row(&s, &mut rng, i, 1, "default", &empty, total, 42, 0);
                     if i % writers as u64 != w as u64 { continue; }
                     assert_eq!(literals(&row), reference[i as usize],
                         "writers={writers} writer={w} row {i}");
@@ -3812,7 +4268,7 @@ mod parallel_writer_tests {
         let s = specs();
         let empty = FkPools::none(s.len());
         let mut reference: Vec<Vec<String>> = Vec::new();
-        let mut rx = spawn_generator(s.clone(), total, 42, 1, "default".into(), empty.clone());
+        let mut rx = spawn_generator(s.clone(), total, 42, 1, "default".into(), empty.clone(), 0);
         while let Some(chunk) = rx.recv().await {
             assert!(chunk.len() <= CHUNK_ROWS);
             reference.extend(chunk.iter().map(|r| literals(r)));
@@ -3823,7 +4279,7 @@ mod parallel_writer_tests {
         let mut merged: Vec<Option<Vec<String>>> = vec![None; total as usize];
         for w in 0..writers {
             let mut rx = spawn_generator_partition(
-                s.clone(), total, 42, 1, "default".into(), empty.clone(), w, writers);
+                s.clone(), total, 42, 1, "default".into(), empty.clone(), w, writers, 0);
             let mut owned = 0u64;
             while let Some(chunk) = rx.recv().await {
                 assert!(chunk.len() <= CHUNK_ROWS);
@@ -3893,7 +4349,7 @@ mod fk_phase4_tests {
         GenParams {
             min: 0.0, max: 100.0, date_from: "2024-01-01".into(), date_to: "2024-12-31".into(),
             list: String::new(), null_pct: 0.0, dist: None,
-            fk_table: None, fk_column: None, fk_group: None,
+            fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -3938,7 +4394,7 @@ mod fk_phase4_tests {
         let mut rng = Rng(42);
         let mut seen = std::collections::HashSet::new();
         for i in 0..2_000u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 42);
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 42, 0);
             let (a, b) = (as_int(&row[0]), as_int(&row[1]));
             // Every pair EXISTS in the parent set and the halves correlate —
             // independent per-column picks would produce (2, 1), (3, 4), …
@@ -3956,7 +4412,7 @@ mod fk_phase4_tests {
         let run = |seed: u32| {
             let mut rng = Rng(seed);
             (0..100u64).map(|i| {
-                let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 100, seed);
+                let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 100, seed, 0);
                 (as_int(&row[0]), as_int(&row[1]))
             }).collect::<Vec<_>>()
         };
@@ -3971,7 +4427,7 @@ mod fk_phase4_tests {
         let mut rng = Rng(1);
         let mut first_parent = 0u32;
         for i in 0..2_000u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 1);
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 1, 0);
             if as_int(&row[0]) == 1 { first_parent += 1; }
             assert_eq!(as_int(&row[1]), as_int(&row[0]).pow(2), "row {i} lost correlation");
         }
@@ -3990,7 +4446,7 @@ mod fk_phase4_tests {
         let mut rng = Rng(42);
         let mut nulls = 0u32;
         for i in 0..2_000u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 42);
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 2_000, 42, 0);
             match (&row[0], &row[1]) {
                 (GenValue::Null, GenValue::Null) => nulls += 1,
                 (GenValue::Int(a), GenValue::Int(b)) => assert_eq!(*b, a * a),
@@ -4022,7 +4478,7 @@ mod fk_phase4_tests {
         let (specs, fk) = employees(false);
         let mut rng = Rng(42);
         for i in 0..5_000u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 5_000, 42);
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 5_000, 42, 0);
             let id = as_int(&row[0]);
             assert_eq!(id, 1 + i as i64, "sequence id");
             let mgr = as_int(&row[1]);
@@ -4041,14 +4497,14 @@ mod fk_phase4_tests {
         let mut rng = Rng(42);
         let mut nulls = 0u32;
         for i in 0..5_000u64 {
-            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 5_000, 42);
+            let row = gen_row(&specs, &mut rng, i, 1, "default", &fk, 5_000, 42, 0);
             let id = as_int(&row[0]);
             match &row[1] {
                 GenValue::Null => nulls += 1,
                 v => assert!(as_int(v) < id, "row {i}: forward reference"),
             }
         }
-        assert!(matches!(gen_row(&specs, &mut Rng(42), 0, 1, "default", &fk, 5_000, 42)[1], GenValue::Null),
+        assert!(matches!(gen_row(&specs, &mut Rng(42), 0, 1, "default", &fk, 5_000, 42, 0)[1], GenValue::Null),
                 "nullable row 0 gets NULL, not a self-loop");
         // nullPct 20 over 5k rows: expect 1000, allow generous noise.
         assert!((800..=1200).contains(&nulls), "nullPct ignored: {nulls}/5000 NULLs");
@@ -4059,7 +4515,7 @@ mod fk_phase4_tests {
         let (specs, fk) = employees(false);
         let run = |seed: u32| {
             let mut rng = Rng(seed);
-            (0..200u64).map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 200, seed)[1]))
+            (0..200u64).map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 200, seed, 0)[1]))
                 .collect::<Vec<_>>()
         };
         assert_eq!(run(9), run(9));
@@ -4079,7 +4535,7 @@ mod fk_phase4_tests {
         ]));
         let mut rng = Rng(42);
         let got: Vec<i64> = (0..12u64)
-            .map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 12, 42)[0]))
+            .map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 12, 42, 0)[0]))
             .collect();
         assert_eq!(got, [9, 8, 10, 9, 7, 9, 8, 9, 10, 8, 7, 10]);
     }
@@ -4092,7 +4548,7 @@ mod fk_phase4_tests {
         fk.pools[0] = Some(FkPool::Tuples((1..=100i64).map(|i| vec![GenValue::Int(i)]).collect()));
         let mut rng = Rng(42);
         let got: Vec<i64> = (0..12u64)
-            .map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 12, 42)[0]))
+            .map(|i| as_int(&gen_row(&specs, &mut rng, i, 1, "default", &fk, 12, 42, 0)[0]))
             .collect();
         assert_eq!(got, [37, 21, 73, 45, 4, 28, 8, 40, 75, 23, 7, 78]);
     }
@@ -4116,7 +4572,7 @@ mod persona_formula_phase4_tests {
         GenParams {
             min: 1.0, max: 1000.0, date_from: "2024-01-01".into(), date_to: "2026-07-01".into(),
             list: String::new(), null_pct: 0.0, dist: None,
-            fk_table: None, fk_column: None, fk_group: None,
+            fk_table: None, fk_column: None, fk_group: None, unique_group: None,
             ride_pings: None, ping_sec: None,
             step: None, jitter_pct: None,
             valid: None, brand: None, iban_country: None,
@@ -4144,9 +4600,9 @@ mod persona_formula_phase4_tests {
         // Rows before i must consume the stream exactly as the run would.
         let fk = FkPools::none(specs.len());
         for j in 0..i {
-            gen_row(specs, &mut rng, j, 1, locale, &fk, 3, seed);
+            gen_row(specs, &mut rng, j, 1, locale, &fk, 3, seed, 0);
         }
-        gen_row(specs, &mut rng, i, 1, locale, &fk, 3, seed)
+        gen_row(specs, &mut rng, i, 1, locale, &fk, 3, seed, 0)
             .iter().map(|v| v.sql_literal(true)).collect()
     }
 
@@ -4206,7 +4662,7 @@ mod persona_formula_phase4_tests {
             let fk = FkPools::none(specs.len());
             let mut rng = Rng(321);
             let got: Vec<String> = (0..3u64)
-                .map(|i| gen_row(&specs, &mut rng, i, 1, loc, &fk, 3, 321)[3].sql_literal(true))
+                .map(|i| gen_row(&specs, &mut rng, i, 1, loc, &fk, 3, 321, 0)[3].sql_literal(true))
                 .collect();
             assert_eq!(got, ["831", "63", "645"], "{loc}");
         }
@@ -4221,7 +4677,7 @@ mod persona_formula_phase4_tests {
             let fk = FkPools::none(specs.len());
             let mut rng = Rng(7);
             for i in 0..200u64 {
-                let row = gen_row(&specs, &mut rng, i, 1, loc, &fk, 200, 7);
+                let row = gen_row(&specs, &mut rng, i, 1, loc, &fk, 200, 7, 0);
                 let (lat, lon) = match (&row[0], &row[1]) {
                     (GenValue::Float(a), GenValue::Float(b)) => (*a, *b),
                     other => panic!("expected floats, got {other:?}"),
@@ -4279,7 +4735,7 @@ mod persona_formula_phase4_tests {
         let fk = FkPools::none(specs.len());
         let mut rng = Rng(42);
         let rows: Vec<Vec<String>> = (0..4u64)
-            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &fk, 4, 42)
+            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &fk, 4, 42, 0)
                 .iter().map(|v| v.sql_literal(true)).collect())
             .collect();
         assert_eq!(rows, [
@@ -4308,7 +4764,7 @@ mod persona_formula_phase4_tests {
         let fk = FkPools::none(specs.len());
         let mut rng = Rng(7);
         let rows: Vec<Vec<String>> = (0..4u64)
-            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &fk, 4, 7)
+            .map(|i| gen_row(&specs, &mut rng, i, 1, "default", &fk, 4, 7, 0)
                 .iter().map(|v| v.sql_literal(true)).collect())
             .collect();
         assert_eq!(rows, [
@@ -4343,7 +4799,7 @@ mod persona_formula_phase4_tests {
         let fk = FkPools::none(nullrun.len());
         let mut rng = Rng(7);
         for i in 0..3u64 {
-            let row = gen_row(&nullrun, &mut rng, i, 1, "default", &fk, 3, 7);
+            let row = gen_row(&nullrun, &mut rng, i, 1, "default", &fk, 3, 7, 0);
             assert_eq!(row[1].sql_literal(true), "NULL", "nullPct owns the cell");
         }
 
@@ -4365,8 +4821,8 @@ mod persona_formula_phase4_tests {
         let mut rw = Rng(7);
         let mut ro = Rng(7);
         for i in 0..3u64 {
-            let w = gen_row(&with, &mut rw, i, 1, "default", &fkw, 3, 7);
-            let o = gen_row(&without, &mut ro, i, 1, "default", &fko, 3, 7);
+            let w = gen_row(&with, &mut rw, i, 1, "default", &fkw, 3, 7, 0);
+            let o = gen_row(&without, &mut ro, i, 1, "default", &fko, 3, 7, 0);
             assert_eq!(w[0].sql_literal(true), o[0].sql_literal(true), "stream shifted (a)");
             assert_eq!(w[2].sql_literal(true), o[1].sql_literal(true), "stream shifted (k)");
         }
@@ -4387,7 +4843,7 @@ mod persona_formula_phase4_tests {
         let specs = vec![base, fcol("b", "a **")];
         let fk = FkPools::none(specs.len());
         let mut rng = Rng(1);
-        let row = gen_row(&specs, &mut rng, 0, 1, "default", &fk, 1, 1);
+        let row = gen_row(&specs, &mut rng, 0, 1, "default", &fk, 1, 1, 0);
         assert_eq!(row[1].sql_literal(true), "NULL");
     }
 }

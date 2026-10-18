@@ -5,6 +5,62 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Fixed — CRITICAL: the editor was unusable in the packaged app (1.3.0 regression)
+
+- **The 1.3.0 CSP blocked CodeMirror's runtime-injected styles.** 1.3.0 added
+  a strict production CSP with `style-src 'self' 'unsafe-inline'` — but Tauri
+  silently appends `'nonce-…'` + hash sources to `style-src`/`script-src`
+  when serving bundled assets, and per the CSP spec a nonce source makes
+  browsers **ignore `'unsafe-inline'`**. CodeMirror injects all of its styles
+  (theme, layout, caret, selection, minimap) as runtime `<style>` elements,
+  so in the packaged app — macOS AND Windows — the editor rendered
+  completely unstyled: invisible text, invisible caret, clicks landing on
+  the gutter layer, no minimap. Dev builds never showed it (Vite serves
+  without the nonce machinery), which is why every pre-release check was
+  green. Fixed by excluding `style-src` from Tauri's CSP asset modification
+  (`dangerousDisableAssetCspModification: ["style-src"]`; `script-src` keeps
+  the nonce hardening), verified live in a release build with an
+  instrumented probe (15 CSP violations → 0, editor styled and editable).
+  **New gates so this class can never ship again**: `tests/cspGuard.test.ts`
+  pins the config invariant, and `dev/release_smoke.sh` boots the actual
+  packaged `.app` with an in-app self-test (`src/utils/smoke.ts`: editor
+  mounts styled, typing lands, SELECT 42 renders a grid through the real
+  backend, zero CSP violations) — now a mandatory release-checklist step.
+- **Auto-connect did nothing when the connections sidebar was hidden** — the
+  sidebar owns the connect event and was unmounted entirely; it now stays
+  mounted (visually hidden) so auto-connect, the status machine and the
+  ping machinery stay alive.
+- **Passwordless MySQL accounts could never connect** — the backend sent an
+  empty-string password which sqlx scrambles, so the server answered "using
+  password: YES" and rejected truly password-free accounts (local dev root).
+  The password is now only set when non-empty.
+
+### Added — data generator, next generation (uniqueness beyond a single fresh run)
+
+- **Cross-run continuation**: a unique run against a populated table now
+  continues past the rows already there instead of colliding with them. The
+  panel/TxShell probe the target's row count (new `resolve_unique_offset`
+  command, 181 registered) and every row-index-driven uniqueness form starts
+  at `i + count` — the int/decimal scramble, the zero-padded string tag (its
+  width grows to fit), and the server path's sequence/email/username row
+  numbers — identically in the TS engine, the Rust writer and the generated
+  SQL. Collision-free by construction against rows the generator itself wrote
+  with the same seed and range (the occupied permutation slots are exactly
+  `0..count`); an empty table produces byte-identical values to before, and a
+  probe that cannot answer keeps the old behavior with an honest per-column
+  note. `uniqueRowReason` now counts existing rows against the range capacity.
+- **Composite uniqueness groups** (`unique (tenant_id, seq)`): unique-checked
+  columns sharing a group name (a per-column field beside the `uniq`
+  checkbox) are unique as a **combination** — the `fkGroup` lead/member
+  precedent applied to uniqueness. Exactly one member anchors (the widest
+  uniqueness domain, e.g. the sequence in `(tenant_id, seq)` — never the
+  low-cardinality one, whatever the column order) and the others generate
+  freely, so member distributions and the seeded RNG stream are untouched.
+  A single-member group, a flag-off member, or a group nothing can anchor is
+  a named config error in the panel, in `\generate` spec parsing, and in the
+  Rust writer before a row is written; the server path wraps the anchor and
+  passes members through.
+
 ### Added — connection manager: steal-list features (wave 5)
 
 - **Password command** (`password_exec`, pgAdmin's generic hook): a

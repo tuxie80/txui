@@ -37,12 +37,18 @@ fn build_options(
         .host(&host)
         .port(port)
         .username(config.user.as_deref().unwrap_or("root"))
-        .password(password.as_deref().unwrap_or(""))
         // Full Unicode: force the 4-byte utf8mb4 connection charset so emoji
         // and all multibyte text round-trip correctly (not latin1/utf8mb3).
         // Collation is left to the server unless explicitly configured —
         // utf8mb4_0900_ai_ci does not exist on MySQL 5.7 / MariaDB < 10.10.
         .charset(config.charset.as_deref().filter(|c| !c.is_empty()).unwrap_or("utf8mb4"));
+
+    // An empty string is NOT "no password": sqlx scrambles even "" and the
+    // server then answers "using password: YES", so truly passwordless
+    // accounts (local dev root) were always rejected. Skip the call instead.
+    if let Some(pw) = password.as_deref().filter(|p| !p.is_empty()) {
+        opts = opts.password(pw);
+    }
 
     if let Some(collation) = config.collation.as_deref().filter(|c| !c.is_empty()) {
         opts = opts.collation(collation);

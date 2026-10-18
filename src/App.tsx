@@ -1279,28 +1279,30 @@ export default function App() {
     <AppDialogHost />
     <div className="app">
       <div className="app-body">
-      {!sidebarHidden ? (
-        <>
-          <div className="sidebar-wrap" style={{ width: sidebarW, minWidth: sidebarW, display: 'flex' }}>
-            <Sidebar
-              sessions={sessions}
-              onNewConnection={(group?: string, prefill?: Partial<ConnectionConfig>) => setView({ kind: 'new-conn', group, edit: prefill })}
-              onEditConnection={cfg => setView({ kind: 'new-conn', edit: cfg })}
-              onOpenSession={handleOpenSession}
-              activeUtility={['multi-exec', 'audit', 'compare', 'dump', 'replicaset'].includes(view.kind) ? view.kind : null}
-              onOpenMultiExec={() => view.kind === 'multi-exec' ? closeUtility() : openUtility('multi-exec')}
-              onOpenAudit={() => view.kind === 'audit' ? closeUtility() : openUtility('audit')}
-              onOpenCompare={() => view.kind === 'compare' ? closeUtility() : openUtility('compare')}
-              onOpenDump={() => view.kind === 'dump' ? closeUtility() : openUtility('dump')}
-              onOpenReplicaSet={openReplicaSet}
-              onHide={toggleSidebar}
-              onDisconnect={disconnectConnection}
-              activeSessionId={activeSessionId}
-            />
-          </div>
-          <div className="h-resizer" onMouseDown={dragSidebar} title="Drag to resize" />
-        </>
-      ) : (
+      {/* The Sidebar is ALWAYS mounted — hidden means display:none, not
+          unmounted. Unmounting it kills its listeners (dbgui:connect, so
+          auto-connect silently did nothing with a hidden sidebar) and its
+          ping/status machinery. The rail below is the visible "hidden"
+          affordance. */}
+      <div className="sidebar-wrap" style={{ width: sidebarW, minWidth: sidebarW, display: sidebarHidden ? 'none' : 'flex' }}>
+        <Sidebar
+          sessions={sessions}
+          onNewConnection={(group?: string, prefill?: Partial<ConnectionConfig>) => setView({ kind: 'new-conn', group, edit: prefill })}
+          onEditConnection={cfg => setView({ kind: 'new-conn', edit: cfg })}
+          onOpenSession={handleOpenSession}
+          activeUtility={['multi-exec', 'audit', 'compare', 'dump', 'replicaset'].includes(view.kind) ? view.kind : null}
+          onOpenMultiExec={() => view.kind === 'multi-exec' ? closeUtility() : openUtility('multi-exec')}
+          onOpenAudit={() => view.kind === 'audit' ? closeUtility() : openUtility('audit')}
+          onOpenCompare={() => view.kind === 'compare' ? closeUtility() : openUtility('compare')}
+          onOpenDump={() => view.kind === 'dump' ? closeUtility() : openUtility('dump')}
+          onOpenReplicaSet={openReplicaSet}
+          onHide={toggleSidebar}
+          onDisconnect={disconnectConnection}
+          activeSessionId={activeSessionId}
+        />
+      </div>
+      {!sidebarHidden && <div className="h-resizer" onMouseDown={dragSidebar} title="Drag to resize" />}
+      {sidebarHidden && (
         <button className="tree-rail" title={`Show connections (${SC.sidebar})`} onClick={toggleSidebar}>▸</button>
       )}
 

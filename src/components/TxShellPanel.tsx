@@ -313,6 +313,18 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
           } catch { /* empty/new table → 1 */ }
         }
 
+        // Unique columns continue past the existing rows: the scramble/tag
+        // start at the table's row COUNT (the panel resolves the same way).
+        // A spec with createDdl targets a fresh table — nothing to continue.
+        let uniqueOffset = 0;
+        if (!spec.createDdl && spec.specs.some(s => s.unique)) {
+          try {
+            uniqueOffset = await invoke<number>('resolve_unique_offset', {
+              sessionId: session.sessionId, table: spec.table,
+            });
+          } catch { /* unanswerable → fresh-run behavior (offset 0) */ }
+        }
+
         const runKey = crypto.randomUUID();
         const startedAt = isoNow();
         // One transcript line updated in place as chunks land — a line per
@@ -343,6 +355,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
               rowCount: spec.rowCount,
               seed: spec.seed,
               seqStart,
+              uniqueOffset,
               locale: spec.locale,
               createDdl: spec.createDdl,
               useCopy: session.engine === 'postgres' && spec.useCopy,
