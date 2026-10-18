@@ -1,7 +1,8 @@
-import { errorDisplay } from '../utils/appError';
+import { errorDisplay, isCancelled } from '../utils/appError';
 import { confirmDialog } from '../utils/appDialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import type { ConnectionConfig, PingResult, Session } from '../types';
 import { ConnectionsStore } from '../store/connections';
@@ -11,6 +12,9 @@ import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { isFavorite, toggleFavorite, favoriteIds, pruneFavorites, useConnFavorites } from '../store/connFavorites';
 import { EngineLogo } from './engineLogos';
 import { withDeadline, connectDeadlineMs, DeadlineError } from '../utils/withDeadline';
+import { stagedDeadlineMs, stagedToPing } from '../utils/connDiag';
+import type { StagedConnectResult } from '../utils/connDiag';
+import { ConnDiagChecklist } from './ConnDiagChecklist';
 import { configToConnectionUrl } from '../utils/connUrl';
 import { getPref, PREFS } from '../store/preferences';
 import { shortcuts } from '../utils/platform';
@@ -40,6 +44,17 @@ interface ConnState {
   /** disconnected = WAS connected this app run, now closed → red dot */
   status: 'idle' | 'connecting' | 'connected' | 'error' | 'disconnected';
   ping?: PingResult;
+  /** The last staged diagnostics run (Test / Diagnose) — the checklist. */
+  diag?: StagedConnectResult | null;
+  /** A Diagnose run is in flight for this row. */
+  diagBusy?: boolean;
+}
+
+/** Why a connected row is amber: the keepalive ping failed, or the backend
+ *  reported the SSH tunnel under the session died (conn:tunnel-lost). */
+interface Unreachable {
+  kind: 'ping' | 'tunnel';
+  detail?: string;
 }
 
 /** Nested folder tree built from `/`-separated group paths. */
@@ -126,8 +141,9 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which row's failure detail is expanded (the "failed" chip toggles it). */
   const [errDetailId, setErrDetailId] = useState<string | null>(null);
-  /** connectionId → epoch ms the in-flight connect/test started. */
-  const [attempts, setAttempts] = useState<Record<string, number>>({});
+  /** connectionId → the in-flight connect/test attempt (start time + what it
+   *  is — only a connect is cancellable, so only a connect gets the ✕). */
+  const [attempts, setAttempts] = useState<Record<string, { at: number; kind: 'connect' | 'test' }>>({});
   /** Re-render once a second while anything is connecting, to move the timer. */
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -158,6 +174,13 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
     if (dropped.length > 0) {
       setConns(prev => prev.map(c =>
         dropped.includes(c.config.id) ? { ...c, status: 'disconnected' } : c));
+      // A closed session is "disconnected", not "unreachable" — the amber
+      // state belongs to live sessions only.
+      setUnreachable(prev => {
+        const out = { ...prev };
+        for (const id of dropped) delete out[id];
+        return out;
+      });
     }
   }, [sessions]);
 
@@ -229,11 +252,11 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
    * from the app being broken. The deadline itself is shared with the form's
    * Test button (utils/withDeadline: connectDeadlineMs).
    */
-  /** connectionId → epoch ms — mirrored in a ref so a second click in the
+  /** connectionId → attempt — mirrored in a ref so a second click in the
    *  same render batch still sees the in-flight attempt. */
-  const attemptsRef = useRef<Record<string, number>>({});
-  function beginAttempt(id: string) {
-    attemptsRef.current = { ...attemptsRef.current, [id]: Date.now() };
+  const attemptsRef = useRef<Record<string, { at: number; kind: 'connect' | 'test' }>>({});
+  function beginAttempt(id: string, kind: 'connect' | 'test') {
+    attemptsRef.current = { ...attemptsRef.current, [id]: { at: Date.now(), kind } };
     setAttempts(attemptsRef.current);
   }
   function endAttempt(id: string) {
@@ -256,7 +279,7 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
       const rows = prev.some(c => c.config.id === id) ? prev : [...prev, state];
       return rows.map(c => c.config.id === id ? { ...c, status: 'connecting' } : c);
     });
-    beginAttempt(id);
+    beginAttempt(id, 'connect');
     logConn('info', `Connecting to ${state.config.name}…`);
     const started = Date.now();
     try {
@@ -276,6 +299,14 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
       logConn('ok', `Connected to ${state.config.name}`);
       onOpenSession(session);
     } catch (err) {
+      // The ✕ on the connecting badge (W3.2): the user stopped this attempt —
+      // an aborted state, not a failure. No red dot, no notification, no
+      // orphan sweep (the backend reaper drops a late session itself).
+      if (isCancelled(err)) {
+        setConns(prev => prev.map(c => c.config.id === id ? { ...c, status: 'idle' } : c));
+        logConn('info', `${state.config.name} — connect cancelled`);
+        return;
+      }
       const secs = Math.round((Date.now() - started) / 1000);
       const msg = `${errorDisplay(err)} (after ${secs}s)`;
       // Back to a resting state that says what happened — never left amber.
@@ -301,12 +332,17 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
   async function handleTest(state: ConnState) {
     const id = state.config.id;
     setConns(prev => prev.map(c => c.config.id === id ? { ...c, status: 'connecting' } : c));
-    beginAttempt(id);
+    beginAttempt(id, 'test');
     logConn('info', `Testing ${state.config.name}…`);
     const started = Date.now();
     let ping: PingResult;
+    let diag: StagedConnectResult | null = null;
     try {
-      ping = await withDeadline(ConnectionsStore.test(id), connectDeadlineMs(state.config));
+      // Staged diagnostics (W3.1): a failed run is DATA (verdict 'fail'), not
+      // a rejection — the checklist shows which of the six stages broke.
+      diag = await withDeadline(
+        ConnectionsStore.testStaged(state.config), stagedDeadlineMs(state.config));
+      ping = stagedToPing(diag);
     } catch (err) {
       const secs = Math.round((Date.now() - started) / 1000);
       ping = { ok: false, latency_ms: secs * 1000, server_version: null,
@@ -315,10 +351,33 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
       endAttempt(id);
     }
     setConns(prev => prev.map(c =>
-      c.config.id === id ? { ...c, status: ping.ok ? 'idle' : 'error', ping } : c
+      c.config.id === id ? { ...c, status: ping.ok ? 'idle' : 'error', ping, diag } : c
     ));
+    // Open the detail row so the stage checklist is what the answer looks
+    // like — on failure it names the stage that broke, on success it carries
+    // the dial/TLS/auth split (W3.3).
+    setErrDetailId(id);
     if (ping.ok) logConn('ok', `${state.config.name} OK${ping.server_version ? ` — ${ping.server_version}` : ''} (${ping.latency_ms}ms)`);
     else logConn('err', `${state.config.name} — ${ping.error ?? 'failed'}`);
+  }
+
+  /** "Diagnose" on a failed connect / amber unreachable row: run the staged
+   *  test and show the checklist inline (W3.1 failure reporting, W4.1). Does
+   *  not touch the status machine — the row keeps saying what it said. */
+  async function handleDiagnose(state: ConnState) {
+    const id = state.config.id;
+    if (state.diagBusy) return;
+    setErrDetailId(id);
+    setConns(prev => prev.map(c => c.config.id === id ? { ...c, diagBusy: true } : c));
+    try {
+      const diag = await withDeadline(
+        ConnectionsStore.testStaged(state.config), stagedDeadlineMs(state.config));
+      setConns(prev => prev.map(c => c.config.id === id ? { ...c, diag, diagBusy: false } : c));
+      logConn(diag.verdict === 'ok' ? 'ok' : 'err', `Diagnose ${state.config.name} — ${diag.verdict} (${diag.total_ms}ms)`);
+    } catch (err) {
+      setConns(prev => prev.map(c => c.config.id === id ? { ...c, diagBusy: false } : c));
+      logConn('err', `Diagnose ${state.config.name} — ${errorDisplay(err)}`);
+    }
   }
 
   /** Duplicate config + keychain password under a new id (roadmap D3). */
@@ -382,23 +441,40 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
 
   // Latency badges: ping every OPEN session every 30 s (paused while hidden).
   const [latencies, setLatencies] = useState<Record<string, number>>({});
+  // W4.1 health: a connection whose sessions stopped answering goes amber
+  // ("unreachable") instead of silently losing the badge while the dot stays
+  // green; the next answered ping turns it green again.
+  const [unreachable, setUnreachable] = useState<Record<string, Unreachable>>({});
   useEffect(() => {
-    if (sessions.length === 0) { setLatencies({}); return; }
+    if (sessions.length === 0) { setLatencies({}); setUnreachable({}); return; }
     const tick = async () => {
       if (document.visibilityState === 'hidden') return;
       const next: Record<string, number> = {};
+      const up = new Set<string>();
+      const down = new Set<string>();
       await Promise.all(sessions.map(async s => {
-        try { next[s.connectionId] = await ConnectionsStore.sessionPing(s.sessionId); }
-        catch {
-          // Keepalive: a failed ping usually means the pooled socket died while
-          // asleep. Retry once — sqlx re-establishes it — so the connection is
-          // warm again before the next real query, and the blip self-heals.
-          if (!getPref(PREFS.keepAlive)) return;
-          try { next[s.connectionId] = await ConnectionsStore.sessionPing(s.sessionId); }
-          catch { /* still down — the badge just disappears */ }
-        }
+        const ping = async (): Promise<number | null> => {
+          try { return await ConnectionsStore.sessionPing(s.sessionId); }
+          catch { return null; }
+        };
+        let ms = await ping();
+        // Keepalive: a failed ping usually means the pooled socket died while
+        // asleep. Retry once — sqlx re-establishes it — so the connection is
+        // warm again before the next real query, and the blip self-heals.
+        if (ms == null && getPref(PREFS.keepAlive)) ms = await ping();
+        if (ms == null) down.add(s.connectionId);
+        else { next[s.connectionId] = ms; up.add(s.connectionId); }
       }));
       setLatencies(next);
+      setUnreachable(prev => {
+        const out = { ...prev };
+        // Any answered session on the connection clears it — recovery to green.
+        for (const id of up) delete out[id];
+        // Only when NO session answered; a tunnel-lost report (more specific)
+        // already there is kept rather than rewritten as a ping failure.
+        for (const id of down) if (!up.has(id)) out[id] = out[id] ?? { kind: 'ping' };
+        return out;
+      });
     };
     tick();
     const t = setInterval(tick, 30_000);
@@ -412,6 +488,21 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
       document.removeEventListener('visibilitychange', onResume);
     };
   }, [sessions]);
+
+  // W4.5/W4.1: the backend watches tunnel child processes and reports a death
+  // mid-session here — before it, a dead tunnel surfaced only as the next
+  // query's error. Mark the row amber; the ping loop restores green (or would
+  // fail too, confirming the state).
+  useEffect(() => {
+    const un = listen<{ session_id: string; connection_id: string; reason: string }>(
+      'conn:tunnel-lost', e => {
+        const p = e.payload;
+        if (!p?.connection_id) return;
+        setUnreachable(prev => ({ ...prev, [p.connection_id]: { kind: 'tunnel', detail: p.reason } }));
+        logConn('err', `SSH tunnel lost${p.reason ? ` — ${p.reason}` : ''}`);
+      });
+    return () => { un.then(f => f()); };
+  }, []);
 
   /** All folder paths in use — feeds the move-dialog datalist. */
   const allFolders = useMemo(() => {
@@ -465,6 +556,9 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
 
   function renderConn(cs: ConnState, depth: number) {
     const connected = sessions.some(s => s.connectionId === cs.config.id);
+    // W4.1: amber while a connected row's keepalive fails (or its tunnel died).
+    const un = connected ? unreachable[cs.config.id] : undefined;
+    const attempt = attempts[cs.config.id];
     const color = cs.config.color;
     return (
       <div key={cs.config.id}
@@ -508,14 +602,35 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
               background: `${tagColor(l.name)}1f`,
             }}>{l.name}</span>
           ))}
-          {connected && latencies[cs.config.id] != null && (
+          {connected && !un && latencies[cs.config.id] != null && (
             <span className="conn-latency" title="Round-trip latency (session ping, refreshed every 30 s)">
               {latencies[cs.config.id]} ms
             </span>
           )}
-          {cs.status === 'connecting' && attempts[cs.config.id] != null && (
+          {/* The conn-list suppresses hover tooltips (data-notip), so the
+              reason is a labelled chip, not a title — click runs the staged
+              diagnosis inline. */}
+          {un && (
+            <button type="button" className="conn-unreachable"
+              onClick={e => { e.stopPropagation(); void handleDiagnose(cs); }}>
+              {un.kind === 'tunnel' ? 'tunnel lost' : 'unreachable'} {errDetailId === cs.config.id ? '▴' : '▾'}
+            </button>
+          )}
+          {cs.status === 'connecting' && attempt != null && (
             <span className="conn-elapsed" title="Waiting for the server to answer">
-              {Math.max(0, Math.round((Date.now() - attempts[cs.config.id]) / 1000))}s
+              {Math.max(0, Math.round((Date.now() - attempt.at) / 1000))}s
+              {/* W3.2: a connect can be cancelled; a test is short and cannot
+                  (cancel_connect targets open_connection only). */}
+              {attempt.kind === 'connect' && (
+                <button type="button" className="conn-cancel"
+                  title="Cancel this connect attempt"
+                  onClick={e => {
+                    e.stopPropagation();
+                    void ConnectionsStore.cancelConnect(cs.config.id).catch(() => {});
+                  }}>
+                  ✕
+                </button>
+              )}
             </span>
           )}
           {cs.status === 'error' && (
@@ -529,26 +644,47 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
             </button>
           )}
           <span
-            className={`status-dot status-${connected ? 'connected' : cs.status}`}
-            title={connected ? 'connected'
+            className={`status-dot status-${un ? 'unreachable' : connected ? 'connected' : cs.status}`}
+            title={un
+              ? (un.kind === 'tunnel' ? 'SSH tunnel lost' : 'unreachable — last ping failed')
+              : connected ? 'connected'
               : cs.status === 'disconnected' ? 'disconnected — last session closed'
               : cs.ping?.error ?? cs.status}
           />
         </div>
         {/* The failure, in full, on demand — the tooltip-only error used to
-            truncate the server's actual reason into one hover line. */}
-        {cs.status === 'error' && errDetailId === cs.config.id && (
+            truncate the server's actual reason into one hover line. Diagnose
+            runs the staged test (W3.1) so a failed connect is one click from
+            the exact stage that broke; the same panel carries a Test result. */}
+        {errDetailId === cs.config.id && (cs.status === 'error' || cs.diag || un) && (
           <div className="conn-error-detail">
-            <div className="conn-error-text">{cs.ping?.error ?? 'Connection failed'}</div>
+            {cs.status === 'error' && (
+              <div className="conn-error-text">{cs.ping?.error ?? 'Connection failed'}</div>
+            )}
+            {un && (
+              <div className="conn-error-text warn">
+                {un.kind === 'tunnel'
+                  ? `SSH tunnel lost${un.detail ? ` — ${un.detail}` : ''}`
+                  : 'unreachable — the last keepalive ping failed'}
+              </div>
+            )}
+            {cs.diag && <ConnDiagChecklist result={cs.diag} />}
             <div className="conn-error-actions">
-              <button type="button"
-                onClick={() => { setErrDetailId(null); void handleConnect(cs); }}>
-                Retry
+              {cs.status === 'error' && (<>
+                <button type="button"
+                  onClick={() => { setErrDetailId(null); void handleConnect(cs); }}>
+                  Retry
+                </button>
+                <button type="button"
+                  onClick={() => { setErrDetailId(null); onEditConnection(cs.config); }}>
+                  Edit connection
+                </button>
+              </>)}
+              <button type="button" disabled={cs.diagBusy}
+                onClick={() => void handleDiagnose(cs)}>
+                {cs.diagBusy ? 'Diagnosing…' : cs.diag ? 'Diagnose again' : 'Diagnose'}
               </button>
-              <button type="button"
-                onClick={() => { setErrDetailId(null); onEditConnection(cs.config); }}>
-                Edit connection
-              </button>
+              <button type="button" onClick={() => setErrDetailId(null)}>Close</button>
             </div>
           </div>
         )}
@@ -722,6 +858,14 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
             }} />
           )}
           <ContextMenuItem label="Connect" onClick={() => { handleConnect(ctxMenu.cs); setCtxMenu(null); }} />
+          {sessions.some(s => s.connectionId === ctxMenu.cs.config.id) && (
+            /* W4.2: close every session of this connection and reopen them in
+               the same tab slots — App owns the session swap (dbgui:reconnect). */
+            <ContextMenuItem label="Reconnect" onClick={() => {
+              window.dispatchEvent(new CustomEvent('dbgui:reconnect', { detail: { connectionId: ctxMenu.cs.config.id } }));
+              setCtxMenu(null);
+            }} />
+          )}
           {sessions.some(s => s.connectionId === ctxMenu.cs.config.id) && (
             <ContextMenuItem label="Disconnect" danger onClick={() => { onDisconnect(ctxMenu.cs.config.id); setCtxMenu(null); }} />
           )}

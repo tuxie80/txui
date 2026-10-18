@@ -9,7 +9,8 @@ use crate::state::AppState;
 ///
 /// Resolved here rather than in each driver because this is where the app
 /// settings are reachable — the drivers only ever see a ConnectionConfig.
-fn with_default_timeout(config: &ConnectionConfig, state: &AppState) -> ConnectionConfig {
+/// Pub(crate): the staged-connect diagnostics (conndiag) apply the same default.
+pub(crate) fn with_default_timeout(config: &ConnectionConfig, state: &AppState) -> ConnectionConfig {
     if config.connect_timeout_secs.is_some() {
         return config.clone();
     }
@@ -41,7 +42,8 @@ pub async fn set_query_timeout(secs: u32, state: State<'_, AppState>) -> Result<
 }
 
 /// Read a connection password from the encrypted secret store.
-fn get_password(config: &ConnectionConfig, data_dir: &std::path::Path) -> Option<String> {
+/// Pub(crate): the staged-connect diagnostics resolve secrets the same way.
+pub(crate) fn get_password(config: &ConnectionConfig, data_dir: &std::path::Path) -> Option<String> {
     crate::secretstore::get(data_dir, &config.keychain_key())
 }
 
@@ -69,7 +71,8 @@ fn password_diag(config: &ConnectionConfig, data_dir: &std::path::Path) -> Strin
 }
 
 /// Verbose target descriptor for diagnostics — exactly what we tried to reach.
-fn describe(config: &ConnectionConfig) -> String {
+/// Pub(crate): the staged diagnostics put it on the auth stage's failure detail.
+pub(crate) fn describe(config: &ConnectionConfig) -> String {
     let host = config.host.as_deref().unwrap_or("localhost");
     let port = config.port.unwrap_or(config.engine.default_port());
     let user = config.user.as_deref().unwrap_or("");
@@ -185,7 +188,8 @@ pub async fn delete_connection(id: Uuid, state: State<'_, AppState>) -> Result<(
 /// store for a saved connection, the form's field for an ad-hoc test. The
 /// error is phrased for display; callers decide what else to do with a
 /// failure (audit rows, PingResult shaping).
-async fn open_tunnel(
+/// Pub(crate): the staged diagnostics run the tunnel bring-up as its own stage.
+pub(crate) async fn open_tunnel(
     config: &ConnectionConfig,
     ssh_password: Option<&str>,
 ) -> Result<Option<crate::db::ssh::SshTunnel>, String> {
@@ -214,7 +218,8 @@ async fn open_tunnel(
 
 /// The SSH password of a SAVED connection, when it uses one. Ad-hoc tests and
 /// dump jobs pass theirs in explicitly instead.
-fn stored_ssh_password(config: &ConnectionConfig, data_dir: &std::path::Path) -> Option<String> {
+/// Pub(crate): the staged-connect diagnostics resolve secrets the same way.
+pub(crate) fn stored_ssh_password(config: &ConnectionConfig, data_dir: &std::path::Path) -> Option<String> {
     if config.use_ssh && config.use_ssh_password {
         crate::secretstore::get(data_dir, &config.ssh_keychain_key())
     } else {
@@ -279,6 +284,27 @@ pub async fn open_connection(id: Uuid, app: tauri::AppHandle, state: State<'_, A
     Ok(session_id)
 }
 
+/// Cancel an in-flight `open_connection` for a connection (W3.2 — the ✕ on
+/// the sidebar's connecting badge). Returns true when a connect was actually
+/// in flight and got the signal; a finished (or never started) connect is a
+/// quiet false. The open itself tears down its partial state — tunnel, and a
+/// late-arriving pool via the spawned reaper — and returns `cancelled`.
+#[tauri::command]
+pub async fn cancel_connect(
+    connection_id: Uuid,
+    state: State<'_, AppState>,
+) -> Result<bool, crate::apperror::AppError> {
+    Ok(cancel_connect_inner(connection_id, &state).await)
+}
+
+/// The State-free body of [`cancel_connect`], so tests can drive it.
+pub(crate) async fn cancel_connect_inner(connection_id: Uuid, state: &AppState) -> bool {
+    match state.connect_cancels.write().await.remove(&connection_id.to_string()) {
+        Some(tx) => { let _ = tx.send(()); true }
+        None => false,
+    }
+}
+
 /// Shared connect path (keychain password + optional SSH tunnel) used by both
 /// `open_connection` and the ephemeral session consumers.
 pub(crate) async fn open_session_for_config(
@@ -320,39 +346,150 @@ async fn open_session_inner(
     // session exists, so a session's lifetime is not charged for connect time.
     let attempt = crate::commands::audit::session_start(config);
 
-    // Open SSH tunnel if configured
+    // W3.2 cancellable connect: a user-facing open registers a oneshot under
+    // the connection id, so `cancel_connect` (the ✕ on the sidebar's
+    // connecting badge) can fire it. Quiet ephemeral opens never register —
+    // several can run for the same connection at once (multi-exec fan-out)
+    // and no UI badge is waiting on them. The entry is removed when the open
+    // ends, so a PRESENT entry is always an in-flight connect.
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    // A quiet open's sender is never registered, but it must still be HELD for
+    // the whole open: dropping it would resolve the receiver, and a select!
+    // arm reads that as a cancel.
+    let mut held_tx = Some(cancel_tx);
+    if !quiet {
+        if let Some(tx) = held_tx.take() {
+            state.connect_cancels.write().await.insert(config.id.to_string(), tx);
+        }
+    }
+
+    let result = open_session_stages(config, password, state, quiet, &attempt, &mut cancel_rx).await;
+
+    if !quiet {
+        state.connect_cancels.write().await.remove(&config.id.to_string());
+    }
+    drop(held_tx); // explicit: the quiet path's sender lives exactly this long
+    result
+}
+
+/// The clean user-intent error a cancelled connect returns (W3.2) — Cancelled,
+/// not ConnectFailed: nothing is wrong with the server, the user pressed ✕.
+fn connect_cancelled() -> crate::apperror::AppError {
+    crate::apperror::AppError::new(crate::apperror::ErrorCode::Cancelled, "Connect cancelled")
+}
+
+/// The staged body of `open_session_inner`, racing each cancellable stage
+/// against `cancel_rx`. A connect is sequential awaits (tunnel → IAM mint →
+/// driver open); the flag is checked BETWEEN stages by wrapping each stage in
+/// a select!, and a driver open that cannot be interrupted mid-dial is
+/// detached and its late arrival reaped (closed) instead of orphaned — the
+/// in-process twin of `close_orphaned_connection` (W1.5).
+async fn open_session_stages(
+    config: &crate::db::types::ConnectionConfig,
+    password: Option<String>,
+    state: &AppState,
+    quiet: bool,
+    attempt: &crate::state::SessionStart,
+    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<Uuid, crate::apperror::AppError> {
+    let audit_fail = |msg: &str| {
+        let msg = msg.to_string();
+        let attempt = attempt.clone();
+        let history = state.history.clone();
+        async move {
+            crate::commands::audit::insert_connect_failed(&history, &attempt, &msg).await;
+        }
+    };
+
+    // Stage 1: the SSH tunnel. Spawned rather than awaited inline so a cancel
+    // does not abandon a half-brought-up ssh child mid-poll: the reaper awaits
+    // the bring-up to completion and drops the SshTunnel, whose Drop kills the
+    // child — the same teardown the success path relies on.
     let tunnel = if config.use_ssh {
         let ssh_password = stored_ssh_password(config, &state.data_dir);
-        match open_tunnel(config, ssh_password.as_deref()).await {
-            Ok(t) => t,
-            Err(msg) => {
-                if !quiet {
-                    crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
-                }
-                return Err(msg.into());
+        let cfg = config.clone();
+        let mut bring_up = tokio::spawn(async move {
+            open_tunnel(&cfg, ssh_password.as_deref()).await
+        });
+        tokio::select! {
+            _ = &mut *cancel_rx => {
+                tokio::spawn(async move {
+                    if let Ok(Ok(Some(t))) = bring_up.await {
+                        drop(t); // Drop kills the ssh child
+                    }
+                });
+                if !quiet { audit_fail("Connect cancelled by user").await; }
+                return Err(connect_cancelled());
             }
+            r = &mut bring_up => match r {
+                Ok(Ok(t)) => t,
+                Ok(Err(msg)) => {
+                    if !quiet { audit_fail(&msg).await; }
+                    return Err(msg.into());
+                }
+                Err(e) => {
+                    let msg = format!("SSH tunnel task failed: {e}");
+                    if !quiet { audit_fail(&msg).await; }
+                    return Err(msg.into());
+                }
+            },
         }
     } else {
         None
     };
 
-    // If tunnel is active, connect to localhost:local_port
+    // If tunnel is active, connect to localhost:local_port. Both halves are
+    // Copy/'static, so this does not borrow the tunnel.
     let host_override: Option<(&str, u16)> = tunnel.as_ref()
         .map(|t| ("127.0.0.1", t.local_port));
 
-    let session_id = match connection::open_session(config, password, &state.sessions, host_override).await {
-        Ok(id) => id,
-        Err(e) => {
-            let msg = format!("Connect to {} failed:\n{:#}\n{}", describe(config), e, password_diag(config, &state.data_dir));
-            if !quiet {
-                crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
+    // Stage 2: the driver open (IAM token mint → dial → auth, inside
+    // connection::open_session). Spawned for the same reason as the tunnel:
+    // sqlx's dial cannot be interrupted mid-flight, so on cancel the task is
+    // detached and a reaper closes whatever session eventually lands — a late
+    // arrival must never become a live pool nobody holds (W1.5's orphan, just
+    // triggered by an explicit cancel instead of a frontend deadline).
+    let cfg = config.clone();
+    let pw = password.clone();
+    let sessions = state.sessions.clone();
+    let mut opening = tokio::spawn(async move {
+        connection::open_session(&cfg, pw, &sessions, host_override).await
+    });
+    let session_id = tokio::select! {
+        _ = &mut *cancel_rx => {
+            let sessions = state.sessions.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(sid)) = opening.await {
+                    // No session_starts/session_meta entry was ever written for
+                    // it (those happen below, on the success path), so a plain
+                    // pool close IS the whole teardown.
+                    connection::close_session(sid, &sessions).await;
+                }
+            });
+            drop(tunnel); // Drop kills the ssh child
+            if !quiet { audit_fail("Connect cancelled by user").await; }
+            return Err(connect_cancelled());
+        }
+        r = &mut opening => match r {
+            Ok(Ok(id)) => id,
+            Ok(Err(e)) => {
+                let msg = format!("Connect to {} failed:\n{:#}\n{}", describe(config), e, password_diag(config, &state.data_dir));
+                if !quiet { audit_fail(&msg).await; }
+                return Err(msg.into());
             }
-            return Err(msg.into());
+            Err(e) => {
+                let msg = format!("Connect to {} failed: the open task died: {e}", describe(config));
+                if !quiet { audit_fail(&msg).await; }
+                return Err(msg.into());
+            }
         }
     };
 
-    // Store tunnel (Drop impl will kill ssh when removed)
+    // Store tunnel (Drop impl will kill ssh when removed) and start its
+    // liveness watch (W4.5) — from here on, the ssh child dying under a live
+    // session is an event, not the next query's surprise error.
     if let Some(t) = tunnel {
+        spawn_tunnel_watch(state, session_id, config.id, &t);
         state.tunnels.write().await.insert(session_id, t);
     }
 
@@ -389,6 +526,58 @@ async fn open_session_inner(
     }
 
     Ok(session_id)
+}
+
+/// How often the tunnel liveness watch polls the ssh child (W4.5). 1 s is far
+/// sooner than the next failed query ever noticed, and each poll is a
+/// microsecond `try_wait` borrow — no lock is ever held across an await.
+const TUNNEL_WATCH_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// W4.5 — SSH tunnel liveness watch. A tunnel's death used to surface only as
+/// the next query's error: the ssh child sat in the registry with nothing
+/// watching it. This spawns a per-tunnel task that polls the child and, on an
+/// UNEXPECTED exit while the session is still alive, marks the session
+/// degraded (session_meta) and emits `conn:tunnel-lost` with
+/// `{ session_id, connection_id, reason }` for the frontend's health surface.
+///
+/// Deliberate teardown is NOT reported: every close path (close_connection,
+/// teardown_ephemeral_session, close_all) removes the tunnel from the map,
+/// whose Drop disarms the watcher before killing the child. Quiet ephemeral
+/// sessions are watched too — the emit is harmless for a session id no
+/// sidebar row holds, and the alternative (a quiet flag threading through) is
+/// a second kind of tunnel lifecycle.
+fn spawn_tunnel_watch(
+    state: &AppState,
+    session_id: Uuid,
+    connection_id: Uuid,
+    tunnel: &crate::db::ssh::SshTunnel,
+) {
+    // Tests build AppState without a running app: nowhere to emit, no watcher.
+    let Some(app) = state.app_handle.get().cloned() else { return };
+    let (child, disarmed) = tunnel.watch_handles();
+    let sessions = state.sessions.clone();
+    let meta = state.session_meta.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(code) = crate::db::ssh::watch_child_exit(child, disarmed, TUNNEL_WATCH_POLL).await else {
+            return; // deliberate teardown — Drop disarmed us
+        };
+        // The session is gone but the tunnel somehow was not disarmed: nothing
+        // to mark and nobody to notify. (All close paths drop the tunnel, so
+        // this is belt and braces, not an expected path.)
+        if !sessions.read().await.contains_key(&session_id) {
+            return;
+        }
+        let reason = crate::db::ssh::tunnel_exit_reason(code);
+        log::warn!("session {session_id}: {reason}");
+        if let Some(g) = meta.write().await.get_mut(&session_id) {
+            g.degraded = Some(reason.clone());
+        }
+        let _ = app.emit("conn:tunnel-lost", serde_json::json!({
+            "session_id":    session_id,
+            "connection_id": connection_id,
+            "reason":        reason,
+        }));
+    });
 }
 
 /// Tear down a session opened by `open_ephemeral_session`: every registry the
@@ -606,7 +795,8 @@ pub(crate) async fn close_orphaned(
 /// falls back to the stored secret, or the form's Test would report an auth
 /// failure about a password the user never retyped. A brand-new (unsaved, nil
 /// id) connection has nothing to fall back to.
-fn resolve_test_secret(arg: Option<String>, stored: Option<String>, saved: bool) -> Option<String> {
+/// Pub(crate): the staged-connect diagnostics resolve secrets the same way.
+pub(crate) fn resolve_test_secret(arg: Option<String>, stored: Option<String>, saved: bool) -> Option<String> {
     match arg.filter(|p| !p.trim().is_empty()) {
         Some(p) => Some(p),
         None if saved => stored,
@@ -724,6 +914,21 @@ pub async fn session_ping(session_id: String, state: State<'_, AppState>) -> Res
     Ok(start.elapsed().as_millis() as u64)
 }
 
+/// Live pool occupancy of a session (W4.4) — `{ size, idle, in_use }` for the
+/// sqlx-pool engines (MySQL, PostgreSQL, SQLite), `null` where a pool count
+/// has no meaning (Redis, ClickHouse, MongoDB, SQL Server, Parquet, DuckDB).
+/// Read-only and cheap: sqlx keeps these counters, no round trip is made.
+#[tauri::command]
+pub async fn session_pool_stats(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<connection::PoolStats>, crate::apperror::AppError> {
+    let id = Uuid::parse_str(&session_id)
+        .map_err(|_| format!("invalid session id: {session_id}"))?;
+    let session = connection::get_session_pub(id, &state.sessions).await?;
+    Ok(connection::pool_stats(&session))
+}
+
 // ── Import / export ─────────────────────────────────────────────────────────
 
 /// Envelope format for connection export files. Secrets are never part of it
@@ -796,6 +1001,125 @@ mod tests {
         let history = crate::history::open_in_memory().await.expect("in-memory history");
         AppState::new(history, std::env::temp_dir(), Default::default())
     }
+
+    // ── Cancellable connect (W3.2) ──────────────────────────────────────────
+
+    /// No connect in flight → a quiet false, and nothing to fire.
+    #[tokio::test]
+    async fn cancel_connect_without_an_in_flight_open_is_a_quiet_false() {
+        let state = test_state().await;
+        assert!(!cancel_connect_inner(Uuid::new_v4(), &state).await);
+    }
+
+    /// A registered connect's oneshot fires and the entry is consumed — a
+    /// second cancel finds nothing.
+    #[tokio::test]
+    async fn cancel_connect_fires_the_registered_oneshot_once() {
+        let state = test_state().await;
+        let id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        state.connect_cancels.write().await.insert(id.to_string(), tx);
+
+        assert!(cancel_connect_inner(id, &state).await);
+        assert_eq!(rx.await, Ok(()), "the open's receiver must resolve");
+        assert!(!cancel_connect_inner(id, &state).await, "the entry is consumed");
+    }
+
+    /// The registration lives exactly as long as the open: after a successful
+    /// (fast, in-process DuckDB) connect the map is clean, so a late cancel
+    /// against a connected session is a false, not a misfire.
+    #[tokio::test]
+    async fn a_finished_open_leaves_no_cancel_registration() {
+        let state = test_state().await;
+        let cfg = scratch_config();
+        let sid = open_session_for_config(&cfg, &state).await.unwrap();
+        assert!(!state.connect_cancels.read().await.contains_key(&cfg.id.to_string()));
+        assert!(!cancel_connect_inner(cfg.id, &state).await);
+        close_one_session(sid, &state).await;
+    }
+
+    /// A quiet (ephemeral) open never registers — several can run for the same
+    /// connection at once, and no sidebar badge is waiting on them.
+    #[tokio::test]
+    async fn ephemeral_opens_never_register_a_cancel() {
+        let state = test_state().await;
+        let cfg = scratch_config();
+        let sid = open_ephemeral_session(&cfg, &state).await.unwrap();
+        assert!(!state.connect_cancels.read().await.contains_key(&cfg.id.to_string()));
+        teardown_ephemeral_session(&state, sid, "k").await;
+    }
+
+    /// The real race: a dial that cannot be interrupted (sqlx waiting on a
+    /// server that accepts TCP but never speaks) is cancelled mid-flight. The
+    /// open returns a clean `cancelled` error, no session or registration is
+    /// left behind, and a reaper — not the test — owns the late arrival.
+    #[tokio::test]
+    async fn cancel_during_the_driver_dial_returns_cancelled_and_cleans_up() {
+        let state = test_state().await;
+        // A listener that accepts (TCP connect succeeds) but never sends the
+        // MySQL handshake: the dial hangs until the connect timeout.
+        let blackhole = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = blackhole.local_addr().unwrap().port();
+
+        let mut cfg = ConnectionConfig::new(Engine::Mysql, "cancel-me");
+        cfg.host = Some("127.0.0.1".into());
+        cfg.port = Some(port);
+        cfg.connect_timeout_secs = Some(30); // long: without cancel this hangs
+
+        let st = state.clone();
+        let cfg2 = cfg.clone();
+        let opening = tokio::spawn(async move { open_session_for_config(&cfg2, &st).await });
+
+        // Wait until the open has actually registered its cancel handle.
+        for _ in 0..50 {
+            if state.connect_cancels.read().await.contains_key(&cfg.id.to_string()) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(cancel_connect_inner(cfg.id, &state).await, "a connect is in flight");
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), opening)
+            .await.expect("the open must end promptly after cancel")
+            .expect("task joined")
+            .expect_err("a cancelled connect is not a success");
+        assert_eq!(err.code.as_str(), "cancelled", "got: {}", err.message);
+
+        assert!(state.sessions.read().await.is_empty(), "no session may land");
+        assert!(state.connect_cancels.read().await.is_empty(), "registration removed");
+        // A cancelled connect is audited as such (loud opens only).
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT error FROM audit_log WHERE sql = 'connect failed'")
+            .fetch_all(&state.history).await.unwrap();
+        assert_eq!(rows, ["Connect cancelled by user"], "the cancel itself is audited");
+
+        drop(blackhole);
+    }
+
+    /// Live: cancel a real connect (e.g. a slow SSH-tunneled one) mid-flight.
+    ///   TXUI_TEST_CONN=Lo80 cargo test --lib connections -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn cancel_connect_live() {
+        let Ok(name) = std::env::var("TXUI_TEST_CONN") else { return };
+        let dir = crate::storage::default_data_dir();
+        let configs = crate::storage::load(&dir).expect("read connections.json");
+        let config = configs.values().find(|c| c.name == name).expect("connection not found").clone();
+        let history = crate::history::open_in_memory().await.expect("in-memory history");
+        let state = AppState::new(history, dir.clone(), configs.clone());
+
+        let st = state.clone();
+        let cfg = config.clone();
+        let opening = tokio::spawn(async move { open_session_for_config(&cfg, &st).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let was_in_flight = cancel_connect_inner(config.id, &state).await;
+        let outcome = opening.await.expect("task joined");
+        eprintln!("cancel fired: {was_in_flight}; outcome: {outcome:?}");
+        if was_in_flight {
+            let err = outcome.expect_err("a signalled connect must not succeed");
+            assert_eq!(err.code.as_str(), "cancelled");
+            assert!(state.sessions.read().await.is_empty());
+        }
+    }
+
 
     /// Quiet open: no session_starts record, no audit rows — but the guard
     /// registration (session_meta) is NOT skipped, or an ephemeral session

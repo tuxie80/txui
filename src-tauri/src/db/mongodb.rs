@@ -162,33 +162,36 @@ pub async fn open(
     password: Option<String>,
     host_override: Option<(&str, u16)>,
 ) -> Result<LiveSession> {
-    let client = connect(config, password, host_override).await?;
+    let (client, _tls) = connect(config, password, host_override).await?;
     Ok(LiveSession::MongoDb(client))
 }
 
 /// Shared by open() and ping(): build the client with the house timeouts and
 /// app name, then prove it with a real `ping` command (the driver's connect
-/// is lazy — no I/O happens until the first command runs).
+/// is lazy — no I/O happens until the first command runs). Returns the client
+/// and whether the connection that succeeded uses TLS — the staged-connect
+/// diagnostics (commands/conndiag.rs) report that instead of guessing the
+/// scheme from the config.
 ///
 /// `SslMode::Preferred` is OPPORTUNISTIC — TLS if the server speaks it, plain
 /// otherwise, MySQL's semantics: a default connection to a stock local Mongo
 /// must not fail because it attempted TLS against a plaintext port. Since the
 /// dial is lazy, the TLS attempt is proven with the probe command before
 /// falling back; the downgrade is logged, never silent.
-async fn connect(
+pub(crate) async fn connect(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
-) -> Result<mongodb::Client> {
+) -> Result<(mongodb::Client, bool)> {
     if matches!(config.ssl_mode, super::types::SslMode::Preferred) {
         match connect_probed(config, password.clone(), host_override, true).await {
-            Ok(client) => return Ok(client),
+            Ok(client) => return Ok((client, true)),
             Err(e) => log::warn!(
                 "MongoDB TLS connect failed (ssl_mode=preferred): {e:#} — retrying without TLS"),
         }
     }
     let tls = !matches!(config.ssl_mode, super::types::SslMode::Disable);
-    connect_probed(config, password, host_override, tls).await
+    Ok((connect_probed(config, password, host_override, tls).await?, tls))
 }
 
 /// Build the client and run one `ping` command on it.
@@ -216,7 +219,7 @@ async fn connect_probed(
 pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingResult {
     let start = Instant::now();
     match connect(config, password, None).await {
-        Ok(client) => {
+        Ok((client, _tls)) => {
             let version = server_version(&client).await.ok();
             PingResult {
                 ok: true,

@@ -37,7 +37,9 @@ fn resolve_iam_key(
              `gcloud auth application-default login`"))
 }
 
-async fn iam_password(
+/// Pub(crate) so the staged-connect diagnostics (commands/conndiag.rs) can run
+/// the mint as its own measured step instead of hiding it inside the dial.
+pub(crate) async fn iam_password(
     config: &ConnectionConfig,
     stored: Option<String>,
 ) -> Result<Option<String>> {
@@ -267,6 +269,116 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
         Engine::MongoDb => mongodb::ping(config, password).await,
         Engine::SqlServer => sqlserver::ping(config, password).await,
     }
+}
+
+/// Pool occupancy snapshot returned by `session_pool_stats` (W4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PoolStats {
+    /// Connections the pool currently holds (idle + checked out).
+    pub size: u32,
+    /// Of those, how many sit idle — a non-zero idle count minutes after the
+    /// last query is the warm pool (W4.3) doing its job.
+    pub idle: usize,
+    /// Checked-out connections — queries in flight right now.
+    pub in_use: u32,
+}
+
+/// Live pool occupancy of a session's sqlx pool, for the connection-health
+/// surface. `None` for engines where the question has no meaning: Redis
+/// multiplexes one managed connection, ClickHouse is stateless HTTP, MongoDB
+/// pools internally, and SQL Server / DuckDB / Parquet hold single
+/// connections — there is no idle/warm split to report.
+pub fn pool_stats(session: &LiveSession) -> Option<PoolStats> {
+    let (size, idle) = match session {
+        LiveSession::Mysql(p)    => (p.size(), p.num_idle()),
+        LiveSession::Postgres(p) => (p.size(), p.num_idle()),
+        LiveSession::Sqlite(p)   => (p.size(), p.num_idle()),
+        _ => return None,
+    };
+    Some(PoolStats { size, idle, in_use: size.saturating_sub(idle as u32) })
+}
+
+/// Does an engine error code mean "the server rejected our credentials at
+/// handshake"? (W4.6). This is the ONLY trigger for the IAM token re-mint: a
+/// Cloud SQL IAM token lives ~1 h, so a pool that re-dials after expiry (idle
+/// reaping, pool growth) fails with exactly these codes — MySQL 1045,
+/// PG 28P01/28000. Everything else (a table-level privilege denial, a dead
+/// socket, a pool timeout) must NOT trigger a re-mint: it would rebuild a
+/// healthy pool and retry a statement that will fail again.
+///
+/// `engine` is the wire name ("mysql", "postgres", …); `db_code` is the
+/// server's own error identity as AppError carries it (MySQL's number, PG's
+/// SQLSTATE).
+pub fn is_iam_auth_failure(engine: &str, db_code: Option<&str>) -> bool {
+    match engine {
+        "mysql"    => db_code == Some("1045"),
+        "postgres" => matches!(db_code, Some("28P01") | Some("28000")),
+        _ => false,
+    }
+}
+
+/// Re-mint the IAM token of a session and rebuild its pool with it (W4.6).
+///
+/// The token is baked into the pool's connect options at open time and lives
+/// ~1 h; sqlx has no hook that could swap the password of a pool mid-life, so
+/// the refresh happens one level up: the execute-query retry layer calls this
+/// after an engine auth failure (see [`is_iam_auth_failure`]) and retries ONCE.
+///
+/// Returns:
+/// - `Ok(false)` — the session is not an IAM MySQL/PostgreSQL session (or its
+///   connection config is gone); nothing was touched and retrying is pointless.
+/// - `Ok(true)` — a fresh token was minted, a new pool connected with it, and
+///   the session's pool was swapped; the old pool closes gracefully in the
+///   background.
+/// - `Err` — the re-mint or re-dial failed. The OLD pool is left in place (a
+///   failed refresh must not make things worse) and the caller returns the
+///   original error.
+///
+/// Concurrency: two queries hitting the expired token at once can both re-mint
+/// and swap. Each swap is self-consistent (a fresh pool either way), the
+/// superseded pool is closed, and the cost of the extra mint is one HTTPS
+/// round trip — a lock would add a registry for a case that resolves itself.
+pub async fn remint_iam_session(
+    session_id: Uuid,
+    sessions: &SessionMap,
+    tunnels: &crate::state::TunnelMap,
+    configs: &crate::state::ConfigStore,
+    session_starts: &crate::state::SessionStartMap,
+) -> Result<bool> {
+    let Some(start) = session_starts.read().await.get(&session_id).cloned() else {
+        return Ok(false);
+    };
+    let Some(config) = configs.read().await.get(&start.connection_id).cloned() else {
+        return Ok(false);
+    };
+    if !config.use_iam_auth || !matches!(config.engine, Engine::Mysql | Engine::Postgres) {
+        return Ok(false);
+    }
+    // A live SSH tunnel still applies to the re-dial.
+    let host_override: Option<(&str, u16)> = {
+        let tunnels = tunnels.read().await;
+        tunnels.get(&session_id).map(|t| ("127.0.0.1", t.local_port))
+    };
+    // open_session re-mints the token itself (iam_password) — None for the
+    // stored secret is exactly right: IAM never uses it. Build on a scratch
+    // registry so a failed re-mint/re-dial leaves the old pool untouched.
+    let scratch: SessionMap = Default::default();
+    let new_id = open_session(&config, None, &scratch, host_override).await?;
+    let new_session = scratch.write().await.remove(&new_id)
+        .ok_or_else(|| anyhow::anyhow!("internal: fresh IAM session missing from its registry"))?;
+    let old = sessions.write().await.insert(session_id, new_session);
+    if let Some(old) = old {
+        // Graceful close (clean server-side disconnect) off the retry's
+        // critical path; bounded so a stuck pool cannot leak a hung task.
+        tokio::spawn(async move {
+            let scratch: SessionMap = Default::default();
+            scratch.write().await.insert(session_id, old);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5),
+                close_session(session_id, &scratch)).await;
+        });
+    }
+    log::info!("session {session_id}: IAM token re-minted after an auth failure; pool rebuilt");
+    Ok(true)
 }
 
 /// SELECT 1-style liveness probe on a live session. Returns a short server
@@ -904,5 +1016,100 @@ mod tests {
         assert!(!res.ok);
         let err = res.error.unwrap();
         assert!(err.contains("/nonexistent/no-such-key.json"), "got: {err}");
+    }
+
+    /// W4.4: pool occupancy is reported for the sqlx-pool engines — and an
+    /// in-flight query shows up as in_use. SQLite's in-memory pool stands in
+    /// for the family; the other engines' arms return None by construction.
+    #[tokio::test]
+    async fn pool_stats_reflects_checkouts() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let s = pool_stats(&LiveSession::Sqlite(pool.clone())).expect("sqlite has a pool");
+        assert_eq!((s.size, s.idle, s.in_use), (1, 1, 0), "fresh pool: one idle connection");
+
+        let held = pool.acquire().await.unwrap();
+        let s = pool_stats(&LiveSession::Sqlite(pool.clone())).unwrap();
+        assert_eq!((s.size, s.idle, s.in_use), (1, 0, 1), "the checkout is visible");
+        drop(held);
+        pool.close().await;
+    }
+
+    /// W4.6: the re-mint trigger is EXACTLY the handshake auth codes — a
+    /// table-level privilege denial (1142/42501) or a pool timeout (no code)
+    /// must not rebuild a healthy pool.
+    #[test]
+    fn iam_auth_failure_is_only_the_handshake_auth_codes() {
+        assert!(is_iam_auth_failure("mysql", Some("1045")));
+        assert!(is_iam_auth_failure("postgres", Some("28P01")));
+        assert!(is_iam_auth_failure("postgres", Some("28000")));
+        assert!(!is_iam_auth_failure("mysql", Some("1142")), "command denied to user ≠ auth");
+        assert!(!is_iam_auth_failure("mysql", Some("1044")), "db access denied ≠ auth");
+        assert!(!is_iam_auth_failure("postgres", Some("42501")), "insufficient privilege ≠ auth");
+        assert!(!is_iam_auth_failure("mysql", None), "no code: not an engine auth answer");
+        assert!(!is_iam_auth_failure("redis", Some("1045")));
+        assert!(!is_iam_auth_failure("sqlite", Some("1045")));
+    }
+
+    fn iam_start_record(cfg: &ConnectionConfig) -> crate::state::SessionStart {
+        crate::state::SessionStart {
+            connection_id:   cfg.id,
+            connection_name: cfg.name.clone(),
+            engine:          cfg.engine.wire_name().to_string(),
+            db_user:         cfg.user.clone().unwrap_or_default(),
+            database:        cfg.database.clone().unwrap_or_default(),
+            at:              std::time::Instant::now(),
+            at_text:         String::new(),
+        }
+    }
+
+    /// W4.6: sessions that are not IAM — or whose records are gone — are a
+    /// quiet `Ok(false)`: nothing minted, nothing rebuilt.
+    #[tokio::test]
+    async fn remint_declines_non_iam_sessions() {
+        let sessions: SessionMap = Default::default();
+        let tunnels: crate::state::TunnelMap = Default::default();
+        let configs: crate::state::ConfigStore = Default::default();
+        let starts: crate::state::SessionStartMap = Default::default();
+
+        // Unknown session entirely (ephemeral sessions have no start record).
+        assert!(!remint_iam_session(Uuid::new_v4(), &sessions, &tunnels, &configs, &starts).await.unwrap());
+
+        // Known session of a NON-IAM connection.
+        let cfg = ConnectionConfig::new(Engine::Mysql, "plain");
+        let sid = Uuid::new_v4();
+        configs.write().await.insert(cfg.id, cfg.clone());
+        starts.write().await.insert(sid, iam_start_record(&cfg));
+        assert!(!remint_iam_session(sid, &sessions, &tunnels, &configs, &starts).await.unwrap());
+
+        // IAM on an engine that cannot authenticate that way.
+        let mut cfg = ConnectionConfig::new(Engine::Redis, "redis-iam");
+        cfg.use_iam_auth = true;
+        let sid = Uuid::new_v4();
+        configs.write().await.insert(cfg.id, cfg.clone());
+        starts.write().await.insert(sid, iam_start_record(&cfg));
+        assert!(!remint_iam_session(sid, &sessions, &tunnels, &configs, &starts).await.unwrap());
+    }
+
+    /// W4.6 failure path: an IAM session whose credential file is missing
+    /// surfaces the MINT error (naming the path, before any dial) and leaves
+    /// the session registry untouched.
+    #[tokio::test]
+    async fn remint_failure_keeps_the_old_pool() {
+        let sessions: SessionMap = Default::default();
+        let tunnels: crate::state::TunnelMap = Default::default();
+        let configs: crate::state::ConfigStore = Default::default();
+        let starts: crate::state::SessionStartMap = Default::default();
+
+        let mut cfg = ConnectionConfig::new(Engine::Mysql, "iam");
+        cfg.use_iam_auth = true;
+        cfg.iam_key_path = Some("/nonexistent/no-such-key.json".into());
+        let sid = Uuid::new_v4();
+        configs.write().await.insert(cfg.id, cfg.clone());
+        starts.write().await.insert(sid, iam_start_record(&cfg));
+
+        let err = remint_iam_session(sid, &sessions, &tunnels, &configs, &starts)
+            .await.unwrap_err().to_string();
+        assert!(err.contains("/nonexistent/no-such-key.json"), "got: {err}");
+        assert!(sessions.read().await.is_empty(), "a failed re-mint must not swap anything in");
     }
 }

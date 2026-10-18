@@ -5,6 +5,35 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added — connection manager: staged diagnostics, cancellable connect, health (waves 3+4)
+
+- **Staged connection diagnostics** — nobody else does this. Both Test
+  buttons and the failed-connect panel now run `connect_test_staged`:
+  **DNS → TCP → SSH tunnel → TLS → auth → version probe**, each stage with
+  ok/fail/skipped + milliseconds + detail, short-circuiting on the first
+  failure and saying exactly *which* stage broke and why (negotiated TLS
+  cipher reported for MySQL/PG; honest "scheme/probe" notes where a driver
+  exposes no handshake split). A failed connect is one click (**Diagnose**)
+  from the answer.
+- **Cancellable connect**: the connecting badge gains a ✕ (`cancel_connect`)
+  — a 300 s connect timeout no longer means a 300 s wait; late-arriving
+  pools/tunnels are reaped automatically.
+- **Connection health**: a dropped session now shows an amber
+  **unreachable** chip (the green dot used to stay green) — driven by the
+  30 s ping and by a new backend **SSH-tunnel liveness watch**
+  (`conn:tunnel-lost` event, never fired on deliberate close). Clicking the
+  chip runs the staged diagnosis. Context menu gains **Reconnect**: sessions
+  are reopened first (a failed reopen keeps the old session alive) and open
+  tabs rebind to the new session in place.
+- **Warm session pools** (min_connections=1): the first query after a minute
+  idle no longer pays a full re-dial + session setup; playground/ephemeral
+  pools stay cold.
+- **GCP IAM sessions self-heal**: an `Access denied` from an expired IAM
+  token now triggers one automatic re-mint + retry instead of a cryptic
+  failure an hour into the session.
+- New `session_pool_stats` command (176 registered) exposes pool
+  size/idle/in-use for the health surface.
+
 ### Fixed — connection manager (deep-dive remediation, waves 1+2)
 
 **Backend correctness** (plan: `docs/plans/plan-connections.md`):

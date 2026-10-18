@@ -6,7 +6,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { parseConnectionUrl, clickhouseCeilingParams, CH_CEILING_KEYS } from '../utils/connUrl';
 import { portError, sshPortError, redisDbError, filePathError } from '../utils/connValidate';
-import { withDeadline, connectDeadlineMs } from '../utils/withDeadline';
+import { withDeadline } from '../utils/withDeadline';
+import { stagedDeadlineMs, verdictLine } from '../utils/connDiag';
+import type { StagedConnectResult } from '../utils/connDiag';
+import { ConnDiagChecklist } from './ConnDiagChecklist';
 import {
   ENGINE_DEFAULTS, DEFAULT_HOST, resolveDefaults, clearStaleDefaults, databasePlaceholder,
 } from '../utils/connDefaults';
@@ -154,6 +157,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [urlWarnings, setUrlWarnings] = useState<string[]>([]);
   const [testing,     setTesting]     = useState(false);
   const [testResult,  setTestResult]  = useState<{ ok: boolean; msg: string } | null>(null);
+  /** The staged run behind testResult (connect_test_staged) — the checklist. */
+  const [testDiag,    setTestDiag]    = useState<StagedConnectResult | null>(null);
 
   function pasteUrl(raw: string) {
     // mysql://user:pass@host:port/db?ssl-mode=REQUIRED  |  postgresql://...
@@ -354,16 +359,22 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     if (invalid) { setError(invalid); return; }
     setTesting(true);
     setTestResult(null);
+    setTestDiag(null);
     setError(null);
     try {
       const config = buildConfig();
-      // The sidebar bounds how long it waits on a connect; the form's Test
-      // gets the same treatment — an IPC call that never settles must not
-      // leave "Testing…" spinning forever.
-      const msg = await withDeadline(
-        ConnectionsStore.testAdhoc(config, password, sshPassword),
-        connectDeadlineMs(config));
-      setTestResult({ ok: true, msg });
+      // Staged diagnostics (W3.1): "no" is not an answer — the checklist says
+      // WHICH of DNS/TCP/SSH/TLS/auth/probe broke. A failed run is data
+      // (verdict 'fail'), not a rejection. The sidebar bounds how long it
+      // waits on a connect; the form's Test gets the same treatment — an IPC
+      // call that never settles must not leave "Testing…" spinning forever.
+      // A staged run can legitimately take several connect-timeouts (one per
+      // stage up to the first failure), so its deadline is the staged one.
+      const result = await withDeadline(
+        ConnectionsStore.testStaged(config, password, sshPassword),
+        stagedDeadlineMs(config));
+      setTestDiag(result);
+      setTestResult({ ok: result.verdict === 'ok', msg: verdictLine(result) });
     } catch (err) {
       setTestResult({ ok: false, msg: errorDisplay(err) });
     } finally {
@@ -1054,7 +1065,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       {error && <p className="error">{error}</p>}
       {initial?.id && (
         <p className="form-hint" style={{ margin: 0 }}>
-          Blank password fields test without the stored secrets.
+          Blank password fields keep the saved secrets — for Save and Test alike.
         </p>
       )}
       {testResult && (
@@ -1062,6 +1073,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           {testResult.msg}
         </p>
       )}
+      {testDiag && <ConnDiagChecklist result={testDiag} />}
 
       <div className="form-actions">
         <button onClick={handleTest} disabled={saving || testing}>

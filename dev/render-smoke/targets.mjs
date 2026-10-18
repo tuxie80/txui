@@ -326,6 +326,20 @@ export async function sweepFixtures(fixtures) {
       { label: 'New tab', section: 'action', action: () => {} },
       { label: 'orders', section: 'table', action: () => {}, hint: 'shop' },
     ] } },
+    // The staged-diagnostics checklist (W3.1): a failed run mid-way, so both
+    // the ok/skipped rows and the red failing detail render.
+    ConnDiagChecklist: { props: { result: {
+      stages: [
+        { id: 'dns', label: 'DNS resolution', status: 'ok', ms: 2, detail: 'db.example.com → 192.0.2.10' },
+        { id: 'tcp', label: 'TCP connect', status: 'ok', ms: 11, detail: 'connected to 192.0.2.10:3306' },
+        { id: 'ssh', label: 'SSH tunnel', status: 'skipped', ms: 0, detail: 'no SSH tunnel configured' },
+        { id: 'tls', label: 'TLS handshake', status: 'ok', ms: 42, detail: 'TLSv1.3, cipher TLS_AES_256_GCM_SHA384' },
+        { id: 'auth', label: 'Authenticate', status: 'fail', ms: 18, detail: 'Access denied for user \'app\'@\'%\'' },
+        { id: 'probe', label: 'Version probe', status: 'skipped', ms: 0, detail: 'not reached — stage \'authenticate\' failed' },
+      ],
+      total_ms: 73,
+      verdict: 'fail',
+    } } },
     DataBrowser: {
       props: { table: 'shop.orders', dbUser: 'app_rw', resultLabel: 'Result 1', txOpen: false },
       mock: {

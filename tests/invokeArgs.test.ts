@@ -199,6 +199,10 @@ const NO_CALLER_EXEMPTIONS: Record<string, string> = {
   // (also re-exported via useQueryRunner and DataBrowser's onEndTx).
   commit_transaction: 'invoked via the endTx(cmd) variable in QueryTabs/useQueryRunner',
   rollback_transaction: 'invoked via the endTx(cmd) variable in QueryTabs/useQueryRunner',
+  // W4.4 backend half: the reader is the connection-health surface (W4.1),
+  // which lands as the frontend half of the same plan. Self-removing — the
+  // "wired" check below fails once a literal call site exists.
+  session_pool_stats: 'W4.4 backend half — wired by the W4.1 connection-health surface (frontend half)',
 };
 
 test('every registered command has at least one caller in src/', () => {

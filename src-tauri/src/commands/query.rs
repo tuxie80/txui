@@ -185,6 +185,9 @@ pub async fn execute_query(
     // Manual-transaction mode: a held connection exists for this session —
     // run there (same backend as BEGIN). No cancel race: abandoning a shared
     // tx connection mid-statement would poison the whole transaction.
+    //
+    // The pinned connection also needs no IAM re-mint retry: token expiry only
+    // bites a NEW dial, and a pinned connection was dialled long ago.
     let tx_conn = state.tx_conns.read().await.get(&session_id).cloned();
     let result = if let Some(txc) = tx_conn {
         drop(rx);
@@ -205,8 +208,39 @@ pub async fn execute_query(
         }
     } else {
         let deadline = state.query_deadline(&session_id).await;
-        race_query(session_id, &effective_sql, &state.sessions, &state.kills, &state.ch_kills,
-                   &cancel_key, fetch_warnings, ch_db, rx, deadline, row_cap).await
+        let first = race_query(session_id, &effective_sql, &state.sessions, &state.kills, &state.ch_kills,
+                   &cancel_key, fetch_warnings, ch_db, rx, deadline, row_cap).await;
+        match first {
+            // W4.6 — IAM token re-mint: a Cloud SQL IAM token lives ~1 h and
+            // is baked into the pool's connect options at open. The first
+            // re-dial after expiry (idle reaping, pool growth) fails the
+            // acquire with the engine's handshake auth code (MySQL 1045,
+            // PG 28P01/28000) — which is otherwise indistinguishable from a
+            // wrong password. For an IAM session that code means "mint a
+            // fresh token and rebuild the pool", then retry the statement
+            // ONCE. A non-IAM session, or a failed re-mint, returns the
+            // ORIGINAL error untouched.
+            Err(e) if connection::is_iam_auth_failure(&engine, e.db_code.as_deref()) => {
+                match connection::remint_iam_session(
+                    session_id, &state.sessions, &state.tunnels, &state.configs, &state.session_starts,
+                ).await {
+                    Ok(true) => {
+                        // The retry needs its own cancel channel — the first
+                        // attempt consumed `rx`. It replaces the entry under
+                        // the same key, so cancel_query keeps working and the
+                        // cleanup below removes whichever is current. The
+                        // client-side deadline restarts with the retry (the
+                        // re-mint itself is a bounded HTTPS round trip).
+                        let (retry_tx, retry_rx) = tokio::sync::oneshot::channel::<()>();
+                        state.cancels.write().await.insert(cancel_key.clone(), retry_tx);
+                        race_query(session_id, &effective_sql, &state.sessions, &state.kills, &state.ch_kills,
+                                   &cancel_key, fetch_warnings, ch_db, retry_rx, deadline, row_cap).await
+                    }
+                    _ => Err(e),
+                }
+            }
+            r => r,
+        }
     };
 
     // Signal the CH progress poller to finish (it emits one last exact figure

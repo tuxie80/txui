@@ -6438,10 +6438,63 @@ button.primary:disabled { opacity: .5; cursor: default; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+.conn-error-text.warn { color: var(--yellow); }
 .conn-error-actions { display: flex; gap: 6px; margin-top: 6px; }
 .conn-error-actions button {
   font-size: calc(11px * var(--font-scale, 1));
 }
+
+/* The ✕ on the connecting badge — cancelling a connect is not an error, so
+   it borrows the badge's amber rather than the failure red until hovered. */
+.conn-cancel {
+  background: none; border: none; padding: 0 0 0 4px;
+  color: var(--yellow); font: inherit; line-height: 1; cursor: pointer;
+}
+.conn-cancel:hover { color: var(--red); }
+
+/* Amber "unreachable": the session is open but the last keepalive ping failed
+   (or the SSH tunnel under it died). Yellow = connecting is transient; this
+   one stays until a ping answers again, and the chip next to it says why
+   (tooltips are suppressed in the connection list — data-notip). */
+.status-unreachable { background: var(--yellow); }
+.conn-unreachable {
+  margin-left: auto;
+  flex: none;
+  font-size: calc(10px * var(--font-scale, 1));
+  color: var(--yellow);
+  opacity: 0.95;
+  background: none; border: none; padding: 0; font-family: inherit;
+  cursor: pointer;
+}
+.conn-unreachable:hover { opacity: 1; text-decoration: underline; }
+
+/* Staged connect diagnostics (connect_test_staged) — one row per stage, its
+   detail underneath, the failing stage in red. Shared by the form's Test and
+   the sidebar's Test/Diagnose (components/ConnDiagChecklist.tsx). */
+.conn-diag {
+  display: flex; flex-direction: column; gap: 2px; margin-top: 6px;
+  font-size: calc(11px * var(--font-scale, 1));
+}
+.conn-diag-row {
+  display: grid; grid-template-columns: 12px minmax(0, max-content) 1fr; gap: 6px;
+  align-items: baseline;
+}
+.conn-diag-icon { font-family: var(--font-mono); }
+.conn-diag-row.conn-diag-ok .conn-diag-icon { color: var(--green); }
+.conn-diag-row.conn-diag-fail .conn-diag-icon { color: var(--red); }
+.conn-diag-row.conn-diag-skipped { color: var(--text2); opacity: 0.75; }
+.conn-diag-ms {
+  justify-self: end; font-variant-numeric: tabular-nums;
+  color: var(--text2); font-size: calc(10px * var(--font-scale, 1));
+}
+.conn-diag-detail {
+  grid-column: 1 / -1; padding-left: 18px;
+  color: var(--text2); white-space: pre-wrap; word-break: break-word;
+}
+.conn-diag-row.conn-diag-fail .conn-diag-detail { color: var(--red); }
+.conn-diag-total { margin-top: 4px; font-weight: 600; }
+.conn-diag-total.conn-diag-ok { color: var(--green); }
+.conn-diag-total.conn-diag-fail { color: var(--red); }
 
 
 /* Session tab: the engine mark plus a quiet engine name. A tab used to show

@@ -1005,6 +1005,7 @@ mod tests {
             prod_allow_unfiltered_write: false,
             autocommit: true,
             query_timeout_secs: None,
+            degraded: None,
         });
         let err = guard_read_only(id, &state, "deleting keys").await.unwrap_err();
         assert!(crate::apperror::AppError::display(&err).contains("read-only"), "{err:?}");

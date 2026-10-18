@@ -139,7 +139,9 @@ struct MsConfig {
 /// the hostname once verification is on), so **VerifyCa without a CA path
 /// degrades to Required** — certificate AND hostname are both verified. That
 /// is stricter than the MySQL/PG reading of VerifyCa, never weaker.
-fn encryption_level(mode: &SslMode) -> EncryptionLevel {
+/// Pub(crate): the staged-connect diagnostics (commands/conndiag.rs) report the
+/// configured level — tiberius exposes no negotiated-cipher readout.
+pub(crate) fn encryption_level(mode: &SslMode) -> EncryptionLevel {
     match mode {
         SslMode::Disable => EncryptionLevel::NotSupported,
         SslMode::Preferred => EncryptionLevel::On,

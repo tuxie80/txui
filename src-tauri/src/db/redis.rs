@@ -76,19 +76,21 @@ async fn connect_manager(client: Client, connect_timeout_secs: Option<u32>) -> R
         .map_err(Into::into)
 }
 
-/// Dial with the connection's TLS posture, returning the manager and the
-/// client (the client is just the parsed URL; db sweeps use it for dedicated
-/// connections).
+/// Dial with the connection's TLS posture, returning the manager, the client
+/// (the client is just the parsed URL; db sweeps use it for dedicated
+/// connections) and whether the connection that succeeded uses TLS — the
+/// staged-connect diagnostics (commands/conndiag.rs) report that third value
+/// instead of guessing the scheme from the config.
 ///
 /// `SslMode::Preferred` is OPPORTUNISTIC — TLS if the server speaks it, plain
 /// otherwise, MySQL's semantics: a default connection to a stock local Redis
 /// must not fail because it attempted TLS against a plaintext port. The
 /// downgrade is logged, never silent.
-async fn dial(
+pub(crate) async fn dial(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
-) -> Result<(ConnectionManager, Client)> {
+) -> Result<(ConnectionManager, Client, bool)> {
     if matches!(config.ssl_mode, SslMode::Preferred) {
         let url = build_url_tls(config, password.clone(), host_override, true);
         let attempt = match Client::open(url) {
@@ -97,18 +99,19 @@ async fn dial(
             Err(e) => Err(e.into()),
         };
         match attempt {
-            Ok(pair) => return Ok(pair),
+            Ok((mgr, client)) => return Ok((mgr, client, true)),
             Err(e) => log::warn!(
                 "Redis TLS connect failed (ssl_mode=preferred): {e:#} — retrying without TLS"),
         }
     }
+    let tls = !matches!(config.ssl_mode, SslMode::Disable);
     let url = build_url(config, password, host_override);
     let client = Client::open(url)?;
     // The Client is kept on the session (cheap: it is just the parsed URL) so
     // db sweeps can open a DEDICATED connection instead of SELECT-switching
     // the shared manager.
     let mgr = connect_manager(client.clone(), config.connect_timeout_secs).await?;
-    Ok((mgr, client))
+    Ok((mgr, client, tls))
 }
 
 /// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
@@ -117,7 +120,7 @@ pub async fn open(
     password: Option<String>,
     host_override: Option<(&str, u16)>,
 ) -> Result<LiveSession> {
-    let (mgr, client) = dial(config, password, host_override).await?;
+    let (mgr, client, _tls) = dial(config, password, host_override).await?;
     Ok(LiveSession::Redis(mgr, client))
 }
 
@@ -125,7 +128,7 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
     let start = Instant::now();
     // Bounded like `open` — the Test button must not hang on a dead host.
     match dial(config, password, None).await {
-        Ok((mut mgr, _client)) => {
+        Ok((mut mgr, _client, _tls)) => {
             let pong: Result<String, _> = redis::cmd("PING").query_async(&mut mgr).await;
             let info: Result<String, _> = redis::cmd("INFO").arg("server").query_async(&mut mgr).await;
             let version = info.ok().and_then(|s| {

@@ -34,7 +34,7 @@ import type { TabActivity } from './store/tabActivity';
 import { stopSessionRuns } from './store/playgroundRuns';
 import { forgetKillPickerState } from './store/killPickerState';
 import { runUpdateCheck } from './store/updater';
-import { withDeadline } from './utils/withDeadline';
+import { withDeadline, connectDeadlineMs } from './utils/withDeadline';
 
 // Engine-specific panels split out of the initial bundle — cold start stays lean
 const RedisBrowser = lazy(() =>
@@ -289,9 +289,10 @@ export default function App() {
   const [prevView, setPrevView] = useState<{ view: View; activeSessionId: string | null } | null>(null);
   // Disconnect guard: what is still running on the session(s) being closed.
   // `fromSidebar` distinguishes the sidebar's drop-the-connection close (which
-  // logs the drop) from a single tab-X close.
+  // logs the drop) from a single tab-X close; `reconnect` makes the confirmed
+  // kill-and-close continue into a reconnect instead of a plain drop.
   const [disconnectAsk, setDisconnectAsk] =
-    useState<{ victims: Session[]; activities: TabActivity[]; fromSidebar: boolean } | null>(null);
+    useState<{ victims: Session[]; activities: TabActivity[]; fromSidebar: boolean; reconnect?: boolean } | null>(null);
 
   function openUtility(kind: 'multi-exec' | 'audit' | 'compare' | 'dump') {
     setPrevView({ view, activeSessionId });
@@ -1028,6 +1029,85 @@ export default function App() {
     }));
   }
 
+  /**
+   * Reconnect (sidebar context menu, W4.2): every session of the connection is
+   * replaced by a fresh one IN THE SAME TAB SLOT — the tab bar, the active
+   * tab and the view are rebound to the new session id instead of falling
+   * back to the welcome screen. The sidebar dispatches `dbgui:reconnect`;
+   * the session/tab state lives here, so the swap does too.
+   */
+  async function reconnectConnection(connectionId: string) {
+    const victims = sessionsRef.current.filter(s => s.connectionId === connectionId);
+    if (victims.length === 0) return;
+    // Same guard as disconnect: a reconnect kills the old sessions, so work
+    // still running on them is named first, never silently dropped.
+    const running = victims.flatMap(v => getSessionActivities(v.sessionId));
+    if (running.length > 0) {
+      setDisconnectAsk({ victims, activities: running, fromSidebar: true, reconnect: true });
+      return;
+    }
+    await reconnectNow(victims);
+  }
+
+  async function reconnectNow(victims: Session[]) {
+    const failures: string[] = [];
+    // The connection's own timeout bounds each reopen, as on any connect.
+    const cfg = await ConnectionsStore.list()
+      .then(l => l.find(c => c.id === victims[0].connectionId))
+      .catch(() => undefined);
+    const deadlineMs = connectDeadlineMs(cfg ?? { connect_timeout_secs: null });
+    // Serial, not parallel: each reopen is a full pool + tunnel bring-up, and
+    // a burst of them against a server that just came back is how the
+    // recovery dies again.
+    for (const old of victims) {
+      try {
+        // Open the NEW session first: when the server is still down the old
+        // tab keeps its (degraded) session rather than losing both.
+        const sessionId = await withDeadline(
+          ConnectionsStore.open(old.connectionId), deadlineMs);
+        const next: Session = { ...old, sessionId };
+        // Swap in place — same position in the tab row, same active tab.
+        // Read/write sessionsRef synchronously (closeSession does the same):
+        // a nested setState updater would see a stale snapshot here.
+        const list = sessionsRef.current.map(s => s.sessionId === old.sessionId ? next : s);
+        sessionsRef.current = list;
+        setSessions(list);
+        if (activeSessionId === old.sessionId) setActiveSessionId(sessionId);
+        setView(v => v.kind === 'query' && v.session.sessionId === old.sessionId
+          ? { kind: 'query', session: next } : v);
+        bumpSchemaRefresh(sessionId);
+        // The old session's backend close + per-session cache cleanup
+        // (privileges, flavor, spatial, replay). Its state removal is a
+        // no-op now — the swap already replaced it.
+        await closeSession(old);
+      } catch (err) {
+        failures.push(errorDisplay(err));
+      }
+    }
+    const name = victims[0].connectionName;
+    if (failures.length === 0) {
+      window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
+        detail: { level: 'ok', msg: `↻ ${name}: reconnected — ${victims.length} session${victims.length === 1 ? '' : 's'} reopened in place` },
+      }));
+    } else {
+      window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
+        detail: { level: 'err', msg: `↻ ${name}: reconnect failed — ${failures.join('; ')}` },
+      }));
+      await alertDialog(`Could not reconnect "${name}": ${failures.join('; ')}`);
+    }
+  }
+
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ connectionId: string }>).detail;
+      if (d?.connectionId) void reconnectConnection(d.connectionId);
+    };
+    window.addEventListener('dbgui:reconnect', on);
+    return () => window.removeEventListener('dbgui:reconnect', on);
+    // Mount-only: reads state through sessionsRef and setState updaters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function closeSession(session: Session): Promise<number[]> {
     // Stop and forget the session's tracked work NOW, not at QueryTabs unmount:
     // that unmount only runs after the setSessions below, which used to wait
@@ -1426,7 +1506,7 @@ export default function App() {
           onCancel={() => setDisconnectAsk(null)}
           onCloseKeepRunning={() => setDisconnectAsk(null)}
           onKillAndClose={() => {
-            const { victims, activities, fromSidebar } = disconnectAsk;
+            const { victims, activities, fromSidebar, reconnect } = disconnectAsk;
             setDisconnectAsk(null);
             // Fire every cancel, await NONE of them: each kill closure only
             // resolves when its cancel command returns, not when the work is
@@ -1435,7 +1515,8 @@ export default function App() {
             for (const a of activities) {
               try { void a.kill?.(); } catch { /* best-effort: disconnecting anyway */ }
             }
-            if (fromSidebar) void disconnectNow(victims);
+            if (reconnect) void reconnectNow(victims);
+            else if (fromSidebar) void disconnectNow(victims);
             else void closeSession(victims[0]);
           }}
         />

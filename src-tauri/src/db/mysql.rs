@@ -179,26 +179,52 @@ async fn setup_new_connection(conn: &mut sqlx::mysql::MySqlConnection, config: &
     }
 }
 
+/// Warm-pool floor for SESSION pools only. sqlx's idle reaper drops a
+/// connection past `idle_timeout` and then re-establishes up to
+/// `min_connections` in the background, so the first query after an idle
+/// stretch finds a live connection instead of paying a full re-dial plus the
+/// after_connect SET SESSION setup. Connect-time failure semantics do NOT
+/// change: `connect_with` already dials at least one connection eagerly at
+/// pool build (sqlx pool/options.rs — "immediately open at least one
+/// connection"), and with min=1 `try_min_connections` dials exactly that same
+/// one.
+const SESSION_MIN_CONNECTIONS: u32 = 1;
+
 pub async fn open(config: &ConnectionConfig, password: Option<String>, host_override: Option<(&str, u16)>) -> Result<LiveSession> {
     // Small pool: a GUI needs only a few concurrent statements. Idle-timeout
     // keeps the instance's thread count low when the user is reading results.
-    Ok(LiveSession::Mysql(open_pool(config, password, host_override, config.pool_max.unwrap_or(4)).await?))
+    Ok(LiveSession::Mysql(open_pool_opts(config, password, host_override, config.pool_max.unwrap_or(4), SESSION_MIN_CONNECTIONS).await?))
 }
 
 /// A standalone pool with an explicit size — the session pool stays at 4, but
 /// the Playground needs one server thread per spawned worker (and holds them
 /// all at once), so it builds its own pool and drops it when the run ends.
+///
+/// Standalone pools stay COLD (`min_connections(0)`): a playground/aux/diag
+/// pool lives for seconds and must not keep a background maintenance task
+/// re-dialling a server after its work is done.
 pub async fn open_pool(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
     max_connections: u32,
 ) -> Result<sqlx::MySqlPool> {
-    let opts = build_options(config, password, host_override)?;
+    open_pool_opts(config, password, host_override, max_connections, 0).await
+}
+
+/// Pool options shared by the session pool and standalone pools —
+/// `min_connections` is the ONLY difference between them (see
+/// [`SESSION_MIN_CONNECTIONS`]). Factored so the warm/cold split is
+/// testable without a server.
+fn pool_options(
+    config: &ConnectionConfig,
+    max_connections: u32,
+    min_connections: u32,
+) -> sqlx::mysql::MySqlPoolOptions {
     let setup_cfg = config.clone();
-    let connect = sqlx::mysql::MySqlPoolOptions::new()
+    sqlx::mysql::MySqlPoolOptions::new()
         .max_connections(max_connections.max(1))
-        .min_connections(0)
+        .min_connections(min_connections)
         .acquire_timeout(std::time::Duration::from_secs(config.pool_acquire_timeout_secs.unwrap_or(30).into()))
         .idle_timeout(std::time::Duration::from_secs(config.pool_idle_timeout_secs.unwrap_or(60).into()))
         .after_connect(move |conn, _meta| {
@@ -208,7 +234,17 @@ pub async fn open_pool(
                 Ok(())
             })
         })
-        .connect_with(opts);
+}
+
+async fn open_pool_opts(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+    max_connections: u32,
+    min_connections: u32,
+) -> Result<sqlx::MySqlPool> {
+    let opts = build_options(config, password, host_override)?;
+    let connect = pool_options(config, max_connections, min_connections).connect_with(opts);
     // Bounded + one-line errors — the shared helper (db/util.rs).
     let pool = super::util::connect_bounded(connect, config.connect_timeout_secs, fmt_conn_error).await?;
     Ok(pool)
@@ -1088,6 +1124,29 @@ mod tests {
         let opts = build_options(&cfg, None, Some(("127.0.0.1", 13306))).unwrap();
         assert_eq!(opts.get_host(), "127.0.0.1");
         assert_eq!(opts.get_port(), 13306);
+    }
+
+    /// The warm/cold split (W4.3): the session pool keeps one warm connection
+    /// so the first query after an idle stretch skips the re-dial + after_connect
+    /// setup; standalone pools (playground/aux/diag) stay cold so nothing
+    /// re-dials after their seconds-long life. Verified on the options builder —
+    /// no server needed.
+    #[test]
+    fn pool_options_split_warm_session_from_cold_standalone() {
+        use crate::db::types::{ConnectionConfig, Engine};
+        let cfg = ConnectionConfig::new(Engine::Mysql, "t");
+
+        let session = super::pool_options(&cfg, 4, super::SESSION_MIN_CONNECTIONS);
+        assert_eq!(session.get_min_connections(), 1, "session pool keeps one warm connection");
+        assert_eq!(session.get_max_connections(), 4);
+
+        let standalone = super::pool_options(&cfg, 8, 0);
+        assert_eq!(standalone.get_min_connections(), 0, "standalone pools stay cold");
+        assert_eq!(standalone.get_max_connections(), 8);
+
+        // max_connections is floored at 1 — a pool_max of 0 must not build a
+        // pool that can never dial.
+        assert_eq!(super::pool_options(&cfg, 0, 0).get_max_connections(), 1);
     }
 
     /// Live: a schema's object list surfaces tables, views, routines,

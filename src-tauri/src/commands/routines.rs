@@ -1035,6 +1035,7 @@ mod mysql_debug_tests {
             prod_allow_unfiltered_write: false,
             autocommit: true,
             query_timeout_secs: None,
+            degraded: None,
         }
     }
 

@@ -14,7 +14,7 @@ pub mod secretstore;
 pub mod tuner;
 mod commands;
 
-use commands::{ai::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, conndiag::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -183,7 +183,12 @@ pub fn run() {
 
             boot.mark("connection configs loaded");
 
-            app.handle().manage(AppState::new(history_store, data_dir, configs));
+            let app_state = AppState::new(history_store, data_dir, configs);
+            // Background tasks (the SSH tunnel liveness watcher, W4.5) emit
+            // app events through this — set before manage so no connect can
+            // race it.
+            let _ = app_state.app_handle.set(app.handle().clone());
+            app.handle().manage(app_state);
             boot.mark("AppState managed");
 
             // The window starts hidden (tauri.conf.json "visible": false) so the
@@ -718,10 +723,13 @@ pub fn run() {
             pg_notify,
             set_active_theme,
             test_connection_adhoc,
+            connect_test_staged,
             session_ping,
+            session_pool_stats,
             export_connections,
             import_connections,
             open_connection,
+            cancel_connect,
             open_scratch_session,
             close_connection,
             close_orphaned_connection,

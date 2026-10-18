@@ -14,6 +14,13 @@ pub type TunnelMap   = Arc<RwLock<HashMap<Uuid, SshTunnel>>>;
 /// Oneshot senders used to cancel in-flight queries.
 /// Key = "<session_id>-<tab_id>".
 pub type CancelMap   = Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
+/// Oneshot senders that cancel an in-flight CONNECT (W3.2). Key = connection
+/// id — the sidebar's connecting badge is per connection, and the frontend's
+/// double-connect guard means at most one user-facing open per connection is
+/// in flight (ephemeral quiet opens never register). The sender is inserted
+/// when the open starts and removed when it ends, so a present entry IS an
+/// in-flight connect.
+pub type ConnectCancelMap = Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
 /// Server-side kill handles of in-flight queries, so cancel can issue
 /// KILL QUERY / pg_cancel_backend / KILL. Same key as [`CancelMap`].
 ///
@@ -71,6 +78,12 @@ pub struct SessionGuard {
     /// rather than looked up per query — execute_query holds a session id, and
     /// this is what a session id already resolves to.
     pub query_timeout_secs: Option<u32>,
+    /// Runtime degradation note, set AFTER capture — currently by the SSH
+    /// tunnel liveness watcher (W4.5) when the tunnel's ssh child dies under a
+    /// live session. None = healthy. Not part of `from_config` (a fresh
+    /// session starts healthy); the watcher writes it, a close removes the
+    /// whole entry.
+    pub degraded: Option<String>,
 }
 
 impl SessionGuard {
@@ -106,6 +119,7 @@ impl SessionGuard {
             prod_allow_unfiltered_write: config.prod_allow_unfiltered_write,
             autocommit: config.autocommit,
             query_timeout_secs: config.query_timeout_secs,
+            degraded: None,
         }
     }
 }
@@ -205,6 +219,10 @@ pub struct AppState {
     pub sessions: SessionMap,
     pub tunnels:  TunnelMap,
     pub cancels:  CancelMap,
+    /// In-flight connects awaiting a `cancel_connect` signal (W3.2) — see
+    /// [`ConnectCancelMap`]. Not touched by `cancel_session_work`: a connect
+    /// has no session yet.
+    pub connect_cancels: ConnectCancelMap,
     pub kills:    KillMap,
     pub ch_kills: ChKillMap,
     pub session_dbs: SessionDbMap,
@@ -237,6 +255,11 @@ pub struct AppState {
     /// 10.3). Sessions without an entry (old servers, ACL refused) fall back
     /// to the shared baseline.
     pub redis_catalogs: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, std::sync::Arc<crate::redisguard::CommandCatalog>>>>,
+    /// The Tauri app handle, set once in `setup()` — background tasks (the SSH
+    /// tunnel liveness watcher, W4.5) emit app events through it. A OnceLock
+    /// because tests build AppState without a running app: an unset handle
+    /// means "nowhere to emit", and watchers stay quiet.
+    pub app_handle: std::sync::Arc<std::sync::OnceLock<tauri::AppHandle>>,
 }
 
 impl AppState {
@@ -250,6 +273,7 @@ impl AppState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             tunnels:  Arc::new(RwLock::new(HashMap::new())),
             cancels:  Arc::new(RwLock::new(HashMap::new())),
+            connect_cancels: Arc::new(RwLock::new(HashMap::new())),
             kills:    Arc::new(RwLock::new(HashMap::new())),
             ch_kills: Arc::new(RwLock::new(HashMap::new())),
             session_dbs: Arc::new(RwLock::new(HashMap::new())),
@@ -268,6 +292,7 @@ impl AppState {
             pg_listeners: Arc::new(RwLock::new(HashMap::new())),
             replay_cache: Arc::new(RwLock::new(HashMap::new())),
             redis_catalogs: Arc::new(RwLock::new(HashMap::new())),
+            app_handle: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -655,6 +680,7 @@ mod bulk_border_tests {
             prod_allow_unfiltered_write: false,
             autocommit: true,
             query_timeout_secs: None,
+            degraded: None,
         }
     }
 

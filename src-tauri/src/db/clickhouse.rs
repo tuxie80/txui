@@ -84,7 +84,10 @@ fn base_url(config: &ConnectionConfig, host_override: Option<(&str, u16)>) -> St
 /// connection to the standard port 8123 died in the TLS handshake with
 /// `received corrupt message of type InvalidContentType`: the server had
 /// answered in plain HTTP and rustls read it as a broken TLS record.
-fn ch_scheme(mode: &SslMode, port: u16) -> &'static str {
+/// Pub(crate): the staged-connect diagnostics (commands/conndiag.rs) report the
+/// scheme decision as their TLS stage — there is no STARTTLS-style negotiation
+/// on an HTTP client to measure separately.
+pub(crate) fn ch_scheme(mode: &SslMode, port: u16) -> &'static str {
     match mode {
         SslMode::Disable => "http",
         // Explicitly asked for TLS — honour it whatever the port.

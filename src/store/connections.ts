@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ConnectionConfig, PingResult } from '../types';
+import type { StagedConnectResult } from '../utils/connDiag';
 import { forgetConnection } from './virtualFks';
 
 export const ConnectionsStore = {
@@ -36,6 +37,25 @@ export const ConnectionsStore = {
       password:    password || null,
       sshPassword: sshPassword || null,
     });
+  },
+
+  /** Staged diagnostics (W3.1): DNS → TCP → SSH → TLS → auth → probe, each
+   *  with ok/fail/skipped + ms + detail. A failed run is DATA (verdict
+   *  'fail'), not a rejection. Blank passwords on a saved config fall back to
+   *  the stored secret backend-side. */
+  async testStaged(config: ConnectionConfig, password?: string, sshPassword?: string): Promise<StagedConnectResult> {
+    return invoke('connect_test_staged', {
+      config,
+      password:    password || null,
+      sshPassword: sshPassword || null,
+    });
+  },
+
+  /** Cancel an in-flight open_connection for this connection (W3.2). Returns
+   *  whether there was an attempt to cancel; the open itself then rejects
+   *  with code 'cancelled'. */
+  async cancelConnect(connectionId: string): Promise<boolean> {
+    return invoke('cancel_connect', { connectionId });
   },
 
   /** Round-trip latency (ms) of an OPEN session. */

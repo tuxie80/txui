@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod conndiag;
 pub mod connections;
 pub mod connimport;
 pub mod gsheets;

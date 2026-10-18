@@ -11,13 +11,82 @@ pub struct SshTunnel {
     /// for a known host. Surfaced by the caller (audit row + session log);
     /// the stderr drain task also `log::warn!`s it the moment it appears.
     pub host_key_note: Option<String>,
-    child: tokio::process::Child,
+    /// Shared with the liveness watcher (W4.5 — see [`watch_child_exit`]).
+    /// Behind a mutex because BOTH owners need `&mut`: the watcher polls
+    /// `try_wait`, Drop sends `start_kill`. Neither ever holds it across an
+    /// await — the watcher polls on a timer and Drop uses `try_lock` — so the
+    /// lock is a microsecond borrow, never a deadlock surface.
+    child: std::sync::Arc<tokio::sync::Mutex<tokio::process::Child>>,
+    /// Set by Drop (deliberate teardown) so the watcher does not report a
+    /// tunnel *we* killed as a lost one. Checked by the watcher before every
+    /// exit report — including after observing the exit, because the kill and
+    /// the observation race.
+    disarmed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for SshTunnel {
     fn drop(&mut self) {
-        // Best-effort async kill — cannot await in Drop
-        let _ = self.child.start_kill();
+        // Disarm FIRST: a deliberate close (session teardown, app exit) is not
+        // a lost tunnel, and the watcher must stay quiet about it.
+        self.disarmed.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Best-effort async kill — cannot await in Drop. try_lock because the
+        // watcher may be inside its microsecond try_wait borrow right now; in
+        // that (rare) case the watcher sees `disarmed` on its way out and does
+        // the kill itself, so the child dies either way.
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// How a dead ssh child is described in the `conn:tunnel-lost` event (W4.5).
+/// Pure so the wording is unit-tested.
+pub(crate) fn tunnel_exit_reason(code: Option<i32>) -> String {
+    match code {
+        Some(c) => format!("the ssh tunnel process exited unexpectedly (exit code {c})"),
+        None    => "the ssh tunnel process was terminated by a signal".to_string(),
+    }
+}
+
+/// Watch an ssh tunnel's child until it exits ON ITS OWN. Returns
+/// `Some(exit_code)` — None code = killed by a signal — exactly once;
+/// returns `None` (quiet) when the tunnel was deliberately torn down
+/// (disarmed via Drop).
+///
+/// Polling (`try_wait` on a timer) rather than `child.wait().await`: `wait`
+/// needs `&mut Child`, which would mean holding the mutex across an await —
+/// and Drop's `start_kill` needs that same mutex. A 1 s poll notices a dead
+/// tunnel orders of magnitude sooner than the next failed query did, without
+/// any lock being held across an await point.
+pub async fn watch_child_exit(
+    child: std::sync::Arc<tokio::sync::Mutex<tokio::process::Child>>,
+    disarmed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    poll: std::time::Duration,
+) -> Option<Option<i32>> {
+    loop {
+        tokio::time::sleep(poll).await;
+        if disarmed.load(std::sync::atomic::Ordering::SeqCst) {
+            // Deliberate teardown. If Drop's try_lock lost the race against
+            // our try_wait borrow, the kill is ours to deliver.
+            if let Ok(mut c) = child.try_lock() {
+                let _ = c.start_kill();
+            }
+            return None;
+        }
+        let exited: Option<Option<i32>> = match child.try_lock() {
+            Ok(mut c) => match c.try_wait() {
+                Ok(Some(status)) => Some(status.code()),
+                // Still running, or a transient OS error — look again next poll.
+                Ok(None) | Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        let Some(code) = exited else { continue };
+        // The exit may BE our own kill landing — disarm wins that race.
+        if disarmed.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        return Some(code);
     }
 }
 
@@ -437,7 +506,25 @@ impl SshTunnel {
         // task's log::warn!, just not the audit row.
         let host_key_note = scan.and_then(|s| s.host_key.lock().unwrap().clone());
 
-        Ok(SshTunnel { local_port, host_key_note, child })
+        Ok(SshTunnel {
+            local_port,
+            host_key_note,
+            child: std::sync::Arc::new(tokio::sync::Mutex::new(child)),
+            disarmed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
+    /// The handles a liveness watcher needs (W4.5): the shared child handle
+    /// and the disarm flag. The watcher (db::ssh::watch_child_exit, spawned by
+    /// the session-open path) reports an UNEXPECTED exit; Drop disarms it for
+    /// deliberate teardown.
+    pub fn watch_handles(
+        &self,
+    ) -> (
+        std::sync::Arc<tokio::sync::Mutex<tokio::process::Child>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        (self.child.clone(), self.disarmed.clone())
     }
 }
 
@@ -769,5 +856,67 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(250),
                 "it must have WAITED for the bind, not won a race: {:?}", start.elapsed());
         drop(delayed);
+    }
+
+    // ── tunnel liveness watch (W4.5) ─────────────────────────────────────────
+
+    /// A portable quick-exit child: the test binary itself in `--list` mode —
+    /// spawns and exits 0 on every desktop, no ssh or shell needed.
+    fn spawn_quick_exit_child() -> tokio::process::Child {
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn current exe --list")
+    }
+
+    #[test]
+    fn exit_reason_names_the_code_or_the_signal() {
+        assert_eq!(tunnel_exit_reason(Some(255)),
+            "the ssh tunnel process exited unexpectedly (exit code 255)");
+        assert_eq!(tunnel_exit_reason(None),
+            "the ssh tunnel process was terminated by a signal");
+    }
+
+    /// An ssh that dies under a live session: the watcher notices and reports
+    /// the exit code.
+    #[tokio::test]
+    async fn watcher_reports_an_unexpected_exit() {
+        let child = std::sync::Arc::new(tokio::sync::Mutex::new(spawn_quick_exit_child()));
+        let disarmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let code = watch_child_exit(child, disarmed, Duration::from_millis(20)).await;
+        assert_eq!(code, Some(Some(0)), "--list exits 0, and the watch must report it");
+    }
+
+    /// A deliberate teardown must NOT be reported — the disarm flag (set by
+    /// Drop) wins even when the child exits during the watch.
+    #[tokio::test]
+    async fn a_disarmed_watch_never_reports() {
+        let child = std::sync::Arc::new(tokio::sync::Mutex::new(spawn_quick_exit_child()));
+        let disarmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let code = watch_child_exit(child, disarmed, Duration::from_millis(20)).await;
+        assert_eq!(code, None, "a deliberate close is not a lost tunnel");
+    }
+
+    /// Drop is the deliberate-close path: it disarms (so the watcher stays
+    /// quiet) and still kills the child.
+    #[tokio::test]
+    async fn drop_disarms_the_watcher() {
+        let tunnel = SshTunnel {
+            local_port: 1,
+            host_key_note: None,
+            child: std::sync::Arc::new(tokio::sync::Mutex::new(spawn_quick_exit_child())),
+            disarmed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let (child, disarmed) = tunnel.watch_handles();
+        drop(tunnel);
+        assert!(disarmed.load(std::sync::atomic::Ordering::SeqCst),
+            "Drop must disarm before anything else");
+
+        // The child exits (killed by Drop, or already done on its own) — the
+        // watcher must return quiet either way.
+        let code = watch_child_exit(child, disarmed, Duration::from_millis(20)).await;
+        assert_eq!(code, None);
     }
 }

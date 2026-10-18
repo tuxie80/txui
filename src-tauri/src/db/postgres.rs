@@ -78,24 +78,43 @@ fn build_options(
     Ok(opts)
 }
 
+/// Warm-pool floor for SESSION pools only — see the MySQL twin
+/// (db/mysql.rs `SESSION_MIN_CONNECTIONS`) for the full reasoning. The short
+/// version: sqlx's reaper re-establishes up to min_connections in the
+/// background after idle reaping, and connect-time semantics are unchanged
+/// because `connect_with` already dials one connection eagerly at pool build.
+const SESSION_MIN_CONNECTIONS: u32 = 1;
+
 pub async fn open(config: &ConnectionConfig, password: Option<String>, host_override: Option<(&str, u16)>) -> Result<LiveSession> {
-    Ok(LiveSession::Postgres(open_pool(config, password, host_override, config.pool_max.unwrap_or(4)).await?))
+    Ok(LiveSession::Postgres(open_pool_opts(config, password, host_override, config.pool_max.unwrap_or(4), SESSION_MIN_CONNECTIONS).await?))
 }
 
 /// Standalone pool with an explicit size — see the MySQL twin: the Playground
 /// holds one backend per spawned worker, which the 4-slot session pool can't.
+/// Standalone pools stay COLD (`min_connections(0)`) — they live for seconds
+/// and must not keep a maintenance task re-dialling afterwards.
 pub async fn open_pool(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
     max_connections: u32,
 ) -> Result<sqlx::PgPool> {
-    let opts = build_options(config, password, host_override)?;
+    open_pool_opts(config, password, host_override, max_connections, 0).await
+}
+
+/// Pool options shared by the session pool and standalone pools —
+/// `min_connections` is the ONLY difference between them. Factored so the
+/// warm/cold split is testable without a server.
+fn pool_options(
+    config: &ConnectionConfig,
+    max_connections: u32,
+    min_connections: u32,
+) -> sqlx::postgres::PgPoolOptions {
     let init_sql = config.init_sql.clone();
     let stmt_timeout = config.statement_timeout_secs.filter(|s| *s > 0);
-    let connect = sqlx::postgres::PgPoolOptions::new()
+    sqlx::postgres::PgPoolOptions::new()
         .max_connections(max_connections.max(1))
-        .min_connections(0)
+        .min_connections(min_connections)
         .acquire_timeout(std::time::Duration::from_secs(config.pool_acquire_timeout_secs.unwrap_or(30).into()))
         .idle_timeout(std::time::Duration::from_secs(config.pool_idle_timeout_secs.unwrap_or(60).into()))
         .after_connect(move |conn, _meta| {
@@ -123,7 +142,17 @@ pub async fn open_pool(
                 Ok(())
             })
         })
-        .connect_with(opts);
+}
+
+async fn open_pool_opts(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+    max_connections: u32,
+    min_connections: u32,
+) -> Result<sqlx::PgPool> {
+    let opts = build_options(config, password, host_override)?;
+    let connect = pool_options(config, max_connections, min_connections).connect_with(opts);
     // Bounded + one-line errors — the shared helper (db/util.rs). Note the
     // unification: this path used to hand back sqlx's raw two-line Display
     // where MySQL rendered fmt_conn_error's actionable line.
@@ -2001,5 +2030,23 @@ mod driver_correctness_tests {
         assert!(r.error.is_some());
         assert!(start.elapsed() < std::time::Duration::from_secs(20),
                 "ping sat on the dial for {:?}", start.elapsed());
+    }
+
+    /// The warm/cold split (W4.3), PG side — the MySQL twin in db/mysql.rs has
+    /// the full reasoning. Session pool keeps one warm connection; standalone
+    /// (playground/aux/diag) pools stay cold. No server needed.
+    #[test]
+    fn pool_options_split_warm_session_from_cold_standalone() {
+        let cfg = ConnectionConfig::new(Engine::Postgres, "t");
+
+        let session = pool_options(&cfg, 4, SESSION_MIN_CONNECTIONS);
+        assert_eq!(session.get_min_connections(), 1, "session pool keeps one warm connection");
+        assert_eq!(session.get_max_connections(), 4);
+
+        let standalone = pool_options(&cfg, 8, 0);
+        assert_eq!(standalone.get_min_connections(), 0, "standalone pools stay cold");
+
+        // max_connections is floored at 1 — pool_max 0 must not be undialable.
+        assert_eq!(pool_options(&cfg, 0, 0).get_max_connections(), 1);
     }
 }
