@@ -55,6 +55,17 @@ export interface ConnectionConfig {
   // Cloud SQL IAM auth (MySQL / PostgreSQL): password is a minted OAuth token.
   use_iam_auth?: boolean;
   iam_key_path?: string | null;
+  // Password command (W5.1): a shell command whose stdout is the password,
+  // resolved by the backend at connect/test time and re-run after the TTL
+  // (%HOST%/%PORT%/%USER%/%DATABASE% placeholders). Stored in
+  // connections.json, never logged — for IAM / Vault / 1Password CLIs.
+  password_exec?: string | null;
+  /** Seconds a resolved password_exec result stays valid; null = run once. */
+  password_exec_ttl_secs?: number | null;
+  /** Databases the schema tree shows (W5.6); empty/absent = all. Exact names,
+   *  the engine's own case rules. Only meaningful where the tree's top level
+   *  is the database list — see utils/dbFilter.ts::dbFilterApplies. */
+  db_filter?: string[];
   // Connection tuning
   connect_timeout_secs: number | null;
   /** Client-side query deadline, seconds. null = use the app-wide Settings

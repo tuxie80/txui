@@ -72,6 +72,19 @@ impl Engine {
             Engine::SqlServer  => "sqlserver",
         }
     }
+
+    /// Does the schema tree's top level list server-side databases, so a
+    /// `db_filter` (W5.6) has something to act on? True for MySQL
+    /// (`SHOW DATABASES`), ClickHouse (`system.databases`), MongoDB
+    /// (`list_database_names`) and SQL Server (`sys.databases`).
+    ///
+    /// False where the concept does not map: PostgreSQL sessions pin one
+    /// database at connect and the top level is its schemas; Redis top-level
+    /// nodes are decorated labels ("db3 (12 keys)"), not plain names; the
+    /// file engines open one local path.
+    pub fn has_database_listing(&self) -> bool {
+        matches!(self, Engine::Mysql | Engine::Clickhouse | Engine::MongoDb | Engine::SqlServer)
+    }
 }
 
 /// Bound on the initial connect when neither the connection nor the app
@@ -330,6 +343,42 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub use_ssh_password: bool,
 
+    // ── Password-exec (pgAdmin's one generic credential hook) ───────────────
+    /// A shell command whose stdout IS the database password, run at connect /
+    /// test time instead of reading the secret store (W5.1). Covers AWS RDS
+    /// IAM token CLIs, Vault, 1Password `op`, … generically.
+    ///
+    /// `%HOST%` / `%PORT%` / `%USER%` / `%DATABASE%` placeholders are
+    /// substituted from this config — each value shell-quoted so it cannot
+    /// break out of its argument — and the substituted line runs through the
+    /// platform shell (`$SHELL -c` / `%ComSpec% /C`), the pgAdmin semantic.
+    /// The command is user-authored and stored in PLAINTEXT here (a command
+    /// string is not a secret); it is never logged, and neither is its output.
+    /// See docs/SECRETS.md.
+    #[serde(default)]
+    pub password_exec: Option<String>,
+    /// Re-run `password_exec` once the minted password is this old (seconds).
+    /// `None` caches the password for the whole app run — right for static
+    /// secrets, wrong for short-lived tokens (RDS IAM lives 15 min), which is
+    /// what the TTL exists for.
+    #[serde(default)]
+    pub password_exec_ttl_secs: Option<u64>,
+
+    // ── Schema-tree visibility ──────────────────────────────────
+    /// Databases the schema tree should show (W5.6 — pgAdmin's DB
+    /// restriction). Empty = show all, which is every config written before
+    /// the field existed. Exact names, matched with the engine's own case
+    /// rules (MySQL database names are case-sensitive where the filesystem
+    /// is) — no folding, no globs.
+    ///
+    /// Only meaningful where the tree's top level IS the server's database
+    /// list — see [`Engine::has_database_listing`]. PostgreSQL sessions pin
+    /// one database at connect (the `database` field is the restriction),
+    /// Redis databases are numbered, and the file engines open one local
+    /// path; the form greys the input for all of those.
+    #[serde(default)]
+    pub db_filter: Vec<String>,
+
     // ── Server activity log + prod hard limits ──────────────────
     /// Per-connection directory for server activity logs (append_server_log)
     #[serde(default)]
@@ -392,6 +441,9 @@ impl ConnectionConfig {
             statement_timeout_secs: None,
             ssh_jump: None,
             use_ssh_password: false,
+            password_exec: None,
+            password_exec_ttl_secs: None,
+            db_filter: Vec::new(),
             log_dir: None,
             prod_allow_ddl: false,
             prod_allow_unfiltered_write: false,
@@ -743,6 +795,30 @@ pub enum SchemaNode {
     Index    { name: String, unique: bool, columns: Vec<String> },
 }
 
+/// Narrow a top-level schema listing to a connection's `db_filter` (W5.6).
+///
+/// Only `Database` nodes are subject to the filter — everything else at the
+/// top level (PostgreSQL's cluster-global publications, tablespaces, …)
+/// belongs to no database and always passes. Matching is exact, with the
+/// engine's own case rules (no folding here: MySQL database names are
+/// case-sensitive where the filesystem is). An empty filter is "show all",
+/// so configs written before the field existed behave unchanged.
+///
+/// The caller gates on [`Engine::has_database_listing`] first — Redis's
+/// top-level `Database` nodes carry decorated labels ("db3 (12 keys)"), not
+/// plain names, and a filter there could only ever hide everything.
+pub fn filter_database_listing(
+    nodes: Vec<SchemaNode>,
+    filter: &[String],
+) -> Vec<SchemaNode> {
+    if filter.is_empty() {
+        return nodes;
+    }
+    nodes.into_iter()
+        .filter(|n| !matches!(n, SchemaNode::Database { name } if !filter.iter().any(|f| f == name)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::Engine;
@@ -826,5 +902,58 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&e).unwrap(), format!("\"{}\"", e.wire_name()));
         }
+    }
+
+    /// W5.6: the visibility filter drops only Database nodes whose name is
+    /// not listed, exactly (case rules are the engine's own — no folding);
+    /// every other node kind passes through, and an empty filter is a no-op.
+    #[test]
+    fn filter_database_listing_keeps_listed_databases_and_non_database_nodes() {
+        use super::{filter_database_listing, SchemaNode};
+        let nodes = vec![
+            SchemaNode::Database { name: "shop".into() },
+            SchemaNode::Database { name: "Shop".into() },
+            SchemaNode::Database { name: "mysql".into() },
+            SchemaNode::Tablespace { name: "pg_default".into(), schema: None,
+                                     owner: "postgres".into(), location: String::new() },
+        ];
+        let filter = vec!["shop".to_string()];
+        let out = filter_database_listing(nodes.clone(), &filter);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&out[0], SchemaNode::Database { name } if name == "shop"));
+        // Exact match — "Shop" is a different name where the engine says so.
+        assert!(matches!(&out[1], SchemaNode::Tablespace { .. }));
+        // Empty filter = show all, the pre-W5.6 behaviour.
+        assert_eq!(filter_database_listing(nodes, &[]).len(), 4);
+    }
+
+    /// The engine gate: only engines whose tree top level IS the server's
+    /// database list are filterable. Redis emits decorated labels and PG pins
+    /// one database at connect, so a filter there would be wrong, not merely
+    /// useless.
+    #[test]
+    fn has_database_listing_matches_the_tree_top_level() {
+        for e in [Engine::Mysql, Engine::Clickhouse, Engine::MongoDb, Engine::SqlServer] {
+            assert!(e.has_database_listing(), "{e:?}");
+        }
+        for e in [Engine::Postgres, Engine::Redis, Engine::Sqlite, Engine::Parquet, Engine::Duckdb] {
+            assert!(!e.has_database_listing(), "{e:?}");
+        }
+    }
+
+    /// A connections.json written before W5.6 has no `db_filter` key — it must
+    /// still deserialize (serde default), and the default is "show all".
+    #[test]
+    fn config_without_db_filter_deserializes_to_show_all() {
+        let cfg = super::ConnectionConfig::new(Engine::Mysql, "t");
+        let json = serde_json::to_value(&cfg).unwrap();
+        // Prove the round-trip both ways: strip the key (an old file) and the
+        // fresh config itself must both load with an empty filter.
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("db_filter");
+        let back: super::ConnectionConfig = serde_json::from_value(old).unwrap();
+        assert!(back.db_filter.is_empty());
+        let back: super::ConnectionConfig = serde_json::from_value(json).unwrap();
+        assert!(back.db_filter.is_empty());
     }
 }

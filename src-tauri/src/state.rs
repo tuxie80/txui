@@ -78,6 +78,11 @@ pub struct SessionGuard {
     /// rather than looked up per query — execute_query holds a session id, and
     /// this is what a session id already resolves to.
     pub query_timeout_secs: Option<u32>,
+    /// Databases the schema tree shows (W5.6); empty = all. Captured at open
+    /// so `list_schema` can narrow the top-level listing without re-reading
+    /// the config store. Only consulted for engines where
+    /// [`Engine::has_database_listing`] holds.
+    pub db_filter: Vec<String>,
     /// Runtime degradation note, set AFTER capture — currently by the SSH
     /// tunnel liveness watcher (W4.5) when the tunnel's ssh child dies under a
     /// live session. None = healthy. Not part of `from_config` (a fresh
@@ -119,6 +124,7 @@ impl SessionGuard {
             prod_allow_unfiltered_write: config.prod_allow_unfiltered_write,
             autocommit: config.autocommit,
             query_timeout_secs: config.query_timeout_secs,
+            db_filter: config.db_filter.clone(),
             degraded: None,
         }
     }
@@ -680,6 +686,7 @@ mod bulk_border_tests {
             prod_allow_unfiltered_write: false,
             autocommit: true,
             query_timeout_secs: None,
+            db_filter: Vec::new(),
             degraded: None,
         }
     }
@@ -745,6 +752,17 @@ mod bulk_border_tests {
         // "prod" is matched exactly — a label that merely contains it is a
         // different environment, and guessing would block the wrong servers.
         assert!(guard(Some("preprod"), false).refuse_bulk("CSV import").is_ok());
+    }
+
+    /// W5.6: the visibility filter rides the guard so `list_schema` needs
+    /// nothing but the session id. Captured verbatim — an empty list stays
+    /// empty ("show all"), never None-or-empty ambiguity.
+    #[test]
+    fn from_config_captures_the_db_filter() {
+        let mut cfg = crate::db::types::ConnectionConfig::new(Engine::Mysql, "t");
+        assert!(SessionGuard::from_config(&cfg).db_filter.is_empty());
+        cfg.db_filter = vec!["shop".into(), "staging".into()];
+        assert_eq!(SessionGuard::from_config(&cfg).db_filter, ["shop", "staging"]);
     }
 }
 

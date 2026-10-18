@@ -332,6 +332,21 @@ body.zen .status-bar {
 .empty-state { padding: 24px 12px; text-align: center; color: var(--text2); }
 .empty-state p { margin-bottom: 10px; }
 
+/* W5.3 local service discovery — quiet rows inside the empty state. */
+.discover { margin-top: 10px; }
+.discover-list { margin-top: 8px; text-align: left; }
+.discover-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 4px;
+  font-size: calc(12px * var(--font-scale, 1));
+}
+.discover-row .discover-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.discover-note { color: var(--text2); font-size: calc(11px * var(--font-scale, 1)); margin: 6px 0 0; }
+
+/* W5.8: the connection list is keyboard-focusable (arrows + Enter). */
+.conn-list:focus { outline: none; }
+.conn-list:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
 .open-sessions { border-top: 1px solid var(--border); padding: 2px 0; }
 .sidebar-section-label {
   padding: 4px 8px 2px;

@@ -1,5 +1,5 @@
 import { errorDisplay, isCancelled } from '../utils/appError';
-import { confirmDialog } from '../utils/appDialog';
+import { confirmDialog, promptDialog } from '../utils/appDialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -16,6 +16,8 @@ import { stagedDeadlineMs, stagedToPing } from '../utils/connDiag';
 import type { StagedConnectResult } from '../utils/connDiag';
 import { ConnDiagChecklist } from './ConnDiagChecklist';
 import { configToConnectionUrl } from '../utils/connUrl';
+import { isEncryptedExport } from '../utils/connExport';
+import { LocalDiscovery } from './LocalDiscovery';
 import { getPref, PREFS } from '../store/preferences';
 import { shortcuts } from '../utils/platform';
 import { labelsOf, visibleLabels, matchesLabelSearch } from '../utils/labels';
@@ -25,7 +27,7 @@ const SC = shortcuts();
 
 interface Props {
   sessions: Session[];
-  onNewConnection: (group?: string) => void;
+  onNewConnection: (group?: string, prefill?: Partial<ConnectionConfig>) => void;
   onEditConnection: (config: ConnectionConfig) => void;
   onOpenSession: (session: Session) => void;
   onOpenMultiExec: () => void;
@@ -240,8 +242,11 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
     setConns(prev => prev.filter(c => c.config.id !== state.config.id));
   }
 
-  function logConn(level: 'info' | 'ok' | 'err', msg: string) {
-    window.dispatchEvent(new CustomEvent('dbgui:conn-log', { detail: { level, msg } }));
+  /** Connection-lifecycle log line (W5.0): App's listener writes it to the
+   *  session log — the explicit sessionId when one is in scope, else the
+   *  active session's. */
+  function logConn(level: 'info' | 'ok' | 'err', msg: string, sessionId?: string) {
+    window.dispatchEvent(new CustomEvent('dbgui:conn-log', { detail: { level, msg, sessionId } }));
   }
 
   /**
@@ -296,7 +301,7 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
         filePath: state.config.file_path,
       };
       setConns(prev => prev.map(c => c.config.id === id ? { ...c, status: 'connected' } : c));
-      logConn('ok', `Connected to ${state.config.name}`);
+      logConn('ok', `Connected to ${state.config.name}`, sessionId);
       onOpenSession(session);
     } catch (err) {
       // The ✕ on the connecting badge (W3.2): the user stopped this attempt —
@@ -391,7 +396,9 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
     }
   }
 
-  /** Export all connections (configs only, never secrets) to a JSON file. */
+  /** Export all connections to a JSON file. The default carries configs only,
+   *  never secrets (unchanged); opt-in, the secrets come along inside a
+   *  passphrase-protected envelope (W5.2, TablePlus/Compass model). */
   async function handleExport() {
     try {
       const path = await save({
@@ -399,23 +406,55 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
         filters: [{ name: 'TxUI connections', extensions: ['json'] }],
       });
       if (!path) return;
-      const json = await ConnectionsStore.exportAll();
-      await invoke('write_text_file', { path, contents: json });
-      logConn('ok', `Exported connections to ${path}`);
+      // Enter = OK = the default (configs only, no secrets). "Include
+      // passwords…" is the explicit click, gated again by the passphrase
+      // prompt (Escape there aborts before anything is written).
+      const configsOnly = await confirmDialog(
+        'Include stored passwords in the export?\n\n'
+        + 'Configs only (default): no secrets travel; recipients set their own passwords.\n'
+        + 'Include passwords: everything travels, inside an envelope protected by a passphrase you choose next.',
+        { title: 'Export connections', okLabel: 'Configs only (default)', cancelLabel: 'Include passwords…' });
+      if (!configsOnly) {
+        const passphrase = await promptDialog(
+          'Passphrase for this export — asked for again at import:', '',
+          { title: 'Encrypt export', okLabel: 'Export' });
+        // An empty passphrase is not an export anyone can trust — abort.
+        if (!passphrase) { logConn('info', 'Export cancelled — no passphrase given'); return; }
+        const payload = await invoke<string>('export_connections_encrypted', { ids: null, passphrase });
+        await invoke('write_text_file', { path, contents: payload });
+        logConn('ok', `Exported connections to ${path} — encrypted, passwords included`);
+      } else {
+        const json = await ConnectionsStore.exportAll();
+        await invoke('write_text_file', { path, contents: json });
+        logConn('ok', `Exported connections to ${path}`);
+      }
     } catch (err) {
       logConn('err', `Export failed — ${errorDisplay(err)}`);
     }
   }
 
-  /** Import an export envelope; fresh ids are assigned, no secrets come along. */
+  /** Import an export envelope; fresh ids are assigned. The encrypted
+   *  envelope (W5.2, detected by shape) asks for its passphrase and brings
+   *  the passwords along; the plain one never carries secrets. */
   async function handleImport() {
     try {
       const path = await open({ multiple: false, filters: [{ name: 'TxUI connections', extensions: ['json'] }] });
       if (!path || typeof path !== 'string') return;
       const json = await invoke<string>('read_text_file', { path });
-      const n = await ConnectionsStore.importJson(json);
-      window.dispatchEvent(new CustomEvent('dbgui:connections-changed'));
-      logConn('ok', `Imported ${n} connection${n === 1 ? '' : 's'} — passwords are not imported, set them per connection`);
+      let n: number;
+      if (isEncryptedExport(json)) {
+        const passphrase = await promptDialog(
+          'This export is passphrase-protected. Passphrase:', '',
+          { title: 'Import connections', okLabel: 'Import' });
+        if (!passphrase) { logConn('info', 'Import cancelled — no passphrase given'); return; }
+        n = await invoke<number>('import_connections_encrypted', { payload: json, passphrase });
+        window.dispatchEvent(new CustomEvent('dbgui:connections-changed'));
+        logConn('ok', `Imported ${n} connection${n === 1 ? '' : 's'} — passwords included`);
+      } else {
+        n = await ConnectionsStore.importJson(json);
+        window.dispatchEvent(new CustomEvent('dbgui:connections-changed'));
+        logConn('ok', `Imported ${n} connection${n === 1 ? '' : 's'} — passwords are not imported, set them per connection`);
+      }
     } catch (err) {
       logConn('err', `Import failed — ${errorDisplay(err)}`);
     }
@@ -554,6 +593,84 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
   }, [conns, filter]);
   const filtering = filter.trim().length > 0;
 
+  // W5.8 keyboard navigation: the rows in RENDER order (a collapsed folder's
+  // contents are not rendered, so they are not reachable by arrows either).
+  const visibleFlat = useMemo(() => {
+    const out: ConnState[] = [];
+    const walk = (n: FolderNode) => {
+      if (n.path !== '' && !filtering && collapsed.has(n.path)) return;
+      out.push(...n.items);
+      for (const child of n.children.values()) walk(child);
+    };
+    walk(tree);
+    return out;
+  }, [tree, filtering, collapsed]);
+
+  const listRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
+
+  /** Arrow keys on the list / Enter to connect; printable keys type into the
+   *  filter (the focus follows, so the box owns the text from then on). */
+  function onListKey(e: React.KeyboardEvent) {
+    const ids = visibleFlat.map(c => c.config.id);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (ids.length === 0) return;
+      const i = ids.indexOf(selectedId ?? '');
+      const next = i === -1
+        ? (e.key === 'ArrowDown' ? ids[0] : ids[ids.length - 1])
+        : ids[(i + (e.key === 'ArrowDown' ? 1 : -1) + ids.length) % ids.length];
+      setSelectedId(next);
+    } else if (e.key === 'Enter') {
+      const cs = visibleFlat.find(c => c.config.id === selectedId);
+      if (cs) { e.preventDefault(); void handleConnect(cs); }
+    } else if (e.key === 'Escape' && filter) {
+      e.preventDefault();
+      setFilter('');
+    } else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      setFilter(f => f + e.key);
+      filterRef.current?.focus();
+    }
+  }
+
+  /** Keys while the FILTER box has focus: ArrowDown steps into the list,
+   *  Enter connects the selected (or first visible) row. */
+  function onFilterKey(e: React.KeyboardEvent) {
+    if (e.key === 'ArrowDown') {
+      const first = visibleFlat[0];
+      if (first) { e.preventDefault(); setSelectedId(first.config.id); listRef.current?.focus(); }
+    } else if (e.key === 'Enter') {
+      const cs = visibleFlat.find(c => c.config.id === selectedId) ?? visibleFlat[0];
+      if (cs) { e.preventDefault(); void handleConnect(cs); }
+    } else if (e.key === 'Escape' && filter) {
+      setFilter('');
+    }
+  }
+
+  // Keep the keyboard-selected row in view — selection is also set by click,
+  // and scrollIntoView({block:'nearest'}) is a no-op when already visible.
+  useEffect(() => {
+    if (!selectedId) return;
+    listRef.current?.querySelector('.conn-item.selected')
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [selectedId]);
+
+  // Pool occupancy (W4.4 surface) in the expanded health/diagnostics row of a
+  // CONNECTED connection: how busy is this pool right now. null (non-sqlx
+  // engines) renders nothing at all — there is no pool to describe.
+  const [poolStats, setPoolStats] = useState<Record<string, { size: number; idle: number; in_use: number } | null>>({});
+  useEffect(() => {
+    if (!errDetailId) return;
+    const s = sessions.find(x => x.connectionId === errDetailId);
+    if (!s) return;
+    let alive = true;
+    ConnectionsStore.sessionPoolStats(s.sessionId)
+      .then(r => { if (alive) setPoolStats(prev => ({ ...prev, [errDetailId]: r })); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [errDetailId, sessions]);
+
   function renderConn(cs: ConnState, depth: number) {
     const connected = sessions.some(s => s.connectionId === cs.config.id);
     // W4.1: amber while a connected row's keepalive fails (or its tunnel died).
@@ -669,6 +786,11 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
               </div>
             )}
             {cs.diag && <ConnDiagChecklist result={cs.diag} />}
+            {connected && poolStats[cs.config.id] && (
+              <div className="conn-error-text">
+                pool: {poolStats[cs.config.id]!.in_use} in use · {poolStats[cs.config.id]!.idle} idle · {poolStats[cs.config.id]!.size} total
+              </div>
+            )}
             <div className="conn-error-actions">
               {cs.status === 'error' && (<>
                 <button type="button"
@@ -753,10 +875,12 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
       </div>
 
       <input
+        ref={filterRef}
         className="conn-filter"
-        placeholder="Filter connections…"
+        placeholder="Filter connections… (↑↓ move, Enter connects)"
         value={filter}
         onChange={e => setFilter(e.target.value)}
+        onKeyDown={onFilterKey}
       />
 
       {/* No hover tooltips anywhere in the connections list — the row's own
@@ -764,6 +888,9 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
           the list is noise, not help. `data-notip` suppresses both our tooltip
           and the browser's native `title` one (see utils/tooltip.ts). */}
       <div className="conn-list" data-notip
+        ref={listRef}
+        tabIndex={0}
+        onKeyDown={onListKey}
         onDragOver={e => { if (dragId) { e.preventDefault(); setDropPath(''); } }}
         onDrop={e => { e.preventDefault(); dropOnFolder(''); }}>
         {/* Pinned quick-access: starred connections.
@@ -794,6 +921,12 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
           <div className="empty-state">
             <p>No connections yet.</p>
             <button className="primary" onClick={() => onNewConnection()}>Add connection</button>
+            {/* W5.3: probe this machine's well-known ports and offer what
+                answers as one-click, prefilled connection forms. */}
+            <LocalDiscovery
+              existing={[]}
+              onAdd={prefill => onNewConnection(undefined, prefill)}
+            />
             {/* Scratch needs no connection at all — the zero-config way to be
                 running SQL ten seconds after first launch. */}
             <button className="toolbar-btn" style={{ marginTop: 8 }}
@@ -831,7 +964,7 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
           onClick={() => window.dispatchEvent(new CustomEvent('dbgui:new-scratch'))}>🦆</button>
         <button className="icon-btn" title="Import connections from JSON" onClick={handleImport}>⤓</button>
         <button className="icon-btn" title="Import from ~/.pgpass, ~/.pg_service.conf, ~/.my.cnf" onClick={handleImportTools}>⇲</button>
-        <button className="icon-btn" title="Export all connections to JSON (no passwords)" onClick={handleExport}>⤒</button>
+        <button className="icon-btn" title="Export all connections to JSON (passwords optional, passphrase-protected)" onClick={handleExport}>⤒</button>
       </div>
 
       {/* Full-width, labelled — the old ◂ icon in the header row read as

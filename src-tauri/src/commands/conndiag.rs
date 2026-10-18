@@ -32,7 +32,7 @@ use crate::db::{clickhouse, connection, duckdb, mongodb, mysql, parquet, postgre
 use crate::state::AppState;
 
 use super::connections::{
-    get_password, open_tunnel, resolve_test_secret, stored_ssh_password, with_default_timeout,
+    open_tunnel, resolve_test_password, resolve_test_secret, stored_ssh_password, with_default_timeout,
 };
 
 /// One stage's outcome, exactly as serialized to the frontend.
@@ -261,11 +261,9 @@ pub async fn connect_test_staged(
     // The app-wide connect timeout, as on every connect path.
     let config = with_default_timeout(&config, &state);
     let saved = !config.id.is_nil();
-    let password = resolve_test_secret(
-        password,
-        if saved { get_password(&config, &state.data_dir) } else { None },
-        saved,
-    );
+    // A password-exec mint failure is not a command error — it becomes the
+    // auth stage's failure detail (a failed verdict is DATA, above).
+    let password = resolve_test_password(&config, password, &state.data_dir).await;
     let ssh_password = resolve_test_secret(
         ssh_password,
         if saved { stored_ssh_password(&config, &state.data_dir) } else { None },
@@ -579,7 +577,7 @@ fn ssl_mode_name(mode: &SslMode) -> &'static str {
 /// down the throwaway session and tunnel.
 async fn run_staged(
     config: &ConnectionConfig,
-    password: Option<String>,
+    password: Result<Option<String>, String>,
     ssh_password: Option<String>,
 ) -> StagedConnectResult {
     let total_start = Instant::now();
@@ -639,10 +637,21 @@ async fn run_staged(
                 }
             }
             "auth" => {
+                // A password-exec mint failure means the credential never
+                // existed — fail auth with that reason instead of dialing.
+                let password = match &password {
+                    Ok(pw) => pw.clone(),
+                    Err(e) => {
+                        let outcome = (StageStatus::Fail, 0, Some(e.clone()));
+                        failed_label = Some(planned.label.clone());
+                        outcomes[i] = Some(outcome);
+                        continue;
+                    }
+                };
                 let host_override: Option<(&str, u16)> = tunnel.as_ref()
                     .map(|t| ("127.0.0.1", t.local_port));
                 let (ms, r) = bounded(timeout, "authentication",
-                    auth_open(config, password.clone(), host_override)).await;
+                    auth_open(config, password, host_override)).await;
                 match r {
                     Ok((s, tls, note)) => {
                         session = Some(s);
@@ -907,7 +916,7 @@ mod tests {
         let mut c = ConnectionConfig::new(Engine::Duckdb, "mem");
         c.file_path = Some(":memory:".into());
         c.connect_timeout_secs = Some(5);
-        let r = run_staged(&c, None, None).await;
+        let r = run_staged(&c, Ok(None), None).await;
         assert_eq!(r.verdict, ConnectVerdict::Ok, "stages: {:?}", r.stages.iter().map(|s| (s.id, s.status, s.detail.clone())).collect::<Vec<_>>());
         let by_id = |id: &str| r.stages.iter().find(|s| s.id == id).expect("stage");
         for id in ["dns", "tcp", "ssh", "tls"] {
@@ -926,13 +935,28 @@ mod tests {
         let mut c = ConnectionConfig::new(Engine::Duckdb, "gone");
         c.file_path = Some("/nonexistent/definitely-not-here.duckdb".into());
         c.connect_timeout_secs = Some(5);
-        let r = run_staged(&c, None, None).await;
+        let r = run_staged(&c, Ok(None), None).await;
         assert_eq!(r.verdict, ConnectVerdict::Fail);
         let by_id = |id: &str| r.stages.iter().find(|s| s.id == id).expect("stage");
         assert_eq!(by_id("auth").status, StageStatus::Fail);
         assert!(by_id("auth").detail.as_deref().unwrap_or("").contains("no such file"));
         assert_eq!(by_id("probe").status, StageStatus::Skipped);
         assert!(by_id("probe").detail.as_deref().unwrap_or("").contains("not reached"));
+    }
+
+    /// A password-exec mint failure (W5.1) fails the AUTH stage with the mint
+    /// error — no dial is attempted with a credential that never existed.
+    #[tokio::test]
+    async fn a_password_mint_failure_fails_auth_without_dialing() {
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "mem");
+        c.file_path = Some(":memory:".into());
+        c.connect_timeout_secs = Some(5);
+        let r = run_staged(&c, Err("password command failed (exit 3)".into()), None).await;
+        assert_eq!(r.verdict, ConnectVerdict::Fail);
+        let by_id = |id: &str| r.stages.iter().find(|s| s.id == id).expect("stage");
+        assert_eq!(by_id("auth").status, StageStatus::Fail);
+        assert_eq!(by_id("auth").detail.as_deref(), Some("password command failed (exit 3)"));
+        assert_eq!(by_id("probe").status, StageStatus::Skipped);
     }
 
     /// Failure injection without a server: port 1 on the loopback refuses
@@ -944,7 +968,7 @@ mod tests {
         c.host = Some("127.0.0.1".into());
         c.port = Some(1);
         c.connect_timeout_secs = Some(2);
-        let r = run_staged(&c, None, None).await;
+        let r = run_staged(&c, Ok(None), None).await;
         assert_eq!(r.verdict, ConnectVerdict::Fail);
         let by_id = |id: &str| r.stages.iter().find(|s| s.id == id).expect("stage");
         assert_eq!(by_id("dns").status, StageStatus::Skipped);
@@ -971,7 +995,7 @@ mod tests {
         } else {
             None
         };
-        let r = run_staged(&config, password, ssh_password).await;
+        let r = run_staged(&config, Ok(password), ssh_password).await;
         for s in &r.stages {
             eprintln!("{:?} {:?} {}ms {:?}", s.id, s.status, s.ms, s.detail);
         }

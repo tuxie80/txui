@@ -11,10 +11,12 @@ pub mod instancedata;
 pub mod sqlfile;
 pub mod importconv;
 pub mod secretstore;
+pub mod password_exec;
+pub mod connexport;
 pub mod tuner;
 mod commands;
 
-use commands::{ai::*, conndiag::*, connections::*, connimport::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -728,6 +730,10 @@ pub fn run() {
             session_pool_stats,
             export_connections,
             import_connections,
+            export_connections_encrypted,
+            import_connections_encrypted,
+            connect_list_databases,
+            discover_local_services,
             open_connection,
             cancel_connect,
             open_scratch_session,

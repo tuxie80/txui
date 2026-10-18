@@ -2,6 +2,7 @@ pub mod ai;
 pub mod conndiag;
 pub mod connections;
 pub mod connimport;
+pub mod discover;
 pub mod gsheets;
 pub mod query;
 pub mod schema;

@@ -63,6 +63,13 @@ export const ConnectionsStore = {
     return invoke('session_ping', { sessionId });
   },
 
+  /** Pool occupancy of an OPEN session (W4.4): total / idle / in-use.
+   *  null for the non-sqlx engines (Redis, MongoDB, file engines) — there is
+   *  no pool to report. */
+  async sessionPoolStats(sessionId: string): Promise<{ size: number; idle: number; in_use: number } | null> {
+    return invoke('session_pool_stats', { sessionId });
+  },
+
   /** JSON envelope of all saved connections (no secrets). */
   async exportAll(): Promise<string> {
     return invoke('export_connections', { ids: null });

@@ -7,15 +7,29 @@ use crate::state::AppState;
 
 /// List top-level schema nodes.
 /// `context` = database name (MySQL) | schema name (PG) | None = top level.
+///
+/// The top-level listing is narrowed by the connection's `db_filter` (W5.6)
+/// when the session has one — every frontend consumer of the tree (sidebar,
+/// database switcher, data browser) goes through this one command, so
+/// filtering here filters all of them, and a hidden database's children are
+/// never introspected because the node is never expanded.
 #[tauri::command]
 pub async fn list_schema(
     session_id: Uuid,
     context: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SchemaNode>, crate::apperror::AppError> {
-    connection::list_schema(session_id, context.as_deref(), &state.sessions)
-        .await
-        .map_err(Into::into)
+    let nodes = connection::list_schema(session_id, context.as_deref(), &state.sessions).await?;
+    if context.is_some() {
+        return Ok(nodes);
+    }
+    let guard = state.session_meta.read().await.get(&session_id).cloned();
+    match guard {
+        Some(g) if g.engine.has_database_listing() && !g.db_filter.is_empty() => {
+            Ok(crate::db::types::filter_database_listing(nodes, &g.db_filter))
+        }
+        _ => Ok(nodes),
+    }
 }
 
 /// List columns + indexes for a table.

@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { parseConnectionUrl, clickhouseCeilingParams, CH_CEILING_KEYS } from '../utils/connUrl';
 import { portError, sshPortError, redisDbError, filePathError } from '../utils/connValidate';
-import { withDeadline } from '../utils/withDeadline';
+import { withDeadline, connectDeadlineMs } from '../utils/withDeadline';
 import { stagedDeadlineMs, verdictLine } from '../utils/connDiag';
 import type { StagedConnectResult } from '../utils/connDiag';
 import { ConnDiagChecklist } from './ConnDiagChecklist';
@@ -18,7 +18,9 @@ import { PALETTE } from '../utils/palette';
 import { basename } from '../utils/platform';
 import { available, unavailableProps } from '../utils/platformCaps';
 import { parseLabels, formatLabels, labelsFromTags } from '../utils/labels';
+import { dbFilterApplies, parseDbFilter, formatDbFilter } from '../utils/dbFilter';
 import { ParquetSchemaDialog } from './ParquetSchemaDialog';
+import { securityCopyFrom, securityCopySources } from '../utils/connSecurity';
 
 const ENGINE_LABELS: Record<Engine, string> = {
   mysql:    'MySQL / MariaDB / Percona',
@@ -75,9 +77,14 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [group,    setGroup]    = useState(initial?.group ?? initialGroup ?? '');
   const [color,    setColor]    = useState<string | null>(initial?.color ?? null);
   const [knownGroups, setKnownGroups] = useState<string[]>([]);
+  // All saved configs — feeds the Security tab's "Copy from…" select (W5.5).
+  const [knownConns, setKnownConns] = useState<ConnectionConfig[]>([]);
   useEffect(() => {
     ConnectionsStore.list()
-      .then(cs => setKnownGroups([...new Set(cs.map(c => c.group).filter((g): g is string => !!g))].sort()))
+      .then(cs => {
+        setKnownGroups([...new Set(cs.map(c => c.group).filter((g): g is string => !!g))].sort());
+        setKnownConns(cs);
+      })
       .catch(() => {});
   }, []);
   const [environment, setEnvironment] = useState(initial?.environment ?? '');
@@ -91,6 +98,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   // rather than a chip editor plus a hidden-toggle that can disagree with it.
   const [labelText, setLabelText] = useState(
     formatLabels(initial?.labels?.length ? initial.labels : labelsFromTags(initial?.tags)));
+  // W5.6 database visibility filter: exact names, comma-separated; blank
+  // shows everything (the pre-filter behaviour).
+  const [dbFilterText, setDbFilterText] = useState(formatDbFilter(initial?.db_filter));
   const [sslMode,  setSslMode]  = useState<SslMode>(initial?.ssl_mode ?? 'preferred');
   const [saving,   setSaving]   = useState(false);
   const [error,    setError]    = useState<string | null>(null);
@@ -126,6 +136,10 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   // Cloud SQL IAM auth (MySQL / PostgreSQL)
   const [useIamAuth,  setUseIamAuth]  = useState(initial?.use_iam_auth ?? false);
   const [iamKeyPath,  setIamKeyPath]  = useState(initial?.iam_key_path ?? '');
+  // Password command (W5.1): stdout is the password; backend resolves it at
+  // connect/test and re-runs after the TTL.
+  const [passwordExec,    setPasswordExec]    = useState(initial?.password_exec ?? '');
+  const [passwordExecTtl, setPasswordExecTtl] = useState(initial?.password_exec_ttl_secs?.toString() ?? '');
 
   // Advanced (connection tuning / pool) — lives on the Advanced tab now.
   const [tab, setTab] = useState<CFTab>('connection');
@@ -159,6 +173,55 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [testResult,  setTestResult]  = useState<{ ok: boolean; msg: string } | null>(null);
   /** The staged run behind testResult (connect_test_staged) — the checklist. */
   const [testDiag,    setTestDiag]    = useState<StagedConnectResult | null>(null);
+
+  // W5.4 database picker: names fetched from the server with the form's own
+  // credentials, offered as datalist suggestions — the typed value still wins.
+  const [dbOptions,   setDbOptions]   = useState<string[]>([]);
+  const [dbFetching,  setDbFetching]  = useState(false);
+  const [dbListError, setDbListError] = useState<string | null>(null);
+
+  /** "Fetch" beside the database box: connect and list the server's databases. */
+  async function fetchDatabases() {
+    setDbFetching(true);
+    setDbListError(null);
+    try {
+      const config = buildConfig();
+      // Same deadline as a connect — a hung lookup must not spin forever.
+      // A blank password on a SAVED config falls back to the stored secret
+      // backend-side; on a new one it is simply "no password".
+      const names = await withDeadline(
+        invoke<string[]>('connect_list_databases', { config, password: password || null }),
+        connectDeadlineMs(config));
+      setDbOptions(names);
+      if (names.length === 0) setDbListError('The server reported no databases');
+    } catch (err) {
+      setDbListError(errorDisplay(err));
+    } finally {
+      setDbFetching(false);
+    }
+  }
+
+  /** W5.5 "Copy from…": TLS + SSH SETTINGS of another saved connection of the
+   *  same engine — never a password (those live in the secret store). */
+  function applySecurityCopy(sourceId: string) {
+    const src = knownConns.find(c => c.id === sourceId);
+    if (!src) return;
+    const c = securityCopyFrom(src);
+    setSslMode(c.ssl_mode);
+    setShowSsl(c.has_custom_certs);
+    setSslCaPath(c.ssl_ca_path);
+    setSslCertPath(c.ssl_cert_path);
+    setSslKeyPath(c.ssl_key_path);
+    setTrustCert(c.trust_server_cert);
+    setUseSsh(c.use_ssh);
+    setSshHost(c.ssh_host);
+    setSshPort(c.ssh_port);
+    setSshUser(c.ssh_user);
+    setSshKeyPath(c.ssh_key_path);
+    setSshJump(c.ssh_jump);
+    setUseSshPassword(c.use_ssh_password);
+    setSshPassword(''); // the auth CHOICE copies; the secret does not
+  }
 
   function pasteUrl(raw: string) {
     // mysql://user:pass@host:port/db?ssl-mode=REQUIRED  |  postgresql://...
@@ -298,6 +361,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       notes:        notes.trim() || null,
       auto_connect: autoConnect,
       labels:       parseLabels(labelText),
+      // Stored only where it can act — a Redis/PG/file-engine config carrying
+      // a dead filter would hide nothing and confuse the export reader.
+      db_filter:    dbFilterApplies(engine) ? parseDbFilter(dbFilterText) : [],
       // Kept in step so an export stays readable by an older build.
       tags:         parseLabels(labelText).filter(l => !l.hidden).map(l => l.name),
       // SSH
@@ -315,6 +381,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       ssl_key_path:  showSsl ? (sslKeyPath || null) : null,
       use_iam_auth:  iamCapable && useIamAuth,
       iam_key_path:  iamCapable && useIamAuth ? (iamKeyPath || null) : null,
+      // Password command — a file engine has no login to authenticate.
+      password_exec:          isFile ? null : (passwordExec.trim() || null),
+      password_exec_ttl_secs: isFile ? null : toNum(passwordExecTtl),
       // Advanced
       connect_timeout_secs: toNum(connectTimeout),
       query_timeout_secs:   toNum(queryTimeout),
@@ -405,6 +474,27 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   // Parquet/CSV/JSON files in SQL.
   const isFile   = engine === 'sqlite' || engine === 'parquet' || engine === 'duckdb';
   const engineDefaults = ENGINE_DEFAULTS[engine];
+
+  // W5.4: why the database Fetch button is greyed, or null when it works.
+  // Host/port/user must be real values — the lookup connects with exactly
+  // what the form shows, and a guess at the defaults is not that.
+  const dbFetchWhy: string | null = isFile
+    ? 'Database lookup — not applicable here: a file engine opens a local path'
+    : isRedis
+      ? 'Database lookup — Redis databases are numbered 0–15; type the number'
+      : !(host.trim() && port != null && user.trim())
+        ? 'Fill in host, port and user first'
+        : null;
+
+  // W5.6: why the database visibility filter is greyed, or null when it
+  // applies. Each reason names the mechanism that already does the job.
+  const dbFilterWhy: string | null = isFile
+    ? 'Database filter — not applicable here: a file engine opens one local path'
+    : isRedis
+      ? 'Database filter — Redis databases are numbered 0–15; the Database # field picks one'
+      : engine === 'postgres'
+        ? 'Database filter — PostgreSQL connects to one database; the Database field already scopes the tree'
+        : null;
 
   // The card is draggable by its title bar, so it can be parked aside while
   // credentials are copied out of whatever password manager sits behind it.
@@ -565,12 +655,34 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
               hidden, leaving db0 the only reachable database unless a URL
               was pasted. */}
           <label>{isRedis ? 'Database #' : 'Database'}</label>
-          <input
-            value={database ?? ''}
-            onChange={e => setDatabase(e.target.value)}
-            placeholder={databasePlaceholder(engine)}
-            inputMode={isRedis ? 'numeric' : undefined}
-          />
+          <div className="cf-pair">
+            <input
+              value={database ?? ''}
+              onChange={e => setDatabase(e.target.value)}
+              placeholder={databasePlaceholder(engine)}
+              inputMode={isRedis ? 'numeric' : undefined}
+              list={dbOptions.length > 0 ? 'dbgui-db-names' : undefined}
+              style={{ flex: 1 }}
+            />
+            {/* W5.4: fetch the server's database names as suggestions — the
+                typed value still wins (datalist, not a select). Greyed with
+                the reason when there is nothing to ask: .unavail goes on the
+                WRAPPER, not the button — a pointer-events:none button fires
+                no hover, so the data-tip would never show (App.css:236). */}
+            <span className={dbFetchWhy ? 'unavail' : undefined}
+                  data-tip={dbFetchWhy ?? undefined}>
+              <button type="button" className="toolbar-btn"
+                aria-disabled={dbFetchWhy ? true : undefined}
+                title={dbFetchWhy ? undefined : 'Connect with the fields above and list the server’s databases'}
+                onClick={() => { if (dbFetchWhy || dbFetching) return; void fetchDatabases(); }}>
+                {dbFetching ? 'Fetching…' : 'Fetch'}
+              </button>
+            </span>
+            <datalist id="dbgui-db-names">
+              {dbOptions.map(d => <option key={d} value={d} />)}
+            </datalist>
+          </div>
+          {dbListError && <p className="form-hint" style={{ margin: 0 }}>Fetch databases: {dbListError}</p>}
         </div>
         )}
         <div className="cf-row">
@@ -710,6 +822,32 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
         )}
       </div>
 
+      {/* W5.6 database visibility filter (pgAdmin's DB restriction): on a
+          shared host with hundreds of databases the tree shows only these.
+          Greyed with the reason where the engine has no database list to
+          narrow (.unavail on the WRAPPER, not the input — a disabled input
+          fires no hover, so the data-tip would never show). The backend
+          applies it in list_schema, so the tree, the database switcher and
+          the browser all see the same narrowed list. */}
+      <label className={dbFilterWhy ? 'unavail' : undefined}
+             data-tip={dbFilterWhy ?? undefined}
+             aria-disabled={dbFilterWhy ? true : undefined}>
+        Databases to show <span className="form-hint">(comma-separated; blank = all)</span>
+        <input
+          value={dbFilterText}
+          onChange={e => { if (dbFilterWhy) return; setDbFilterText(e.target.value); }}
+          placeholder="e.g. shop, shop_staging"
+          spellCheck={false}
+        />
+      </label>
+      {!dbFilterWhy && parseDbFilter(dbFilterText).length > 0 && (
+        <p className="form-hint" style={{ margin: 0 }}>
+          The tree shows exactly these {parseDbFilter(dbFilterText).length}{' '}
+          database{parseDbFilter(dbFilterText).length === 1 ? '' : 's'} — names match as the
+          server stores them (MySQL is case-sensitive on Linux).
+        </p>
+      )}
+
       <label>Notes
         <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
           placeholder="shown as a sidebar tooltip · searchable" style={{ resize: 'vertical', fontFamily: 'inherit' }} />
@@ -717,6 +855,41 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       </>)}
 
       {tab === 'security' && (<>
+
+      {/* ── Copy from another connection (W5.5) ─────────────────── */}
+      {/* DataGrip's shortcut for the tenth database on the same cluster:
+          TLS + SSH SETTINGS of a saved same-engine connection, copied into
+          this form. Passwords never come along — they live in the secret
+          store keyed by connection id, and the new connection gets its own. */}
+      {(() => {
+        const sources = securityCopySources(knownConns, engine, initial?.id ?? null);
+        const why = isFile
+          ? 'Copy security settings — not applicable here: a file engine has no TLS or SSH to copy'
+          : sources.length === 0
+            ? `Copy security settings — no other saved ${ENGINE_LABELS[engine]} connections`
+            : null;
+        return (
+          <div className={why ? 'form-section unavail' : 'form-section'}
+               data-tip={why ?? undefined}
+               aria-disabled={why ? true : undefined}>
+            <div className="form-row">
+              <label style={{ flex: 1 }}>Copy SSL/SSH settings from…
+                <select value=""
+                        onChange={e => { if (why) return; applySecurityCopy(e.target.value); }}>
+                  <option value="" disabled>— choose a connection —</option>
+                  {sources.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </label>
+            </div>
+            {!why && (
+              <p className="form-hint">
+                Copies SSL mode, certificate paths and the SSH tunnel settings
+                (incl. the auth choice) — never a password.
+              </p>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── SSH tunnel ──────────────────────────────────────────── */}
       {/* Offered for every client/server engine, greyed for the file engines:
@@ -819,6 +992,37 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           )}
         </div>
       )}
+
+      {/* ── Password command (W5.1) ─────────────────────────────── */}
+      {/* pgAdmin's password exec: a shell command whose stdout IS the
+          password, resolved at connect/test and re-run after the TTL. This
+          reopens AWS RDS IAM-style short-lived passwords and covers
+          Vault/1Password CLIs generically. Stored in connections.json
+          (readable — it is a command, not a secret), never logged. */}
+      <div className={isFile ? 'form-section unavail' : 'form-section'}
+           data-tip={isFile
+             ? 'Password command — not applicable here: a file engine opens a local path, there is no login to authenticate'
+             : undefined}
+           aria-disabled={isFile || undefined}>
+        <label>Password command
+          <input value={passwordExec} disabled={isFile}
+                 onChange={e => setPasswordExec(e.target.value)}
+                 placeholder="op read op://Vault/prod-db/password" spellCheck={false} />
+        </label>
+        {passwordExec.trim() && (
+          <div className="form-row">
+            <label style={{ flex: '0 0 200px' }}>Re-run after (seconds)
+              <input type="number" min={0} value={passwordExecTtl} disabled={isFile}
+                     onChange={e => setPasswordExecTtl(e.target.value)}
+                     placeholder="blank = run once per connect" />
+            </label>
+          </div>
+        )}
+        <p className="form-hint">
+          stdout becomes the password; <code>%HOST% %PORT% %USER% %DATABASE%</code>{' '}
+          placeholders; re-run after the TTL — for IAM / Vault / 1Password CLIs.
+        </p>
+      </div>
 
       {/* ── SSL / TLS ───────────────────────────────────────────── */}
       {/* Same file-engine treatment as the tunnel: TLS is a property of a

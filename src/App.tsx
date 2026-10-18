@@ -69,6 +69,8 @@ import { forgetDuckdbSpatial } from './store/duckdbSpatial';
 import { forgetFlavor } from './store/serverFlavors';
 import { clearSchemaScan } from './store/schemaScan';
 import { restoreRunLog, addLog } from './store/logStore';
+import { connLogEntry, connLogTarget } from './utils/connLog';
+import type { ConnLogDetail } from './utils/connLog';
 import { initGaleraWatches } from './store/galeraWatch';
 import { logAudit, isoNow } from './utils/audit';
 import { PALETTE } from './utils/palette';
@@ -87,7 +89,9 @@ const SC = shortcuts();
 
 type View =
   | { kind: 'welcome' }
-  | { kind: 'new-conn'; edit?: ConnectionConfig; group?: string }
+  // edit: the whole config when editing; a Partial when the form is prefilled
+  // (local service discovery, W5.3).
+  | { kind: 'new-conn'; edit?: Partial<ConnectionConfig>; group?: string }
   | { kind: 'multi-exec' }
   | { kind: 'audit' }
   | { kind: 'compare' }
@@ -112,6 +116,10 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: 'welcome' });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  // Mirror for mount-only listeners (dbgui:conn-log) that must read the
+  // CURRENT active session without re-subscribing on every tab switch.
+  const activeSessionRef = useRef<string | null>(null);
+  useEffect(() => { activeSessionRef.current = activeSessionId; }, [activeSessionId]);
 
   // Dolphie replay detection. A SQLite session whose file fingerprints as a
   // recording does NOT auto-open the dashboard — it presents a chooser and the
@@ -397,7 +405,7 @@ export default function App() {
     // Abort the open: close the backend session that was already established.
     ConnectionsStore.close(ask.session.sessionId).catch(() => {});
     window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
-      detail: { level: 'info', msg: `${ask.session.connectionName} — connection aborted (production acknowledgment declined)` },
+      detail: { level: 'info', sessionId: ask.session.sessionId, msg: `${ask.session.connectionName} — connection aborted (production acknowledgment declined)` },
     }));
   }
 
@@ -559,6 +567,25 @@ export default function App() {
         detail: e.payload.note, line: `! ${e.payload.note}` });
     });
     return () => { un.then(f => f()); };
+  }, []);
+
+  // `dbgui:conn-log` (W5.0): the connection-lifecycle events — sidebar
+  // connect/test/diagnose, scratch open, disconnect, reconnect — were
+  // dispatched with no listener at all. This is the ONE listener: an explicit
+  // sessionId in the payload wins, otherwise the active session's log takes
+  // the line, otherwise it is dropped (utils/connLog). Registered here because
+  // most dispatch sites predate the session they talk about.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<ConnLogDetail>).detail;
+      const entry = connLogEntry(d);
+      if (!entry) return;
+      const sid = connLogTarget(d, activeSessionRef.current);
+      if (!sid) return;
+      addLog(sid, entry);
+    };
+    window.addEventListener('dbgui:conn-log', on);
+    return () => window.removeEventListener('dbgui:conn-log', on);
   }, []);
 
   // Themes — applied at startup and whenever the native menu (View → Theme)
@@ -960,7 +987,7 @@ export default function App() {
         scratch: true,
       });
       window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
-        detail: { level: 'ok', msg: 'Scratch buffer opened — in-memory DuckDB; nothing is saved' },
+        detail: { level: 'ok', sessionId, msg: 'Scratch buffer opened — in-memory DuckDB; nothing is saved' },
       }));
     } catch (err) {
       await alertDialog(`Could not open scratch buffer: ${errorDisplay(err)}`);
@@ -1024,6 +1051,7 @@ export default function App() {
     window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
       detail: {
         level: 'err',
+        sessionId: victims[0].sessionId,
         msg: `✂ ${victims[0].connectionName}: ALL connections dropped — ${victims.length} session${victims.length === 1 ? '' : 's'}, pools + tunnels killed. ${tids}`,
       },
     }));
@@ -1051,6 +1079,8 @@ export default function App() {
 
   async function reconnectNow(victims: Session[]) {
     const failures: string[] = [];
+    // The new session ids, so the lifecycle line lands in a live log.
+    const reopened: string[] = [];
     // The connection's own timeout bounds each reopen, as on any connect.
     const cfg = await ConnectionsStore.list()
       .then(l => l.find(c => c.id === victims[0].connectionId))
@@ -1065,6 +1095,7 @@ export default function App() {
         // tab keeps its (degraded) session rather than losing both.
         const sessionId = await withDeadline(
           ConnectionsStore.open(old.connectionId), deadlineMs);
+        reopened.push(sessionId);
         const next: Session = { ...old, sessionId };
         // Swap in place — same position in the tab row, same active tab.
         // Read/write sessionsRef synchronously (closeSession does the same):
@@ -1087,11 +1118,11 @@ export default function App() {
     const name = victims[0].connectionName;
     if (failures.length === 0) {
       window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
-        detail: { level: 'ok', msg: `↻ ${name}: reconnected — ${victims.length} session${victims.length === 1 ? '' : 's'} reopened in place` },
+        detail: { level: 'ok', sessionId: reopened[0], msg: `↻ ${name}: reconnected — ${victims.length} session${victims.length === 1 ? '' : 's'} reopened in place` },
       }));
     } else {
       window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
-        detail: { level: 'err', msg: `↻ ${name}: reconnect failed — ${failures.join('; ')}` },
+        detail: { level: 'err', sessionId: victims[0].sessionId, msg: `↻ ${name}: reconnect failed — ${failures.join('; ')}` },
       }));
       await alertDialog(`Could not reconnect "${name}": ${failures.join('; ')}`);
     }
@@ -1253,7 +1284,7 @@ export default function App() {
           <div className="sidebar-wrap" style={{ width: sidebarW, minWidth: sidebarW, display: 'flex' }}>
             <Sidebar
               sessions={sessions}
-              onNewConnection={(group?: string) => setView({ kind: 'new-conn', group })}
+              onNewConnection={(group?: string, prefill?: Partial<ConnectionConfig>) => setView({ kind: 'new-conn', group, edit: prefill })}
               onEditConnection={cfg => setView({ kind: 'new-conn', edit: cfg })}
               onOpenSession={handleOpenSession}
               activeUtility={['multi-exec', 'audit', 'compare', 'dump', 'replicaset'].includes(view.kind) ? view.kind : null}

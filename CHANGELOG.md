@@ -5,6 +5,35 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added — connection manager: steal-list features (wave 5)
+
+- **Password command** (`password_exec`, pgAdmin's generic hook): a
+  per-connection command whose stdout becomes the password, with
+  `%HOST%`/`%PORT%`/`%USER%`/`%DATABASE%` placeholders and an optional TTL
+  re-run — one field that covers AWS RDS IAM, Vault, 1Password CLI and any
+  corporate token broker, on every engine. Resolved at connect/test/diagnose
+  time, never logged, never silently falls back when it fails.
+- **Encrypted connection export**: alongside the secrets-free default, an
+  opt-in passphrase-protected export (Argon2id + AES-256-GCM, the vault's
+  parameters) that includes passwords; import detects the envelope and
+  prompts. Connections become shareable/backup-able without plaintext.
+- **Local service discovery**: "Scan this machine" probes the usual ports
+  (3306/5432/6379/8123/27017/1433, bounded < 2 s) and offers one-click
+  pre-filled connections for what's actually running.
+- **Database picker**: a Fetch button beside the database field lists the
+  server's databases (tunneled connections included; stored-secret fallback)
+  — free text still wins.
+- **Copy SSL/SSH settings from another connection** (same engine, secrets
+  never copied) — cert bundles and bastions are per-organization, not
+  per-server.
+- **Database visibility filter**: per-connection list of databases to show,
+  applied at the schema listing so shared-hosting servers with hundreds of
+  databases introspect only what you kept (MySQL/ClickHouse/MongoDB/SQL
+  Server; PG/Redis/file engines greyed with the reason).
+- **Keyboard navigation** in the connection list (arrows + Enter, type to
+  filter); pool stats (in use/idle/total) in the connection's health detail;
+  connection events now land in the canonical session log.
+
 ### Added — connection manager: staged diagnostics, cancellable connect, health (waves 3+4)
 
 - **Staged connection diagnostics** — nobody else does this. Both Test

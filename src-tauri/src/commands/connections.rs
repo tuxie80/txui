@@ -47,9 +47,49 @@ pub(crate) fn get_password(config: &ConnectionConfig, data_dir: &std::path::Path
     crate::secretstore::get(data_dir, &config.keychain_key())
 }
 
+/// The database password for a REAL connect: `password_exec` when the config
+/// has one (W5.1 — minted, cached per TTL), else the stored secret. A set-but-
+/// failing password command is an error, never a silent fall-back to the
+/// stored secret (see password_exec::resolve).
+async fn resolve_db_password(
+    config: &ConnectionConfig,
+    data_dir: &std::path::Path,
+) -> Result<Option<String>, String> {
+    match crate::password_exec::resolve(config).await? {
+        Some(pw) => Ok(Some(pw)),
+        None => Ok(get_password(config, data_dir)),
+    }
+}
+
+/// Credential resolution for a Test / staged diagnostic / database listing:
+/// an explicitly typed password wins; then `password_exec` when the config
+/// carries one (the form can set it before the connection is ever saved, so
+/// this is not gated on `saved`); then, for a connection that EXISTS in
+/// storage, the stored secret — test-while-editing (W2.3, resolve_test_secret).
+/// Pub(crate): the staged-connect diagnostics resolve secrets the same way.
+pub(crate) async fn resolve_test_password(
+    config: &ConnectionConfig,
+    arg: Option<String>,
+    data_dir: &std::path::Path,
+) -> Result<Option<String>, String> {
+    if let Some(p) = arg.filter(|p| !p.trim().is_empty()) {
+        return Ok(Some(p));
+    }
+    if let Some(p) = crate::password_exec::resolve(config).await? {
+        return Ok(Some(p));
+    }
+    Ok(if !config.id.is_nil() { get_password(config, data_dir) } else { None })
+}
+
 /// Diagnostic for the connect-failure log — reports store state without
 /// leaking plaintext in release builds.
 fn password_diag(config: &ConnectionConfig, data_dir: &std::path::Path) -> String {
+    if config.password_exec.as_deref().is_some_and(|c| !c.trim().is_empty()) {
+        // The password came from the connection's password command (W5.1), not
+        // the store — the stored-secret report below would be a red herring.
+        // The command line itself is never quoted (it stays out of logs).
+        return "[password minted by the connection's password command — run it yourself and check what it prints]".into();
+    }
     let key = config.keychain_key();
     match crate::secretstore::get(data_dir, &key) {
         None => format!("[no stored password for '{}' → EMPTY sent. Edit the connection, type the password, Save.]", key),
@@ -237,7 +277,8 @@ pub(crate) fn stored_ssh_password(config: &ConnectionConfig, data_dir: &std::pat
 pub async fn test_connection(id: Uuid, state: State<'_, AppState>) -> Result<PingResult, crate::apperror::AppError> {
     let config = state.configs.read().await.get(&id).cloned()
         .ok_or_else(|| format!("connection {} not found", id))?;
-    let password = get_password(&config, &state.data_dir);
+    let password = resolve_db_password(&config, &state.data_dir).await
+        .map_err(crate::apperror::AppError::from)?;
     let config = with_default_timeout(&config, &state);
     let ssh_password = stored_ssh_password(&config, &state.data_dir);
     let start = std::time::Instant::now();
@@ -335,7 +376,18 @@ async fn open_session_inner(
     state: &AppState,
     quiet: bool,
 ) -> Result<Uuid, crate::apperror::AppError> {
-    let password = get_password(config, &state.data_dir);
+    let password = match resolve_db_password(config, &state.data_dir).await {
+        Ok(p) => p,
+        Err(msg) => {
+            // A password-exec failure is a connect failure: audited like one
+            // on the loud path (the quiet path writes no lifecycle rows).
+            if !quiet {
+                let attempt = crate::commands::audit::session_start(config);
+                crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
+            }
+            return Err(msg.into());
+        }
+    };
     // Apply the app-wide connect timeout to anything that has not set its own.
     let owned = with_default_timeout(config, state);
     let config = &owned;
@@ -855,12 +907,9 @@ pub async fn test_connection_adhoc(
 ) -> Result<String, crate::apperror::AppError> {
     // The app-wide connect timeout, as on every other connect path.
     let config = with_default_timeout(&config, &state);
+    let password = resolve_test_password(&config, password, &state.data_dir).await
+        .map_err(crate::apperror::AppError::from)?;
     let saved = !config.id.is_nil();
-    let password = resolve_test_secret(
-        password,
-        if saved { get_password(&config, &state.data_dir) } else { None },
-        saved,
-    );
     let ssh_password = resolve_test_secret(
         ssh_password,
         if saved { stored_ssh_password(&config, &state.data_dir) } else { None },
@@ -990,6 +1039,222 @@ pub async fn import_connections(json: String, state: State<'_, AppState>) -> Res
     drop(configs);
     persist_configs(&state).await?;
     Ok(imported)
+}
+
+// ── Encrypted import / export (W5.2) ────────────────────────────────────────
+
+/// The opt-in passphrase-protected export (TablePlus/Compass model), alongside
+/// the secrets-free `export_connections`. Collects the selected connections
+/// AND their stored secrets (database + SSH passwords) and seals them under
+/// the passphrase (`connexport`: Argon2id at the vault's cost + AES-256-GCM,
+/// portable JSON envelope). Returns the sealed JSON text.
+#[tauri::command]
+pub async fn export_connections_encrypted(
+    ids: Option<Vec<Uuid>>,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<String, crate::apperror::AppError> {
+    export_connections_encrypted_body(ids, passphrase, &state).await
+}
+
+/// The State-free body of [`export_connections_encrypted`], so tests can drive it.
+pub(crate) async fn export_connections_encrypted_body(
+    ids: Option<Vec<Uuid>>,
+    passphrase: String,
+    state: &AppState,
+) -> Result<String, crate::apperror::AppError> {
+    let configs = state.configs.read().await;
+    let mut list: Vec<ConnectionConfig> = match &ids {
+        Some(ids) => ids.iter().filter_map(|id| configs.get(id).cloned()).collect(),
+        None      => configs.values().cloned().collect(),
+    };
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut secrets = std::collections::BTreeMap::new();
+    for c in &list {
+        if let Some(pw) = crate::secretstore::get(&state.data_dir, &c.keychain_key()) {
+            secrets.insert(c.keychain_key(), pw);
+        }
+        if let Some(pw) = crate::secretstore::get(&state.data_dir, &c.ssh_keychain_key()) {
+            secrets.insert(c.ssh_keychain_key(), pw);
+        }
+    }
+    drop(configs);
+
+    let payload = crate::connexport::Payload::new(list, secrets);
+    // Argon2id at 64 MiB blocks — keep the runtime responsive.
+    let out = tokio::task::spawn_blocking(move || crate::connexport::seal(&payload, &passphrase))
+        .await
+        .map_err(|e| format!("export task failed: {e}"))?
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// Import a passphrase-protected export (`export_connections_encrypted`).
+/// Every connection gets a FRESH id and its secrets are re-keyed to it and
+/// written into the ACTIVE secretstore — plain mode or vault, whichever is
+/// live. Returns the number of connections imported. A wrong passphrase is a
+/// clean error, nothing is imported.
+#[tauri::command]
+pub async fn import_connections_encrypted(
+    payload: String,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<u32, crate::apperror::AppError> {
+    import_connections_encrypted_body(payload, passphrase, &state).await
+}
+
+/// The State-free body of [`import_connections_encrypted`], so tests can drive it.
+pub(crate) async fn import_connections_encrypted_body(
+    payload: String,
+    passphrase: String,
+    state: &AppState,
+) -> Result<u32, crate::apperror::AppError> {
+    let opened = tokio::task::spawn_blocking(move || crate::connexport::open(&payload, &passphrase))
+        .await
+        .map_err(|e| format!("import task failed: {e}"))?
+        .map_err(|e| e.to_string())?;
+
+    let mut configs = state.configs.write().await;
+    let mut imported = 0u32;
+    for mut config in opened.connections {
+        let old_id = config.id;
+        config.id = Uuid::new_v4();
+        // Re-key the secrets to the fresh id before anything persists them.
+        for (old_key, new_key) in [
+            (format!("dbgui:{old_id}"), config.keychain_key()),
+            (format!("dbgui-ssh:{old_id}"), config.ssh_keychain_key()),
+        ] {
+            if let Some(secret) = opened.secrets.get(&old_key) {
+                crate::secretstore::set(&state.data_dir, &new_key, secret)
+                    .map_err(|e| format!("could not store an imported password: {e}"))?;
+            }
+        }
+        configs.insert(config.id, config);
+        imported += 1;
+    }
+    drop(configs);
+    persist_configs_state(state).await?;
+    Ok(imported)
+}
+
+// ── Database list for the form's picker (W5.4) ──────────────────────────────
+
+/// The SQL that lists databases/schemas on each engine, or `None` where the
+/// driver API answers instead (MongoDB `list_database_names`) or the question
+/// is meaningless (Redis, file engines). Pure — unit-tested per engine.
+///
+/// Exactly the engine's canonical catalog query; the row cap is applied to
+/// the RESULT (Rust-side), because MySQL's `SHOW DATABASES` takes no LIMIT.
+pub(crate) fn list_databases_sql(engine: Engine) -> Option<&'static str> {
+    match engine {
+        Engine::Mysql      => Some("SHOW DATABASES"),
+        Engine::Postgres   => Some("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY datname"),
+        Engine::SqlServer  => Some("SELECT name FROM sys.databases ORDER BY name"),
+        Engine::Clickhouse => Some("SHOW DATABASES"),
+        Engine::MongoDb    => None, // driver API, not SQL
+        Engine::Redis | Engine::Sqlite | Engine::Parquet | Engine::Duckdb => None,
+    }
+}
+
+/// Hard cap on the returned list — a hosting server can expose tens of
+/// thousands of databases, and the picker's dropdown is not the place for
+/// them. "A few thousand", per the wave contract.
+const LIST_DATABASES_CAP: usize = 5_000;
+
+/// Engines where "list databases" has no meaning — the frontend greys the
+/// picker button on exactly this predicate's mirror.
+fn databases_not_applicable(engine: Engine) -> bool {
+    engine.is_file_backed() || engine == Engine::Redis
+}
+
+/// List database/schema names for the connection form's picker, without
+/// opening a real session: the throwaway-session machinery (`test_connect_core`
+/// pattern — SSH tunnel included, scratch registry, torn down afterwards).
+/// Credential resolution follows the Test-button rules (`resolve_test_password`):
+/// a typed password wins, then the connection's password command (W5.1), then
+/// the stored secret of a saved config.
+#[tauri::command]
+pub async fn connect_list_databases(
+    config: ConnectionConfig,
+    password: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, crate::apperror::AppError> {
+    connect_list_databases_body(config, password, &state).await
+}
+
+/// The State-free body of [`connect_list_databases`], so tests can drive it.
+pub(crate) async fn connect_list_databases_body(
+    config: ConnectionConfig,
+    password: Option<String>,
+    state: &AppState,
+) -> Result<Vec<String>, crate::apperror::AppError> {
+    if databases_not_applicable(config.engine) {
+        return Err(format!(
+            "database listing is not applicable for {} connections",
+            config.engine.wire_name()
+        ).into());
+    }
+    let config = with_default_timeout(&config, &state);
+    let password = resolve_test_password(&config, password, &state.data_dir).await
+        .map_err(crate::apperror::AppError::from)?;
+    let ssh_password = if !config.id.is_nil() {
+        stored_ssh_password(&config, &state.data_dir)
+    } else {
+        None
+    };
+
+    let sessions: connection::SessionMap = Default::default();
+    let tunnel = open_tunnel(&config, ssh_password.as_deref()).await?;
+    let host_override: Option<(&str, u16)> = tunnel.as_ref()
+        .map(|t| ("127.0.0.1", t.local_port));
+
+    let result: Result<Vec<String>, String> = async {
+        let session_id = connection::open_session(&config, password, &sessions, host_override)
+            .await
+            .map_err(|e| format!("Connect to {} failed:\n{}", describe(&config), friendly_error(&config.engine, &e)))?;
+        let session = connection::get_session_pub(session_id, &sessions)
+            .await
+            .map_err(|e| e.to_string())?;
+        let dbs = list_databases_on(&session).await
+            .map_err(|e| format!("Connected, but listing databases failed: {e:#}"))?;
+        connection::close_session(session_id, &sessions).await;
+        Ok(dbs)
+    }.await;
+
+    drop(tunnel); // Drop kills the ssh child
+    result.map_err(crate::apperror::AppError::from)
+}
+
+/// Run the engine's database listing on a live (throwaway) session.
+async fn list_databases_on(
+    session: &crate::db::types::LiveSession,
+) -> anyhow::Result<Vec<String>> {
+    use crate::db::types::LiveSession;
+    let mut names: Vec<String> = match session {
+        LiveSession::Mysql(pool) => sqlx::query_scalar(list_databases_sql(Engine::Mysql).unwrap())
+            .fetch_all(pool).await?,
+        LiveSession::Postgres(pool) => sqlx::query_scalar(list_databases_sql(Engine::Postgres).unwrap())
+            .fetch_all(pool).await?,
+        LiveSession::Clickhouse(s) => {
+            let r = crate::db::clickhouse::execute(s, list_databases_sql(Engine::Clickhouse).unwrap()).await?;
+            r.rows.iter()
+                .filter_map(|row| row.first().and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        }
+        LiveSession::SqlServer(s) => {
+            let r = crate::db::sqlserver::execute(s, list_databases_sql(Engine::SqlServer).unwrap()).await?;
+            r.rows.iter()
+                .filter_map(|row| row.first().and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        }
+        LiveSession::MongoDb(client) => client.list_database_names().await?,
+        // Guarded by the command's `databases_not_applicable` check — a direct
+        // call still gets an error, never a panic.
+        _ => anyhow::bail!("database listing is not applicable for {}", session.engine_name()),
+    };
+    names.truncate(LIST_DATABASES_CAP);
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -1335,5 +1600,149 @@ mod tests {
         let json = r#"{"format": "other-app", "version": 1, "connections": []}"#;
         let envelope: ConnectionsEnvelope = serde_json::from_str(json).unwrap();
         assert_ne!(envelope.format, EXPORT_FORMAT);
+    }
+
+    // ── W5.1 password-exec resolution ───────────────────────────────────────
+
+    /// A data dir unique to this test — secretstore writes real files, and the
+    /// shared temp_dir would leak state between tests.
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("txui-conn-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Resolution order: typed > password-exec > stored (saved only).
+    #[tokio::test]
+    async fn test_password_resolution_order() {
+        let dir = unique_dir("pworder");
+
+        // No exec, saved config with a stored secret → stored (W2.3).
+        let mut c = ConnectionConfig::new(Engine::Postgres, "t");
+        crate::secretstore::set(&dir, &c.keychain_key(), "stored-pw").unwrap();
+        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap().as_deref(), Some("stored-pw"));
+        // Blank/whitespace arg behaves like None.
+        assert_eq!(resolve_test_password(&c, Some("  ".into()), &dir).await.unwrap().as_deref(), Some("stored-pw"));
+        // Typed wins over the store.
+        assert_eq!(resolve_test_password(&c, Some("typed".into()), &dir).await.unwrap().as_deref(), Some("typed"));
+
+        // password-exec wins over the store (and works for an UNSAVED config).
+        c.password_exec = Some("echo minted".into());
+        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap().as_deref(), Some("minted"));
+        c.id = Uuid::nil(); // adhoc, never saved — the command still runs
+        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap().as_deref(), Some("minted"));
+
+        // A failing exec is an ERROR, never a silent fall-back to the store.
+        let mut c = ConnectionConfig::new(Engine::Postgres, "t");
+        crate::secretstore::set(&dir, &c.keychain_key(), "stored-pw").unwrap();
+        c.password_exec = Some("exit 7".into());
+        let err = resolve_test_password(&c, None, &dir).await.unwrap_err();
+        assert!(err.contains("exit 7"), "{err}");
+
+        // Unsaved, no exec, no arg → honestly nothing.
+        let mut c = ConnectionConfig::new(Engine::Postgres, "t");
+        c.id = Uuid::nil();
+        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// resolve_db_password: exec when set, else the stored secret.
+    #[tokio::test]
+    async fn db_password_prefers_the_exec_command_then_the_store() {
+        let dir = unique_dir("dbpw");
+        let c = ConnectionConfig::new(Engine::Mysql, "t");
+        crate::secretstore::set(&dir, &c.keychain_key(), "stored-pw").unwrap();
+        assert_eq!(resolve_db_password(&c, &dir).await.unwrap().as_deref(), Some("stored-pw"));
+        let mut c2 = c.clone();
+        c2.password_exec = Some("echo minted2".into());
+        assert_eq!(resolve_db_password(&c2, &dir).await.unwrap().as_deref(), Some("minted2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── W5.4 database listing ───────────────────────────────────────────────
+
+    #[test]
+    fn list_databases_sql_is_the_canonical_query_per_engine() {
+        assert_eq!(list_databases_sql(Engine::Mysql), Some("SHOW DATABASES"));
+        assert_eq!(list_databases_sql(Engine::Postgres),
+            Some("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY datname"));
+        assert_eq!(list_databases_sql(Engine::SqlServer),
+            Some("SELECT name FROM sys.databases ORDER BY name"));
+        assert_eq!(list_databases_sql(Engine::Clickhouse), Some("SHOW DATABASES"));
+        // Driver API, not SQL — and the engines where the question is
+        // meaningless.
+        for e in [Engine::MongoDb, Engine::Redis, Engine::Sqlite, Engine::Parquet, Engine::Duckdb] {
+            assert_eq!(list_databases_sql(e), None, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn databases_not_applicable_marks_exactly_the_picker_greyed_engines() {
+        for e in [Engine::Redis, Engine::Sqlite, Engine::Parquet, Engine::Duckdb] {
+            assert!(databases_not_applicable(e), "{e:?}");
+        }
+        for e in [Engine::Mysql, Engine::Postgres, Engine::Clickhouse, Engine::MongoDb, Engine::SqlServer] {
+            assert!(!databases_not_applicable(e), "{e:?}");
+        }
+    }
+
+    /// The command refuses the not-applicable engines with the error text the
+    /// frontend keys on, before any dial is attempted.
+    #[tokio::test]
+    async fn connect_list_databases_refuses_file_engines_and_redis() {
+        let state = test_state().await;
+        for engine in [Engine::Redis, Engine::Sqlite, Engine::Parquet, Engine::Duckdb] {
+            let mut c = ConnectionConfig::new(engine, "x");
+            if engine.is_file_backed() { c.file_path = Some(":memory:".into()); }
+            let err = connect_list_databases_body(c, None, &state).await.unwrap_err();
+            assert!(err.message.contains("not applicable"), "{engine:?}: {}", err.message);
+        }
+    }
+
+    // ── W5.2 encrypted export/import ────────────────────────────────────────
+
+    /// Full command-level round trip: export seals configs + secrets, import
+    /// mints fresh ids, re-keys the secrets into the (plain-mode) secretstore,
+    /// and persists the configs. Wrong passphrase imports nothing.
+    #[tokio::test]
+    async fn encrypted_export_import_round_trip_with_fresh_ids() {
+        let dir = unique_dir("encxp");
+        let history = crate::history::open_in_memory().await.unwrap();
+        let mut seed = std::collections::HashMap::new();
+        let mut c = ConnectionConfig::new(Engine::Postgres, "prod-eu");
+        c.user = Some("app".into());
+        seed.insert(c.id, c.clone());
+        let state = AppState::new(history, dir.clone(), seed);
+        crate::secretstore::set(&dir, &c.keychain_key(), "the-password").unwrap();
+        crate::secretstore::set(&dir, &c.ssh_keychain_key(), "the-ssh-password").unwrap();
+
+        // Export (all).
+        let sealed = export_connections_encrypted_body(None, "a-good-passphrase".into(), &state)
+            .await.unwrap();
+        assert!(sealed.contains("\"v\": 1"), "{sealed}");
+        assert!(!sealed.contains("the-password"), "no plaintext secret in the export");
+
+        // Import into the SAME state: fresh ids, so both generations coexist.
+        let n = import_connections_encrypted_body(sealed.clone(), "a-good-passphrase".into(), &state)
+            .await.unwrap();
+        assert_eq!(n, 1);
+        let all = state.configs.read().await;
+        assert_eq!(all.len(), 2);
+        let imported = all.values().find(|x| x.id != c.id).expect("the fresh-id import");
+        assert_eq!(imported.name, "prod-eu");
+        // Secrets re-keyed to the fresh id and readable from the active store.
+        assert_eq!(crate::secretstore::get(&dir, &imported.keychain_key()).as_deref(), Some("the-password"));
+        assert_eq!(crate::secretstore::get(&dir, &imported.ssh_keychain_key()).as_deref(), Some("the-ssh-password"));
+        drop(all);
+
+        // Wrong passphrase: clean error, nothing imported.
+        let err = import_connections_encrypted_body(sealed, "wrong-passphrase".into(), &state)
+            .await.unwrap_err();
+        assert!(err.message.contains("wrong passphrase"), "{}", err.message);
+        assert_eq!(state.configs.read().await.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

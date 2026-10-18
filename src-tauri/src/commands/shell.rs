@@ -59,7 +59,10 @@ fn clamp(mut s: Vec<u8>) -> (String, bool) {
 /// what it means in the terminal the user already has open, and `cmd.exe` is
 /// what `ComSpec` names on a default install. Someone who prefers PowerShell
 /// can set `ComSpec`.
-fn user_shell() -> (String, &'static str) {
+///
+/// Pub(crate): `password_exec` (W5.1) runs its credential command through the
+/// same shell, so both agree on what "the platform shell" is.
+pub(crate) fn user_shell() -> (String, &'static str) {
     #[cfg(windows)]
     {
         let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
