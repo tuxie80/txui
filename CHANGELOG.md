@@ -3,7 +3,7 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
-## [Unreleased]
+## [1.4.0] - 2026-10-18
 
 ### Fixed — CRITICAL: the editor was unusable in the packaged app (1.3.0 regression)
 

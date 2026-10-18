@@ -11,6 +11,7 @@
 # Usage: dev/release_smoke.sh [path/to/TxUI.app]
 set -euo pipefail
 APP="${1:-$(dirname "$0")/../src-tauri/target/release/bundle/macos/TxUI.app}"
+APP="$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")"  # absolutize — `open -a` rejects relative paths
 VERDICT=/tmp/txui-smoke.json
 LSDB="$HOME/Library/WebKit/com.dbgui.app/WebsiteData/Default"
 ORIGIN="tauri.localhost"   # WKWebView localStorage origin for the custom protocol
@@ -27,7 +28,7 @@ rc=0
 python3 - "$LSDB" <<'PYEOF' || rc=$?
 import sqlite3, glob, sys
 base = sys.argv[1]
-dbs = glob.glob(base + '/*/LocalStorage/localstorage.sqlite3')
+dbs = glob.glob(base + '/**/LocalStorage/localstorage.sqlite3', recursive=True)
 if not dbs:
     print('no localstorage db yet — launching once to create it')
     sys.exit(3)  # caller handles: launch once, quit, retry
@@ -41,7 +42,8 @@ print('armed')
 PYEOF
 if [ "$rc" -eq 3 ]; then
   open -a "$APP"; sleep 6; osascript -e 'quit app "TxUI"' 2>/dev/null || true; sleep 2
-  exec "$0" "$APP"   # retry once with storage now initialized
+  [ -z "${SMOKE_RETRIED:-}" ] && SMOKE_RETRIED=1 exec "$0" "$APP"   # retry once
+  echo "SMOKE: could not arm localStorage flag"; exit 2
 fi
 
 # 3. launch — the app self-tests and exits on its own (utils/smoke.ts)
@@ -54,7 +56,7 @@ done
 # 4. disarm (app is closed by now) so the next normal launch doesn't self-test
 python3 - "$LSDB" <<'PYEOF'
 import sqlite3, glob, sys
-dbs = glob.glob(sys.argv[1] + '/*/LocalStorage/localstorage.sqlite3')
+dbs = glob.glob(sys.argv[1] + '/**/LocalStorage/localstorage.sqlite3', recursive=True)
 if dbs:
     con = sqlite3.connect(dbs[0])
     con.execute("DELETE FROM ItemTable WHERE key='dbgui.smoke'")
