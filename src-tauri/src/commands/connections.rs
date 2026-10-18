@@ -180,22 +180,78 @@ pub async fn delete_connection(id: Uuid, state: State<'_, AppState>) -> Result<(
     Ok(())
 }
 
-/// Test connectivity — does NOT open a persistent session
+/// Bring up the SSH tunnel a connection config asks for, or `Ok(None)` when
+/// `use_ssh` is off. `ssh_password` is resolved by the caller — the secret
+/// store for a saved connection, the form's field for an ad-hoc test. The
+/// error is phrased for display; callers decide what else to do with a
+/// failure (audit rows, PingResult shaping).
+async fn open_tunnel(
+    config: &ConnectionConfig,
+    ssh_password: Option<&str>,
+) -> Result<Option<crate::db::ssh::SshTunnel>, String> {
+    if !config.use_ssh {
+        return Ok(None);
+    }
+    let ssh_host = config.ssh_host.as_deref()
+        .ok_or("SSH host is required when tunnel is enabled")?;
+    let ssh_user = config.ssh_user.as_deref()
+        .ok_or("SSH user is required when tunnel is enabled")?;
+    let ssh_port = config.ssh_port.unwrap_or(22);
+    let db_host  = config.host.as_deref().unwrap_or("localhost");
+    let db_port  = config.port.unwrap_or(config.engine.default_port());
+
+    crate::db::ssh::SshTunnel::open(
+        ssh_host, ssh_port, ssh_user,
+        config.ssh_key_path.as_deref(),
+        db_host, db_port,
+        config.ssh_jump.as_deref(),
+        ssh_password,
+        config.connect_timeout_secs,
+    ).await
+    .map_err(|e| format!("SSH tunnel to {ssh_user}@{ssh_host}:{ssh_port} failed:\n{e:#}"))
+    .map(Some)
+}
+
+/// The SSH password of a SAVED connection, when it uses one. Ad-hoc tests and
+/// dump jobs pass theirs in explicitly instead.
+fn stored_ssh_password(config: &ConnectionConfig, data_dir: &std::path::Path) -> Option<String> {
+    if config.use_ssh && config.use_ssh_password {
+        crate::secretstore::get(data_dir, &config.ssh_keychain_key())
+    } else {
+        None
+    }
+}
+
+/// Test connectivity — does NOT open a persistent session.
+///
+/// Goes through the exact path `test_connection_adhoc` (and a real connect)
+/// use: SSH tunnel included, then a throwaway session on a scratch registry
+/// and a probe query. The previous version called `connection::ping` with no
+/// tunnel, so every tunnelled saved connection failed the sidebar's Test.
 #[tauri::command]
 pub async fn test_connection(id: Uuid, state: State<'_, AppState>) -> Result<PingResult, crate::apperror::AppError> {
     let config = state.configs.read().await.get(&id).cloned()
         .ok_or_else(|| format!("connection {} not found", id))?;
     let password = get_password(&config, &state.data_dir);
     let config = with_default_timeout(&config, &state);
-    let mut ping = connection::ping(&config, password).await;
-    // Prefix the failure with the full target so the error is self-explanatory.
-    if !ping.ok {
-        let target = describe(&config);
-        ping.error = Some(match ping.error.take() {
-            Some(e) => format!("Connect to {} failed:\n{}", target, e),
-            None => format!("Connect to {} failed (no detail)", target),
-        });
-    }
+    let ssh_password = stored_ssh_password(&config, &state.data_dir);
+    let start = std::time::Instant::now();
+    let ping = match test_connect_core(&config, password, ssh_password).await {
+        Ok(version) => PingResult {
+            ok: true,
+            latency_ms: start.elapsed().as_millis() as u64,
+            server_version: version,
+            error: None,
+        },
+        // The core's errors are already self-explanatory (they name the target
+        // or the tunnel); a failed Test is data, not a command failure.
+        Err(e) => PingResult {
+            ok: false,
+            latency_ms: start.elapsed().as_millis() as u64,
+            server_version: None,
+            error: Some(e),
+        },
+    };
     Ok(ping)
 }
 
@@ -266,37 +322,16 @@ async fn open_session_inner(
 
     // Open SSH tunnel if configured
     let tunnel = if config.use_ssh {
-        let ssh_host = config.ssh_host.as_deref()
-            .ok_or("SSH host is required when tunnel is enabled")?;
-        let ssh_user = config.ssh_user.as_deref()
-            .ok_or("SSH user is required when tunnel is enabled")?;
-        let ssh_port = config.ssh_port.unwrap_or(22);
-        let db_host  = config.host.as_deref().unwrap_or("localhost");
-        let db_port  = config.port.unwrap_or(config.engine.default_port());
-        let ssh_password = if config.use_ssh_password {
-            crate::secretstore::get(&state.data_dir, &config.ssh_keychain_key())
-        } else {
-            None
-        };
-
-        let t = match crate::db::ssh::SshTunnel::open(
-            ssh_host, ssh_port, ssh_user,
-            config.ssh_key_path.as_deref(),
-            db_host, db_port,
-            config.ssh_jump.as_deref(),
-            ssh_password.as_deref(),
-        ).await {
+        let ssh_password = stored_ssh_password(config, &state.data_dir);
+        match open_tunnel(config, ssh_password.as_deref()).await {
             Ok(t) => t,
-            Err(e) => {
-                let msg = format!("SSH tunnel to {}@{}:{} failed:\n{:#}", ssh_user, ssh_host, ssh_port, e);
+            Err(msg) => {
                 if !quiet {
                     crate::commands::audit::insert_connect_failed(&state.history, &attempt, &msg).await;
                 }
                 return Err(msg.into());
             }
-        };
-
-        Some(t)
+        }
     } else {
         None
     };
@@ -451,6 +486,13 @@ pub async fn open_scratch_session(state: State<'_, AppState>) -> Result<Uuid, cr
 /// graceful close itself is then bounded by a 5 s timeout.
 #[tauri::command]
 pub async fn close_connection(session_id: Uuid, state: State<'_, AppState>) -> Result<Vec<u64>, crate::apperror::AppError> {
+    Ok(close_one_session(session_id, &state).await)
+}
+
+/// The body of `close_connection` on a bare `&AppState`, so
+/// `close_orphaned_connection` can run the same teardown for a session it
+/// found by connection id.
+async fn close_one_session(session_id: Uuid, state: &AppState) -> Vec<u64> {
     state.cancel_session_work(session_id).await;
     // An open manual transaction dies with the session — dropping the held
     // connection makes the server roll it back.
@@ -480,57 +522,122 @@ pub async fn close_connection(session_id: Uuid, state: State<'_, AppState>) -> R
     if let Some(start) = state.session_starts.write().await.remove(&session_id) {
         crate::commands::audit::insert_lifecycle(&state.history, session_id, &start, "disconnect").await;
     }
-    Ok(thread_ids)
+    thread_ids
 }
 
-/// Test an unsaved (ad-hoc) connection: opens a real connection — including
-/// the SSH tunnel when configured, using the passed `ssh_password` instead of
-/// the secret store — pings it, and tears everything down. Nothing is left in
-/// AppState and NOTHING is persisted to the secret store or connections.json.
-/// Returns a short success summary (server version when cheap to get).
+/// Best-effort cleanup for a connect the frontend ABANDONED at its deadline.
+///
+/// The frontend wraps `open_connection` in a client-side deadline
+/// (withDeadline.ts): when it fires, the promise is dropped but the backend
+/// keeps opening, and a slow connect then lands a live pool (+ SSH tunnel) in
+/// the registry with nobody holding its session id — a failed-looking connect
+/// that is actually connected. The frontend calls this on that path: close
+/// every session of `connection_id` that appeared since the attempt started.
+///
+/// `attempt_age_ms` is how long ago the frontend STARTED the attempt, so a
+/// session that predates it (the user was already connected) is never
+/// touched. The abandoned open may still be mid-dial when this arrives, so a
+/// late arrival is polled for, up to `grace_ms` — default: the connection's
+/// own connect timeout + 10 s slack (capped at 60 s total). Returns how many
+/// sessions were closed.
 #[tauri::command]
-pub async fn test_connection_adhoc(
-    config: ConnectionConfig,
+pub async fn close_orphaned_connection(
+    connection_id: Uuid,
+    attempt_age_ms: u64,
+    grace_ms: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<u32, crate::apperror::AppError> {
+    Ok(close_orphaned(connection_id, attempt_age_ms, grace_ms, &state).await)
+}
+
+/// The State-free body of [`close_orphaned_connection`], so tests can drive it.
+pub(crate) async fn close_orphaned(
+    connection_id: Uuid,
+    attempt_age_ms: u64,
+    grace_ms: Option<u64>,
+    state: &AppState,
+) -> u32 {
+    /// Clock-skew allowance between the frontend's deadline clock and the
+    /// backend's open-completion Instant. A session older than the attempt by
+    /// more than this is pre-existing and must survive.
+    const SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+    // A bogus huge age would make EVERY session of the connection qualify;
+    // clamp it to something a connect attempt can legitimately take.
+    let age = std::time::Duration::from_millis(attempt_age_ms.min(600_000));
+    let Some(cutoff) = std::time::Instant::now().checked_sub(age) else {
+        return 0;
+    };
+    let grace = match grace_ms {
+        Some(ms) => std::time::Duration::from_millis(ms.min(60_000)),
+        // Long enough for the abandoned open to actually land: the
+        // connection's own connect timeout (else the app default) + slack.
+        None => {
+            let secs = state.configs.read().await.get(&connection_id)
+                .and_then(|c| c.connect_timeout_secs)
+                .map(u64::from)
+                .unwrap_or(crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS);
+            (std::time::Duration::from_secs(secs) + std::time::Duration::from_secs(10))
+                .min(std::time::Duration::from_secs(60))
+        }
+    };
+    let deadline = std::time::Instant::now() + grace;
+
+    let mut closed = 0u32;
+    loop {
+        let victims: Vec<Uuid> = state.session_starts.read().await.iter()
+            .filter(|(_, s)| s.connection_id == connection_id && s.at + SLACK >= cutoff)
+            .map(|(sid, _)| *sid)
+            .collect();
+        for sid in victims {
+            close_one_session(sid, state).await;
+            closed += 1;
+        }
+        if closed > 0 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    closed
+}
+
+/// Credential resolution for a Test: an explicitly passed secret wins; a
+/// blank one on a connection that EXISTS in storage (test-while-editing)
+/// falls back to the stored secret, or the form's Test would report an auth
+/// failure about a password the user never retyped. A brand-new (unsaved, nil
+/// id) connection has nothing to fall back to.
+fn resolve_test_secret(arg: Option<String>, stored: Option<String>, saved: bool) -> Option<String> {
+    match arg.filter(|p| !p.trim().is_empty()) {
+        Some(p) => Some(p),
+        None if saved => stored,
+        None => None,
+    }
+}
+
+/// Shared core of the two Test buttons: bring up the SSH tunnel when the
+/// config asks for one, open a throwaway session on a scratch registry (never
+/// AppState — nothing persists), run the probe query, and tear everything
+/// down, tunnel included. Returns the probe's version string when the engine
+/// has a cheap one. Errors are phrased for display.
+async fn test_connect_core(
+    config: &ConnectionConfig,
     password: Option<String>,
     ssh_password: Option<String>,
-) -> Result<String, crate::apperror::AppError> {
+) -> Result<Option<String>, String> {
     // Ephemeral session registry — never touches AppState.
     let sessions: connection::SessionMap = Default::default();
 
-    // Open SSH tunnel if configured (ad-hoc SSH password, never the store)
-    let tunnel = if config.use_ssh {
-        let ssh_host = config.ssh_host.as_deref()
-            .ok_or("SSH host is required when tunnel is enabled")?;
-        let ssh_user = config.ssh_user.as_deref()
-            .ok_or("SSH user is required when tunnel is enabled")?;
-        let ssh_port = config.ssh_port.unwrap_or(22);
-        let db_host  = config.host.as_deref().unwrap_or("localhost");
-        let db_port  = config.port.unwrap_or(config.engine.default_port());
-
-        let t = crate::db::ssh::SshTunnel::open(
-            ssh_host, ssh_port, ssh_user,
-            config.ssh_key_path.as_deref(),
-            db_host, db_port,
-            config.ssh_jump.as_deref(),
-            ssh_password.as_deref(),
-        ).await.map_err(|e| format!("SSH tunnel to {}@{}:{} failed:\n{:#}", ssh_user, ssh_host, ssh_port, e))?;
-
-        Some(t)
-    } else {
-        None
-    };
-
+    let tunnel = open_tunnel(config, ssh_password.as_deref()).await?;
     let host_override: Option<(&str, u16)> = tunnel.as_ref()
         .map(|t| ("127.0.0.1", t.local_port));
 
-    let start = std::time::Instant::now();
-    let result: Result<Option<String>, crate::apperror::AppError> = async {
-        let session_id = connection::open_session(&config, password, &sessions, host_override)
+    let result: Result<Option<String>, String> = async {
+        let session_id = connection::open_session(config, password, &sessions, host_override)
             .await
-            .map_err(|e| format!("Connect to {} failed:\n{}", describe(&config), friendly_error(&config.engine, &e)))?;
+            .map_err(|e| format!("Connect to {} failed:\n{}", describe(config), friendly_error(&config.engine, &e)))?;
         let session = connection::get_session_pub(session_id, &sessions)
             .await
-            ?;
+            .map_err(|e| e.to_string())?;
         let version = connection::probe_session(&session)
             .await
             .map_err(|e| format!("Connected, but the probe query failed: {e:#}"))?;
@@ -539,8 +646,41 @@ pub async fn test_connection_adhoc(
     }.await;
 
     drop(tunnel); // Drop kills the ssh child
+    result
+}
 
-    let version = result?;
+/// Test an unsaved (ad-hoc) connection: opens a real connection — including
+/// the SSH tunnel when configured — pings it, and tears everything down.
+/// Nothing is left in AppState and NOTHING is persisted to the secret store
+/// or connections.json. A blank password on a config whose id exists in
+/// storage falls back to the STORED secret (test-while-editing; see
+/// resolve_test_secret). Returns a short success summary (server version when
+/// cheap to get).
+#[tauri::command]
+pub async fn test_connection_adhoc(
+    config: ConnectionConfig,
+    password: Option<String>,
+    ssh_password: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, crate::apperror::AppError> {
+    // The app-wide connect timeout, as on every other connect path.
+    let config = with_default_timeout(&config, &state);
+    let saved = !config.id.is_nil();
+    let password = resolve_test_secret(
+        password,
+        if saved { get_password(&config, &state.data_dir) } else { None },
+        saved,
+    );
+    let ssh_password = resolve_test_secret(
+        ssh_password,
+        if saved { stored_ssh_password(&config, &state.data_dir) } else { None },
+        saved,
+    );
+
+    let start = std::time::Instant::now();
+    let version = test_connect_core(&config, password, ssh_password)
+        .await
+        .map_err(crate::apperror::AppError::from)?;
     let ms = start.elapsed().as_millis();
     Ok(match version {
         Some(v) => format!("Connected to {} ({} ms)", v, ms),
@@ -659,8 +799,7 @@ mod tests {
 
     /// Quiet open: no session_starts record, no audit rows — but the guard
     /// registration (session_meta) is NOT skipped, or an ephemeral session
-    /// would slip past the read-only/prod border. The loud open keeps both.
-    #[tokio::test]
+    /// would slip past the read-only/prod border. The loud open keeps both.    #[tokio::test]
     async fn ephemeral_open_is_quiet_regular_open_is_audited() {
         let state = test_state().await;
         let cfg = scratch_config();
@@ -713,6 +852,62 @@ mod tests {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
             .fetch_one(&state.history).await.unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// Test-while-editing: the form's blank password field means "the stored
+    /// one" for a connection that exists in storage, and "nothing" for a new
+    /// one. An explicitly typed password always wins.
+    #[test]
+    fn test_secret_falls_back_to_the_store_only_for_saved_connections() {
+        let stored = Some("stored".to_string());
+        // Blank/None arg on a saved connection → stored secret.
+        assert_eq!(resolve_test_secret(None, stored.clone(), true).as_deref(), Some("stored"));
+        assert_eq!(resolve_test_secret(Some("  ".into()), stored.clone(), true).as_deref(), Some("stored"));
+        // Typed value wins, even blank-looking whitespace is filtered first.
+        assert_eq!(resolve_test_secret(Some("typed".into()), stored.clone(), true).as_deref(), Some("typed"));
+        // Unsaved connection: no fallback, whatever the store holds.
+        assert_eq!(resolve_test_secret(None, stored.clone(), false), None);
+        // Saved but the store is empty: honestly nothing.
+        assert_eq!(resolve_test_secret(None, None, true), None);
+    }
+
+    /// The deadline-abandoned connect, replayed on a scratch session: a
+    /// session that arrived during the attempt is closed (with its
+    /// 'disconnect' audit row), an older session of the same connection and
+    /// any session of another connection survive, and a no-op call is Ok(0).
+    #[tokio::test]
+    async fn close_orphaned_connection_closes_only_the_late_arrival() {
+        let state = test_state().await;
+        let cfg = scratch_config();
+
+        // An "old" session: opened (well) before the attempt started. Its
+        // start record is backdated so the age filter must spare it.
+        let old = open_session_for_config(&cfg, &state).await.unwrap();
+        state.session_starts.write().await.get_mut(&old).unwrap().at =
+            std::time::Instant::now() - std::time::Duration::from_secs(3600);
+
+        // The attempt "started 3 s ago"; the abandoned open lands now.
+        let orphan = open_session_for_config(&cfg, &state).await.unwrap();
+
+        let closed = close_orphaned(cfg.id, 3_000, Some(0), &state).await;
+        assert_eq!(closed, 1, "only the late arrival is an orphan");
+        assert!(connection::get_session_pub(orphan, &state.sessions).await.is_err());
+        assert!(connection::get_session_pub(old, &state.sessions).await.is_ok(),
+            "the pre-existing session must survive");
+
+        // The orphan's open wrote a 'connect' row; its cleanup wrote the
+        // matching 'disconnect'.
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT sql FROM audit_log ORDER BY id")
+            .fetch_all(&state.history).await.unwrap();
+        assert_eq!(rows.iter().filter(|s| s.as_str() == "disconnect").count(), 1);
+
+        // No matching session → a no-op, and another connection's sessions
+        // are never in scope.
+        assert_eq!(close_orphaned(cfg.id, 3_000, Some(0), &state).await, 0);
+        assert_eq!(close_orphaned(Uuid::new_v4(), 600_000, Some(0), &state).await, 0);
+
+        close_one_session(old, &state).await;
     }
 
     // ── Scratch sessions ────────────────────────────────────────────────────

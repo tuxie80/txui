@@ -5,6 +5,8 @@ import type { ConnectionConfig, Engine, SslMode } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { parseConnectionUrl, clickhouseCeilingParams, CH_CEILING_KEYS } from '../utils/connUrl';
+import { portError, sshPortError, redisDbError, filePathError } from '../utils/connValidate';
+import { withDeadline, connectDeadlineMs } from '../utils/withDeadline';
 import {
   ENGINE_DEFAULTS, DEFAULT_HOST, resolveDefaults, clearStaleDefaults, databasePlaceholder,
 } from '../utils/connDefaults';
@@ -330,12 +332,37 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     };
   }
 
+  // Validation lives ahead of BOTH paths that build a config — Test and Save
+  // — so an impossible value never leaves the form.
+  function validateForm(): string | null {
+    if (isFile) return filePathError(filePath, engine as 'sqlite' | 'parquet' | 'duckdb');
+    const p = portError(port);
+    if (p) return p;
+    if (isRedis) {
+      const r = redisDbError(database ?? '');
+      if (r) return r;
+    }
+    if (useSsh) {
+      const s = sshPortError(sshPort);
+      if (s) return s;
+    }
+    return null;
+  }
+
   async function handleTest() {
+    const invalid = validateForm();
+    if (invalid) { setError(invalid); return; }
     setTesting(true);
     setTestResult(null);
     setError(null);
     try {
-      const msg = await ConnectionsStore.testAdhoc(buildConfig(), password, sshPassword);
+      const config = buildConfig();
+      // The sidebar bounds how long it waits on a connect; the form's Test
+      // gets the same treatment — an IPC call that never settles must not
+      // leave "Testing…" spinning forever.
+      const msg = await withDeadline(
+        ConnectionsStore.testAdhoc(config, password, sshPassword),
+        connectDeadlineMs(config));
       setTestResult({ ok: true, msg });
     } catch (err) {
       setTestResult({ ok: false, msg: errorDisplay(err) });
@@ -346,6 +373,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
 
   async function handleSave() {
     if (!name.trim()) { setError('Name is required'); return; }
+    const invalid = validateForm();
+    if (invalid) { setError(invalid); return; }
     setSaving(true);
     setError(null);
     try {
@@ -497,8 +526,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           <div className="cf-pair">
             <input value={host ?? ''} onChange={e => setHost(e.target.value)}
                    placeholder={DEFAULT_HOST} style={{ flex: 1 }} />
-            {/* '' is the empty state, not 0 — `Number('')` is 0, which is not a port. */}
-            <input type="number" value={port ?? ''} placeholder={String(engineDefaults.port)}
+            {/* '' is the empty state, not 0 — `Number('')` is 0, which is not a port.
+                Out-of-range values are rejected at save/test (utils/connValidate). */}
+            <input type="number" min={1} max={65535} value={port ?? ''} placeholder={String(engineDefaults.port)}
                    onChange={e => setPort(e.target.value === '' ? null : Number(e.target.value))}
                    style={{ width: 84 }} />
           </div>
@@ -678,18 +708,26 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       {tab === 'security' && (<>
 
       {/* ── SSH tunnel ──────────────────────────────────────────── */}
-      {/* Shown for every engine. It was hidden for Redis, but the tunnel was
-          in fact created and then IGNORED by the Redis driver, which connected
-          straight to the real host — SSH was silently broken, not unsupported.
-          The driver now honours the tunnel endpoint. */}
+      {/* Offered for every client/server engine, greyed for the file engines:
+          SQLite/DuckDB/Parquet open a local path, so there is no server to
+          tunnel to. Greyed with the reason on hover (the .unavail idiom),
+          never hidden — a hidden control reads as "I cannot find it". It was
+          once hidden for Redis, but the tunnel was in fact created and then
+          IGNORED by the Redis driver, which connected straight to the real
+          host — SSH was silently broken, not unsupported. The driver now
+          honours the tunnel endpoint. */}
       {/* Greyed on Windows until 0.49.0, when the tunnel got its Windows
           branch (db/ssh.rs). The entry left utils/platformCaps.ts with it —
           leaving it would have had the form say "not implemented yet" about
           something that is. */}
-      <div className="form-section">
+      <div className={isFile ? 'form-section unavail' : 'form-section'}
+           data-tip={isFile
+             ? 'SSH tunnel — not applicable here: a file engine opens a local path, there is no server to tunnel to'
+             : undefined}
+           aria-disabled={isFile || undefined}>
           <label className="form-section-toggle">
             <input type="checkbox" checked={useSsh}
-                   onChange={e => setUseSsh(e.target.checked)} />
+                   onChange={e => { if (isFile) return; setUseSsh(e.target.checked); }} />
             SSH tunnel
           </label>
 
@@ -702,8 +740,11 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
                 <input style={{ flex: 1 }} value={sshHost}
                        onChange={e => setSshHost(e.target.value)}
                        placeholder="SSH host — bastion.example.com" />
-                <input type="number" style={{ flex: '0 0 70px' }} value={sshPort}
-                       onChange={e => setSshPort(Number(e.target.value))} title="SSH port" />
+                {/* A cleared box is 0 (`Number('')`), and 0 is NOT a port — it
+                    stays in state as-is and save/test reject it with a message,
+                    rather than silently becoming 22 in buildConfig. */}
+                <input type="number" min={1} max={65535} style={{ flex: '0 0 70px' }} value={sshPort}
+                       onChange={e => setSshPort(e.target.value === '' ? 0 : Number(e.target.value))} title="SSH port" />
                 <input style={{ flex: '0 0 120px' }} value={sshUser}
                        onChange={e => setSshUser(e.target.value)} placeholder="user" />
               </div>
@@ -769,10 +810,16 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       )}
 
       {/* ── SSL / TLS ───────────────────────────────────────────── */}
-      <div className="form-section">
+      {/* Same file-engine treatment as the tunnel: TLS is a property of a
+          server connection, and a local file has none. */}
+      <div className={isFile ? 'form-section unavail' : 'form-section'}
+           data-tip={isFile
+             ? 'SSL/TLS — not applicable here: a file engine opens a local path, there is no connection to encrypt'
+             : undefined}
+           aria-disabled={isFile || undefined}>
           <div className="form-row">
             <label style={{ flex: 1 }}>SSL mode
-              <select value={sslMode} onChange={e => setSslMode(e.target.value as SslMode)}>
+              <select value={sslMode} onChange={e => { if (isFile) return; setSslMode(e.target.value as SslMode); }}>
                 <option value="disable">Disable</option>
                 <option value="preferred">Preferred</option>
                 <option value="require">Require</option>

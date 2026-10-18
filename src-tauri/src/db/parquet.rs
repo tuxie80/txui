@@ -84,6 +84,11 @@ pub struct ParquetFile {
     /// Bytes on disk — the denominator for every "how well does this compress"
     /// question, and not derivable from the footer alone.
     pub file_size: u64,
+    /// Stop button reachability for the row path: the decode runs in
+    /// `spawn_blocking` (a oneshot cannot abort it), so cancel is a flag the
+    /// batch loops check between record batches. Set by `interrupt`, cleared
+    /// at the start of each run.
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for ParquetFile {
@@ -123,6 +128,28 @@ impl ParquetFile {
 pub enum ParquetSource {
     Single(ParquetFile),
     Dataset(ParquetDataset),
+}
+
+impl ParquetSource {
+    /// Stop an in-flight row read. The single-file decode runs in
+    /// `spawn_blocking`, which cannot be aborted — so cancel is a flag the
+    /// batch loops check between record batches. A dataset's row reads go
+    /// through its internal DuckDB view, which has a real interrupt instead.
+    pub fn interrupt(&self) {
+        match self {
+            ParquetSource::Single(f) =>
+                f.cancel.store(true, std::sync::atomic::Ordering::Relaxed),
+            ParquetSource::Dataset(d) => d.duck.interrupt(),
+        }
+    }
+
+    /// Clear a previous cancel before a new run starts — a stale set flag
+    /// would otherwise kill the next query on its first batch.
+    pub fn reset_interrupt(&self) {
+        if let ParquetSource::Single(f) = self {
+            f.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 impl std::fmt::Debug for ParquetSource {
@@ -374,6 +401,7 @@ pub fn open_path(path: &Path) -> Result<ParquetFile> {
         path: path.to_path_buf(),
         metadata: reader.metadata().clone().into(),
         file_size,
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
 
@@ -1372,6 +1400,11 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
     let mut out: Vec<Row> = Vec::new();
     let mut seen = 0usize;
     while out.len() < limit {
+        // The Stop button's reach: checked between record batches (the decode
+        // runs in spawn_blocking, so no oneshot could abort it mid-batch).
+        if f.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("query cancelled");
+        }
         let Some(batch) = reader.next() else { break };
         let batch = batch?;
         let fmts: Vec<ArrayFormatter> = batch
@@ -1609,6 +1642,10 @@ pub fn preview_filtered(
     let mut all: Vec<Row> = Vec::new();
     let mut capped = false;
     'read: for batch in reader {
+        // Cancel between record batches, like preview().
+        if f.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("query cancelled");
+        }
         let batch = batch?;
         let fmts: Vec<ArrayFormatter> = batch.columns().iter()
             .map(|c| ArrayFormatter::try_new(c.as_ref(), &opts))
@@ -2086,6 +2123,38 @@ mod tests {
         let tail = preview(&f, 50, 240).unwrap();
         assert_eq!(tail.rows.len(), 10);
         assert_eq!(tail.rows[9][0], serde_json::json!("249"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_set_cancel_flag_stops_the_read_between_batches() {
+        let path = fixture("cancel.parquet", 250, 100);
+        let f = open_path(&path).unwrap();
+
+        // Cancel arrives before the first batch is decoded → no rows, a
+        // "cancelled" error rather than a silent empty result.
+        f.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = preview(&f, 5, 0).unwrap_err().to_string();
+        assert!(err.contains("cancelled"), "{err}");
+        let err = preview_filtered(&f, 5, 0,
+            &[crate::db::types::FilterClause {
+                column: "label".into(),
+                op: crate::db::types::FilterOp::Like,
+                value: Some("row-%".into()),
+            }], &[]).unwrap_err().to_string();
+        assert!(err.contains("cancelled"), "{err}");
+
+        // The next run clears the flag (execute_query does this) and reads fine.
+        f.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(preview(&f, 5, 0).unwrap().rows.len(), 5);
+
+        // The session-level interrupt sets the same flag.
+        let src = ParquetSource::Single(open_path(&path).unwrap());
+        src.interrupt();
+        let ParquetSource::Single(f2) = &src else { panic!("single") };
+        assert!(f2.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        src.reset_interrupt();
+        assert!(!f2.cancel.load(std::sync::atomic::Ordering::Relaxed));
         let _ = std::fs::remove_file(&path);
     }
 

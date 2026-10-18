@@ -218,9 +218,33 @@ fn spawn_stderr_scan(stderr: tokio::process::ChildStderr) -> (StderrScan, tauri:
     (scan, task)
 }
 
+/// The last few non-empty stderr lines of a dead (or stalled) ssh, phrased
+/// for an error message — empty when there is nothing worth quoting.
+fn stderr_tail(scan: Option<&StderrScan>) -> String {
+    let Some(scan) = scan else { return String::new() };
+    let tail = scan.tail.lock().unwrap();
+    let lines: Vec<&String> = tail.iter().filter(|l| !l.trim().is_empty()).collect();
+    let tail_text = lines.iter().rev().take(3).rev()
+        .map(|s| s.as_str()).collect::<Vec<_>>().join(" | ");
+    if tail_text.is_empty() {
+        String::new()
+    } else {
+        format!(" ssh said: {tail_text}")
+    }
+}
+
+/// Can 127.0.0.1:`port` accept a TCP connection right now? Loopback refusal
+/// is immediate, so this is a cheap poll; the accepted probe connection is
+/// dropped at once (ssh forwards it to the DB, which sees a connect and an
+/// immediate close — the same thing a refused dial costs).
+async fn port_accepts(port: u16) -> bool {
+    tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
+}
+
 impl SshTunnel {
     /// Spawn `ssh -N -L local_port:db_host:db_port user@ssh_host` and wait
-    /// up to 1 second for the process to stabilise (quick-exit = failure).
+    /// until the local forward actually accepts connections (bounded by the
+    /// connection's connect timeout — None means the app-wide default).
     ///
     /// `ssh_jump` adds `-J <jump>`; `ssh_password` switches to askpass-driven
     /// password/passphrase auth (BatchMode is omitted in that case — it would
@@ -235,9 +259,10 @@ impl SshTunnel {
         db_port:      u16,
         ssh_jump:     Option<&str>,
         ssh_password: Option<&str>,
+        connect_timeout_secs: Option<u32>,
     ) -> Result<Self> {
         match Self::open_once(ssh_host, ssh_port, ssh_user, ssh_key_path, db_host, db_port,
-                              ssh_jump, ssh_password).await {
+                              ssh_jump, ssh_password, connect_timeout_secs).await {
             // The local port is chosen by bind:0 and then RELEASED before ssh
             // binds it — another process can claim it in that window, and ssh
             // exits at once under ExitOnForwardFailure. "Address already in
@@ -247,7 +272,7 @@ impl SshTunnel {
             // mitigation, not a guarantee.
             Err(e) if e.to_string().contains("Address already in use") =>
                 Self::open_once(ssh_host, ssh_port, ssh_user, ssh_key_path, db_host, db_port,
-                                ssh_jump, ssh_password).await,
+                                ssh_jump, ssh_password, connect_timeout_secs).await,
             r => r,
         }
     }
@@ -262,6 +287,7 @@ impl SshTunnel {
         db_port:      u16,
         ssh_jump:     Option<&str>,
         ssh_password: Option<&str>,
+        connect_timeout_secs: Option<u32>,
     ) -> Result<Self> {
         validate_endpoint(ssh_user, ssh_host)?;
         if let Some(jump) = ssh_jump {
@@ -304,7 +330,8 @@ impl SshTunnel {
 
         if let Some(password) = ssh_password {
             // BatchMode intentionally omitted: it disables password prompts.
-            let script = askpass.as_ref().expect("askpass script written above");
+            let script = askpass.as_ref().ok_or_else(|| anyhow::anyhow!(
+                "internal error: SSH password given but no askpass script was written"))?;
             cmd.env("SSH_ASKPASS", script)
                .env("SSH_ASKPASS_REQUIRE", "force")
                .env("DISPLAY", "txui:0")
@@ -346,9 +373,20 @@ impl SshTunnel {
             None => (None, None),
         };
 
-        // Poll for 1 s; if the process exits early that indicates a failure
+        // Wait until the local forward actually ACCEPTS a connection. OpenSSH
+        // binds the -L port only after auth completes, so the old fixed 500 ms
+        // settle raced slow handshakes (MFA, a bastion, a loaded sshd) and the
+        // pool's first dial hit a port nothing listened on yet — a spurious
+        // "connection refused" on a healthy tunnel. Poll until the port
+        // accepts, ssh exits (a quick exit is a failure, and ssh's own stderr
+        // words are the diagnosis), or the connect timeout is spent.
+        let ready_timeout = Duration::from_secs(connect_timeout_secs
+            .map(u64::from)
+            .filter(|s| *s > 0)
+            .unwrap_or(crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS));
         let mut result = Ok(());
-        for attempt in 0..10 {
+        let wait_start = std::time::Instant::now();
+        loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -356,29 +394,30 @@ impl SshTunnel {
                     // about to be — give it a moment, then read ssh's own
                     // words from the tail it kept.
                     if let Some(t) = scan_task { let _ = t.await; }
-                    let mut err_tail = String::new();
-                    if let Some(scan) = &scan {
-                        let tail = scan.tail.lock().unwrap();
-                        let lines: Vec<&String> = tail.iter().filter(|l| !l.trim().is_empty()).collect();
-                        let tail_text = lines.iter().rev().take(3).rev()
-                            .map(|s| s.as_str()).collect::<Vec<_>>().join(" | ");
-                        if !tail_text.is_empty() {
-                            err_tail = format!(" ssh said: {tail_text}");
-                        }
-                    }
                     result = Err(anyhow::anyhow!(
                         "SSH tunnel exited immediately (exit code {:?}).{} \
                          Check host/user/key and that the remote DB is reachable.",
-                        status.code(), err_tail
+                        status.code(), stderr_tail(scan.as_ref())
                     ));
                     break;
                 }
-                Ok(None) if attempt >= 4 => break, // 500 ms elapsed and still running
-                Ok(None) => continue,
+                Ok(None) => {}
                 Err(e) => {
                     result = Err(anyhow::anyhow!("SSH process error: {}", e));
                     break;
                 }
+            }
+            if port_accepts(local_port).await {
+                break;
+            }
+            if wait_start.elapsed() >= ready_timeout {
+                result = Err(anyhow::anyhow!(
+                    "SSH tunnel did not accept connections on 127.0.0.1:{local_port} \
+                     within {}s — the ssh handshake (auth, host key, jump host) is \
+                     slower than this connection's connect timeout.{}",
+                    ready_timeout.as_secs(), stderr_tail(scan.as_ref())
+                ));
+                break;
             }
         }
 
@@ -391,10 +430,11 @@ impl SshTunnel {
             local_port, db_host, db_port, ssh_user, ssh_host, ssh_port
         );
 
-        // Host-key acceptance happens during the handshake, before auth — a
-        // first-contact note is essentially always captured within the settle
-        // window above. A pathologically slow kex that lands it later still
-        // gets the drain task's log::warn!, just not the audit row.
+        // Host-key acceptance happens during the handshake, before auth — and
+        // the readiness wait above only ends once auth has completed (the port
+        // binds after it), so a first-contact note is captured by now on any
+        // tunnel that came up. A pathologically late one still gets the drain
+        // task's log::warn!, just not the audit row.
         let host_key_note = scan.and_then(|s| s.host_key.lock().unwrap().clone());
 
         Ok(SshTunnel { local_port, host_key_note, child })
@@ -522,7 +562,8 @@ pub async fn spawn_ssh_exec(
 
     if let Some(password) = ssh_password {
         // BatchMode intentionally omitted: it disables password prompts.
-        let script = askpass.as_ref().expect("askpass script written above");
+        let script = askpass.as_ref().ok_or_else(|| anyhow::anyhow!(
+            "internal error: SSH password given but no askpass script was written"))?;
         cmd.env("SSH_ASKPASS", script)
            .env("SSH_ASKPASS_REQUIRE", "force")
            .env("DISPLAY", "txui:0")
@@ -688,5 +729,45 @@ mod tests {
         assert_eq!(c, "tail -n 200 -F '/var/log/mysql/error.log'");
         // A rejected path must fail BEFORE a command string exists.
         assert!(tail_command("/x/err';id;'.log", 200).is_err());
+    }
+
+    // ── tunnel readiness polling ─────────────────────────────────────────────
+
+    /// The readiness probe is a plain loopback connect: true on a listener,
+    /// false on a closed port (refusal is immediate, so this is cheap).
+    #[tokio::test]
+    async fn port_accepts_only_when_something_listens() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_accepts(port).await, "a bound listener must accept");
+        drop(listener);
+        assert!(!port_accepts(port).await, "nothing listening must not accept");
+    }
+
+    /// The race this fixes, replayed: ssh binds the -L port only AFTER auth,
+    /// so a fixed settle saw "still running" and reported success against a
+    /// port nothing listened on. Polling must wait for the bind to appear.
+    #[tokio::test]
+    async fn polling_waits_for_a_late_listener() {
+        // Reserve a free port, release it, then bind it 300 ms "late" — the
+        // stand-in for ssh binding the forward only once auth has completed.
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let delayed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            TcpListener::bind(("127.0.0.1", port)).await.unwrap()
+        });
+
+        let start = std::time::Instant::now();
+        let mut ready = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if port_accepts(port).await { ready = true; break; }
+        }
+        assert!(ready, "the poll must notice the late bind");
+        assert!(start.elapsed() >= Duration::from_millis(250),
+                "it must have WAITED for the bind, not won a race: {:?}", start.elapsed());
+        drop(delayed);
     }
 }

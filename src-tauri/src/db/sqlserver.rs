@@ -325,6 +325,20 @@ pub(crate) async fn aux_connect(session: &SqlServerSession) -> Result<MsClient> 
     connect(&session.cfg).await
 }
 
+/// `SELECT @@VERSION` from an AUXILIARY connection — the probe behind the
+/// sidebar's latency ping. The session's one client is mutexed and may be
+/// held for the whole length of a user query; asking through it made a 30 s
+/// ping stack behind a long statement and read as a dead server.
+pub async fn probe_version(session: &SqlServerSession) -> Result<String> {
+    let mut aux = aux_connect(session).await?;
+    let stream = aux.simple_query("SELECT @@VERSION").await.map_err(ms_error)?;
+    let row = stream.into_row().await.map_err(ms_error)?;
+    row.as_ref()
+        .and_then(|r| r.get::<&str, _>(0))
+        .map(|s| s.lines().next().unwrap_or(s).to_string())
+        .ok_or_else(|| anyhow!("@@VERSION returned no value"))
+}
+
 /// Kill a session by id, from an auxiliary connection.
 ///
 /// **T-SQL has one `KILL` and it ends the whole session.** There is no

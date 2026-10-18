@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { withDeadline, DeadlineError } from '../src/utils/withDeadline.ts';
+import { withDeadline, DeadlineError, connectDeadlineMs } from '../src/utils/withDeadline.ts';
 
 const later = <T>(v: T, ms: number) => new Promise<T>(r => setTimeout(() => r(v), ms));
 
@@ -44,4 +44,15 @@ test('the timer is cleared once settled', async () => {
   await withDeadline(later('ok', 1), 60_000);
   const after = process.getActiveResourcesInfo?.().filter(r => r === 'Timeout').length ?? 0;
   assert.equal(after, before);
+});
+
+test('connectDeadlineMs: connection timeout plus grace, 15 s default', () => {
+  // The sidebar and the form's Test share this schedule — a connect the UI
+  // watches must never outlive the backend's own bound by less than the
+  // handshake grace.
+  assert.equal(connectDeadlineMs({}), 23_000);
+  assert.equal(connectDeadlineMs({ connect_timeout_secs: null }), 23_000);
+  assert.equal(connectDeadlineMs({ connect_timeout_secs: 5 }), 13_000);
+  // An explicit 0 is honoured (backend: no timeout) rather than read as unset.
+  assert.equal(connectDeadlineMs({ connect_timeout_secs: 0 }), 8_000);
 });

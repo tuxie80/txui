@@ -134,6 +134,7 @@ pub(crate) fn lifecycle_now() -> String {
 /// Build the session-start record at connect time.
 pub(crate) fn session_start(config: &crate::db::types::ConnectionConfig) -> crate::state::SessionStart {
     crate::state::SessionStart {
+        connection_id:   config.id,
         connection_name: config.name.clone(),
         engine:          config.engine.wire_name().to_string(),
         db_user:         config.user.clone().unwrap_or_default(),

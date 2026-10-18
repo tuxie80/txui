@@ -489,3 +489,47 @@ export function buildConnectionUrl(f: ConnectionUrlFields): string {
     : '';
   return `${scheme}://${userinfo}${authority}${db ? `/${db}` : ''}${qs}`;
 }
+
+/**
+ * The "Copy as URL" view of a saved connection config.
+ *
+ * Secrets are structurally absent: the config never carries the password (it
+ * lives in the secretstore) and buildConnectionUrl has no password field, so
+ * what lands on the clipboard is shareable as-is. Returns null for the file
+ * engines — a local path has no URL form (there is no sqlite: scheme this
+ * parser accepts), and a made-up one would not paste back.
+ */
+export function configToConnectionUrl(cfg: {
+  engine: string;
+  host?: string | null;
+  port?: number | null;
+  user?: string | null;
+  database?: string | null;
+  ssl_mode?: UrlSslMode;
+  connect_timeout_secs?: number | null;
+  application_name?: string | null;
+  socket_path?: string | null;
+  read_only?: boolean;
+  extra_params?: Record<string, string>;
+}): string | null {
+  const URL_ENGINES: readonly string[] = ['mysql', 'postgres', 'redis', 'clickhouse', 'mongodb', 'sqlserver'];
+  if (!URL_ENGINES.includes(cfg.engine)) return null;
+  const engine = cfg.engine as UrlEngine;
+  return buildConnectionUrl({
+    engine,
+    host: cfg.host,
+    port: cfg.port,
+    user: cfg.user,
+    // Redis keeps its db index in `database` as a decimal string; the URL
+    // form carries it as the path (redis://h/2).
+    database: engine === 'redis' ? null : cfg.database,
+    redisDb: engine === 'redis' && cfg.database && Number.isInteger(Number(cfg.database))
+      ? Number(cfg.database) : null,
+    sslMode: cfg.ssl_mode,
+    connectTimeoutSecs: cfg.connect_timeout_secs,
+    applicationName: cfg.application_name,
+    socketPath: cfg.socket_path,
+    readOnly: cfg.read_only,
+    extraParams: cfg.extra_params,
+  });
+}

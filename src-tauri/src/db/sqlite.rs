@@ -47,6 +47,10 @@ pub async fn open(config: &ConnectionConfig) -> Result<sqlx::SqlitePool> {
     let opts = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(false)
+        // Wait for a lock instead of answering SQLITE_BUSY at once — the app's
+        // own history pool or a second tool holding the file briefly is normal,
+        // and failing instantly read as corruption. 5 s, like a connect timeout.
+        .busy_timeout(std::time::Duration::from_secs(5))
         // Server-enforced, in the sense that SQLite itself refuses the write.
         .read_only(config.read_only);
 
@@ -481,6 +485,25 @@ mod tests {
                    "PRAGMA \"main\".table_info(\"orders\")");
         assert_eq!(pragma("temp", "index_list", "we\"ird"),
                    "PRAGMA \"temp\".index_list(\"we\"\"ird\")");
+    }
+
+    /// A locked file must be WAITED for, not failed at once with SQLITE_BUSY.
+    /// Proven through the driver's own open: the pragma reads back 5000 ms.
+    #[tokio::test]
+    async fn open_sets_a_busy_timeout() {
+        let dir = std::env::temp_dir().join(format!("txui-sqlite-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let _ = std::fs::remove_file(&path);
+        super::create(&path).await.unwrap();
+
+        let mut c = ConnectionConfig::new(crate::db::types::Engine::Sqlite, "t");
+        c.file_path = Some(path.to_string_lossy().into_owned());
+        let pool = open(&c).await.unwrap();
+        let ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout").fetch_one(&pool).await.unwrap();
+        assert_eq!(ms, 5000, "busy_timeout must be 5 s");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// WP-04 4.1: the editor pipeline's row cap. Insert cap+10 rows, execute

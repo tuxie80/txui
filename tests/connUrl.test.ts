@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseConnectionUrl, buildConnectionUrl } from '../src/utils/connUrl.ts';
+import { parseConnectionUrl, buildConnectionUrl, configToConnectionUrl } from '../src/utils/connUrl.ts';
 import type { ParsedConnectionUrlOk } from '../src/utils/connUrl.ts';
 
 function ok(url: string): ParsedConnectionUrlOk {
@@ -217,6 +217,29 @@ test('buildConnectionUrl: password is never emitted', () => {
   assert.equal(url.includes('@'), true);  // userinfo present
   assert.ok(!url.includes(':s3cret'));
   assert.equal(url, 'mysql://root@h/db');
+});
+
+test('configToConnectionUrl: a saved config becomes a shareable, secret-free URL', () => {
+  // The sidebar's "Copy as URL" — what lands on the clipboard must be
+  // paste-able and must never carry a secret (the config has none to carry).
+  assert.equal(configToConnectionUrl({
+    engine: 'mysql', host: 'db.local', port: 3306, user: 'root', database: 'app',
+    ssl_mode: 'require', read_only: false, extra_params: {},
+  }), 'mysql://root@db.local:3306/app?ssl-mode=REQUIRED');
+  // Redis: the db index lives in `database` as a string, and comes out as
+  // the URL path.
+  assert.equal(configToConnectionUrl({
+    engine: 'redis', host: 'h', port: 6379, database: '2',
+  }), 'redis://h:6379/2');
+  assert.equal(configToConnectionUrl({
+    engine: 'redis', host: 'h', port: 6379, database: null,
+  }), 'redis://h:6379');
+});
+
+test('configToConnectionUrl: file engines have no URL form', () => {
+  for (const engine of ['sqlite', 'parquet', 'duckdb']) {
+    assert.equal(configToConnectionUrl({ engine, database: 'x' }), null, engine);
+  }
 });
 
 test('buildConnectionUrl: rediss for TLS redis, IPv6 brackets, socket paths', () => {

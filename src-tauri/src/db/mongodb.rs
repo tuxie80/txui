@@ -71,10 +71,25 @@ const KEY_SAMPLE_SIZE: i64 = 100;
 /// an endpoint (dialing it on 27017 answers nothing; that was the bug). An
 /// SSH tunnel still wins: it hands over a concrete host:port, and SRV
 /// discovery through a tunnel resolves to the wrong side of it.
+/// The URI with the TLS decision taken from `ssl_mode` (TLS unless Disable).
+/// Only the tests build it this way — the connect path goes through
+/// [`build_uri_tls`] directly so `Preferred` can attempt both spellings.
+#[cfg(test)]
 fn build_uri(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
+) -> String {
+    build_uri_tls(config, password, host_override, !matches!(config.ssl_mode, super::types::SslMode::Disable))
+}
+
+/// As [`build_uri`] with the TLS decision made by the caller — `Preferred`
+/// tries `true` first and falls back to `false` (see [`connect`]).
+fn build_uri_tls(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+    tls: bool,
 ) -> String {
     let srv = host_override.is_none()
         && config.extra_params.get("srv")
@@ -110,7 +125,7 @@ fn build_uri(
             params.push(format!("{}={}", key, super::util::userinfo_encode(v)));
         }
     }
-    if !matches!(config.ssl_mode, super::types::SslMode::Disable) {
+    if tls {
         params.push("tls=true".to_string());
         // The driver's rustls-tls feature verifies against a BAKED webpki
         // (Mozilla) root list, not the OS store — see the note on the mongodb
@@ -119,6 +134,14 @@ fn build_uri(
         // CA-path field maps to the driver's tlsCAFile option.
         if let Some(ca) = config.ssl_ca_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             params.push(format!("tlsCAFile={}", super::util::userinfo_encode(ca)));
+        }
+        // The self-signed escape hatch — the role `trust_server_cert` plays
+        // for SQL Server: verification OFF, not narrowed (a CA path is the
+        // narrowing option). Both halves of the check go, because a
+        // self-signed dev cert rarely matches the hostname either.
+        if config.trust_server_cert {
+            params.push("tlsAllowInvalidCertificates=true".to_string());
+            params.push("tlsAllowInvalidHostnames=true".to_string());
         }
     }
     let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
@@ -132,26 +155,50 @@ fn build_uri(
 
 /// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
 ///
-/// The driver connects lazily, so open runs `ping` itself — a refused endpoint
-/// must surface at connect, not on the first tree expansion.
+/// The driver connects lazily, so connect runs `ping` itself — a refused
+/// endpoint must surface at connect, not on the first tree expansion.
 pub async fn open(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
 ) -> Result<LiveSession> {
     let client = connect(config, password, host_override).await?;
-    client.database("admin").run_command(doc! { "ping": 1 }).await?;
     Ok(LiveSession::MongoDb(client))
 }
 
 /// Shared by open() and ping(): build the client with the house timeouts and
-/// app name. No I/O happens here — the caller's first command does the dial.
+/// app name, then prove it with a real `ping` command (the driver's connect
+/// is lazy — no I/O happens until the first command runs).
+///
+/// `SslMode::Preferred` is OPPORTUNISTIC — TLS if the server speaks it, plain
+/// otherwise, MySQL's semantics: a default connection to a stock local Mongo
+/// must not fail because it attempted TLS against a plaintext port. Since the
+/// dial is lazy, the TLS attempt is proven with the probe command before
+/// falling back; the downgrade is logged, never silent.
 async fn connect(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
 ) -> Result<mongodb::Client> {
-    let uri = build_uri(config, password, host_override);
+    if matches!(config.ssl_mode, super::types::SslMode::Preferred) {
+        match connect_probed(config, password.clone(), host_override, true).await {
+            Ok(client) => return Ok(client),
+            Err(e) => log::warn!(
+                "MongoDB TLS connect failed (ssl_mode=preferred): {e:#} — retrying without TLS"),
+        }
+    }
+    let tls = !matches!(config.ssl_mode, super::types::SslMode::Disable);
+    connect_probed(config, password, host_override, tls).await
+}
+
+/// Build the client and run one `ping` command on it.
+async fn connect_probed(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+    tls: bool,
+) -> Result<mongodb::Client> {
+    let uri = build_uri_tls(config, password, host_override, tls);
     let mut opts = mongodb::options::ClientOptions::parse(&uri).await?;
     opts.app_name = Some(APP_NAME.into());
     // Never unbounded: see DEFAULT_CONNECT_TIMEOUT_SECS in db/types.rs.
@@ -161,20 +208,21 @@ async fn connect(
         .unwrap_or(super::types::DEFAULT_CONNECT_TIMEOUT_SECS);
     opts.connect_timeout = Some(Duration::from_secs(secs));
     opts.server_selection_timeout = Some(Duration::from_secs(secs));
-    Ok(mongodb::Client::with_options(opts)?)
+    let client = mongodb::Client::with_options(opts)?;
+    client.database("admin").run_command(doc! { "ping": 1 }).await?;
+    Ok(client)
 }
 
 pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingResult {
     let start = Instant::now();
     match connect(config, password, None).await {
         Ok(client) => {
-            let pong = client.database("admin").run_command(doc! { "ping": 1 }).await;
             let version = server_version(&client).await.ok();
             PingResult {
-                ok: pong.is_ok(),
+                ok: true,
                 latency_ms: start.elapsed().as_millis() as u64,
                 server_version: version,
-                error: pong.err().map(|e| e.to_string()),
+                error: None,
             }
         }
         Err(e) => PingResult {
@@ -923,6 +971,40 @@ mod tests {
     }
 
     #[test]
+    fn preferred_dials_tls_first_then_plain() {
+        // The fallback seam behind connect(): Preferred's two attempts are
+        // tls=true then no tls parameter — opportunistic, like MySQL.
+        let mut c = cfg();
+        c.ssl_mode = SslMode::Preferred;
+        assert_eq!(build_uri_tls(&c, None, None, true),
+                   "mongodb://db.internal:27017?tls=true");
+        assert_eq!(build_uri_tls(&c, None, None, false),
+                   "mongodb://db.internal:27017");
+    }
+
+    #[test]
+    fn trust_server_cert_disables_verification_when_tls_is_on() {
+        // The self-signed escape hatch (SQL Server's trust_server_cert,
+        // mapped): both halves of certificate verification go off, and only
+        // when TLS is actually in use.
+        let mut c = cfg();
+        c.ssl_mode = SslMode::Require;
+        c.trust_server_cert = true;
+        let uri = build_uri(&c, None, None);
+        assert!(uri.contains("tlsAllowInvalidCertificates=true"), "{uri}");
+        assert!(uri.contains("tlsAllowInvalidHostnames=true"), "{uri}");
+
+        c.ssl_mode = SslMode::Disable;
+        let uri = build_uri(&c, None, None);
+        assert!(!uri.contains("tls"), "plaintext carries no TLS options: {uri}");
+
+        // Default off: a TLS connection verifies, as before.
+        let mut c = cfg();
+        c.ssl_mode = SslMode::Require;
+        assert_eq!(build_uri(&c, None, None), "mongodb://db.internal:27017?tls=true");
+    }
+
+    #[test]
     fn ssh_tunnel_endpoint_wins() {
         assert_eq!(build_uri(&cfg(), None, Some(("127.0.0.1", 51234))),
                    "mongodb://127.0.0.1:51234");
@@ -1245,6 +1327,21 @@ mod live_tests {
 
     async fn cleanup(c: &mongodb::Client, db_name: &str) {
         c.database(db_name).drop().await.expect("cleanup drop");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn mongo_live_preferred_falls_back_to_plaintext() {
+        // The fixture runs no TLS; a Preferred connection must downgrade and
+        // connect anyway (MySQL's Preferred semantics), not fail the handshake.
+        let mut c = config();
+        c.ssl_mode = SslMode::Preferred;
+        match super::open(&c, password(), None).await {
+            Ok(LiveSession::MongoDb(_)) =>
+                println!("  preferred → plaintext fallback connected"),
+            Ok(_) => panic!("not a mongodb session"),
+            Err(_) => println!("no mongodb — skipping"),
+        }
     }
 
     #[tokio::test]

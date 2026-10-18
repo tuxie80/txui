@@ -21,6 +21,17 @@ export class DeadlineError extends Error {
   }
 }
 
+/**
+ * How long the UI pretends to be waiting on a connect/test for this config:
+ * the connection's own timeout plus grace for TLS/handshake/SSH, or the
+ * backend default (15 s) plus the same grace. Shared by the sidebar's
+ * connect/test and the form's Test button, so every "waiting" surface gives
+ * up on the same schedule.
+ */
+export function connectDeadlineMs(cfg: { connect_timeout_secs?: number | null }): number {
+  return ((cfg.connect_timeout_secs ?? 15) + 8) * 1000;
+}
+
 export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
   // A non-positive deadline means "no deadline" rather than "fail instantly",
   // which is the safer reading of a mis-configured timeout.

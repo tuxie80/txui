@@ -406,9 +406,13 @@ pub(crate) async fn stop_in_flight(
     // than through a kill map: the handle belongs to the session's one
     // connection, and a stale key can only interrupt a query this tab's own
     // session is running, which is what the button means anyway.
+    // Parquet is the same shape with a flag instead of a handle: its decode
+    // runs in spawn_blocking and checks it between record batches.
     if let Ok(session) = connection::get_session_pub(session_id, sessions).await {
-        if let crate::db::types::LiveSession::Duckdb(s) = session.as_ref() {
-            s.interrupt();
+        match session.as_ref() {
+            crate::db::types::LiveSession::Duckdb(s) => s.interrupt(),
+            crate::db::types::LiveSession::Parquet(f) => f.interrupt(),
+            _ => {}
         }
     }
 }

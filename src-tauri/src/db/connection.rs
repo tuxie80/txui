@@ -43,7 +43,14 @@ async fn iam_password(
 ) -> Result<Option<String>> {
     if config.use_iam_auth && matches!(config.engine, Engine::Mysql | Engine::Postgres) {
         let key = resolve_iam_key(config, super::gcp_iam::default_credentials_path())?;
-        Ok(Some(super::gcp_iam::iam_access_token(&key).await?))
+        // The mint is an HTTPS round trip to the token endpoint; bound it with
+        // the connection's connect timeout so a wedged endpoint cannot hang
+        // the connect forever.
+        let timeout = std::time::Duration::from_secs(config.connect_timeout_secs
+            .map(u64::from)
+            .filter(|s| *s > 0)
+            .unwrap_or(super::types::DEFAULT_CONNECT_TIMEOUT_SECS));
+        Ok(Some(super::gcp_iam::iam_access_token(&key, timeout).await?))
     } else {
         Ok(stored)
     }
@@ -63,11 +70,14 @@ pub async fn open_session(
         Engine::Mysql    => mysql::open(config, password, host_override).await?,
         Engine::Postgres => postgres::open(config, password, host_override).await?,
         Engine::Redis    => redis::open(config, password, host_override).await?,
-        // HTTP is stateless — "opening" builds a configured client. The first
-        // real round-trip is the caller's, so a bad endpoint surfaces there
-        // rather than here.
-        Engine::Clickhouse =>
-            LiveSession::Clickhouse(clickhouse::open(config, password, host_override)?),
+        Engine::Clickhouse => {
+            let s = clickhouse::open(config, password, host_override)?;
+            // HTTP is stateless — building the client alone proves nothing,
+            // so "connected" used to show green on a dead host until the
+            // first query. One cheap round trip makes open honest.
+            clickhouse::probe(&s).await?;
+            LiveSession::Clickhouse(s)
+        }
         // File-backed: `file_path` is the address. No dial, no tunnel, no auth.
         Engine::Sqlite   => LiveSession::Sqlite(sqlite::open(config).await?),
         Engine::Parquet  => LiveSession::Parquet(Arc::new(parquet::open_async(config).await?)),
@@ -165,6 +175,8 @@ pub async fn close_session(session_id: Uuid, sessions: &SessionMap) -> Vec<u64> 
             // than running to completion into the void. The worker's own Arc
             // keeps the session alive long enough for it to take effect.
             LiveSession::Duckdb(s) => s.interrupt(),
+            // Same shape as DuckDB: the flag is checked between record batches.
+            LiveSession::Parquet(f) => f.interrupt(),
             _ => {}
         }
     }
@@ -199,6 +211,9 @@ pub async fn close_all(state: &crate::state::AppState) {
                     // run on past the exit; the connection itself closes on Drop
                     // like the other non-pool engines.
                     LiveSession::Duckdb(s)      => s.interrupt(),
+                    // Parquet's decode interrupt is a flag checked between
+                    // record batches — same reason, same shape.
+                    LiveSession::Parquet(f)     => f.interrupt(),
                     // Only the sqlx pools need an awaited close. Every other engine
                     // holds either a single socket (SQL Server, ClickHouse), a file
                     // handle (SQLite, DuckDB, Parquet) or a manager (Redis, MongoDB),
@@ -284,16 +299,17 @@ pub async fn probe_session(session: &LiveSession) -> Result<Option<String>> {
         // Immutable file already read — nothing to probe.
         LiveSession::Parquet(f) => Ok(parquet::ping(f).server_version),
         LiveSession::Duckdb(s) => {
-            let v = duckdb::execute(s, "SELECT version()").await?;
-            Ok(v.rows.first().and_then(|row| row.first())
-                .and_then(|v| v.as_str()).map(|v| format!("DuckDB {v}")))
+            // A FRESH connection answers this — the session's own connection
+            // is mutexed and may be held by a long query (this probe is the
+            // 30 s sidebar ping; it must not stack behind it).
+            let v = s.probe_version().await?;
+            Ok(Some(format!("DuckDB {v}")))
         }
         LiveSession::MongoDb(client) => Ok(Some(mongodb::server_version(client).await?)),
         LiveSession::SqlServer(s) => {
-            let r = sqlserver::execute(s, "SELECT @@VERSION").await?;
-            Ok(r.rows.first().and_then(|row| row.first())
-                .and_then(|v| v.as_str())
-                .map(|v| v.lines().next().unwrap_or(v).to_string()))
+            // Same reasoning: aux connection, not the session's one mutexed
+            // client.
+            Ok(Some(sqlserver::probe_version(s).await?))
         }
     }
 }
@@ -374,6 +390,11 @@ pub async fn execute_query(
         // statement runs to completion inside the process.
         LiveSession::Sqlite(pool) => sqlite::execute_capped(pool, sql, max_rows).await,
         LiveSession::Parquet(f) => {
+            // Cancel is an AtomicBool on the source, checked between record
+            // batches: the Arrow decode runs in spawn_blocking and cannot be
+            // aborted, so Stop (stop_in_flight) tells it to bail early.
+            // Cleared here so a previous cancel does not kill this run.
+            f.reset_interrupt();
             // Full-file Arrow decodes are CPU-bound and can pin an async
             // worker for seconds — off the runtime, like commands/export.rs.
             let f = f.clone();

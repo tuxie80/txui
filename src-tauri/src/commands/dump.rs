@@ -540,6 +540,7 @@ async fn run_tool_inner(
                 ssh_host, config.ssh_port.unwrap_or(22), ssh_user,
                 config.ssh_key_path.as_deref(), &db_host, db_port,
                 config.ssh_jump.as_deref(), ssh_password.as_deref(),
+                config.connect_timeout_secs,
             ) => t.map_err(|e| format!("SSH tunnel failed:\n{e:#}"))?,
             _ = &mut *cancel_rx => {
                 return cancelled_early(started.elapsed().as_millis() as u64);

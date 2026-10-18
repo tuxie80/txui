@@ -5,6 +5,50 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Fixed — connection manager (deep-dive remediation, waves 1+2)
+
+**Backend correctness** (plan: `docs/plans/plan-connections.md`):
+
+- **Sidebar Test now honours SSH tunnels** — it used to dial the DB host
+  directly, reporting a false failure on every tunneled connection; both
+  Test buttons now share one tunnel-aware core.
+- **SSH tunnel bring-up no longer races**: the fixed 500 ms settle is
+  replaced by polling the local forward port until it accepts (or ssh exits),
+  bounded by the connect timeout — kills spurious "connection refused" on
+  slow MFA/bastion links.
+- **GCP IAM token mint is bounded** (a wedged OAuth endpoint could hang a
+  connect forever) and **ClickHouse connect actually dials** (`SELECT 1`
+  probe — the sidebar no longer shows "connected" on a dead host; plus a
+  read timeout so a stalled socket can't hang a query forever).
+- **Deadline-abandoned connects clean up after themselves** — a new
+  `close_orphaned_connection` command (173 registered) closes the pool +
+  tunnel that arrive after the UI stops waiting.
+- **`Preferred` TLS mode now means try-TLS-then-plain on Redis and
+  MongoDB** (matching MySQL) instead of TLS-or-fail — stock local instances
+  connect with default settings again.
+- **SQLite gets a 5 s busy timeout** (no more instant `SQLITE_BUSY`);
+  **Parquet Stop actually stops** (cancel flag between record batches);
+  **SQL Server / DuckDB latency probes no longer queue behind a running
+  query** (auxiliary connection); **MongoDB self-signed TLS** is reachable
+  via the trust option (the SQL Server `trust_server_cert` precedent).
+- Latent release-mode panics in the SSH askpass path converted to errors.
+
+**Frontend correctness**:
+
+- Ports validated (1–65535, blank SSH port no longer becomes 0), file
+  engines require a file path, Redis database # clamped to 0–15 —
+  all before save/test, not at connect time.
+- Testing a saved connection after editing now uses the **stored** password
+  when the field is blank (previously a guaranteed false auth failure), and
+  the form's Test honours the app-wide timeout.
+- Double-click while connecting no longer opens a second pool; in-flight
+  status survives a connection-list reload.
+- SSH/SSL sections are greyed with a reason for file engines.
+- Auto-connect failures get the same red dot, notification and expandable
+  error detail (with **Retry** / **Edit connection**) as manual connects;
+  editing or deleting a connection with open sessions now says so.
+- Context menu gains **Copy as URL** (secrets-free).
+
 ### Added — data generator, next generation (phase 5 + synthesis-lite)
 
 - **Mimic existing data** (synthesis-lite): one button in fill-existing-table

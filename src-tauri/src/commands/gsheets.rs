@@ -98,7 +98,8 @@ pub async fn gsheets_export(
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
 ) -> Result<String, AppError> {
-    let (token, _project) = mint_token(&key_path, SHEETS_SCOPE).await?;
+    let (token, _project) = mint_token(&key_path, SHEETS_SCOPE,
+        std::time::Duration::from_secs(crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS)).await?;
     let client = reqwest::Client::builder().build()
         .map_err(|e| AppError::from(format!("HTTP client: {e}")))?;
 

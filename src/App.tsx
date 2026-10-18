@@ -339,6 +339,14 @@ export default function App() {
     await ConnectionsStore.save(config, password || undefined, sshPassword || undefined);
     window.dispatchEvent(new CustomEvent('dbgui:connections-changed'));
     setView({ kind: 'welcome' });
+    // Sessions already open keep the config they were opened with — say so,
+    // or "I changed the port and it's still connecting to the old one"
+    // reads as a bug.
+    const openNow = sessions.filter(s => s.connectionId === config.id);
+    if (openNow.length > 0) {
+      await alertDialog(
+        `Saved "${config.name}". ${openNow.length} open session${openNow.length === 1 ? '' : 's'} on it keep${openNow.length === 1 ? 's' : ''} the old settings — disconnect and reconnect to apply the changes.`);
+    }
   }
 
   function openSessionNow(session: Session) {
@@ -415,27 +423,21 @@ export default function App() {
     return () => { clearTimeout(first); clearInterval(every); };
   }, []);
 
-  // Auto-connect connections flagged auto_connect, once at launch.
+  // Auto-connect connections flagged auto_connect, once at launch. Each one
+  // goes through the sidebar's connect path (the dbgui:connect event), so a
+  // failure gets the same red dot, elapsed counter and OS notification as a
+  // manual connect — before, it was a single log line and nothing else.
   const autoConnectedRef = useRef(false);
   useEffect(() => {
     if (autoConnectedRef.current) return;
     autoConnectedRef.current = true;
     ConnectionsStore.list().then(list => {
       for (const c of list.filter(x => x.auto_connect)) {
-        ConnectionsStore.open(c.id).then(sessionId => {
-          handleOpenSession({
-            connectionId: c.id, sessionId, connectionName: c.name, engine: c.engine,
-              environment: c.environment, readOnly: c.read_only, color: c.color, filePath: c.file_path,
-          });
-        }).catch(() => {
-          window.dispatchEvent(new CustomEvent('dbgui:conn-log', {
-            detail: { level: 'err', msg: `Auto-connect ${c.name} failed` } }));
-        });
+        window.dispatchEvent(new CustomEvent('dbgui:connect', { detail: { connectionId: c.id } }));
       }
     }).catch(() => {});
-    // Mount-only: auto-connect runs once at startup; handleOpenSession is safe
-    // to call later because it reads state via setState updaters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Mount-only: auto-connect runs once at startup; the sidebar owns the
+    // connect from here (it calls back into handleOpenSession on success).
   }, []);
 
   // Right-click ALWAYS yields a menu: components with their own menus call

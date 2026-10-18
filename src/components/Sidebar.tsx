@@ -10,7 +10,8 @@ import { getFolderMeta, setFolderMeta, renameFolderMeta, useFolderMetaStore } fr
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { isFavorite, toggleFavorite, favoriteIds, pruneFavorites, useConnFavorites } from '../store/connFavorites';
 import { EngineLogo } from './engineLogos';
-import { withDeadline } from '../utils/withDeadline';
+import { withDeadline, connectDeadlineMs, DeadlineError } from '../utils/withDeadline';
+import { configToConnectionUrl } from '../utils/connUrl';
 import { getPref, PREFS } from '../store/preferences';
 import { shortcuts } from '../utils/platform';
 import { labelsOf, visibleLabels, matchesLabelSearch } from '../utils/labels';
@@ -93,6 +94,9 @@ function tagColor(tag: string): string {
 
 export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSession, onOpenMultiExec, onOpenAudit, onOpenCompare, onOpenDump, onOpenReplicaSet, activeUtility, onHide, onDisconnect, activeSessionId }: Props) {
   const [conns, setConns] = useState<ConnState[]>([]);
+  // Latest rows for event handlers (dbgui:connect) that run outside render.
+  const connsRef = useRef<ConnState[]>([]);
+  useEffect(() => { connsRef.current = conns; }, [conns]);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; cs: ConnState } | null>(null);
   const [folderMenu, setFolderMenu] = useState<{ x: number; y: number; node: FolderNode } | null>(null);
   const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
@@ -120,6 +124,8 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
     if (cs && (cs.config.group ?? '') !== path) void moveToFolder(cs, path);
   };
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Which row's failure detail is expanded (the "failed" chip toggles it). */
+  const [errDetailId, setErrDetailId] = useState<string | null>(null);
   /** connectionId → epoch ms the in-flight connect/test started. */
   const [attempts, setAttempts] = useState<Record<string, number>>({});
   /** Re-render once a second while anything is connecting, to move the timer. */
@@ -158,7 +164,17 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
   useEffect(() => {
     const load = () => ConnectionsStore.list().then(cfgs => {
       pruneFavorites(new Set(cfgs.map(c => c.id)));
-      setConns(cfgs.map(c => ({ config: c, status: 'idle' })));
+      setConns(prev => {
+        const byId = new Map(prev.map(c => [c.config.id, c]));
+        return cfgs.map(config => {
+          const old = byId.get(config.id);
+          // A save/delete reload must not lose an in-flight connect or the
+          // failure it produced — only the config underneath may have changed.
+          return old && old.status !== 'idle'
+            ? { ...old, config }
+            : { config, status: 'idle' as const };
+        });
+      });
     });
     load();
     // Re-load after save/delete from the connection form
@@ -166,8 +182,37 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
     return () => window.removeEventListener('dbgui:connections-changed', load);
   }, []);
 
+  // Auto-connect (and any other out-of-sidebar connect request) goes through
+  // the SAME status machine as a double-click: the red dot, the elapsed
+  // counter, the notification. Before this, an auto-connect failure was one
+  // log line and nothing else.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ connectionId: string }>).detail;
+      if (!d?.connectionId) return;
+      const found = connsRef.current.find(c => c.config.id === d.connectionId);
+      if (found) { void handleConnect(found); return; }
+      // The list may not have loaded yet (auto-connect fires at startup) —
+      // fetch the config and connect with a fresh row state.
+      void ConnectionsStore.list().then(list => {
+        const cfg = list.find(c => c.id === d.connectionId);
+        if (cfg) void handleConnect({ config: cfg, status: 'idle' });
+      }).catch(() => {});
+    };
+    window.addEventListener('dbgui:connect', on);
+    return () => window.removeEventListener('dbgui:connect', on);
+    // Mount-only: reads state through connsRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function handleDelete(state: ConnState) {
-    if (!await confirmDialog(`Delete connection "${state.config.name}"? The stored password is removed too.`, { danger: true, okLabel: 'Delete' })) return;
+    // Name what stays behind: deleting the config does not close sessions
+    // already open on it, and finding that out later reads as a bug.
+    const openNow = sessions.filter(s => s.connectionId === state.config.id);
+    const openNote = openNow.length > 0
+      ? ` ${openNow.length} session${openNow.length === 1 ? '' : 's'} (${openNow.map(s => s.connectionName).join(', ')}) ${openNow.length === 1 ? 'is' : 'are'} still open on it — deleting does not disconnect them; they keep running until closed.`
+      : '';
+    if (!await confirmDialog(`Delete connection "${state.config.name}"? The stored password is removed too.${openNote}`, { danger: true, okLabel: 'Delete' })) return;
     await ConnectionsStore.delete(state.config.id);
     setConns(prev => prev.filter(c => c.config.id !== state.config.id));
   }
@@ -181,37 +226,44 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
    * backend had no default timeout, so an unreachable host sat on the OS's
    * SYN retries. The backend now bounds it, and the UI bounds it again —
    * because "connecting" with no elapsed time and no end is indistinguishable
-   * from the app being broken.
+   * from the app being broken. The deadline itself is shared with the form's
+   * Test button (utils/withDeadline: connectDeadlineMs).
    */
-  function connectDeadlineMs(cfg: ConnectionConfig): number {
-    // The connection's own timeout plus grace for TLS/handshake/SSH, or the
-    // backend default (15s) plus the same grace.
-    return ((cfg.connect_timeout_secs ?? 15) + 8) * 1000;
-  }
-
+  /** connectionId → epoch ms — mirrored in a ref so a second click in the
+   *  same render batch still sees the in-flight attempt. */
+  const attemptsRef = useRef<Record<string, number>>({});
   function beginAttempt(id: string) {
-    setAttempts(prev => ({ ...prev, [id]: Date.now() }));
+    attemptsRef.current = { ...attemptsRef.current, [id]: Date.now() };
+    setAttempts(attemptsRef.current);
   }
   function endAttempt(id: string) {
-    setAttempts(prev => {
-      if (!(id in prev)) return prev;
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
+    if (!(id in attemptsRef.current)) return;
+    const next = { ...attemptsRef.current };
+    delete next[id];
+    attemptsRef.current = next;
+    setAttempts(next);
   }
 
   async function handleConnect(state: ConnState) {
-    const idx = conns.findIndex(c => c.config.id === state.config.id);
-    setConns(prev => prev.map((c, i) => i === idx ? { ...c, status: 'connecting' } : c));
-    beginAttempt(state.config.id);
+    const id = state.config.id;
+    // Double-connect guard: a second click while the first is still in flight
+    // used to fire a second open_connection — two pools, two tunnels, and a
+    // status machine that no longer knew which answer belonged to which click.
+    if (id in attemptsRef.current) return;
+    setConns(prev => {
+      // An event-driven connect (auto-connect, palette) can name a connection
+      // the list has not loaded yet — add the row so the status is visible.
+      const rows = prev.some(c => c.config.id === id) ? prev : [...prev, state];
+      return rows.map(c => c.config.id === id ? { ...c, status: 'connecting' } : c);
+    });
+    beginAttempt(id);
     logConn('info', `Connecting to ${state.config.name}…`);
     const started = Date.now();
     try {
       const sessionId = await withDeadline(
-        ConnectionsStore.open(state.config.id), connectDeadlineMs(state.config));
+        ConnectionsStore.open(id), connectDeadlineMs(state.config));
       const session: Session = {
-        connectionId: state.config.id,
+        connectionId: id,
         sessionId,
         connectionName: state.config.name,
         engine: state.config.engine,
@@ -220,42 +272,50 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
         color: state.config.color,
         filePath: state.config.file_path,
       };
-      setConns(prev => prev.map((c, i) => i === idx ? { ...c, status: 'connected' } : c));
+      setConns(prev => prev.map(c => c.config.id === id ? { ...c, status: 'connected' } : c));
       logConn('ok', `Connected to ${state.config.name}`);
       onOpenSession(session);
     } catch (err) {
       const secs = Math.round((Date.now() - started) / 1000);
       const msg = `${errorDisplay(err)} (after ${secs}s)`;
       // Back to a resting state that says what happened — never left amber.
-      setConns(prev => prev.map((c, i) =>
-        i === idx ? { ...c, status: 'error', ping: { ok: false, latency_ms: secs * 1000, server_version: null, error: msg } } : c
+      setConns(prev => prev.map(c =>
+        c.config.id === id ? { ...c, status: 'error', ping: { ok: false, latency_ms: secs * 1000, server_version: null, error: msg } } : c
       ));
       logConn('err', `${state.config.name} — ${msg}`);
       // And say it out loud — the red dot alone was the whole feedback before.
       void notifyConnectFailed(state.config.name, errorDisplay(err));
+      if (err instanceof DeadlineError) {
+        // The UI gave up but the backend kept opening — a slow connect can
+        // still land a live pool + tunnel that nobody holds. Best-effort
+        // cleanup of any session that arrived since this attempt started.
+        void invoke('close_orphaned_connection', {
+          connectionId: id, attemptAgeMs: Date.now() - started,
+        }).catch(() => {});
+      }
     } finally {
-      endAttempt(state.config.id);
+      endAttempt(id);
     }
   }
 
   async function handleTest(state: ConnState) {
-    const idx = conns.findIndex(c => c.config.id === state.config.id);
-    setConns(prev => prev.map((c, i) => i === idx ? { ...c, status: 'connecting' } : c));
-    beginAttempt(state.config.id);
+    const id = state.config.id;
+    setConns(prev => prev.map(c => c.config.id === id ? { ...c, status: 'connecting' } : c));
+    beginAttempt(id);
     logConn('info', `Testing ${state.config.name}…`);
     const started = Date.now();
     let ping: PingResult;
     try {
-      ping = await withDeadline(ConnectionsStore.test(state.config.id), connectDeadlineMs(state.config));
+      ping = await withDeadline(ConnectionsStore.test(id), connectDeadlineMs(state.config));
     } catch (err) {
       const secs = Math.round((Date.now() - started) / 1000);
       ping = { ok: false, latency_ms: secs * 1000, server_version: null,
                error: `${errorDisplay(err)} (after ${secs}s)` };
     } finally {
-      endAttempt(state.config.id);
+      endAttempt(id);
     }
-    setConns(prev => prev.map((c, i) =>
-      i === idx ? { ...c, status: ping.ok ? 'idle' : 'error', ping } : c
+    setConns(prev => prev.map(c =>
+      c.config.id === id ? { ...c, status: ping.ok ? 'idle' : 'error', ping } : c
     ));
     if (ping.ok) logConn('ok', `${state.config.name} OK${ping.server_version ? ` — ${ping.server_version}` : ''} (${ping.latency_ms}ms)`);
     else logConn('err', `${state.config.name} — ${ping.error ?? 'failed'}`);
@@ -459,7 +519,14 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
             </span>
           )}
           {cs.status === 'error' && (
-            <span className="conn-failed" title={cs.ping?.error ?? 'failed'}>failed</span>
+            <button type="button" className="conn-failed"
+              title={`${cs.ping?.error ?? 'failed'} — click for details`}
+              onClick={e => {
+                e.stopPropagation();
+                setErrDetailId(errDetailId === cs.config.id ? null : cs.config.id);
+              }}>
+              failed {errDetailId === cs.config.id ? '▴' : '▾'}
+            </button>
           )}
           <span
             className={`status-dot status-${connected ? 'connected' : cs.status}`}
@@ -468,6 +535,23 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
               : cs.ping?.error ?? cs.status}
           />
         </div>
+        {/* The failure, in full, on demand — the tooltip-only error used to
+            truncate the server's actual reason into one hover line. */}
+        {cs.status === 'error' && errDetailId === cs.config.id && (
+          <div className="conn-error-detail">
+            <div className="conn-error-text">{cs.ping?.error ?? 'Connection failed'}</div>
+            <div className="conn-error-actions">
+              <button type="button"
+                onClick={() => { setErrDetailId(null); void handleConnect(cs); }}>
+                Retry
+              </button>
+              <button type="button"
+                onClick={() => { setErrDetailId(null); onEditConnection(cs.config); }}>
+                Edit connection
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -627,6 +711,16 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
             onClick={() => { toggleFavorite(ctxMenu.cs.config.id); setCtxMenu(null); }} />
           <ContextMenuItem label="Edit" onClick={() => { onEditConnection(ctxMenu.cs.config); setCtxMenu(null); }} />
           <ContextMenuItem label="Copy name" onClick={() => { navigator.clipboard.writeText(ctxMenu.cs.config.name).catch(() => {}); setCtxMenu(null); }} />
+          {/* Shareable shape of the config — secrets are structurally absent
+              (configToConnectionUrl has no password field). File engines have
+              no URL form, so the item is not offered for them. */}
+          {configToConnectionUrl(ctxMenu.cs.config) !== null && (
+            <ContextMenuItem label="Copy as URL" onClick={() => {
+              const url = configToConnectionUrl(ctxMenu.cs.config);
+              if (url) navigator.clipboard.writeText(url).catch(() => {});
+              setCtxMenu(null);
+            }} />
+          )}
           <ContextMenuItem label="Connect" onClick={() => { handleConnect(ctxMenu.cs); setCtxMenu(null); }} />
           {sessions.some(s => s.connectionId === ctxMenu.cs.config.id) && (
             <ContextMenuItem label="Disconnect" danger onClick={() => { onDisconnect(ctxMenu.cs.config.id); setCtxMenu(null); }} />

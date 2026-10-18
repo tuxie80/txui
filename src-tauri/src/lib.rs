@@ -724,6 +724,7 @@ pub fn run() {
             open_connection,
             open_scratch_session,
             close_connection,
+            close_orphaned_connection,
             // query
             execute_query,
             cancel_query,

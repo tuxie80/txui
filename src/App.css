@@ -6416,6 +6416,31 @@ button.primary:disabled { opacity: .5; cursor: default; }
   font-size: calc(10px * var(--font-scale, 1));
   color: var(--red);
   opacity: 0.9;
+  /* A button now (click expands the failure detail) — strip the chrome. */
+  background: none; border: none; padding: 0; font-family: inherit;
+  cursor: pointer;
+}
+.conn-failed:hover { opacity: 1; text-decoration: underline; }
+
+/* The expanded failure detail under a row: the server's actual reason, with
+   a way straight into the form that fixes it. */
+.conn-error-detail {
+  margin: 2px 4px 6px 22px;
+  padding: calc(6px * var(--font-scale, 1)) calc(8px * var(--font-scale, 1));
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--red);
+  border-radius: 4px;
+  background: var(--bg2);
+}
+.conn-error-text {
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--red);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.conn-error-actions { display: flex; gap: 6px; margin-top: 6px; }
+.conn-error-actions button {
+  font-size: calc(11px * var(--font-scale, 1));
 }
 
 
@@ -6659,9 +6684,9 @@ button.primary:disabled { opacity: .5; cursor: default; }
 
 
 /* ── Connection appearance picker ─────────────────────────────────────────
-   128 swatches, a second colour, and a fill pattern. Eight colours ran out
-   after a dozen servers; the pattern is what keeps tabs apart when the hues
-   are close, or for anyone who does not separate reds and greens easily. */
+   16 swatches, one colour. Eight ran out after a dozen servers; 128 was a
+   wall of near-identical swatches where picking one took longer than it
+   saved (see utils/palette.ts). */
 .cf-appearance { display: flex; flex-direction: column; gap: calc(6px * var(--font-scale, 1)); }
 .cf-swatch-row {
   display: flex; align-items: center;

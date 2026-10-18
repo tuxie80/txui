@@ -16,6 +16,17 @@ fn build_url(
     password: Option<String>,
     host_override: Option<(&str, u16)>,
 ) -> String {
+    build_url_tls(config, password, host_override, !matches!(config.ssl_mode, SslMode::Disable))
+}
+
+/// As [`build_url`] with the TLS decision made by the caller — `Preferred`
+/// tries `true` first and falls back to `false` (see [`dial`]).
+fn build_url_tls(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+    tls: bool,
+) -> String {
     let (host, port) = host_override.unwrap_or((
         config.host.as_deref().unwrap_or("127.0.0.1"),
         config.port.unwrap_or(6379),
@@ -27,10 +38,7 @@ fn build_url(
     // TLS is a scheme, not a flag. `disable` means plain redis://; anything
     // stricter means rediss://. Certificate verification itself is governed by
     // the `tls-rustls` feature's defaults.
-    let scheme = match config.ssl_mode {
-        SslMode::Disable => "redis",
-        _ => "rediss",
-    };
+    let scheme = if tls { "rediss" } else { "redis" };
 
     // Redis 6+ ACL: user AND password. Before ACLs only a password existed,
     // which is the `default` user — sending an empty username preserves that.
@@ -68,53 +76,74 @@ async fn connect_manager(client: Client, connect_timeout_secs: Option<u32>) -> R
         .map_err(Into::into)
 }
 
-/// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
-pub async fn open(
+/// Dial with the connection's TLS posture, returning the manager and the
+/// client (the client is just the parsed URL; db sweeps use it for dedicated
+/// connections).
+///
+/// `SslMode::Preferred` is OPPORTUNISTIC — TLS if the server speaks it, plain
+/// otherwise, MySQL's semantics: a default connection to a stock local Redis
+/// must not fail because it attempted TLS against a plaintext port. The
+/// downgrade is logged, never silent.
+async fn dial(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
-) -> Result<LiveSession> {
+) -> Result<(ConnectionManager, Client)> {
+    if matches!(config.ssl_mode, SslMode::Preferred) {
+        let url = build_url_tls(config, password.clone(), host_override, true);
+        let attempt = match Client::open(url) {
+            Ok(client) => connect_manager(client.clone(), config.connect_timeout_secs).await
+                .map(|mgr| (mgr, client)),
+            Err(e) => Err(e.into()),
+        };
+        match attempt {
+            Ok(pair) => return Ok(pair),
+            Err(e) => log::warn!(
+                "Redis TLS connect failed (ssl_mode=preferred): {e:#} — retrying without TLS"),
+        }
+    }
     let url = build_url(config, password, host_override);
     let client = Client::open(url)?;
     // The Client is kept on the session (cheap: it is just the parsed URL) so
     // db sweeps can open a DEDICATED connection instead of SELECT-switching
     // the shared manager.
     let mgr = connect_manager(client.clone(), config.connect_timeout_secs).await?;
+    Ok((mgr, client))
+}
+
+/// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
+pub async fn open(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+) -> Result<LiveSession> {
+    let (mgr, client) = dial(config, password, host_override).await?;
     Ok(LiveSession::Redis(mgr, client))
 }
 
 pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingResult {
-    let url = build_url(config, password, None);
     let start = Instant::now();
-    match Client::open(url) {
-        // Bounded like `open` — the Test button must not hang on a dead host.
-        Ok(client) => match connect_manager(client, config.connect_timeout_secs).await {
-            Ok(mut mgr) => {
-                let pong: Result<String, _> = redis::cmd("PING").query_async(&mut mgr).await;
-                let info: Result<String, _> = redis::cmd("INFO").arg("server").query_async(&mut mgr).await;
-                let version = info.ok().and_then(|s| {
-                    s.lines()
-                        .find(|l| l.starts_with("redis_version:"))
-                        .map(|l| l.trim_start_matches("redis_version:").trim().to_string())
-                });
-                // A failed PING must carry its reason — `ok: false` with
-                // `error: None` told the user nothing (WP-09 9.8; the MongoDB
-                // ping already did this).
-                let error = pong.as_ref().err().map(|e| e.to_string());
-                PingResult {
-                    ok: pong.is_ok(),
-                    latency_ms: start.elapsed().as_millis() as u64,
-                    server_version: version,
-                    error,
-                }
-            }
-            Err(e) => PingResult {
-                ok: false,
+    // Bounded like `open` — the Test button must not hang on a dead host.
+    match dial(config, password, None).await {
+        Ok((mut mgr, _client)) => {
+            let pong: Result<String, _> = redis::cmd("PING").query_async(&mut mgr).await;
+            let info: Result<String, _> = redis::cmd("INFO").arg("server").query_async(&mut mgr).await;
+            let version = info.ok().and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("redis_version:"))
+                    .map(|l| l.trim_start_matches("redis_version:").trim().to_string())
+            });
+            // A failed PING must carry its reason — `ok: false` with
+            // `error: None` told the user nothing (WP-09 9.8; the MongoDB
+            // ping already did this).
+            let error = pong.as_ref().err().map(|e| e.to_string());
+            PingResult {
+                ok: pong.is_ok(),
                 latency_ms: start.elapsed().as_millis() as u64,
-                server_version: None,
-                error: Some(e.to_string()),
-            },
-        },
+                server_version: version,
+                error,
+            }
+        }
         Err(e) => PingResult {
             ok: false,
             latency_ms: start.elapsed().as_millis() as u64,
@@ -364,6 +393,16 @@ mod tests {
     }
 
     #[test]
+    fn preferred_dials_tls_first_then_plain() {
+        // The fallback seam behind dial(): Preferred's two attempts are
+        // rediss:// then redis:// — opportunistic, like MySQL's Preferred.
+        let mut c = cfg();
+        c.ssl_mode = SslMode::Preferred;
+        assert_eq!(build_url_tls(&c, None, None, true), "rediss://cache.internal:6379");
+        assert_eq!(build_url_tls(&c, None, None, false), "redis://cache.internal:6379");
+    }
+
+    #[test]
     fn database_index_is_appended() {
         // Redis has 16 numbered databases; without this the browser could only
         // ever see db0.
@@ -469,6 +508,21 @@ mod live_tests {
         match super::open(&config(db), None, None).await.ok()? {
             crate::db::types::LiveSession::Redis(m, c) => Some((m, c)),
             _ => None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn redis_live_preferred_falls_back_to_plaintext() {
+        // The fixture runs no TLS; a Preferred connection must downgrade and
+        // connect anyway (MySQL's Preferred semantics), not fail the handshake.
+        let mut c = config(None);
+        c.ssl_mode = SslMode::Preferred;
+        match super::open(&c, None, None).await {
+            Ok(crate::db::types::LiveSession::Redis(..)) =>
+                println!("  preferred → plaintext fallback connected"),
+            Ok(_) => panic!("not a redis session"),
+            Err(_) => println!("no redis — skipping"),
         }
     }
 

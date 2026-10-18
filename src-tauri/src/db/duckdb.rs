@@ -49,6 +49,10 @@ pub struct DuckDbSession {
     interrupt: Arc<duckdb::InterruptHandle>,
     read_only: bool,
     memory: bool,
+    /// The path the session opened (`":memory:"` for a scratch), kept so the
+    /// latency probe can open a FRESH connection instead of queueing on this
+    /// session's mutex behind a long query.
+    path: String,
 }
 
 impl std::fmt::Debug for DuckDbSession {
@@ -70,6 +74,37 @@ impl DuckDbSession {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// `SELECT version()` on a FRESH connection to the same database — the
+    /// sidebar's latency probe. The session's own connection is mutexed and
+    /// may be held for the whole length of a user query; asking through it
+    /// made a 30 s ping stack behind a long statement. A second in-process
+    /// connection attaches to the same DuckDB instance for a file; for
+    /// `:memory:` it is an empty scratch — either way `version()` answers
+    /// without touching any data. Same access mode as the session, so the
+    /// instance cache never sees conflicting flags.
+    pub async fn probe_version(&self) -> Result<String> {
+        let path = self.path.clone();
+        let read_only = self.read_only;
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            let conn = if path == ":memory:" {
+                duckdb::Connection::open_in_memory()?
+            } else {
+                let cfg = duckdb::Config::default()
+                    .access_mode(if read_only {
+                        duckdb::AccessMode::ReadOnly
+                    } else {
+                        duckdb::AccessMode::Automatic
+                    })
+                    .map_err(|e| anyhow!("invalid DuckDB configuration: {e}"))?;
+                duckdb::Connection::open_with_flags(&path, cfg)?
+            };
+            let v: String = conn.query_row("SELECT version()", [], |r| r.get(0))?;
+            Ok(v)
+        })
+        .await
+        .map_err(|e| anyhow!("DuckDB probe task failed: {e}"))?
     }
 }
 
@@ -115,6 +150,7 @@ pub async fn open(config: &ConnectionConfig) -> Result<DuckDbSession> {
         interrupt,
         read_only,
         memory: path == ":memory:",
+        path: path.to_string(),
     })
 }
 
@@ -141,6 +177,7 @@ pub fn open_memory_sync(read_only: bool) -> Result<DuckDbSession> {
         interrupt,
         read_only,
         memory: true,
+        path: ":memory:".to_string(),
     })
 }
 
@@ -1071,6 +1108,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("txui-duckdb-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("t.duckdb")
+    }
+
+    #[tokio::test]
+    async fn probe_version_does_not_wait_for_the_session_mutex() {
+        // The whole point of the fresh-connection probe: the sidebar ping
+        // must answer while a long query holds the session's one connection.
+        let s = mem().await;
+        let _held = s.conn.lock().unwrap();
+        let v = tokio::time::timeout(std::time::Duration::from_secs(10), s.probe_version())
+            .await
+            .expect("the probe stacked behind the session's held mutex")
+            .unwrap();
+        assert!(v.starts_with('v'), "unexpected version {v}");
     }
 
     #[tokio::test]

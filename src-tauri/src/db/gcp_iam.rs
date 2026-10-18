@@ -83,7 +83,15 @@ const SQL_LOGIN_SCOPE: &str = "https://www.googleapis.com/auth/sqlservice.login"
 ///   is sent: a refresh can only *narrow* the consented scopes, and the ADC
 ///   consent already carries `cloud-platform`, which Cloud SQL accepts for
 ///   IAM login (verified live against a Cloud SQL MySQL 8.0 instance).
-pub async fn mint_token(key_path: &str, scope: &str) -> anyhow::Result<(String, String)> {
+///
+/// `timeout` bounds the whole token endpoint round trip: without one a wedged
+/// endpoint would hang `open_session` forever. Callers pass the connection's
+/// connect timeout.
+pub async fn mint_token(
+    key_path: &str,
+    scope: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<(String, String)> {
     let raw = std::fs::read_to_string(key_path)
         .map_err(|e| anyhow::anyhow!("credential file {key_path}: {e}"))?;
     let key: KeyFile = serde_json::from_str(&raw).map_err(|e| {
@@ -92,16 +100,20 @@ pub async fn mint_token(key_path: &str, scope: &str) -> anyhow::Result<(String, 
     })?;
 
     match key {
-        KeyFile::ServiceAccount(key) => mint_service_account(&key, scope).await
+        KeyFile::ServiceAccount(key) => mint_service_account(&key, scope, timeout).await
             .map(|t| (t, key.project_id.clone())),
-        KeyFile::AuthorizedUser(key) => mint_authorized_user(&key).await
+        KeyFile::AuthorizedUser(key) => mint_authorized_user(&key, timeout).await
             .map(|t| (t, String::new())),
     }
 }
 
 /// The JWT-bearer grant: sign claims with the service account's private key
 /// and exchange the assertion at its `token_uri`.
-async fn mint_service_account(key: &ServiceAccountKey, scope: &str) -> anyhow::Result<String> {
+async fn mint_service_account(
+    key: &ServiceAccountKey,
+    scope: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -122,22 +134,29 @@ async fn mint_service_account(key: &ServiceAccountKey, scope: &str) -> anyhow::R
     token_request(&key.token_uri, &[
         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
         ("assertion", assertion.as_str()),
-    ]).await
+    ], timeout).await
 }
 
 /// The refresh-token grant for gcloud application-default credentials.
-async fn mint_authorized_user(key: &AuthorizedUserKey) -> anyhow::Result<String> {
+async fn mint_authorized_user(
+    key: &AuthorizedUserKey,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
     token_request("https://oauth2.googleapis.com/token", &[
         ("grant_type", "refresh_token"),
         ("client_id", key.client_id.as_str()),
         ("client_secret", key.client_secret.as_str()),
         ("refresh_token", key.refresh_token.as_str()),
-    ]).await
+    ], timeout).await
 }
 
 /// POST a grant form to a token endpoint and unwrap the access token.
-async fn token_request(url: &str, form: &[(&str, &str)]) -> anyhow::Result<String> {
-    let client = reqwest::Client::builder().build()?;
+async fn token_request(
+    url: &str,
+    form: &[(&str, &str)],
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder().timeout(timeout).build()?;
     let resp = client
         .post(url)
         .form(form)
@@ -197,9 +216,11 @@ pub fn default_credentials_path() -> Option<std::path::PathBuf> {
     credentials_path_from(|k| std::env::var_os(k))
 }
 
-/// Mint a Cloud SQL IAM DB access token (the DB password). Thin wrapper.
-pub async fn iam_access_token(key_path: &str) -> anyhow::Result<String> {
-    Ok(mint_token(key_path, SQL_LOGIN_SCOPE).await?.0)
+/// Mint a Cloud SQL IAM DB access token (the DB password). Thin wrapper;
+/// `timeout` bounds the token endpoint round trip (the caller passes the
+/// connection's connect timeout — a wedged endpoint must not hang connect).
+pub async fn iam_access_token(key_path: &str, timeout: std::time::Duration) -> anyhow::Result<String> {
+    Ok(mint_token(key_path, SQL_LOGIN_SCOPE, timeout).await?.0)
 }
 
 #[cfg(test)]

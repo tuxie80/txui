@@ -164,8 +164,26 @@ pub fn open(
             .unwrap_or(crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS)
             .max(1),
     );
+    // Server-side execution ceiling, seconds. Computed before the client is
+    // built: it is also the basis of the overall request timeout below.
+    // `statement_timeout_secs` is the field that means this. It used to
+    // read `pool_acquire_timeout_secs` — a pool-checkout knob — so raising
+    // the time TxUI would wait for a free connection silently raised the
+    // ceiling on every query. The old field is still honoured as a
+    // fallback so existing saved connections keep their behaviour.
+    let max_execution_secs = config.statement_timeout_secs
+        .or(config.pool_acquire_timeout_secs)
+        .unwrap_or(60)
+        .max(1);
     let mut builder = reqwest::Client::builder()
         .connect_timeout(timeout)
+        // Overall ceiling on the WHOLE request (connect → body fully read):
+        // connect_timeout alone left a socket that stalls mid-response open
+        // forever. Sized from the server-side ceiling — the server answers
+        // max_execution_time itself — plus the connect timeout and a minute
+        // of slack for the transfer. Cancel is unaffected: a KILL QUERY or a
+        // dropped request resolves the future long before this fires.
+        .timeout(request_timeout(timeout, max_execution_secs))
         .user_agent("TxUI");
     // A private CA, when the connection names one. Without this the only way
     // to reach an internally-signed ingress was to weaken the mode until
@@ -208,15 +226,7 @@ pub fn open(
         // Bounded by default: an unbounded query against a large ClickHouse
         // table can run for a very long time and there is no cheap cancel over
         // HTTP once it has started.
-        // `statement_timeout_secs` is the field that means this. It used to
-        // read `pool_acquire_timeout_secs` — a pool-checkout knob — so raising
-        // the time TxUI would wait for a free connection silently raised the
-        // ceiling on every query. The old field is still honoured as a
-        // fallback so existing saved connections keep their behaviour.
-        max_execution_secs: config.statement_timeout_secs
-            .or(config.pool_acquire_timeout_secs)
-            .unwrap_or(60)
-            .max(1),
+        max_execution_secs,
         // Memory / row ceilings live in `extra_params` (the documented home for
         // ad-hoc ClickHouse session settings) so no new config field is needed;
         // the UI writes them there under their ClickHouse names. 0 / blank /
@@ -226,6 +236,20 @@ pub fn open(
         max_rows_to_read:  ch_ceiling(config, "max_rows_to_read"),
         max_bytes_to_read: ch_ceiling(config, "max_bytes_to_read"),
     })
+}
+
+/// The overall per-request ceiling: server execution ceiling + connect
+/// timeout + one minute for the transfer itself. Pure so the arithmetic is
+/// unit-tested; the reqwest builder does not expose what it was given.
+fn request_timeout(connect: Duration, max_execution_secs: u32) -> Duration {
+    connect + Duration::from_secs(u64::from(max_execution_secs)) + Duration::from_secs(60)
+}
+
+/// A `SELECT 1` round trip — connect's proof the endpoint actually answers.
+/// HTTP is stateless, so building the client says nothing about the server.
+pub async fn probe(session: &ChSession) -> Result<()> {
+    session.scalar("SELECT 1").await?;
+    Ok(())
 }
 
 /// A memory / row ceiling read from `extra_params`. Returns `None` for a
@@ -1798,6 +1822,17 @@ mod tests {
         let settings = s.settings();
         assert!(settings.iter().any(|(k, _)| *k == "max_execution_time"),
                 "an unbounded query on ClickHouse cannot be cheaply cancelled over HTTP");
+    }
+
+    #[test]
+    fn overall_request_timeout_covers_execution_and_transfer() {
+        // The stalled-mid-response fix: the ceiling is the server-side
+        // execution limit plus the dial and a minute of transfer slack.
+        let t = super::request_timeout(Duration::from_secs(5), 60);
+        assert_eq!(t, Duration::from_secs(125));
+        // A raised statement ceiling raises the socket ceiling with it.
+        let t = super::request_timeout(Duration::from_secs(10), 3600);
+        assert_eq!(t, Duration::from_secs(3670));
     }
 
     #[test]

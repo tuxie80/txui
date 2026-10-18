@@ -116,6 +116,9 @@ pub type SessionMetaMap = Arc<RwLock<HashMap<Uuid, SessionGuard>>>;
 /// 'disconnect' entry with nothing but the session id in hand.
 #[derive(Clone, Debug)]
 pub struct SessionStart {
+    /// The connection this session was opened from — `close_orphaned_connection`
+    /// finds abandoned sessions by it.
+    pub connection_id:   Uuid,
     pub connection_name: String,
     /// The wire/frontend engine name ("mysql", "mongodb", …) — Engine::wire_name.
     pub engine:          String,
