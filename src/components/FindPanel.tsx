@@ -85,9 +85,13 @@ export function FindPanel({ session, schema, buffers, initialDir, scope, onScope
   // an effect so the parent's clear never fires during this render. Consumed
   // back to null re-arms the same scope for a later open.
   const [seenScope, setSeenScope] = useState<FindScope | null>(null);
-  if (scope !== seenScope) {
-    setSeenScope(scope ?? null);
-    const def = scope && SCOPES.find(s => s.id === scope);
+  // Normalize undefined → null BEFORE comparing: undefined !== null is always
+  // true, so comparing raw props re-fires the adjustment every render —
+  // an infinite render loop when no scope is set.
+  const wantedScope = scope ?? null;
+  if (wantedScope !== seenScope) {
+    setSeenScope(wantedScope);
+    const def = wantedScope && SCOPES.find(s => s.id === wantedScope);
     if (def && scopeOk(def)) setActive(def.id);
   }
   useEffect(() => {

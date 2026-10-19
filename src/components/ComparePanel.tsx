@@ -103,9 +103,12 @@ export function ComparePanel({ session, openSessions, schema, results, dbList, c
   // an effect so the parent's clear never fires during this render. Consumed
   // back to null re-arms the same scope for a later open.
   const [seenScope, setSeenScope] = useState<CompareScope | null>(null);
-  if (scope !== seenScope) {
-    setSeenScope(scope ?? null);
-    const def = scope && MODES.find(m => m.id === scope);
+  // Normalize undefined → null BEFORE comparing (see FindPanel — a raw
+  // undefined !== null comparison loops forever when no scope is set).
+  const wantedScope = scope ?? null;
+  if (wantedScope !== seenScope) {
+    setSeenScope(wantedScope);
+    const def = wantedScope && MODES.find(m => m.id === wantedScope);
     if (def && modeOk(def)) setActive(def.id);
   }
   useEffect(() => {

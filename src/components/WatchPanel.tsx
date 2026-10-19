@@ -109,12 +109,15 @@ export function WatchPanel({ session, target, onTargetConsumed, onClose }: Props
   // effect so the parent's clear never fires during this render. Consumed back
   // to null re-arms the same target for a later open.
   const [seenTarget, setSeenTarget] = useState<WatchTarget | null>(target ?? null);
-  if (target !== seenTarget) {
-    setSeenTarget(target ?? null);
-    const def = target && MODES.find(m => m.id === target.mode);
+  // Normalize undefined → null BEFORE comparing (see FindPanel — a raw
+  // undefined !== null comparison loops forever when no target is set).
+  const wantedTarget = target ?? null;
+  if (wantedTarget !== seenTarget) {
+    setSeenTarget(wantedTarget);
+    const def = wantedTarget && MODES.find(m => m.id === wantedTarget.mode);
     if (def && modeOk(def)) {
       setActive(def.id);
-      if (target.threadId != null) setPin(target.threadId);
+      if (wantedTarget.threadId != null) setPin(wantedTarget.threadId);
     }
   }
   useEffect(() => {

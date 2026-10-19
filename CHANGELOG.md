@@ -3,6 +3,18 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Find and Compare panels crashed the whole UI** — opening either from the
+  Find & Compare menu hit "Too many re-renders" and took the app to the
+  error boundary, on every engine. The render-phase scope adjustment
+  compared the raw prop (`undefined` when idle) with its `null`-seeded
+  state, so the condition never settled and React aborted the tree.
+  FindPanel, ComparePanel and WatchPanel (same shared pattern) now
+  normalize `undefined` → `null` before comparing.
+
 ## [1.4.0] - 2026-10-18
 
 ### Fixed — CRITICAL: the editor was unusable in the packaged app (1.3.0 regression)
