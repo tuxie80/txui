@@ -76,22 +76,27 @@ export function ColumnProfilePanel({ session, schema, onClose }: Props) {
       : engine === 'mysql'
       ? "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') ORDER BY schema_name"
       : "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name";
+    let alive = true;
     run(sql)
       .then(r => {
+        if (!alive) return;
         const l = r.rows.map(x => String(x[0]));
         setSchemas(l);
         setDb(d => d || l[0] || '');
       })
-      .catch(e => setError(errorDisplay(e)));
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [run, engine]);
 
   useEffect(() => {
     if (!db) return;
+    let alive = true;
     setTable('');
     setRows(null);
     run(`SELECT table_name FROM information_schema.tables WHERE table_schema = ${sqlLiteral(db, engine)} AND table_type = 'BASE TABLE' ORDER BY table_name`)
-      .then(r => setTables(r.rows.map(x => String(x[0]))))
-      .catch(e => setError(errorDisplay(e)));
+      .then(r => { if (alive) setTables(r.rows.map(x => String(x[0]))); })
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [db, run, engine]);
 
   const profile = useCallback(async (useSample: number | null) => {

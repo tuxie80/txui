@@ -783,7 +783,16 @@ export function FastGrid({
   // ── Column resize ──────────────────────────────────────────────────────────
 
   const resizeRef = useRef<{ col: number; startX: number; startW: number } | null>(null);
+  const resizeListenersRef = useRef<{ move: (ev: MouseEvent) => void; up: () => void } | null>(null);
   const suppressSortRef = useRef(false); // a resize drag must not fire the header's sort click
+
+  // A mid-drag unmount must not leave the window listeners behind.
+  useEffect(() => () => {
+    const l = resizeListenersRef.current;
+    if (!l) return;
+    window.removeEventListener('mousemove', l.move);
+    window.removeEventListener('mouseup', l.up);
+  }, []);
 
   const handleResizeStart = useCallback((col: number, e: React.MouseEvent) => {
     e.preventDefault();
@@ -818,11 +827,13 @@ export function FastGrid({
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       apply();
       resizeRef.current = null;
+      resizeListenersRef.current = null;
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
+    resizeListenersRef.current = { move, up };
   }, [widths]);
 
   const autoFit = useCallback((col: number, e: React.MouseEvent) => {

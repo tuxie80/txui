@@ -888,9 +888,14 @@ export function RedisBrowser({ session, isActive = true }: Props) {
       const res = await invoke<ScanResult>('redis_scan', {
         sessionId, pattern, cursor: cur, count: 200
       });
+      // Read the payload inside the try: a null/short response must land in
+      // scanErr, not detonate inside the setKeys updater (an updater throw is
+      // a render error — ErrorBoundary, whole workspace gone).
+      const incoming = res?.keys ?? [];
+      const cursor = res?.cursor ?? 0;
       // SCAN may return the same key on two pages — merge through a Set.
-      setKeys(prev => mergeScannedKeys(fresh ? [] : prev, res.keys));
-      setNextCursor(res.cursor);
+      setKeys(prev => mergeScannedKeys(fresh ? [] : prev, incoming));
+      setNextCursor(cursor);
     } catch (e) { setScanErr(errorDisplay(e)); }
     finally { setScanning(false); }
   }

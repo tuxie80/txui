@@ -95,30 +95,37 @@ export function FindUsagesPanel({ session, schema, buffers = [], onClose }: Prop
       : engine === 'mysql'
       ? "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') ORDER BY schema_name"
       : "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name";
+    let alive = true;
     run(sql)
       .then(r => {
+        if (!alive) return;
         const l = r.rows.map(x => String(x[0]));
         setSchemas(l);
         setDb(d => d || l[0] || '');
       })
-      .catch(e => setError(errorDisplay(e)));
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [run, engine]);
 
   useEffect(() => {
     if (!db) return;
+    let alive = true;
     setTable(''); setColumn(''); setReport(null); setSources(null);
     run(`SELECT table_name FROM information_schema.tables WHERE table_schema = ${sqlLiteral(db, engine)} ORDER BY table_name`)
-      .then(r => setTables(r.rows.map(x => String(x[0]))))
-      .catch(e => setError(errorDisplay(e)));
+      .then(r => { if (alive) setTables(r.rows.map(x => String(x[0]))); })
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [db, run, engine]);
 
   useEffect(() => {
     if (!db || !table) { setColumns([]); return; }
+    let alive = true;
     setColumn('');
     run(`SELECT column_name FROM information_schema.columns WHERE table_schema = ${sqlLiteral(db, engine)}`
       + ` AND table_name = ${sqlLiteral(table, engine)} ORDER BY ordinal_position`)
-      .then(r => setColumns(r.rows.map(x => String(x[0]))))
-      .catch(e => setError(errorDisplay(e)));
+      .then(r => { if (alive) setColumns(r.rows.map(x => String(x[0]))); })
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [db, table, run, engine]);
 
   const fetchCorpus = useCallback(async (schemaName: string): Promise<UsageSource[]> => {

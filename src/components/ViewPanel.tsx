@@ -111,24 +111,32 @@ export function ViewPanel({ session, schema, target, onTargetConsumed, onClose }
 
   useEffect(() => {
     if (!engine) return;
+    let alive = true;
     run(schemaListSql(engine))
       .then(r => {
+        if (!alive) return;
         const l = r.rows.map(x => String(x[0]));
         setSchemas(l);
         setDb(d => d || l[0] || '');
       })
-      .catch(e => setError(errorDisplay(e)));
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [run, engine]);
 
-  const refreshList = useCallback(async () => {
+  const refreshList = useCallback(async (alive: () => boolean = () => true) => {
     if (!engine || !db) return;
     try {
       const r = await run(listSql(db, engine));
+      if (!alive()) return;
       setItems(r.rows.map(x => ({ name: String(x[0]), kind: asKind(String(x[1])) })));
-    } catch (e) { setError(errorDisplay(e)); }
+    } catch (e) { if (alive()) setError(errorDisplay(e)); }
   }, [run, db, engine]);
 
-  useEffect(() => { void refreshList(); }, [refreshList]);
+  useEffect(() => {
+    let alive = true;
+    void refreshList(() => alive);
+    return () => { alive = false; };
+  }, [refreshList]);
 
   /** Load one view. `null` starts a new one of `kind`. */
   const open = useCallback(async (name: string | null, wantKind?: string) => {

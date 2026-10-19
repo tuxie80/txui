@@ -293,7 +293,7 @@ export function MapView({ columns, rows, columnTypes, onSelectRow, initialBbox, 
   // Geometry-first: a result with a geometry column but no recognizable
   // latitude/longitude pair opens directly on the shapes — a spatial table IS
   // the map, not a context layer under a track that does not exist.
-  const colSig = columns.join('');
+  const colSig = JSON.stringify(columns);
   const [autoSig, setAutoSig] = useState('');
   if (autoSig !== colSig) {
     setAutoSig(colSig);

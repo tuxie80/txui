@@ -38,7 +38,7 @@ export function ResultDiffPanel({ results, onClose }: Props) {
   // the right answer to "did the output change?". Narrowing it to a real key
   // turns matched-but-changed rows into per-column differences instead. Reset
   // whenever the shared column list changes so the key is never stale.
-  const sharedSig = shared.join('');
+  const sharedSig = JSON.stringify(shared);
   const [keyCols, setKeyCols] = useState<string[]>(shared);
   // Adjust state during render rather than in an effect: when the pair (and so
   // the shared column list) changes, reset the key to every shared column and

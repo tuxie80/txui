@@ -716,6 +716,15 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
     mutate(activeId, d => ({ ...d, notes: d.notes.filter(n => n.id !== id) }));
   }, [activeId, mutate]);
 
+  const noteDragRef = useRef<{ move: (ev: MouseEvent) => void; up: () => void } | null>(null);
+  // A mid-drag unmount must not leave the window listeners behind.
+  useEffect(() => () => {
+    const l = noteDragRef.current;
+    if (!l) return;
+    window.removeEventListener('mousemove', l.move);
+    window.removeEventListener('mouseup', l.up);
+  }, []);
+
   const onNoteDown = useCallback((e: React.MouseEvent, id: string) => {
     if (e.button !== 0 || !activeId) return;
     e.stopPropagation();
@@ -733,11 +742,13 @@ export function ErDiagram({ sessionId, connectionId, engine, onClose }: Props) {
       }));
     };
     const up = () => {
+      noteDragRef.current = null;
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
+    noteDragRef.current = { move, up };
   }, [activeId, diagrams, tf.s, mutate]);
 
   // ── Export ──────────────────────────────────────────────────────────────

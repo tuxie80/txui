@@ -145,31 +145,41 @@ export function RoutinePanel({
     if (engine !== 'sqlserver' || schema) return;
     const sql = schemaListSql(engine);
     if (!sql) return;
+    let alive = true;
     invoke<QueryResult>('monitor_query', { sessionId, sql })
       .then(r => {
+        if (!alive) return;
         const l = r.rows.map(x => String(x[0]));
         setMssqlSchemas(l);
         setPickedSchema(d => d || defaultSchema(engine, l));
       })
-      .catch(e => setListError(errorDisplay(e)));
+      .catch(e => { if (alive) setListError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [engine, schema, sessionId]);
   const effSchema = schema ?? (pickedSchema || null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (alive: () => boolean = () => true) => {
     if (!effSchema) { setList([]); return; }
     setLoading(true);
     setListError(null);
     try {
-      setList(await invoke<RoutineInfo[]>('list_routines', { sessionId, schema: effSchema }));
+      const list = await invoke<RoutineInfo[]>('list_routines', { sessionId, schema: effSchema });
+      if (!alive()) return;
+      setList(list);
     } catch (e) {
+      if (!alive()) return;
       setListError(errorDisplay(e));
       setList([]);
     } finally {
-      setLoading(false);
+      if (alive()) setLoading(false);
     }
   }, [sessionId, effSchema]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    let alive = true;
+    void refresh(() => alive);
+    return () => { alive = false; };
+  }, [refresh]);
 
   const open = useCallback(async (info: RoutineInfo) => {
     setBusy(true);
@@ -387,7 +397,7 @@ export function RoutinePanel({
               ))}
           </span>
         )}
-        <button className="toolbar-btn" onClick={refresh} disabled={loading}>Refresh</button>
+        <button className="toolbar-btn" onClick={() => void refresh()} disabled={loading}>Refresh</button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
 

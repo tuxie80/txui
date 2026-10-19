@@ -107,9 +107,9 @@ export function LongQueryPanel({ session, pinnedThread, onUnpin, onClose }: Prop
     watchedIdRef.current = null;
     setWatched(null);
     setPin(null);
-    setSeenPin(null);
+    setSeenPin(pinnedThread ?? null);
     onUnpin?.();
-  }, [onUnpin]);
+  }, [onUnpin, pinnedThread]);
 
   const addLog = useCallback((level: LogLine['level'], msg: string) =>
     setLog(prev => [...prev.slice(-499), { t: now(), msg, level }]), []);

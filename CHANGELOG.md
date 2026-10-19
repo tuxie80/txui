@@ -14,6 +14,34 @@ this project follows semantic versioning.
   state, so the condition never settled and React aborted the tree.
   FindPanel, ComparePanel and WatchPanel (same shared pattern) now
   normalize `undefined` → `null` before comparing.
+- **Stale picker data on fast schema switches** — the schema/table/column
+  fetch effects in FindUsages, Column profile, Data compare, Views, Types,
+  Sequences, Dictionary and Routines had no alive-guard, so a slow response
+  for the previous schema could land after the fast one and permanently
+  show the wrong objects until re-picked. Every fetch effect now carries
+  the WriteConfirm alive-flag cleanup.
+- **Mid-drag unmount left `user-select: none` stuck app-wide** — closing a
+  tab during a split drag (useResizable) never reverted the body styles,
+  so text became unselectable everywhere until the next full drag. The
+  hook now tears down listeners and restores styles on unmount; the same
+  ref-tracked cleanup covers FastGrid's column resize and the ER diagram's
+  note drag.
+- **Column-signature guards could miss a real change** — MapView and
+  Result diff keyed their reset guards on `join('\x01')` signatures;
+  replaced with `JSON.stringify` so no separator byte can collide.
+- **Long-query unpin could silently no-op** if a future caller passed
+  `pinnedThread` without `onUnpin` — the panel now keeps its seen-guard
+  satisfied on unpin.
+- **Redis browser: a null `redis_scan` response would have thrown inside a
+  state updater** (render error → error boundary). The payload is now read
+  in the guarded path, so a bad response lands as an inline error bar.
+
+### Testing
+
+- **`dev/panel_smoke.mjs`** — opens every plugins-menu panel on every
+  fixture engine (88 panels) and asserts no error boundary, no page errors,
+  no console errors. This is the harness that catches the crash class that
+  shipped in 1.4.0.
 
 ## [1.4.0] - 2026-10-18
 

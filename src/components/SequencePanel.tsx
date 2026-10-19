@@ -99,24 +99,32 @@ export function SequencePanel({ session, schema, target, onTargetConsumed, onClo
       : engine === 'sqlserver'
       ? "SELECT name FROM sys.schemas WHERE schema_id < 16384 AND name NOT IN ('sys','INFORMATION_SCHEMA','guest') ORDER BY name"
       : "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') ORDER BY schema_name";
+    let alive = true;
     run(sql)
       .then(r => {
+        if (!alive) return;
         const l = r.rows.map(x => String(x[0]));
         setSchemas(l);
         setDb(d => d || l[0] || '');
       })
-      .catch(e => setError(errorDisplay(e)));
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [run, engine]);
 
-  const refreshList = useCallback(async () => {
+  const refreshList = useCallback(async (alive: () => boolean = () => true) => {
     if (!engine || !db) return;
     try {
       const r = await run(listSql(db, engine));
+      if (!alive()) return;
       setNames(r.rows.map(x => String(x[0])));
-    } catch (e) { setError(errorDisplay(e)); }
+    } catch (e) { if (alive()) setError(errorDisplay(e)); }
   }, [run, db, engine]);
 
-  useEffect(() => { void refreshList(); }, [refreshList]);
+  useEffect(() => {
+    let alive = true;
+    void refreshList(() => alive);
+    return () => { alive = false; };
+  }, [refreshList]);
 
   /** Load one sequence. `null` starts a new one. */
   const open = useCallback(async (name: string | null) => {

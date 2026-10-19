@@ -85,17 +85,20 @@ export function DataComparePanel({ session, openSessions, schema, onClose }: Pro
   // Tables come from the source; the target is expected to have the same one.
   useEffect(() => {
     if (!source.schema) return;
+    let alive = true;
     runOn(source.sessionId,
       // information_schema.tables works on all three; SQL Server needs the
       // BASE TABLE filter as much as the others (its view lists views too).
       `SELECT table_name FROM information_schema.tables WHERE table_schema = ${sqlLiteral(source.schema, engine)}`
       + ` AND table_type = 'BASE TABLE' ORDER BY table_name`)
-      .then(r => setTables(r.rows.map(x => String(x[0]))))
-      .catch(e => setError(errorDisplay(e)));
+      .then(r => { if (alive) setTables(r.rows.map(x => String(x[0]))); })
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [source.schema, source.sessionId, runOn, engine]);
 
   useEffect(() => {
     if (!source.schema || !source.table) { setColumns([]); setKeyColumns([]); return; }
+    let alive = true;
     Promise.all([
       runOn(source.sessionId,
         `SELECT column_name FROM information_schema.columns WHERE table_schema = ${sqlLiteral(source.schema, engine)}`
@@ -107,11 +110,13 @@ export function DataComparePanel({ session, openSessions, schema, onClose }: Pro
         + ` AND tc.table_schema = ${sqlLiteral(source.schema, engine)}`
         + ` AND tc.table_name = ${sqlLiteral(source.table, engine)} ORDER BY kcu.ordinal_position`),
     ]).then(([c, k]) => {
+      if (!alive) return;
       setColumns(c.rows.map(x => String(x[0])));
       // The primary key is the right default and usually the only sane choice.
       setKeyColumns(k.rows.map(x => String(x[0])));
       setDiff(null);
-    }).catch(e => setError(errorDisplay(e)));
+    }).catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [source.schema, source.table, source.sessionId, runOn, engine]);
 
   const compare = useCallback(async () => {

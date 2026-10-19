@@ -3,7 +3,7 @@
  * axis 'x' → horizontal drag changes width; 'y' → vertical drag changes height.
  * `invert` flips drag direction (for handles on the leading edge).
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export function useResizable(
   storageKey: string,
@@ -18,6 +18,10 @@ export function useResizable(
     return Number.isFinite(raw) && raw >= min && raw <= max ? raw : initial;
   });
   const sizeRef = useRef(size);
+  const teardownRef = useRef<(() => void) | null>(null);
+
+  // A mid-drag unmount must not leave the listeners or the body styles behind.
+  useEffect(() => () => { teardownRef.current?.(); }, []);
 
   const startDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -50,11 +54,19 @@ export function useResizable(
       window.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      teardownRef.current = null;
     };
     document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
     document.body.style.userSelect = 'none';
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    teardownRef.current = () => {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
   }, [storageKey, min, max, axis, invert]);
 
   return [size, startDrag];

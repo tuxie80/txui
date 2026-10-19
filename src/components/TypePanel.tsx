@@ -96,26 +96,34 @@ export function TypePanel({ session, schema, target, onTargetConsumed, onClose }
 
   useEffect(() => {
     if (!isPg) return;
+    let alive = true;
     run("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name")
       .then(r => {
+        if (!alive) return;
         const l = r.rows.map(x => String(x[0]));
         setSchemas(l);
         setDb(d => d || l[0] || '');
       })
-      .catch(e => setError(errorDisplay(e)));
+      .catch(e => { if (alive) setError(errorDisplay(e)); });
+    return () => { alive = false; };
   }, [run, isPg]);
 
-  const refreshList = useCallback(async () => {
+  const refreshList = useCallback(async (alive: () => boolean = () => true) => {
     if (!isPg || !db) return;
     try {
       const r = await run(listSql(db));
+      if (!alive()) return;
       setItems(r.rows
         .map(x => ({ name: String(x[0]), kind: asKind(String(x[1])) }))
         .filter((x): x is { name: string; kind: TypeKind } => x.kind !== null));
-    } catch (e) { setError(errorDisplay(e)); }
+    } catch (e) { if (alive()) setError(errorDisplay(e)); }
   }, [run, db, isPg]);
 
-  useEffect(() => { void refreshList(); }, [refreshList]);
+  useEffect(() => {
+    let alive = true;
+    void refreshList(() => alive);
+    return () => { alive = false; };
+  }, [refreshList]);
 
   /** Load one type. `null` starts a new one of `kind`. */
   const open = useCallback(async (name: string | null, wantKind?: string) => {
