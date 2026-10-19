@@ -3,7 +3,7 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
-## [Unreleased]
+## [1.4.1] - 2026-10-19
 
 ### Fixed
 
