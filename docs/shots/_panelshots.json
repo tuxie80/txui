@@ -26,12 +26,12 @@
   "column-profile": "panel-column-profile",
   "find": "panel-find",
   "compare": "panel-compare",
+  "txshell": "panel-txshell",
+  "sql-quality": "panel-sql-quality",
+  "saved-queries": "panel-saved-queries",
   "listen-notify": "panel-listen-notify",
   "vacuum-bloat": "panel-vacuum-bloat",
   "sequences": "panel-sequences",
   "types": "panel-types",
-  "txshell": "panel-txshell",
-  "sql-quality": "panel-sql-quality",
-  "saved-queries": "panel-saved-queries",
   "dictionary": "panel-dictionary"
 }

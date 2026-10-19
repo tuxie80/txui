@@ -50,7 +50,7 @@
   {
     "name": "02-settings-tabs",
     "ok": true,
-    "note": "tabs found: 8, captured: 6"
+    "note": "tabs found: 9, captured: 6"
   },
   {
     "name": "03-command-palette",
@@ -281,6 +281,24 @@
     "errs": []
   },
   {
+    "name": "panel-txshell",
+    "ok": true,
+    "note": "TxShell (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-sql-quality",
+    "ok": true,
+    "note": "SQL Quality (mysql)",
+    "errs": []
+  },
+  {
+    "name": "panel-saved-queries",
+    "ok": true,
+    "note": "Saved queries (mysql)",
+    "errs": []
+  },
+  {
     "name": "panel-listen-notify",
     "ok": true,
     "note": "Listen / Notify (postgres)",
@@ -302,24 +320,6 @@
     "name": "panel-types",
     "ok": true,
     "note": "Types (postgres)",
-    "errs": []
-  },
-  {
-    "name": "panel-txshell",
-    "ok": true,
-    "note": "TxShell (postgres)",
-    "errs": []
-  },
-  {
-    "name": "panel-sql-quality",
-    "ok": true,
-    "note": "SQL Quality (postgres)",
-    "errs": []
-  },
-  {
-    "name": "panel-saved-queries",
-    "ok": true,
-    "note": "Saved queries (postgres)",
     "errs": []
   },
   {
