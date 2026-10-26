@@ -138,6 +138,7 @@ export const PREFS = {
   editorCursorBlinkMs: num('dbgui.editorCursorBlinkMs', 1200),
   editorCursorColor: str('dbgui.editorCursorColor', '#ffa94d'),
   editorCursorBorderColor: str('dbgui.editorCursorBorderColor', 'transparent'),
+  editorCursorBarOpacity: num('dbgui.editorCursorBarOpacity', 80),
   /** Include the column header row when copying cells (⌘C) from a result. */
   copyHeaders: bool('dbgui.copyHeaders', true),
   /**

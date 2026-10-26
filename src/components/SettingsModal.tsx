@@ -52,6 +52,7 @@ export function SettingsModal({ onClose }: Props) {
   const [cursorBlinkMs, setCursorBlinkMs] = usePreference(PREFS.editorCursorBlinkMs);
   const [cursorColor, setCursorColor] = usePreference(PREFS.editorCursorColor);
   const [cursorBorderColor, setCursorBorderColor] = usePreference(PREFS.editorCursorBorderColor);
+  const [cursorBarOpacity, setCursorBarOpacity] = usePreference(PREFS.editorCursorBarOpacity);
   const [copyHeaders, setCopyHeaders] = usePreference(PREFS.copyHeaders);
   const [exportEol, setExportEol] = usePreference(PREFS.exportEol);
   const [keywordCase, setKeywordCase] = usePreference(PREFS.editorKeywordCase);
@@ -193,6 +194,20 @@ export function SettingsModal({ onClose }: Props) {
                 <option value="underline">Underline</option>
               </select>
             </label>
+            {cursorStyle === 'bar' && (
+              <label className="settings-row">
+                <span>Bar cursor opacity <em>({cursorBarOpacity}%)</em></span>
+                <input
+                  aria-label="Bar cursor opacity"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={Math.max(0, Math.min(100, cursorBarOpacity))}
+                  onChange={e => setCursorBarOpacity(Number(e.target.value))}
+                />
+              </label>
+            )}
             <div className="settings-row">
               <span>Cursor color</span>
               <div className="settings-cursor-color">

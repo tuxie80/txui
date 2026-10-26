@@ -8,6 +8,7 @@ export const CURSOR_PREF_KEYS: readonly string[] = [
   PREFS.editorCursorBlinkMs.key,
   PREFS.editorCursorColor.key,
   PREFS.editorCursorBorderColor.key,
+  PREFS.editorCursorBarOpacity.key,
 ];
 
 function cursorColor(value: string, fallback: string): string {
@@ -22,6 +23,7 @@ export function editorCursorExtension(): Extension[] {
   const borderColor = cursorColor(
     getPref(PREFS.editorCursorBorderColor), PREFS.editorCursorBorderColor.default,
   );
+  const barOpacity = Math.max(0, Math.min(100, Math.round(getPref(PREFS.editorCursorBarOpacity))));
   const cursor: Record<string, string> = style === 'block' ? {
     '--txui-cursor-width': '0.65em',
     '--txui-cursor-color': color,
@@ -38,8 +40,8 @@ export function editorCursorExtension(): Extension[] {
     '--txui-cursor-margin': '0px',
   } : {
     '--txui-cursor-width': '2.5px',
-    '--txui-cursor-color': `color-mix(in srgb, ${color} 80%, transparent)`,
-    '--txui-cursor-background': `color-mix(in srgb, ${color} 80%, transparent)`,
+    '--txui-cursor-color': `color-mix(in srgb, ${color} ${barOpacity}%, transparent)`,
+    '--txui-cursor-background': `color-mix(in srgb, ${color} ${barOpacity}%, transparent)`,
     '--txui-cursor-border': `1px solid ${borderColor}`,
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '-1.25px',
