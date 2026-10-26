@@ -38,8 +38,8 @@ export function editorCursorExtension(): Extension[] {
     '--txui-cursor-margin': '0px',
   } : {
     '--txui-cursor-width': '2.5px',
-    '--txui-cursor-color': color,
-    '--txui-cursor-background': color,
+    '--txui-cursor-color': `color-mix(in srgb, ${color} 80%, transparent)`,
+    '--txui-cursor-background': `color-mix(in srgb, ${color} 80%, transparent)`,
     '--txui-cursor-border': `1px solid ${borderColor}`,
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '-1.25px',

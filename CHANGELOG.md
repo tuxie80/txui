@@ -23,8 +23,8 @@ this project follows semantic versioning.
   remain supported. Missing MySQL performance_schema setup is diagnosed, with
   a confirmed, audited, guarded action to enable instruments and consumers.
 
-- **Configurable editor caret** — Settings → Editor offers bar (default),
-  block and underline shapes, fully opaque fill and an independent optional
+- **Configurable editor caret** — Settings → Editor offers an 80%-opacity bar
+  (default), opaque block and underline shapes, and an independent optional
   border color (either can be invisible), blinking on/off and a 200–5000 ms
   blink-cycle slider. Changes apply live to primary and split editors.
 
