@@ -52,7 +52,7 @@ export function SettingsModal({ onClose }: Props) {
   const [cursorBlinkMs, setCursorBlinkMs] = usePreference(PREFS.editorCursorBlinkMs);
   const [cursorColor, setCursorColor] = usePreference(PREFS.editorCursorColor);
   const [cursorBorderColor, setCursorBorderColor] = usePreference(PREFS.editorCursorBorderColor);
-  const [cursorBarOpacity, setCursorBarOpacity] = usePreference(PREFS.editorCursorBarOpacity);
+  const [cursorOpacity, setCursorOpacity] = usePreference(PREFS.editorCursorOpacity);
   const [copyHeaders, setCopyHeaders] = usePreference(PREFS.copyHeaders);
   const [exportEol, setExportEol] = usePreference(PREFS.exportEol);
   const [keywordCase, setKeywordCase] = usePreference(PREFS.editorKeywordCase);
@@ -195,16 +195,15 @@ export function SettingsModal({ onClose }: Props) {
               </select>
             </label>
             <label className="settings-row">
-              <span>Bar cursor opacity <em>({cursorBarOpacity}%{cursorStyle === 'bar' ? '' : ' · bar only'})</em></span>
+              <span>Cursor opacity <em>({cursorOpacity}%)</em></span>
               <input
-                aria-label="Bar cursor opacity"
+                aria-label="Cursor opacity"
                 type="range"
                 min="0"
                 max="100"
                 step="1"
-                disabled={cursorStyle !== 'bar'}
-                value={Math.max(0, Math.min(100, cursorBarOpacity))}
-                onChange={e => setCursorBarOpacity(Number(e.target.value))}
+                value={Math.max(0, Math.min(100, cursorOpacity))}
+                onChange={e => setCursorOpacity(Number(e.target.value))}
               />
             </label>
             <div className="settings-row">

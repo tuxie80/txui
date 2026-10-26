@@ -8,7 +8,7 @@ export const CURSOR_PREF_KEYS: readonly string[] = [
   PREFS.editorCursorBlinkMs.key,
   PREFS.editorCursorColor.key,
   PREFS.editorCursorBorderColor.key,
-  PREFS.editorCursorBarOpacity.key,
+  PREFS.editorCursorOpacity.key,
 ];
 
 function cursorColor(value: string, fallback: string): string {
@@ -23,25 +23,26 @@ export function editorCursorExtension(): Extension[] {
   const borderColor = cursorColor(
     getPref(PREFS.editorCursorBorderColor), PREFS.editorCursorBorderColor.default,
   );
-  const barOpacity = Math.max(0, Math.min(100, Math.round(getPref(PREFS.editorCursorBarOpacity))));
+  const opacity = Math.max(0, Math.min(100, Math.round(getPref(PREFS.editorCursorOpacity))));
+  const fill = `color-mix(in srgb, ${color} ${opacity}%, transparent)`;
   const cursor: Record<string, string> = style === 'block' ? {
     '--txui-cursor-width': '0.65em',
-    '--txui-cursor-color': color,
-    '--txui-cursor-background': color,
+    '--txui-cursor-color': fill,
+    '--txui-cursor-background': fill,
     '--txui-cursor-border': `1px solid ${borderColor}`,
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '0px',
   } : style === 'underline' ? {
     '--txui-cursor-width': '0px',
-    '--txui-cursor-color': color,
+    '--txui-cursor-color': fill,
     '--txui-cursor-background': 'transparent',
     '--txui-cursor-border': 'none',
-    '--txui-cursor-underline': `2px solid ${color}`,
+    '--txui-cursor-underline': `2px solid ${fill}`,
     '--txui-cursor-margin': '0px',
   } : {
     '--txui-cursor-width': '2.5px',
-    '--txui-cursor-color': `color-mix(in srgb, ${color} ${barOpacity}%, transparent)`,
-    '--txui-cursor-background': `color-mix(in srgb, ${color} ${barOpacity}%, transparent)`,
+    '--txui-cursor-color': fill,
+    '--txui-cursor-background': fill,
     '--txui-cursor-border': `1px solid ${borderColor}`,
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '-1.25px',
