@@ -51,11 +51,13 @@ export type Capability =
   /** Read other accounts and their grants (👤 Users). */
   | 'user-admin'
   /** Change server-wide settings (SET GLOBAL / ALTER SYSTEM / sp_configure). */
-  | 'server-admin';
+  | 'server-admin'
+  /** Enable MySQL performance_schema stage instruments and consumers. */
+  | 'stage-progress-admin';
 
 export const CAPABILITIES: readonly Capability[] = [
   'processlist-all', 'kill-others', 'replication', 'stats-views', 'statement-stats', 'user-admin',
-  'server-admin',
+  'server-admin', 'stage-progress-admin',
 ];
 
 export type Grant = 'granted' | 'denied' | 'unknown';
@@ -77,6 +79,7 @@ const ALL_UNKNOWN: Privileges = {
   'statement-stats': { state: 'unknown' },
   'user-admin': { state: 'unknown' },
   'server-admin': { state: 'unknown' },
+  'stage-progress-admin': { state: 'unknown' },
 };
 
 /** Nothing is known — the probe has not run, failed, or the engine has no model. */
@@ -94,56 +97,41 @@ interface MysqlGrants {
   global: Set<string>;
   /** Schemas with an explicit SELECT (or ALL) grant, lower-cased. */
   selectSchemas: Set<string>;
-  /**
-   * A role was granted and we cannot see through it. MySQL 8 shows role
-   * membership as its own `GRANT \`r\`@\`%\` TO …` line and does NOT expand
-   * the privileges behind it unless the role is active, so a user whose whole
-   * access arrives through a role parses as having nothing at all — the exact
-   * shape that would grey a working feature.
-   */
+  /** Schemas with an explicit UPDATE (or ALL) grant, lower-cased. */
+  updateSchemas: Set<string>;
+  /** Role membership whose effective privileges cannot be expanded safely. */
   opaqueRoles: boolean;
 }
 
-/**
- * Parse the lines of `SHOW GRANTS`.
- *
- * Deliberately forgiving: a line this does not understand is ignored rather
- * than treated as evidence of absence, and `ALL PRIVILEGES` on `*.*` short
- * circuits everything.
- */
+/** Parse SHOW GRANTS without treating unrecognized lines as proof of denial. */
 export function parseMysqlGrants(lines: readonly string[]): MysqlGrants {
   const global = new Set<string>();
   const selectSchemas = new Set<string>();
+  const updateSchemas = new Set<string>();
   let opaqueRoles = false;
 
   for (const raw of lines) {
     const line = raw.trim();
     const m = /^GRANT\s+(.+?)\s+ON\s+(\S+?)\s+TO\s/i.exec(line);
     if (!m) {
-      // `GRANT `role`@`%` TO `user`@`%`` — membership, not privileges.
       if (/^GRANT\s+\S+\s+TO\s/i.test(line)) opaqueRoles = true;
       continue;
     }
     const privs = m[1].toUpperCase().split(',').map(p => p.trim()).filter(Boolean);
-    // `db`.* / *.* / `db`.`tbl` — the schema part, unquoted.
     const object = m[2].replace(/`/g, '');
-    const schema = object.split('.')[0];
+    const schema = object.split('.')[0].toLowerCase();
 
     if (object === '*.*') {
       for (const p of privs) global.add(p.replace(/\s+/g, ' '));
-    } else if (privs.some(p => p === 'SELECT' || p.startsWith('ALL'))) {
-      selectSchemas.add(schema.toLowerCase());
+    } else {
+      if (privs.some(p => p === 'SELECT' || p.startsWith('ALL'))) selectSchemas.add(schema);
+      if (privs.some(p => p === 'UPDATE' || p.startsWith('ALL'))) updateSchemas.add(schema);
     }
   }
-  return { global, selectSchemas, opaqueRoles };
+  return { global, selectSchemas, updateSchemas, opaqueRoles };
 }
 
-/**
- * MySQL capabilities from parsed grants.
- *
- * The privilege names are the ones a DBA types into a `GRANT` statement, so
- * the reason can be pasted straight into a ticket.
- */
+/** MySQL capabilities from parsed grants. */
 export function mysqlPrivileges(lines: readonly string[]): Privileges {
   const g = parseMysqlGrants(lines);
   if (g.opaqueRoles) return unknownPrivileges();
@@ -157,20 +145,17 @@ export function mysqlPrivileges(lines: readonly string[]): Privileges {
     ok ? { state: 'granted' } : { state: 'denied', needs };
 
   return {
-    // Without PROCESS a user sees only their own threads — and the panel that
-    // exists to show the server's work shows one row.
     'processlist-all': verdict(has('PROCESS'), 'the PROCESS privilege'),
-    // CONNECTION_ADMIN is the 8.0 split-out of SUPER; both still work.
     'kill-others': verdict(has('SUPER', 'CONNECTION_ADMIN'), 'SUPER or CONNECTION_ADMIN'),
     'replication': verdict(has('REPLICATION CLIENT', 'SUPER'), 'the REPLICATION CLIENT privilege'),
     'stats-views': verdict(canSelect('performance_schema') || canSelect('sys'),
       'SELECT on performance_schema and sys'),
     'statement-stats': verdict(canSelect('performance_schema'), 'SELECT on performance_schema'),
     'user-admin': verdict(canSelect('mysql'), 'SELECT on the mysql schema'),
-    // SET GLOBAL needs SUPER on MariaDB; MySQL 8 split out
-    // SYSTEM_VARIABLES_ADMIN and both still work there.
     'server-admin': verdict(has('SUPER', 'SYSTEM_VARIABLES_ADMIN'),
       'SUPER (or SYSTEM_VARIABLES_ADMIN on MySQL 8)'),
+    'stage-progress-admin': verdict(has('UPDATE') || g.updateSchemas.has('performance_schema'),
+      'UPDATE on the performance_schema setup tables'),
   };
 }
 
@@ -244,6 +229,7 @@ export function pgPrivileges(p: PgProbe): Privileges {
     'user-admin': { state: 'granted' },
     // ALTER SYSTEM / cluster-wide SETs answer to the superuser alone.
     'server-admin': verdict(p.is_super, 'superuser'),
+    'stage-progress-admin': { state: 'granted' },
   };
 }
 
@@ -364,6 +350,7 @@ export function mssqlPrivileges(p: MssqlProbe): Privileges {
     'server-admin': all || p.alterSettings
       ? yes
       : no('ALTER SETTINGS (or the sysadmin server role)'),
+    'stage-progress-admin': all ? yes : no('MySQL performance_schema (not applicable here)'),
   };
 }
 

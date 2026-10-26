@@ -92,6 +92,17 @@ test('an explicit performance_schema grant is enough for the stats views', () =>
   assert.equal(p['statement-stats'].state, 'granted');
 });
 
+test('stage setup requires UPDATE, including a performance_schema-scoped grant', () => {
+  assert.equal(mysqlPrivileges(REPORTING)['stage-progress-admin'].state, 'denied');
+  assert.equal(mysqlPrivileges([
+    "GRANT UPDATE ON *.* TO `ops`@`%`",
+  ])['stage-progress-admin'].state, 'granted');
+  assert.equal(mysqlPrivileges([
+    "GRANT USAGE ON *.* TO `ops`@`%`",
+    "GRANT UPDATE ON `performance_schema`.* TO `ops`@`%`",
+  ])['stage-progress-admin'].state, 'granted');
+});
+
 test('privileges arriving through a role leave everything unknown, not denied', () => {
   // MySQL 8 prints role membership as its own line and does not expand what
   // is behind it. Reading that as "no privileges" would grey out every DBA

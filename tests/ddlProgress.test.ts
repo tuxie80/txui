@@ -13,7 +13,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ddlKind, progressProbe, reportsPhases, MYSQL_STAGE_SETUP,
+  appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
+  mysqlCompletionLine, mysqlPhaseTiming, mysqlProgressStats, mysqlStageSetup, mysqlThreadSnapshot,
+  parseThreadId, progressProbe, reportsPhases, withMysqlAlterLifecycle,
+  MYSQL_CURRENT_ALTER_STAGES_SQL, MYSQL_STAGE_SETUP, MYSQL_ALTER_PHASES,
 } from '../src/utils/ddlProgress.ts';
 
 // ── recognising the statement ───────────────────────────────────────────────
@@ -92,25 +95,196 @@ test('MySQL polls performance_schema stages for every kind', () => {
   for (const kind of ['create-index', 'alter-table', 'other'] as const) {
     const p = progressProbe('mysql', kind, 99);
     assert.match(p.sql!, /events_stages_current/, kind);
+    assert.match(p.sql!, /events_stages_history/, kind);
+    assert.match(p.sql!, /s\.NESTING_EVENT_ID = stmt\.EVENT_ID/, kind);
     assert.match(p.sql!, /WHERE p\.ID = 99/, kind);
   }
 });
 
-test('the MySQL note blames configuration, not the query', () => {
-  // The failure mode this exists for: a blank phase that looks like a stall
-  // when it is actually an unconfigured server.
-  assert.match(progressProbe('mysql', 'alter-table', 1).note!, /OFF by default/);
-  assert.match(progressProbe('mysql', 'alter-table', 1).note!, /unconfigured, not stalled/);
-});
-
-test('the fix enables the instrument AND the consumer', () => {
-  // People reliably enable one of the two, and one without the other looks
-  // exactly like neither.
+test('the fix enables every required instrument and stage consumer', () => {
   assert.equal(MYSQL_STAGE_SETUP.length, 2);
   assert.match(MYSQL_STAGE_SETUP[0], /setup_instruments/);
   assert.match(MYSQL_STAGE_SETUP[0], /stage\/innodb\/alter%/);
+  assert.match(MYSQL_STAGE_SETUP[0], /stage\/sql\/copy to tmp table/);
   assert.match(MYSQL_STAGE_SETUP[1], /setup_consumers/);
-  assert.match(MYSQL_STAGE_SETUP[1], /events_stages_current/);
+  assert.match(MYSQL_STAGE_SETUP[1], /events_stages_%/);
+});
+
+const ALTER_SQL = `CREATE INDEX ix ON finance_at.out_document_item (${'updated_at,'.repeat(30)} updated_at)`;
+const phaseRow = (
+  eventId: number, phase: string, status: 'running' | 'done', pct: number | null, secs: number,
+) => [
+  5432258, ALTER_SQL, 255, 'executing', phase, 1000, 2000, pct, secs, status,
+  eventId, 900, 'jiri.sula', 'proxy:3307', 'finance_at', 'Query', 3.2,
+  120, 2000, 0, 1, 0, 77,
+];
+
+test('MySQL snapshots retain overlapping running/done phases and ALTER metadata', () => {
+  const snap = mysqlThreadSnapshot([
+    phaseRow(11, 'stage/innodb/alter table (read PK and internal sort)', 'done', 100, 90),
+    phaseRow(12, 'stage/innodb/alter table (merge sort)', 'running', 65.2, 191.2),
+    phaseRow(13, 'stage/innodb/alter table (insert)', 'running', 87.5, 90),
+  ])!;
+  assert.equal(snap.query, ALTER_SQL);
+  assert.equal(snap.querySecs, 255);
+  assert.equal(snap.stages.length, 3);
+  assert.deepEqual(snap.stages.map(s => s.status), ['done', 'running', 'running']);
+  assert.equal(snap.statementEventId, 900);
+  assert.equal(snap.statementThreadId, 77);
+  assert.equal(snap.user, 'jiri.sula');
+  assert.equal(snap.database, 'finance_at');
+  assert.equal(snap.stats.lockSecs, 3.2);
+  assert.equal(snap.stats.rowsExamined, 2000);
+  assert.equal(snap.stats.warnings, 1);
+});
+
+test('snapshot merging preserves a phase that leaves bounded history', () => {
+  const previous = mysqlThreadSnapshot([
+    phaseRow(11, 'stage/innodb/alter table (read PK)', 'running', 40, 90),
+    phaseRow(12, 'stage/innodb/alter table (insert)', 'running', 20, 20),
+  ]);
+  const next = mysqlThreadSnapshot([
+    phaseRow(12, 'stage/innodb/alter table (insert)', 'running', 80, 80),
+  ]);
+  const merged = mergeMysqlThreadSnapshots(previous, next)!;
+  assert.equal(merged.stages.length, 2);
+  assert.equal(merged.stages[0].status, 'done');
+  assert.equal(merged.stages[0].phaseSecs, 90);
+  assert.equal(merged.stages[1].phaseSecs, 80);
+});
+
+test('a new statement never inherits phases from the previous statement', () => {
+  const previous = mysqlThreadSnapshot([phaseRow(11, 'stage/innodb/alter table (insert)', 'running', 50, 10)]);
+  const next = mysqlThreadSnapshot([phaseRow(12, 'stage/innodb/alter table (merge sort)', 'running', 10, 2)]);
+  next!.statementEventId = 901;
+  assert.equal(mergeMysqlThreadSnapshots(previous, next).stages.length, 1);
+  assert.equal(mergeMysqlThreadSnapshots(previous, next).stages[0].eventId, 12);
+});
+
+test('ALTER and CREATE INDEX show all seven known phases with pending/not-run states', () => {
+  const snap = mysqlThreadSnapshot([
+    phaseRow(364, MYSQL_ALTER_PHASES[0], 'running', 44.7, 2956.7),
+  ])!;
+  const lifecycle = withMysqlAlterLifecycle(snap);
+  assert.equal(lifecycle.stages.length, 7);
+  assert.deepEqual(lifecycle.stages.map(stage => stage.phase), MYSQL_ALTER_PHASES);
+  assert.equal(lifecycle.stages[0].status, 'running');
+  assert.ok(lifecycle.stages.slice(1).every(stage => stage.status === 'pending'));
+  assert.ok(lifecycle.stages.slice(1).every(stage => stage.pct === null));
+  const finished = finishMysqlThreadSnapshot(lifecycle);
+  assert.equal(finished.stages[0].status, 'done');
+  assert.ok(finished.stages.slice(1).every(stage => stage.status === 'skipped'));
+});
+
+test('a duplicate statement row takes identity from the actual stage event', () => {
+  const nullStage = phaseRow(11, '', 'running', null, 0);
+  nullStage[4] = null;
+  nullStage[11] = 357;
+  const actual = phaseRow(364, MYSQL_ALTER_PHASES[0], 'running', 44.7, 2956.7);
+  actual[11] = 362;
+  const snap = mysqlThreadSnapshot([nullStage, actual])!;
+  assert.equal(snap.statementEventId, 362);
+});
+
+test('the full current-stage feed retains NULL-conn_id background workers', () => {
+  const watched = mysqlThreadSnapshot([
+    phaseRow(364, MYSQL_ALTER_PHASES[0], 'running', 44.8, 393.9),
+  ])!;
+  const worker = phaseRow(365, MYSQL_ALTER_PHASES[1], 'running', 51.6, 130.3);
+  worker[0] = null;
+  worker[1] = '';
+  worker[22] = 5439999;
+  const merged = appendMysqlWorkerStages(watched, [worker]);
+  assert.equal(merged.stages.length, 2);
+  assert.equal(merged.query, ALTER_SQL, 'worker NULL query never replaces watched metadata');
+  const background = merged.stages.find(stage => stage.eventId === 365)!;
+  assert.equal(background.connId, null);
+  assert.equal(background.phaseThreadId, 5439999);
+  assert.equal(background.workCompleted, 1000);
+  assert.match(MYSQL_CURRENT_ALTER_STAGES_SQL, /events_stages_current/);
+  assert.ok(!MYSQL_CURRENT_ALTER_STAGES_SQL.includes('WHERE p.ID'));
+});
+
+test('overlapping same-name events pause and resume independently by EVENT_ID', () => {
+  const previous = mysqlThreadSnapshot([
+    phaseRow(12, MYSQL_ALTER_PHASES[1], 'running', 50, 100),
+    phaseRow(13, MYSQL_ALTER_PHASES[1], 'running', 40, 50),
+  ]);
+  const nextRows = [
+    phaseRow(12, MYSQL_ALTER_PHASES[1], 'running', 50, 130),
+    phaseRow(13, MYSQL_ALTER_PHASES[1], 'running', 41, 60),
+  ];
+  nextRows[1][5] = 1001;
+  const paused = mergeMysqlThreadSnapshots(previous, mysqlThreadSnapshot(nextRows));
+  assert.equal(paused.stages[0].stalledForSecs, 30);
+  assert.equal(paused.stages[1].stalledForSecs, 0);
+  assert.equal(mysqlPhaseTiming(paused.stages[0]).remainingSecs, null);
+  assert.notEqual(mysqlPhaseTiming(paused.stages[1]).remainingSecs, null);
+  const resumedRows = [phaseRow(12, MYSQL_ALTER_PHASES[1], 'running', 51, 140)];
+  resumedRows[0][5] = 1002;
+  const resumed = mergeMysqlThreadSnapshots(paused, mysqlThreadSnapshot(resumedRows));
+  assert.equal(resumed.stages[0].stalledForSecs, 0);
+});
+
+test('a live thread without a stage still has a process snapshot', () => {
+  const row = phaseRow(11, '', 'running', null, 0);
+  row[4] = null;
+  const snap = mysqlThreadSnapshot([row])!;
+  assert.equal(snap.threadId, 5432258);
+  assert.equal(snap.stages.length, 0);
+  assert.equal(mysqlThreadSnapshot([]), null);
+});
+
+test('phase ETA and overall ETA handle overlap without summing phases', () => {
+  const snap = mysqlThreadSnapshot([
+    phaseRow(11, 'stage/innodb/alter table (read PK)', 'done', 100, 90),
+    phaseRow(12, 'stage/innodb/alter table (merge sort)', 'running', 50, 100),
+    phaseRow(13, 'stage/innodb/alter table (insert)', 'running', 25, 100),
+  ])!;
+  assert.deepEqual(mysqlPhaseTiming(snap.stages[1]), { remainingSecs: 100, totalSecs: 200 });
+  assert.deepEqual(mysqlPhaseTiming(snap.stages[0]), { remainingSecs: 0, totalSecs: 90 });
+  const stats = mysqlProgressStats(snap);
+  assert.equal(stats.active, 2);
+  assert.equal(stats.done, 1);
+  assert.equal(stats.remainingSecs, 300);
+  assert.equal(stats.totalSecs, 555);
+  assert.equal(stats.longestPhaseSecs, 100);
+});
+
+test('an unknown active percentage makes the overall ETA indeterminate', () => {
+  const snap = mysqlThreadSnapshot([phaseRow(11, 'stage/innodb/alter table (insert)', 'running', null, 100)])!;
+  assert.equal(mysqlPhaseTiming(snap.stages[0]).remainingSecs, null);
+  assert.equal(mysqlProgressStats(snap).remainingSecs, null);
+  assert.equal(mysqlProgressStats(snap).totalSecs, null);
+});
+
+test('completion finalizes states and logs final statistics once the thread is gone', () => {
+  const snap = mysqlThreadSnapshot([
+    phaseRow(11, 'stage/innodb/alter table (merge sort)', 'running', 65.2, 191.2),
+    phaseRow(12, 'stage/innodb/alter table (insert)', 'done', 100, 90),
+  ])!;
+  const finished = finishMysqlThreadSnapshot(snap);
+  assert.ok(finished.stages.every(stage => stage.status === 'done'));
+  assert.equal(finished.stages[0].pct, 65.2, 'last known work is not invented as 100%');
+  const line = mysqlCompletionLine(finished);
+  assert.match(line, /thread 5432258 finished after 255\.0 s/);
+  assert.match(line, /2 phases observed \(2 done\)/);
+  assert.match(line, /longest stage\/innodb\/alter table \(merge sort\) 191\.2 s/);
+  assert.match(line, /rows affected\/examined\/sent 120\/2000\/0/);
+});
+
+test('thread ID input is a positive safe integer, never SQL text', () => {
+  assert.equal(parseThreadId(' 5432258 '), 5432258);
+  for (const bad of ['', '0', '-1', '1.2', '1 OR 1=1', '9007199254740992']) {
+    assert.equal(parseThreadId(bad), null, bad);
+  }
+});
+
+test('setup status requires all instruments and consumers', () => {
+  assert.equal(mysqlStageSetup([4, 4, 3, 3])?.ready, true);
+  assert.equal(mysqlStageSetup([3, 4, 3, 3])?.ready, false);
+  assert.equal(mysqlStageSetup([4, 4, 2, 3])?.ready, false);
+  assert.equal(mysqlStageSetup([0, 0, 0, 0])?.ready, false);
 });
 
 // ── guards ──────────────────────────────────────────────────────────────────

@@ -790,9 +790,7 @@ pub fn run() {
             list_deadlock_events,
             get_deadlock_event,
             delete_deadlock_event,
-            // long-query captures + incident timeline
-            record_long_query_event,
-            // Galera transition captures (wsrep state diffs from the dashboard)
+            // Galera transition captures + incident timeline
             record_galera_event,
             incident_timeline,
             // data browser
@@ -888,7 +886,7 @@ pub fn run() {
             resolve_unique_offset,
             // "Mimic existing data" profiling (read-only, per-column sampled)
             datagen_profile_table,
-            run_watched,
+            enable_mysql_stage_progress,
             cancel_watched,
             // Vacuum & Bloat panel's tracked, cancellable maintenance runs
             commands::vacuum::run_vacuum,

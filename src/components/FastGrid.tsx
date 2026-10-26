@@ -575,6 +575,7 @@ export function FastGrid({
     if (e.button !== 0) return;
     const cell = cellFromEvent(e);
     if (!cell) return;
+    e.preventDefault();
     if (e.shiftKey && active) {
       setSel({ r1: active.r, c1: active.c, r2: cell.r, c2: cell.c });
     } else {
@@ -605,6 +606,7 @@ export function FastGrid({
     if (!draggingRef.current || !active) return;
     const cell = cellFromEvent(e);
     if (!cell) return;
+    e.preventDefault();
     dragSelRef.current = { r1: active.r, c1: active.c, r2: cell.r, c2: cell.c };
     if (dragRafRef.current) return;
     dragRafRef.current = requestAnimationFrame(() => {

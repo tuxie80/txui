@@ -641,7 +641,36 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           <div className="cf-pair">
             <input value={user ?? ''} onChange={e => setUser(e.target.value)}
                    placeholder={engineDefaults.user || 'user'} style={{ flex: 1 }} />
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="password" style={{ flex: 1 }} />
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                   placeholder={engine === 'mysql' && useIamAuth ? 'generated IAM token' : 'password'}
+                   readOnly={engine === 'mysql' && useIamAuth}
+                   title={engine === 'mysql' && useIamAuth
+                     ? 'Cloud SQL IAM mints a short-lived token at connect time; no stored password is used'
+                     : undefined}
+                   style={{ flex: 1 }} />
+          </div>
+        </div>
+        )}
+        {engine === 'mysql' && (
+        <div className="cf-row">
+          <label>Authentication</label>
+          <div className="cf-iam-main">
+            <label className="form-check">
+              <input type="checkbox" checked={useIamAuth}
+                     onChange={e => setUseIamAuth(e.target.checked)} />
+              Cloud SQL IAM authentication
+            </label>
+            {useIamAuth && (
+              <>
+                <input value={iamKeyPath} onChange={e => setIamKeyPath(e.target.value)}
+                       placeholder="Credential JSON path — blank uses gcloud application-default credentials"
+                       spellCheck={false} />
+                <span className="form-hint">
+                  User = IAM principal. TxUI mints the short-lived password token automatically;
+                  leave the credential path blank after `gcloud auth application-default login`.
+                </span>
+              </>
+            )}
           </div>
         </div>
         )}
@@ -967,8 +996,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           )}
         </div>
 
-      {/* ── Cloud SQL IAM authentication ────────────────────────── */}
-      {iamCapable && (
+      {/* MySQL IAM lives on the main Connection tab; PostgreSQL stays here. */}
+      {engine === 'postgres' && (
         <div className="form-section">
           <label className="form-section-toggle">
             <input type="checkbox" checked={useIamAuth}

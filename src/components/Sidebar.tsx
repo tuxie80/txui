@@ -98,7 +98,7 @@ function countItems(n: FolderNode): number {
 
 const COLLAPSE_KEY = 'dbgui.connCollapsed';
 
-const TAG_PALETTE = ['#6c8fff', '#4caf73', '#e0b050', '#50c8c8', '#b06ce0', '#e07a9e', '#e0894a', '#7a8aa0'];
+const TAG_PALETTE = ['#4da8ff', '#4caf73', '#e0b050', '#50c8c8', '#b06ce0', '#e07a9e', '#e0894a', '#7a8aa0'];
 function tagColor(tag: string): string {
   let h = 0;
   for (let i = 0; i < tag.length; i++) h = (h * 31 + tag.charCodeAt(i)) >>> 0;
@@ -1063,7 +1063,7 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
                 apply: v => setFolderMeta(node.path, { note: v.trim() || undefined }) });
             }} />
           <div className="cf-colors" style={{ padding: '4px 12px' }}>
-            {[null, '#e05555', '#e0b050', '#4caf73', '#50c8c8', '#6c8fff', '#b06ce0', '#e07a9e', '#808a9a'].map(c => (
+            {[null, '#e05555', '#e0b050', '#4caf73', '#50c8c8', '#4da8ff', '#b06ce0', '#e07a9e', '#808a9a'].map(c => (
               <button key={c ?? 'none'} type="button"
                 className={`cf-swatch ${getFolderMeta(folderMenu.node.path).color === c ? 'cf-swatch-on' : ''}`}
                 style={c ? { background: c } : undefined}

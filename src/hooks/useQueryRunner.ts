@@ -669,6 +669,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     // variable modals — must target THIS tab, not whatever is active when the
     // user later clicks the modal's Run (they can switch tabs via ⌘T meanwhile).
     const tabId = activeTabId;
+    if (tabsRef.current.find(t => t.id === tabId)?.running) return;
     // "The version that ran" is the most useful bookmark in the timeline.
     recordVersion(tabId, input, 'run');
     // Alias expansion: `myalias 8793 'x'` → saved query with :1 :2 filled in.
@@ -796,7 +797,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       return;
     }
     executeSql(sql, tabId, from, noResults);
-  }, [activeTabId, session, executeSql, currentDb, supportsDbSelect, txOpen, connCfg,
+  }, [activeTabId, session, executeSql, currentDb, supportsDbSelect, txOpen, connCfg, tabsRef,
       recordVersion, patchTab, aliasesRef, setPreflight, setVarPrompt, setWriteAsk]);
 
   return { runQuery, executeSql, executeOne };

@@ -72,7 +72,7 @@ type RedisValue =
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const TYPE_COLOR: Record<string, string> = {
-  string: '#6c8fff', list: '#4caf73', hash: '#e0b050',
+  string: '#4da8ff', list: '#4caf73', hash: '#e0b050',
   set: '#b06cff',   zset: '#e07050', stream: '#50c0e0', none: '#666',
 };
 
@@ -1023,8 +1023,7 @@ export function RedisBrowser({ session, isActive = true }: Props) {
       {tab === 'console' && <ConsolePanel session={session} />}
 
       {tab === 'processes' && (
-        <ProcessListPanel sessionId={sessionId} connectionName={session.connectionName}
-          engine={session.engine} onClose={closePanel} />
+        <ProcessListPanel session={session} onClose={closePanel} />
       )}
       {tab === 'serverinfo' && (
         <ServerInfoPanel sessionId={sessionId} engine={session.engine} onClose={closePanel} />

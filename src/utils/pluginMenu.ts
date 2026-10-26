@@ -45,12 +45,9 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
       // chains + kill on one tab, the deadlock wait-for graph and recorded
       // incident history on the other.
       { panel: 'locks', label: 'Locks & Deadlocks', tip: 'Locks & Deadlocks — blocking chains, deadlock graph & incident history', when: 'lockWaits' },
-      // One Watch panel, three modes (metrics / statement / wait profile —
-      // components/WatchPanel.tsx). No engine gate: the Metrics mode runs any
-      // query on any engine; the statement mode (longQueryWatch) and the wait
-      // profile (PostgreSQL) are greyed inside the panel where the engine or
-      // the role cannot serve them.
-      { panel: 'watch', label: 'Watch', tip: 'Watch — interval metrics, a statement\'s live phase + progress, or a wait-event profile' },
+      // Metrics runs on every engine; the PostgreSQL-only wait profile greys
+      // inside WatchPanel. Thread progress opens from Processes instead.
+      { panel: 'watch', label: 'Watch', tip: 'Watch — interval metrics or a PostgreSQL wait-event profile' },
       { panel: 'replication', label: 'Replication', tip: 'Replication status', when: 'replication' },
       { panel: 'pglisten', label: 'Listen / Notify', tip: 'Listen / Notify — watch a PostgreSQL channel', when: 'postgres' },
       // Playground lives under Activity, not Server: it is about live

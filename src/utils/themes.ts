@@ -37,7 +37,7 @@ export function cursorColor(dark: boolean): string {
 export const THEMES: Theme[] = [
   { id: 'txui-dark', name: 'TxUI Dark', dark: true, vars: {
     bg:'#1a1a1f', bg2:'#22222a', bg3:'#2a2a35', border:'#333344',
-    text:'#e0e0ec', text2:'#9090a8', accent:'#6c8fff', accent2:'#4a6eee',
+    text:'#e0e0ec', text2:'#9090a8', accent:'#4da8ff', accent2:'#2388e8',
     green:'#4caf73', red:'#e05555', yellow:'#e0b050' } },
 
   { id: 'one-dark', name: 'One Dark', dark: true, vars: {

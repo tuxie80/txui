@@ -42,6 +42,8 @@ src-tauri/binaries/
 site/
 docs/shots/demo/
 dev/record_demo.mjs
+dev/site-backup-v2/
+dev/site-shots-v3/
 
 # CSP check build artifacts (dev/csp_check.mjs regenerates both)
 dev/.csp-dist/

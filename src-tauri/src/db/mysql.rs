@@ -60,7 +60,7 @@ fn build_options(
     if let Some(tz) = config.time_zone.as_deref().filter(|t| !t.is_empty()) {
         opts = opts.timezone(Some(tz.to_string()));
     }
-    if config.enable_cleartext_plugin {
+    if config.enable_cleartext_plugin || config.use_iam_auth {
         opts = opts.enable_cleartext_plugin(true);
     }
     // Unix socket overrides host/port (ignored when an SSH tunnel supplies
@@ -1130,6 +1130,23 @@ mod tests {
         let opts = build_options(&cfg, None, Some(("127.0.0.1", 13306))).unwrap();
         assert_eq!(opts.get_host(), "127.0.0.1");
         assert_eq!(opts.get_port(), 13306);
+    }
+
+    #[test]
+    fn iam_enables_the_cleartext_auth_plugin() {
+        use super::build_options;
+        use crate::db::types::{ConnectionConfig, Engine};
+
+        let mut cfg = ConnectionConfig::new(Engine::Mysql, "iam");
+        let enabled = |cfg: &ConnectionConfig|
+            format!("{:?}", build_options(cfg, None, None).unwrap())
+                .contains("enable_cleartext_plugin: true");
+        assert!(!enabled(&cfg));
+        cfg.use_iam_auth = true;
+        assert!(enabled(&cfg));
+        cfg.use_iam_auth = false;
+        cfg.enable_cleartext_plugin = true;
+        assert!(enabled(&cfg));
     }
 
     /// The warm/cold split (W4.3): the session pool keeps one warm connection

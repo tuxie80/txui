@@ -407,6 +407,71 @@ mod tests {
             .await.expect("open_session via ADC-minted IAM token");
         let session = crate::db::connection::get_session_pub(id, &sessions).await.unwrap();
         let version = crate::db::connection::probe_session(&session).await.unwrap();
-        println!("CONNECTED via ADC — server {version:?}");
+        let crate::db::types::LiveSession::Mysql(pool) = session.as_ref() else { panic!("not mysql") };
+        let who: String = sqlx::query_scalar("SELECT CURRENT_USER()").fetch_one(pool).await.unwrap();
+        let databases = crate::db::mysql::execute(pool, "SHOW DATABASES").await.unwrap();
+        println!("CONNECTED via ADC — server {version:?}, authenticated as {who}, {} databases visible",
+            databases.rows.len());
+
+        let tid: u64 = match std::env::var("TXUI_LIVE_IAM_WATCH") {
+            Ok(id) => id.parse().expect("TXUI_LIVE_IAM_WATCH must be a numeric process id"),
+            Err(_) => sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(pool).await.unwrap(),
+        };
+        let progress = crate::db::mysql::execute(pool, &format!(
+            "SELECT p.ID AS conn_id, IFNULL(p.INFO, '') AS query,
+                    COALESCE(ROUND(stmt.TIMER_WAIT / 1e12, 1), p.TIME) AS query_secs,
+                    IFNULL(p.STATE, '') AS state,
+                    s.EVENT_NAME AS phase, s.WORK_COMPLETED, s.WORK_ESTIMATED,
+                    ROUND(100 * s.WORK_COMPLETED / NULLIF(s.WORK_ESTIMATED, 0), 1) AS pct,
+                    ROUND(s.TIMER_WAIT / 1e12, 1) AS phase_secs,
+                    IF(s.END_EVENT_ID IS NULL, 'running', 'done') AS phase_status,
+                    s.EVENT_ID, stmt.EVENT_ID AS statement_event_id,
+                    IFNULL(p.USER, ''), IFNULL(p.HOST, ''), IFNULL(p.DB, ''), IFNULL(p.COMMAND, ''),
+                    ROUND(stmt.LOCK_TIME / 1e12, 1) AS lock_secs,
+                    stmt.ROWS_AFFECTED, stmt.ROWS_EXAMINED, stmt.ROWS_SENT, stmt.WARNINGS, stmt.ERRORS,
+                    t.THREAD_ID AS statement_thread_id
+             FROM information_schema.PROCESSLIST p
+             LEFT JOIN performance_schema.threads t ON t.PROCESSLIST_ID = p.ID
+             LEFT JOIN performance_schema.events_statements_current stmt ON stmt.THREAD_ID = t.THREAD_ID
+             LEFT JOIN (
+               SELECT THREAD_ID, EVENT_ID, END_EVENT_ID, NESTING_EVENT_ID, EVENT_NAME,
+                      WORK_COMPLETED, WORK_ESTIMATED, TIMER_WAIT
+               FROM performance_schema.events_stages_current
+               UNION ALL
+               SELECT THREAD_ID, EVENT_ID, END_EVENT_ID, NESTING_EVENT_ID, EVENT_NAME,
+                      WORK_COMPLETED, WORK_ESTIMATED, TIMER_WAIT
+               FROM performance_schema.events_stages_history
+             ) s ON s.THREAD_ID = t.THREAD_ID
+              AND s.NESTING_EVENT_ID = stmt.EVENT_ID
+              AND (s.EVENT_NAME LIKE 'stage/innodb/alter%' OR s.EVENT_NAME LIKE 'stage/sql/copy%')
+             WHERE p.ID = {tid} ORDER BY s.EVENT_ID"
+        )).await.unwrap();
+        println!("WATCH {tid}: {} phase/process rows: {:?}", progress.rows.len(), progress.rows);
+        let workers = crate::db::mysql::execute(pool,
+            "SELECT t.PROCESSLIST_ID AS conn_id, s.THREAD_ID, s.EVENT_ID, s.NESTING_EVENT_ID,
+                    s.EVENT_NAME AS phase, s.WORK_COMPLETED, s.WORK_ESTIMATED,
+                    ROUND(100 * s.WORK_COMPLETED / NULLIF(s.WORK_ESTIMATED, 0), 1) AS pct,
+                    ROUND(s.TIMER_WAIT / 1e12, 1) AS phase_secs,
+                    LEFT(t.PROCESSLIST_INFO, 120) AS query
+             FROM performance_schema.events_stages_current s
+             JOIN performance_schema.threads t USING (THREAD_ID)
+             WHERE s.EVENT_NAME LIKE 'stage/innodb/alter%' OR s.EVENT_NAME LIKE 'stage/sql/copy%'
+             ORDER BY s.EVENT_ID"
+        ).await.unwrap();
+        println!("ALL CURRENT ALTER WORKERS: {} rows: {:?}", workers.rows.len(), workers.rows);
+        let setup = crate::db::mysql::execute(pool,
+            "SELECT
+               (SELECT COUNT(*) FROM performance_schema.setup_instruments
+                 WHERE (NAME LIKE 'stage/innodb/alter%' OR NAME = 'stage/sql/copy to tmp table')
+                   AND ENABLED = 'YES' AND TIMED = 'YES'),
+               (SELECT COUNT(*) FROM performance_schema.setup_instruments
+                 WHERE NAME LIKE 'stage/innodb/alter%' OR NAME = 'stage/sql/copy to tmp table'),
+               (SELECT COUNT(*) FROM performance_schema.setup_consumers
+                 WHERE NAME LIKE 'events_stages_%' AND ENABLED = 'YES'),
+               (SELECT COUNT(*) FROM performance_schema.setup_consumers
+                 WHERE NAME LIKE 'events_stages_%')"
+        ).await.unwrap();
+        assert_eq!(setup.rows.len(), 1);
+        println!("READ-ONLY progress probes passed for thread {tid}; no setup changes made");
     }
 }

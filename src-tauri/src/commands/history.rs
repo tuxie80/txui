@@ -169,31 +169,8 @@ pub async fn delete_deadlock_event(
         .map_err(Into::into)
 }
 
-// ── Long-query events (watchdog capture store) ───────────────────────────────
-//
-// The persistence half of the Long query panel's watchdog: the panel records
-// each threshold crossing (its `newOnes`), and the incident timeline reads
-// them back as one of its event kinds. Dedupe and retention live in
-// history.rs, mirroring the deadlock store.
-
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn record_long_query_event(
-    connection_id: String,
-    engine: String,
-    db_user: String,
-    host: String,
-    db: String,
-    age_secs: i64,
-    sql: String,
-    state: State<'_, AppState>,
-) -> Result<Option<i64>, crate::apperror::AppError> {
-    history::record_long_query_event(
-        &state.history, &connection_id, &engine, &db_user, &host, &db, age_secs, &sql,
-    )
-    .await
-    .map_err(Into::into)
-}
+// Existing long-query captures remain in history.rs for the incident timeline;
+// the removed server-wide watchdog no longer records new threshold crossings.
 
 // ── Galera events (wsrep transition captures) ────────────────────────────────
 //

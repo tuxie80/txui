@@ -36,7 +36,6 @@ import {
 const FindPanel = lazy(() => import('./FindPanel').then(m => ({ default: m.FindPanel })));
 import type { FindScope } from './FindPanel';
 import type { CompareScope } from './ComparePanel';
-import type { WatchMode, WatchTarget } from './WatchPanel';
 const ColumnProfilePanel = lazy(() => import('./ColumnProfilePanel').then(m => ({ default: m.ColumnProfilePanel })));
 const SequencePanel = lazy(() => import('./SequencePanel').then(m => ({ default: m.SequencePanel })));
 const TypePanel = lazy(() => import('./TypePanel').then(m => ({ default: m.TypePanel })));
@@ -336,9 +335,8 @@ const PANEL_ENGINE_CAP: Record<string, Parameters<typeof can>[1] | undefined> = 
   // cannot serve are greyed inside it (components/FindPanel.tsx). 'compare'
   // is the same shape: the schema, results and scripts modes work everywhere,
   // only the data mode is engine-gated inside (components/ComparePanel.tsx).
-  // 'watch' too: the Metrics mode runs any query on any engine; the Statement
-  // (longQueryWatch) and Wait profile (postgres) modes are gated inside
-  // (components/WatchPanel.tsx).
+  // 'watch' too: Metrics runs any query on any engine; the PostgreSQL-only
+  // Wait profile is gated inside components/WatchPanel.tsx.
   // 'maintenance', not 'sqlDba': SQLite has maintenance (VACUUM, integrity
   // check, ANALYZE) without the catalog-driven DBA panels, so gating this on
   // sqlDba refused it from the palette and the native menu while the menu bar
@@ -368,9 +366,8 @@ const RIGHT_ANCHORED_MENUS = new Set(['findcompare', 'sql']);
 
 const PANEL_PRIVILEGE: Record<string, Capability | undefined> = {
   // pg_stat_activity / SHOW PROCESSLIST show only your own work without it,
-  // so both of these panels degrade to a mirror. (The Watch panel's Statement
-  // mode is the third consumer — it is gated at mode level inside
-  // components/WatchPanel.tsx, so Metrics stays reachable without it.)
+  // so both of these panels degrade to a mirror. Thread Progress explains the
+  // same limitation inside its dialog rather than blocking own-thread watches.
   processes:   'processlist-all',
   locks:       'processlist-all',
   replication: 'replication',
@@ -574,8 +571,6 @@ interface PanelCtx {
   clearFindScope: () => void;
   compareScope: CompareScope | null;
   clearCompareScope: () => void;
-  watchTarget: WatchTarget | null;
-  clearWatchTarget: () => void;
 }
 
 /**
@@ -605,8 +600,7 @@ const PANEL_META: Record<string, {
   processes: {
     label: 'Processes',
     render: (c, close) =>
-      <ProcessListPanel sessionId={c.session.sessionId}
-          connectionName={c.session.connectionName} engine={c.session.engine} onClose={close} />,
+      <ProcessListPanel session={c.session} onClose={close} />,
   },
   replication: {
     label: 'Replication',
@@ -804,8 +798,7 @@ const PANEL_META: Record<string, {
   watch: {
     label: 'Watch',
     render: (c, close) =>
-      <WatchPanel session={c.session} target={c.watchTarget}
-          onTargetConsumed={c.clearWatchTarget} onClose={close} />,
+      <WatchPanel session={c.session} onClose={close} />,
   },
   locks: {
     label: 'Locks & Deadlocks',
@@ -1094,9 +1087,6 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const [findScope, setFindScope] = useState<FindScope | null>(null);
   /** Which mode the Compare panel should open on — set by a scope-carrying open. */
   const [compareScope, setCompareScope] = useState<CompareScope | null>(null);
-  /** Which mode (+ optional pinned thread) the Watch panel should open on —
-      set by Processes' "watch this thread". */
-  const [watchTarget, setWatchTarget] = useState<WatchTarget | null>(null);
   // Stable so the panels' consume effects don't re-fire on every parent render.
   const clearRoutineTarget = useCallback(() => setRoutineTarget(null), []);
   const clearSequenceTarget = useCallback(() => setSequenceTarget(null), []);
@@ -1105,7 +1095,6 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const clearDictionaryTarget = useCallback(() => setDictionaryTarget(null), []);
   const clearFindScope = useCallback(() => setFindScope(null), []);
   const clearCompareScope = useCallback(() => setCompareScope(null), []);
-  const clearWatchTarget = useCallback(() => setWatchTarget(null), []);
   /**
    * `togglePanel` is declared below the listener effect, so the listener
    * reaches it through a ref rather than the binding, which is still in its
@@ -2235,7 +2224,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
      */
     const onTogglePanelById = (e: Event) => {
       const d = (e as CustomEvent<{
-        panel: string; scope?: FindScope | CompareScope | WatchMode; threadId?: number | null;
+        panel: string; scope?: FindScope | CompareScope;
       }>).detail;
       const panel = d?.panel;
       if (!panel || !PANEL_META[panel]) return;
@@ -2259,13 +2248,6 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       // Same dance for a mode-carrying Compare open.
       if (panel === 'compare' && d?.scope) {
         setCompareScope(d.scope as CompareScope);
-        openOrFocusPanel(panel);
-        return;
-      }
-      // Same dance for a Watch open — with an optional pinned thread id, from
-      // Processes' "watch this thread" ("statement" mode, read-only).
-      if (panel === 'watch' && d?.scope) {
-        setWatchTarget({ mode: d.scope as WatchMode, threadId: d.threadId ?? null });
         openOrFocusPanel(panel);
         return;
       }
@@ -2715,7 +2697,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     const deps: unknown[] = [
       tab.panel, session, openSessions, currentDb, dbList,
       routineTarget, sequenceTarget, typeTarget, viewTarget, dictionaryTarget, designTarget,
-      findScope, compareScope, watchTarget,
+      findScope, compareScope,
       (tab.panel === 'saved' || tab.panel === 'compare' || tab.panel === 'find') ? tabs : null,
     ];
     const hit = panelElemCache.current.get(tab.id);
@@ -2745,7 +2727,6 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       sequenceTarget, clearSequenceTarget, typeTarget, clearTypeTarget,
       viewTarget, clearViewTarget, dictionaryTarget, clearDictionaryTarget,
       findScope, clearFindScope, compareScope, clearCompareScope,
-      watchTarget, clearWatchTarget,
     };
     return meta.render(c, close);
   }
@@ -3198,7 +3179,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                 onDiagnostics={tab.id === activeId ? setDiagCounts : undefined}
                 statementRuns={statementRunsFor(tab)}
                 showInvisibles={showInvisibles}
-                readOnly={!!tab.readOnly}
+                readOnly={!!tab.readOnly || tab.running}
                 zoom={editorZoom}
                 onZoom={bumpZoom}
                 bookmarks={marksFor(tab.id).map(b => b.line)}

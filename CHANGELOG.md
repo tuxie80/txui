@@ -3,6 +3,49 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **On-demand thread progress in Processes** — enter any process/thread ID (or
+  prefill the selected row) to watch full SQL and ALTER metadata. The phase
+  table combines current and history stages for the current statement and
+  lists all seven documented InnoDB phases for ALTER TABLE and CREATE INDEX.
+  Every EVENT_ID is independent: overlapping and same-name phases can pause
+  and resume separately. Running uses a spinner + percentage (no progress bar),
+  done is green, pending/not-run phases remain visible, and ≥30 s without
+  completed-work progress marks **paused?** until work resumes. Each row shows
+  work counters, percentage, elapsed, estimated remaining and total time.
+  Overall ETA uses the longest active phase ETA, never a sum or an invented
+  overall percentage. The first poll is immediate; subsequent refreshes default
+  to **10 s** (0.5/1/2/5/10 selectable). Completion leaves final observed statistics and
+  writes one summary to the session log. PostgreSQL and SQL Server progress
+  remain supported. Missing MySQL performance_schema setup is diagnosed, with
+  a confirmed, audited, guarded action to enable instruments and consumers.
+
+### Changed
+
+- **Watch now contains Metrics and PostgreSQL Wait profile only** — the old
+  Statement editor/runner, kill/EXPLAIN watchdog and static pinned-thread page
+  were replaced by the read-only Processes progress dialog.
+- **Connection placeholders are visibly muted** rather than looking like
+  entered values.
+- **The default accent is the website's electric blue** — TxUI Dark and all
+  hard-coded accent tints now use `#4da8ff` (hover `#2388e8`) instead of the
+  previous blue-violet; alternative named themes are unchanged.
+
+### Fixed
+
+- **Thread progress no longer drops background ALTER workers or delays its first poll** — the full current-stage feed supplements watched-thread history, preserving NULL-conn_id rows and their origin; the first request fires directly on Watch.
+- **A running editor is locked against edits and re-entry** — Enter/F9 cannot start a second run and reset the active timer or result state; completion restores editing and the normal result log.
+- **FastGrid drag selection no longer competes with native text selection** — vertical drags copy only the selected column's cells, not whole rows.
+
+- **MySQL Cloud SQL IAM works from the main Connection tab** — the IAM checkbox
+  and optional credential path are immediately accessible, and IAM now enables
+  the required `mysql_clear_password` client plugin automatically instead of
+  depending on an unrelated Advanced option. Verified through TxUI's gcloud ADC
+  login path against a live Cloud SQL MySQL instance.
+
 ## [1.4.1] - 2026-10-19
 
 ### Fixed

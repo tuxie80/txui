@@ -374,8 +374,7 @@ export function MongoBrowser({ session, isActive }: Props) {
       </div>
 
       {tab === 'processes' && (
-        <ProcessListPanel sessionId={sessionId} connectionName={session.connectionName}
-          engine={session.engine} onClose={() => setTab('find')} />
+        <ProcessListPanel session={session} onClose={() => setTab('find')} />
       )}
       {tab === 'serverinfo' && (
         <ServerInfoPanel sessionId={sessionId} engine={session.engine} onClose={() => setTab('find')} />

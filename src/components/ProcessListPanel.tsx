@@ -1,17 +1,9 @@
-/**
- * Live processlist panel (MySQL SHOW FULL PROCESSLIST / pg_stat_activity)
- * with auto-refresh and one-click kill — the DBA feature no competitor has.
- * Rendered as a full-pane overlay inside the session workspace.
- *
- * "Watch" hands the selected thread to the Watch panel's Statement mode as a
- * PINNED thread (phase + progress, read-only) — the answer to "an ALTER was
- * started elsewhere; is it moving?" Killing stays here, where it is audited.
- */
+/** Live processlist with auto-refresh, audited kill, and on-demand thread progress. */
 import { errorDisplay } from '../utils/appError';
 import { useCallback, useMemo, useState } from 'react';
 import { cellSortKey, compareCellKeys } from '../utils/sortValue';
 import { invoke } from '@tauri-apps/api/core';
-import type { QueryResult } from '../types';
+import type { QueryResult, Session } from '../types';
 import type { SortClause } from '../types/browser';
 import { FastGrid } from './FastGrid';
 import { CopyExportMenu } from './CopyExportMenu';
@@ -23,18 +15,17 @@ import { privilegeTip } from '../utils/privileges';
 import { can, ENGINE_LABELS } from '../utils/engineCaps';
 import { longClass } from '../utils/longQuery';
 import { usePoll } from '../hooks/usePoll';
+import { ThreadProgressDialog } from './ThreadProgressDialog';
 
 interface Props {
-  sessionId: string;
-  /** audit-log attribution for kills issued here */
-  connectionName?: string;
-  engine?: string;
+  session: Session;
   onClose: () => void;
 }
 
 const INTERVALS = [1, 2, 3, 5, 10, 30];
 
-export function ProcessListPanel({ sessionId, connectionName, engine, onClose }: Props) {
+export function ProcessListPanel({ session, onClose }: Props) {
+  const { sessionId, connectionName, engine } = session;
   /**
    * Whether this role may signal *other* backends. Killing your own is always
    * allowed; killing someone else's needs SUPER/CONNECTION_ADMIN on MySQL or
@@ -69,6 +60,7 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
   const [threshold, setThreshold] = useState(30);
   const [onlyLong, setOnlyLong] = useState(false);
   const [longestFirst, setLongestFirst] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
   const body = useCallback(async () => {
     try {
       const r = await invoke<QueryResult>('list_processes', { sessionId });
@@ -281,18 +273,11 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
         {killErr && <span className="proc-err">{killErr}</span>}
         <button
           className={`toolbar-btn${watchBlocked ? ' unavail' : ''}`}
-          disabled={selectedPid === null}
           aria-disabled={watchBlocked ? true : undefined}
           data-tip={watchBlocked ?? undefined}
-          title={watchBlocked
-            ?? 'Watch this thread\'s live phase + progress in the Watch panel — read-only, no KILL'}
-          onClick={() => {
-            if (watchBlocked || selectedPid === null) return;
-            window.dispatchEvent(new CustomEvent('dbgui:toggle-panel', {
-              detail: { panel: 'watch', scope: 'statement', threadId: selectedPid },
-            }));
-          }}
-        >👁 Watch{selectedPid !== null ? ` ${selectedPid}` : ''}</button>
+          title={watchBlocked ?? 'Enter a process/thread ID and watch its live phase + progress — read-only'}
+          onClick={() => { if (!watchBlocked) setProgressOpen(true); }}
+        >⏱ Progress{selectedPid !== null ? ` ${selectedPid}` : ''}</button>
         {interactiveKill ? (
           <>
             <button
@@ -350,6 +335,10 @@ export function ProcessListPanel({ sessionId, connectionName, engine, onClose }:
         {result && `${filteredRows.length}${filter ? ` / ${result.rows.length}` : ''} backends`}
         {paused ? ' · paused' : ` · every ${intervalSec}s`}
       </div>
+      {progressOpen && (
+        <ThreadProgressDialog session={session} initialThreadId={selectedPid}
+          onClose={() => setProgressOpen(false)} />
+      )}
     </div>
   );
 }
