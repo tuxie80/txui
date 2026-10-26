@@ -194,20 +194,19 @@ export function SettingsModal({ onClose }: Props) {
                 <option value="underline">Underline</option>
               </select>
             </label>
-            {cursorStyle === 'bar' && (
-              <label className="settings-row">
-                <span>Bar cursor opacity <em>({cursorBarOpacity}%)</em></span>
-                <input
-                  aria-label="Bar cursor opacity"
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={Math.max(0, Math.min(100, cursorBarOpacity))}
-                  onChange={e => setCursorBarOpacity(Number(e.target.value))}
-                />
-              </label>
-            )}
+            <label className="settings-row">
+              <span>Bar cursor opacity <em>({cursorBarOpacity}%{cursorStyle === 'bar' ? '' : ' · bar only'})</em></span>
+              <input
+                aria-label="Bar cursor opacity"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                disabled={cursorStyle !== 'bar'}
+                value={Math.max(0, Math.min(100, cursorBarOpacity))}
+                onChange={e => setCursorBarOpacity(Number(e.target.value))}
+              />
+            </label>
             <div className="settings-row">
               <span>Cursor color</span>
               <div className="settings-cursor-color">
