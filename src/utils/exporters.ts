@@ -32,17 +32,24 @@ function neutralizeFormula(s: string): string {
   return s;
 }
 
-function csvEscape(v: unknown): string {
+function csvEscape(v: unknown, delimiter = ','): string {
   if (v === null || v === undefined) return '';
   const raw = typeof v === 'object' ? JSON.stringify(v) : String(v);
   const s = neutralizeFormula(raw);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return s.includes(delimiter) || /["\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 export function toCsv(columns: string[], rows: Cells): string {
-  const header = columns.map(csvEscape).join(',');
-  const body = rows.map(row => row.map(csvEscape).join(','));
+  const header = columns.map(v => csvEscape(v)).join(',');
+  const body = rows.map(row => row.map(v => csvEscape(v)).join(','));
   return [header, ...body].join('\n') + '\n';
+}
+
+export function toClipboardCsv(columns: string[], rows: Cells, includeHeaders = true): string {
+  const header = includeHeaders ? [columns.map(v => csvEscape(v, ';')).join(';')] : [];
+  const body = rows.map(row => row.map(v => csvEscape(v, ';')).join(';'));
+  const lines = [...header, ...body];
+  return lines.length ? lines.join('\n') + '\n' : '';
 }
 
 export function toTsv(columns: string[], rows: Cells): string {

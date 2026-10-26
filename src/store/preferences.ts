@@ -76,6 +76,9 @@ const choice = <T extends string>(key: string, def: T, allowed: readonly T[]): P
 export const KEYWORD_CASES = ['lower', 'upper'] as const;
 export type KeywordCase = typeof KEYWORD_CASES[number];
 
+export const CURSOR_STYLES = ['bar', 'block', 'underline'] as const;
+export type CursorStyle = typeof CURSOR_STYLES[number];
+
 /**
  * When the editor formats SQL for you (see utils/sqlBeautify.ts).
  *   off       — never (default)
@@ -129,6 +132,11 @@ export const PREFS = {
   defaultLimit: num('dbgui.defaultLimit', 1000),
   /** Word-wrap the SQL editor by default (new editors). */
   editorWrap: bool('dbgui:editor-wrap', false),
+  editorCursorStyle: choice<CursorStyle>('dbgui.editorCursorStyle', 'bar', CURSOR_STYLES),
+  editorCursorBlink: bool('dbgui.editorCursorBlink', true),
+  /** Full on/off blink cycle in milliseconds; 200–10000 when applied. */
+  editorCursorBlinkMs: num('dbgui.editorCursorBlinkMs', 1200),
+  editorCursorColor: str('dbgui.editorCursorColor', '#ffa94d'),
   /** Include the column header row when copying cells (⌘C) from a result. */
   copyHeaders: bool('dbgui.copyHeaders', true),
   /**

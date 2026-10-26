@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EditorView, keymap, highlightActiveLine,
-  drawSelection, rectangularSelection, crosshairCursor, Decoration, hoverTooltip,
+  rectangularSelection, crosshairCursor, Decoration, hoverTooltip,
   gutter, GutterMarker, highlightWhitespace, highlightTrailingWhitespace,
   scrollPastEnd, ViewPlugin, WidgetType } from '@codemirror/view';
 import type { DecorationSet, ViewUpdate } from '@codemirror/view';
@@ -59,6 +59,7 @@ import { minimap } from './minimap';
 import { indentGuides } from './indentGuides';
 import { rulers } from './editorRulers';
 import { changeBars } from './editorChangeBars';
+import { CURSOR_PREF_KEYS, editorCursorExtension } from './editorCursor';
 import { searchCountBadge } from './searchBadge';
 import { sqlPatternSearch } from './sqlPatternSearch';
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
@@ -867,6 +868,8 @@ interface Props {
   showInvisibles?: boolean;
   /** Make the document read-only — distinct from a read-only connection. */
   readOnly?: boolean;
+  /** Restore the caret when the query execution lock is released. */
+  restoreFocusOnEditable?: boolean;
   /** Per-editor font zoom, in percent. 100 is the app font size. */
   zoom?: number;
   /** Zoom step from the keyboard: +10 / -10, or 0 to reset. */
@@ -949,6 +952,7 @@ export function SqlEditor({
   placeholder,
   showInvisibles = false,
   readOnly = false,
+  restoreFocusOnEditable = false,
   zoom = 100,
   onZoom,
   onKillContext,
@@ -977,6 +981,7 @@ export function SqlEditor({
   const runBareCmdRef = useRef<((v: EditorView) => void) | null>(null);
   const explainCmdRef = useRef<((v: EditorView) => void) | null>(null);
   const completionsCompartment = useRef(new Compartment());
+  const cursorCompartment      = useRef(new Compartment());
   const wrapCompartment        = useRef(new Compartment());
   const minimapCompartment     = useRef(new Compartment());
   const invisiblesCompartment  = useRef(new Compartment());
@@ -1042,6 +1047,7 @@ export function SqlEditor({
   // Own wrap/zoom compartments so the second pane follows those prefs live,
   // exactly as the primary does, without being rebuilt on every change.
   const wrapCompartment2 = useRef(new Compartment());
+  const cursorCompartment2 = useRef(new Compartment());
   const zoomCompartment2 = useRef(new Compartment());
   const hintsCompartment2 = useRef(new Compartment());
   // Tears down an in-flight divider drag; also called on unmount so a component
@@ -2077,7 +2083,6 @@ export function SqlEditor({
     const editorExtensions = [
         // Multiple selections / multi-cursor + column (rectangular) selection.
         EditorState.allowMultipleSelections.of(true),
-        drawSelection(),
         rectangularSelection(),   // Alt-drag → column selection
         crosshairCursor(),        // Alt shows the crosshair for column mode
         // Per-statement run markers sit LEFT of the line numbers (CM lays
@@ -2116,6 +2121,7 @@ export function SqlEditor({
         highlightSelectionMatches(),
         history(),
         appEditorTheme,
+        cursorCompartment.current.of(editorCursorExtension()),
         sqlLang,
         completionsCompartment.current.of(
           hintsRef.current
@@ -2461,7 +2467,6 @@ export function SqlEditor({
       selection: primary.state.selection,
       extensions: [
         EditorState.allowMultipleSelections.of(true),
-        drawSelection(),
         rectangularSelection(),
         crosshairCursor(),
         selectionLineNumbers,
@@ -2479,6 +2484,7 @@ export function SqlEditor({
         highlightSelectionMatches(),
         history(),
         appEditorTheme,
+        cursorCompartment2.current.of(editorCursorExtension()),
         sqlLang,
         hintsCompartment2.current.of(
           hintsRef.current
@@ -2660,12 +2666,29 @@ export function SqlEditor({
     });
   }, [showInvisibles]);
 
+  const wasReadOnlyRef = useRef(readOnly);
+  const focusBeforeLockRef = useRef<'primary' | 'secondary' | null>(null);
   useEffect(() => {
+    const wasReadOnly = wasReadOnlyRef.current;
+    if (readOnly && !wasReadOnly) {
+      focusBeforeLockRef.current = splitViewRef.current?.hasFocus
+        ? 'secondary' : viewRef.current?.hasFocus ? 'primary' : null;
+    }
     viewRef.current?.dispatch({
       effects: readOnlyCompartment.current.reconfigure(
         readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
     });
-  }, [readOnly]);
+    wasReadOnlyRef.current = readOnly;
+    if (wasReadOnly && !readOnly && restoreFocusOnEditable && activeRef.current) {
+      const frame = requestAnimationFrame(() => {
+        const view = focusBeforeLockRef.current === 'secondary'
+          ? splitViewRef.current ?? viewRef.current : viewRef.current;
+        view?.focus();
+        focusBeforeLockRef.current = null;
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [readOnly, restoreFocusOnEditable]);
 
   // The status bar's Ln/Col is clickable — the same command ⌘G runs. Its own
   // event name: `dbgui:goto-line` (with a line) is the JUMP; overloading one
@@ -2731,6 +2754,15 @@ export function SqlEditor({
             // Toggling it on mid-session diffs against the same baseline the
             // mount used — the buffer as first loaded.
             getPref(PREFS.editorChangeBars) ? changeBars(changeBarsBaselineRef.current) : []),
+        });
+        return;
+      }
+      if (CURSOR_PREF_KEYS.includes(key)) {
+        view.dispatch({
+          effects: cursorCompartment.current.reconfigure(editorCursorExtension()),
+        });
+        splitViewRef.current?.dispatch({
+          effects: cursorCompartment2.current.reconfigure(editorCursorExtension()),
         });
         return;
       }

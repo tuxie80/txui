@@ -9,8 +9,8 @@
  * statement lines drive the gutter directly while they exist). When a single
  * run follows a script run, the script's finished entries fold INTO the
  * accumulator first (foldScriptInto), so its markers survive too — a marker
- * lives until its own statement is re-run or the buffer is edited (the
- * editor-side field clears on docChanged).
+ * lives until its own statement is re-run or a substantive edit changes the
+ * buffer. Whitespace-only edits keep the marker and its measured time.
  *
  * The host (QueryTabs.executeSql) resolves the editor's doc offset to a
  * statement index ONCE, at run time, via statementIndexAt — crucially, nothing

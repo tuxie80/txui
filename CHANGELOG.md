@@ -23,8 +23,15 @@ this project follows semantic versioning.
   remain supported. Missing MySQL performance_schema setup is diagnosed, with
   a confirmed, audited, guarded action to enable instruments and consumers.
 
+- **Configurable editor caret** — Settings → Editor offers bar (default),
+  block and underline shapes, cursor color, blinking on/off and a 200–5000 ms
+  blink-cycle slider. Changes apply live to primary and split editors.
+
 ### Changed
 
+- **Result-cell copying is semicolon-delimited CSV** — right-click → Copy,
+  `Mod+C`, `Mod+X` and native clipboard actions all use the same properly quoted
+  serializer, with optional headers and no padding between columns.
 - **Watch now contains Metrics and PostgreSQL Wait profile only** — the old
   Statement editor/runner, kill/EXPLAIN watchdog and static pinned-thread page
   were replaced by the read-only Processes progress dialog.
@@ -37,7 +44,8 @@ this project follows semantic versioning.
 ### Fixed
 
 - **Thread progress no longer drops background ALTER workers or delays its first poll** — the full current-stage feed supplements watched-thread history, preserving NULL-conn_id rows and their origin; the first request fires directly on Watch.
-- **A running editor is locked against edits and re-entry** — Enter/F9 cannot start a second run and reset the active timer or result state; completion restores editing and the normal result log.
+- **A running editor is locked against edits and re-entry** — Enter/F9 cannot start a second run and reset the active timer or result state; completion restores editing, focus/caret and the normal result log.
+- **Finished statement times survive blank-line edits** — whitespace-only changes move markers with their statements without clearing or changing the recorded duration; substantive SQL edits still invalidate them.
 - **FastGrid drag selection no longer competes with native text selection** — vertical drags copy only the selected column's cells, not whole rows.
 
 - **Accepted Cloud SQL proxy IAM no longer emits sqlx's cleartext warning** — the explicitly accepted non-TLS token handshake suppresses only that module's warning; errors and other connection warnings remain visible.

@@ -10,7 +10,17 @@
  * (or failed) without reading the results list. Fed by the host via
  * `statementRuns`.
  */
-import { StateEffect, StateField } from '@codemirror/state';
+import { StateEffect, StateField, type Transaction } from '@codemirror/state';
+
+function whitespaceOnlyChange(tr: Transaction): boolean {
+  let onlyWhitespace = true;
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    if (!/^\s*$/.test(tr.startState.sliceDoc(fromA, toA)) || !/^\s*$/.test(inserted.toString())) {
+      onlyWhitespace = false;
+    }
+  });
+  return onlyWhitespace;
+}
 
 export interface StatementRun {
   status: 'ok' | 'error' | 'skipped' | 'running';
@@ -29,13 +39,10 @@ const statementRunsField = StateField.define<StatementRun[]>({
   create: () => [],
   update(value, tr) {
     for (const e of tr.effects) if (e.is(setStatementRuns)) return e.value;
-    // Markers describe what RAN, bound to those statements. Mapping them across
-    // an edit would resurrect an old chip/time on whatever new text lands at
-    // the same statement index — so any doc change invalidates them outright,
-    // and they stay gone until the host reports a genuinely NEW run (the
-    // SqlEditor effect only re-dispatches when the runs prop changes identity,
-    // so the memoized array is not re-sent after a mere edit).
-    if (tr.docChanged) return [];
+    // Whitespace does not change what ran: keep the measured outcome and let
+    // markerMap place it on the statement's new line. Substantive edits still
+    // invalidate every marker until the host reports a genuinely NEW run.
+    if (tr.docChanged && !whitespaceOnlyChange(tr)) return [];
     return value;
   },
 });

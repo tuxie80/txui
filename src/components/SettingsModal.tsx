@@ -47,6 +47,10 @@ export function SettingsModal({ onClose }: Props) {
   const [showCreate, setShowCreate] = usePreference(PREFS.showCreateOnBrowse);
   const [defaultLimit, setDefaultLimit] = usePreference(PREFS.defaultLimit);
   const [editorWrap, setEditorWrap] = usePreference(PREFS.editorWrap);
+  const [cursorStyle, setCursorStyle] = usePreference(PREFS.editorCursorStyle);
+  const [cursorBlink, setCursorBlink] = usePreference(PREFS.editorCursorBlink);
+  const [cursorBlinkMs, setCursorBlinkMs] = usePreference(PREFS.editorCursorBlinkMs);
+  const [cursorColor, setCursorColor] = usePreference(PREFS.editorCursorColor);
   const [copyHeaders, setCopyHeaders] = usePreference(PREFS.copyHeaders);
   const [exportEol, setExportEol] = usePreference(PREFS.exportEol);
   const [keywordCase, setKeywordCase] = usePreference(PREFS.editorKeywordCase);
@@ -180,9 +184,43 @@ export function SettingsModal({ onClose }: Props) {
               <input type="checkbox" checked={editorWrap} onChange={e => setEditorWrap(e.target.checked)} />
               <span>Word-wrap the SQL editor by default <em>(new editors; toggle live with {SC.wrap} or View → Toggle Word Wrap)</em></span>
             </label>
+            <label className="settings-row">
+              <span>Cursor shape <em>(applies live to every editor)</em></span>
+              <select aria-label="Cursor shape" value={cursorStyle} onChange={e => setCursorStyle(e.target.value as typeof cursorStyle)}>
+                <option value="bar">Bar</option>
+                <option value="block">Block</option>
+                <option value="underline">Underline</option>
+              </select>
+            </label>
+            <label className="settings-row">
+              <span>Cursor color</span>
+              <input
+                aria-label="Cursor color"
+                type="color"
+                value={/^#[0-9a-f]{6}$/i.test(cursorColor) ? cursorColor : PREFS.editorCursorColor.default}
+                onChange={e => setCursorColor(e.target.value)}
+              />
+            </label>
+            <label className="settings-check">
+              <input type="checkbox" checked={cursorBlink} onChange={e => setCursorBlink(e.target.checked)} />
+              <span>Blinking cursor</span>
+            </label>
+            <label className="settings-row">
+              <span>Blink interval <em>({cursorBlinkMs} ms for a full on/off cycle)</em></span>
+              <input
+                aria-label="Blink interval"
+                type="range"
+                min="200"
+                max="5000"
+                step="100"
+                disabled={!cursorBlink}
+                value={Math.max(200, Math.min(5000, cursorBlinkMs))}
+                onChange={e => setCursorBlinkMs(Number(e.target.value))}
+              />
+            </label>
             <label className="settings-check">
               <input type="checkbox" checked={copyHeaders} onChange={e => setCopyHeaders(e.target.checked)} />
-              <span>Include column headers when copying cells <em>({SC.copy}; toggle with {SC.copyHeaders})</em></span>
+              <span>Include column headers when copying cells <em>(semicolon CSV; {SC.copy}; toggle with {SC.copyHeaders})</em></span>
             </label>
             <label className="settings-row">
               <span>Line endings in exported files</span>

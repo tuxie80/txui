@@ -39,6 +39,22 @@ test('serialize threads the engine through the insert format', async () => {
   assert.match(out, /INSERT INTO "t" \("a"\) VALUES \('x'\);/);
 });
 
+test('clipboard CSV uses semicolons and preserves complex cell values', async () => {
+  const { toClipboardCsv } = await import('../src/utils/exporters.ts');
+  const columns = ['id', 'note', 'nothing'];
+  const rows = [[1, 'plain', null], [2, 'a;b "quoted"\nnext', '=1+2']];
+  assert.equal(toClipboardCsv(columns, rows),
+    "id;note;nothing\n1;plain;\n2;\"a;b \"\"quoted\"\"\nnext\";'=1+2\n");
+  assert.equal(toClipboardCsv(columns, rows, false),
+    "1;plain;\n2;\"a;b \"\"quoted\"\"\nnext\";'=1+2\n");
+});
+
+test('clipboard CSV quotes object values and empty selections stay newline-free', async () => {
+  const { toClipboardCsv } = await import('../src/utils/exporters.ts');
+  assert.equal(toClipboardCsv(['value'], [[{ a: 1 }]]), 'value\n"{""a"":1}"\n');
+  assert.equal(toClipboardCsv(['value'], [], false), '');
+});
+
 test('copy confirm threshold and message', async () => {
   const { COPY_CONFIRM_ROWS, copyConfirmMessage } = await import('../src/utils/exporters.ts');
   assert.equal(COPY_CONFIRM_ROWS, 10_000);

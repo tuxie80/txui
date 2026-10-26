@@ -8,7 +8,7 @@
  * Single ⌘↵ runs update one entry; script runs drive the gutter from their
  * lines and replace the map; a single run after a script run folds the
  * script's finished markers in first, so nothing vanishes until its own
- * statement is re-run or the buffer is edited.
+ * statement is re-run or the buffer is substantively edited.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -221,9 +221,9 @@ test('the accumulator output does not depend on the document (edits cannot move 
   // Regression guard for "deleted-then-retyped statements resurrect old
   // times": stmtRuns stores run-time INDICES, so none of these functions take
   // a document — there is nothing an edit could shift. The editor-side field
-  // clears on docChanged (tests/runMarkersField.test.ts), and because this
-  // output is index-stable the memo keeps returning the SAME array identity,
-  // so no re-dispatch resurrects the markers.
+  // clears on substantive docChanged (tests/runMarkersField.test.ts), and this
+  // index-stable output keeps the SAME array identity, so no re-dispatch
+  // resurrects invalidated markers.
   const a = stmtRunsToRuns({ 1: { status: 'ok', ms: 87 } })!;
   const b = stmtRunsToRuns({ 1: { status: 'ok', ms: 87 } })!;
   assert.deepEqual(a, b);

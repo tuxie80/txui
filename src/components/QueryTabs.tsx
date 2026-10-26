@@ -265,8 +265,8 @@ export interface QueryTab {
    * status+ms). A single ⌘↵ run updates only its own entry — other statements'
    * chips persist; a script run replaces the whole map (and drives the gutter
    * from scriptResults while it exists). The index is resolved at run time;
-   * nothing here is derived from the live buffer, so an edit cannot shift it —
-   * the editor-side field clears markers on any doc change.
+   * nothing here is derived from the live buffer. The editor clears markers on
+   * substantive edits; whitespace-only edits retain them.
    */
   stmtRuns: StmtRunMap;
   /**
@@ -1990,10 +1990,9 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       setTabs(prev => prev.map(t => {
         const live = sqlRefs.current.get(t.id);
         if (live === undefined || live === t.sql) return t;
-        // An edit invalidates the gutter markers (the editor field clears on
-        // docChanged) — the cached auto-EXPLAIN plans are keyed to the same
-        // statement indices, so they go with them. Whole map, like the markers:
-        // an edit can renumber every statement below it.
+        // The editor keeps gutter markers across whitespace-only edits but
+        // clears them after substantive changes. Cached auto-EXPLAIN plans are
+        // invalidated conservatively because an edit can renumber statements.
         return { ...t, sql: live, autoPlans: {}, dirty: isDirty(t.file, live) };
       }));
     }, 250);
@@ -2003,8 +2002,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     window.clearTimeout(sqlSyncTimer.current);
     setTabs(prev => prev.map(t => {
       const live = sqlRefs.current.get(t.id);
-      // Same rule as the debounced sync: edited text invalidates the cached
-      // auto-EXPLAIN plans along with the gutter markers.
+      // Same rule as the debounced sync: cached auto-EXPLAIN plans are
+      // conservatively invalidated; whitespace-only edits keep gutter markers.
       return live !== undefined && live !== t.sql ? { ...t, sql: live, autoPlans: {} } : t;
     }));
   }, []);
@@ -2642,7 +2641,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
    * Gutter markers for a tab: the last script run's per-statement lines while
    * they exist, otherwise the accumulated single-run outcomes (`stmtRuns`) —
    * one entry per statement ever run with ⌘↵, each persisting until its own
-   * statement is re-run or the buffer is edited. The offset → statement-index
+   * statement is re-run or the buffer is substantively edited. The offset → statement-index
    * translation lives in utils/runMarkers (resolved once, at run time).
    * Memoised per tab so the editor does not receive a fresh array (and dispatch
    * a state effect) on every single render of the workspace.
@@ -3180,6 +3179,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                 statementRuns={statementRunsFor(tab)}
                 showInvisibles={showInvisibles}
                 readOnly={!!tab.readOnly || tab.running}
+                restoreFocusOnEditable={!tab.readOnly}
                 zoom={editorZoom}
                 onZoom={bumpZoom}
                 bookmarks={marksFor(tab.id).map(b => b.line)}

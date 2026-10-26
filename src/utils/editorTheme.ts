@@ -11,10 +11,13 @@ import { tags as t } from '@lezer/highlight';
 
 const chrome = EditorView.theme({
   '&': { color: 'var(--text)', backgroundColor: 'var(--bg)' },
-  '.cm-content': { caretColor: 'var(--cursor)' },
-  // Bolder than CM's 1.2px default, and orange (var(--cursor)) — the accent
-  // blue vanished into half the themes. Drop cursor matches.
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--cursor)', borderLeftWidth: '2.5px' },
+  '.cm-content': { caretColor: 'var(--txui-cursor-color, var(--cursor))' },
+  '.cm-cursor, .cm-dropCursor': {
+    borderLeftColor: 'var(--txui-cursor-color, var(--cursor))',
+    borderLeftWidth: 'var(--txui-cursor-width, 2.5px)',
+    borderBottom: 'var(--txui-cursor-underline, 0px solid transparent)',
+    marginLeft: 'var(--txui-cursor-margin, -1.25px)',
+  },
   '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
     { backgroundColor: 'color-mix(in srgb, var(--accent) 32%, transparent)' },
   '.cm-panels': { backgroundColor: 'var(--bg2)', color: 'var(--text)' },

@@ -32,8 +32,9 @@ import type { ColumnInfo } from '../types';
 import type { TableColumn, SortClause, RowChange } from '../types/browser';
 import { useGridSettings, gridRowHeight } from '../store/gridSettings';
 import { measureText } from '../utils/measure';
-import { toTsv, cellText, COPY_CONFIRM_ROWS, copyConfirmMessage } from '../utils/exporters';
+import { toClipboardCsv, cellText, COPY_CONFIRM_ROWS, copyConfirmMessage } from '../utils/exporters';
 import { confirmDialog } from '../utils/appDialog';
+import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { geometryBadge, geometryBadgeLabel } from '../utils/geometryBadge';
 import type { GeometryBadgeInfo } from '../utils/geometryBadge';
 import { copyToClipboard } from '../utils/exportersIo';
@@ -276,6 +277,7 @@ export function FastGrid({
   const [selection, setSelection] = useState<SelRect | null>(null);
   const [active, setActive] = useState<{ r: number; c: number } | null>(null);
   const [editing, setEditing] = useState<EditingCell | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const draggingRef = useRef(false);
   const editInputRef = useRef<HTMLInputElement>(null);
   // Find-in-results (⌘F) — jumps the selection to matching cells (read-only).
@@ -709,6 +711,34 @@ export function FastGrid({
 
   const closeFind = useCallback(() => { setFindOpen(false); setFindText(''); setMatchIdx(-1); }, []);
 
+  const copySelection = useCallback(async () => {
+    const { columns: cols, rows: data } = getSelectionData();
+    if (data.length > COPY_CONFIRM_ROWS
+        && !await confirmDialog(copyConfirmMessage(data.length), { title: 'Copy' })) return;
+    await copyToClipboard(toClipboardCsv(cols, data, getPref(PREFS.copyHeaders)));
+  }, [getSelectionData]);
+
+  const handleClipboard = useCallback((e: React.ClipboardEvent) => {
+    if (editing) return;
+    e.preventDefault();
+    copySelection().catch(() => {});
+  }, [editing, copySelection]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    const cell = cellFromEvent(e);
+    if (!cell) return;
+    e.preventDefault();
+    const inside = selection && cell.r >= Math.min(selection.r1, selection.r2)
+      && cell.r <= Math.max(selection.r1, selection.r2)
+      && cell.c >= Math.min(selection.c1, selection.c2)
+      && cell.c <= Math.max(selection.c1, selection.c2);
+    if (!inside) {
+      setActive(cell);
+      setSel({ r1: cell.r, c1: cell.c, r2: cell.r, c2: cell.c });
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, [cellFromEvent, selection, setSel]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (editing) return; // input handles its own keys
     const mod = e.metaKey || e.ctrlKey;
@@ -720,20 +750,9 @@ export function FastGrid({
       return;
     }
 
-    if (mod && e.key === 'c') {
+    if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
       e.preventDefault();
-      const { columns: cols, rows: data } = getSelectionData();
-      void (async () => {
-        // Serializing a whole result is synchronous main-thread work — above
-        // the threshold the copy asks first, because ⌘C with a fat result is
-        // too easy to hit by accident.
-        if (data.length > COPY_CONFIRM_ROWS
-            && !await confirmDialog(copyConfirmMessage(data.length), { title: 'Copy' })) return;
-        const text = getPref(PREFS.copyHeaders)
-          ? toTsv(cols, data)
-          : data.map(r => r.map(cellText).join('\t')).join('\n') + '\n';
-        copyToClipboard(text).catch(() => {});
-      })();
+      copySelection().catch(() => {});
       return;
     }
     if (mod && e.key === 'a') {
@@ -779,7 +798,7 @@ export function FastGrid({
     ensureVisible(r, c);
   }, [
     editing, active, selection, nRows, nCols, view.h, headerH, rowH,
-    getSelectionData, setSel, ensureVisible, editable, startEdit, onOpenCell,
+    copySelection, setSel, ensureVisible, editable, startEdit, onOpenCell,
   ]);
 
   // ── Column resize ──────────────────────────────────────────────────────────
@@ -1048,6 +1067,9 @@ export function FastGrid({
       onMouseMove={handleMouseMove}
       onDoubleClick={handleDoubleClick}
       onKeyDown={handleKeyDown}
+      onContextMenu={handleContextMenu}
+      onCopy={handleClipboard}
+      onCut={handleClipboard}
     >
       <div className="fg-content" style={{ width: totalW, height: totalH }}>
         {/* Sticky header */}
@@ -1082,6 +1104,17 @@ export function FastGrid({
       {nRows === 0 && <div className="fg-empty">No rows.</div>}
     </div>
     </div>
+    {contextMenu && (
+      <ContextMenu x={contextMenu.x} y={contextMenu.y} onClose={() => setContextMenu(null)}>
+        <ContextMenuItem
+          label="Copy"
+          onClick={() => {
+            setContextMenu(null);
+            copySelection().catch(() => {});
+          }}
+        />
+      </ContextMenu>
+    )}
     </div>
   );
 }
