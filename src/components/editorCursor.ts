@@ -33,8 +33,8 @@ export function editorCursorExtension(): Extension[] {
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '0px',
   } : style === 'underline' ? {
-    '--txui-cursor-width': '0px',
-    '--txui-cursor-color': fill,
+    '--txui-cursor-width': '0.65em',
+    '--txui-cursor-color': 'transparent',
     '--txui-cursor-background': 'transparent',
     '--txui-cursor-border': 'none',
     '--txui-cursor-underline': `2px solid ${fill}`,

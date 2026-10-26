@@ -44,6 +44,7 @@ this project follows semantic versioning.
 
 ### Fixed
 
+- **Underline cursor is visible** — it now spans character width with a transparent vertical edge instead of collapsing to zero width; its selected color and opacity apply to the underline.
 - **Thread progress no longer drops background ALTER workers or delays its first poll** — the full current-stage feed supplements watched-thread history, preserving NULL-conn_id rows and their origin; the first request fires directly on Watch.
 - **A running editor is locked against edits and re-entry** — Enter/F9 cannot start a second run and reset the active timer or result state; completion restores editing, focus/caret and the normal result log.
 - **Finished statement times survive blank-line edits** — whitespace-only changes move markers with their statements without clearing or changing the recorded duration; substantive SQL edits still invalidate them.
