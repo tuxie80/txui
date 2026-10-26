@@ -40,6 +40,7 @@ this project follows semantic versioning.
 - **A running editor is locked against edits and re-entry** — Enter/F9 cannot start a second run and reset the active timer or result state; completion restores editing and the normal result log.
 - **FastGrid drag selection no longer competes with native text selection** — vertical drags copy only the selected column's cells, not whole rows.
 
+- **Accepted Cloud SQL proxy IAM no longer emits sqlx's cleartext warning** — the explicitly accepted non-TLS token handshake suppresses only that module's warning; errors and other connection warnings remain visible.
 - **MySQL Cloud SQL IAM works from the main Connection tab** — the IAM checkbox
   and optional credential path are immediately accessible, and IAM now enables
   the required `mysql_clear_password` client plugin automatically instead of

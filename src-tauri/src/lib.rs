@@ -117,6 +117,10 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        // Cloud SQL IAM through a local proxy explicitly accepts
+                        // cleartext-token auth without mandatory TLS. This module's
+                        // only warning is that notice; errors remain visible.
+                        .level_for("sqlx_mysql::connection::establish", log::LevelFilter::Error)
                         .build(),
                 )?;
             }
