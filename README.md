@@ -37,9 +37,9 @@ brew install --cask tuxie80/tap/txui
 - **Windows**: NSIS setup / MSI from the [latest release](https://github.com/tuxie80/txui/releases/latest)
 - **Older versions**: every release stays on the [releases page](https://github.com/tuxie80/txui/releases)
 - **Self-update**: built in — status-bar chip, restart to apply
-- **macOS first open (important)**: the build is ad-hoc signed — no $99 Apple Developer ID — so Gatekeeper may say *"TxUI is damaged"* or *"unidentified developer"* on the first launch. Either fix works, once:
+- **macOS first open (important)**: the build is ad-hoc signed — no $99 Apple Developer ID — so Gatekeeper may say *"TxUI is damaged"* or *"unidentified developer"* on the first launch. **Do not move the app to Trash.** Copy it to `/Applications`, then use either fix once:
   - right-click the app → **Open** → **Open** in the dialog, or
-  - `xattr -cr /Applications/TxUI.app`
+  - run `xattr -cr /Applications/TxUI.app` in Terminal, then open TxUI normally.
   (The one-liner installer and Homebrew already strip the quarantine flag — this applies to a manual DMG download.)
 
 **Docs**: [tuxie.eu/txui/docs](https://tuxie.eu/txui/docs/) · [older versions](https://tuxie.eu/txui/docs-archive/) · [unreleased main](https://tuxie.eu/txui/dev/)
