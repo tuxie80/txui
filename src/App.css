@@ -532,7 +532,8 @@ body.zen .status-bar {
 .conn-form textarea::placeholder { color: var(--text2); opacity: .58; }
 .conn-form input[readonly] { color: var(--text2); background: var(--bg2); }
 .cf-iam-main { display: flex; flex-direction: column; gap: 6px; }
-.cf-iam-main .form-check { flex-direction: row; align-items: center; color: var(--text); }
+.cf-iam-main .form-check { flex-direction: row; align-items: center; align-self: flex-start; color: var(--text); }
+.cf-iam-main .form-check input { width: auto; margin: 0; }
 
 .form-actions {
   display: flex; gap: 8px; justify-content: flex-end;
