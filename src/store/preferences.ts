@@ -137,6 +137,7 @@ export const PREFS = {
   /** Full on/off blink cycle in milliseconds; 200–10000 when applied. */
   editorCursorBlinkMs: num('dbgui.editorCursorBlinkMs', 1200),
   editorCursorColor: str('dbgui.editorCursorColor', '#ffa94d'),
+  editorCursorBorderColor: str('dbgui.editorCursorBorderColor', 'transparent'),
   /** Include the column header row when copying cells (⌘C) from a result. */
   copyHeaders: bool('dbgui.copyHeaders', true),
   /**

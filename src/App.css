@@ -5660,6 +5660,8 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .settings-section h3 { margin: 0 0 10px; font-size: calc(12px * var(--font-scale, 1)); text-transform: uppercase; letter-spacing: .06em; color: var(--text2); }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0; font-size: calc(13px * var(--font-scale, 1)); }
 .settings-row select { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px 8px; font-size: calc(13px * var(--font-scale, 1)); }
+.settings-cursor-color { display: flex; align-items: center; gap: 10px; }
+.settings-cursor-color label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
 .settings-check { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; font-size: calc(13px * var(--font-scale, 1)); line-height: 1.4; cursor: pointer; }
 .settings-check input { margin-top: 2px; }
 .settings-check code { font-family: var(--font-mono); background: var(--bg3); padding: 0 4px; border-radius: 3px; }

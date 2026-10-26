@@ -577,6 +577,7 @@ export function FastGrid({
     if (e.button !== 0) return;
     const cell = cellFromEvent(e);
     if (!cell) return;
+    scrollRef.current?.focus({ preventScroll: true });
     e.preventDefault();
     if (e.shiftKey && active) {
       setSel({ r1: active.r, c1: active.c, r2: cell.r, c2: cell.c });
@@ -593,6 +594,7 @@ export function FastGrid({
     if (e.button !== 0) return;
     const rn = (e.target as HTMLElement).closest('[data-rn]') as HTMLElement | null;
     if (!rn || rn.dataset.rn === undefined) return;
+    scrollRef.current?.focus({ preventScroll: true });
     const r = Number(rn.dataset.rn);
     setSel({ r1: r, c1: 0, r2: r, c2: nCols - 1 });
     setActive({ r, c: 0 });
@@ -727,6 +729,7 @@ export function FastGrid({
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     const cell = cellFromEvent(e);
     if (!cell) return;
+    scrollRef.current?.focus({ preventScroll: true });
     e.preventDefault();
     const inside = selection && cell.r >= Math.min(selection.r1, selection.r2)
       && cell.r <= Math.max(selection.r1, selection.r2)
@@ -897,6 +900,7 @@ export function FastGrid({
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const sel = selection ? normSel(selection) : null;
+  const rangeSelected = sel !== null && (sel.r1 !== sel.r2 || sel.c1 !== sel.c2);
 
   const bodyRows = [];
   for (let r = rowStart; r < rowEnd; r++) {
@@ -918,7 +922,7 @@ export function FastGrid({
         fkCols={fkCols}
         zebra={settings.zebraStripes}
         sel={rowSel}
-        active={active && active.r === r ? active.c : null}
+        active={!rangeSelected && active && active.r === r ? active.c : null}
         pendingCols={pendingByRow?.get(r) ?? null}
         rowCls={rowClass?.(r) ?? ''}
         textCache={textCache}

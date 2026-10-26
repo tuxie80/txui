@@ -24,7 +24,8 @@ this project follows semantic versioning.
   a confirmed, audited, guarded action to enable instruments and consumers.
 
 - **Configurable editor caret** — Settings → Editor offers bar (default),
-  block and underline shapes, cursor color, blinking on/off and a 200–5000 ms
+  block and underline shapes, fully opaque fill and an independent optional
+  border color (either can be invisible), blinking on/off and a 200–5000 ms
   blink-cycle slider. Changes apply live to primary and split editors.
 
 ### Changed
@@ -47,6 +48,7 @@ this project follows semantic versioning.
 - **A running editor is locked against edits and re-entry** — Enter/F9 cannot start a second run and reset the active timer or result state; completion restores editing, focus/caret and the normal result log.
 - **Finished statement times survive blank-line edits** — whitespace-only changes move markers with their statements without clearing or changing the recorded duration; substantive SQL edits still invalidate them.
 - **FastGrid drag selection no longer competes with native text selection** — vertical drags copy only the selected column's cells, not whole rows.
+- **Grid mouse selection now focuses the grid**, so `Command+C` on macOS reaches its semicolon-CSV copy handler. Multi-cell rectangles no longer draw a separate outline around the initial anchor cell.
 
 - **Accepted Cloud SQL proxy IAM no longer emits sqlx's cleartext warning** — the explicitly accepted non-TLS token handshake suppresses only that module's warning; errors and other connection warnings remain visible.
 - **MySQL Cloud SQL IAM works from the main Connection tab** — the IAM checkbox

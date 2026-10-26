@@ -51,6 +51,7 @@ export function SettingsModal({ onClose }: Props) {
   const [cursorBlink, setCursorBlink] = usePreference(PREFS.editorCursorBlink);
   const [cursorBlinkMs, setCursorBlinkMs] = usePreference(PREFS.editorCursorBlinkMs);
   const [cursorColor, setCursorColor] = usePreference(PREFS.editorCursorColor);
+  const [cursorBorderColor, setCursorBorderColor] = usePreference(PREFS.editorCursorBorderColor);
   const [copyHeaders, setCopyHeaders] = usePreference(PREFS.copyHeaders);
   const [exportEol, setExportEol] = usePreference(PREFS.exportEol);
   const [keywordCase, setKeywordCase] = usePreference(PREFS.editorKeywordCase);
@@ -192,15 +193,40 @@ export function SettingsModal({ onClose }: Props) {
                 <option value="underline">Underline</option>
               </select>
             </label>
-            <label className="settings-row">
+            <div className="settings-row">
               <span>Cursor color</span>
-              <input
-                aria-label="Cursor color"
-                type="color"
-                value={/^#[0-9a-f]{6}$/i.test(cursorColor) ? cursorColor : PREFS.editorCursorColor.default}
-                onChange={e => setCursorColor(e.target.value)}
-              />
-            </label>
+              <div className="settings-cursor-color">
+                <input
+                  aria-label="Cursor color"
+                  type="color"
+                  value={/^#[0-9a-f]{6}$/i.test(cursorColor) ? cursorColor : PREFS.editorCursorColor.default}
+                  onChange={e => setCursorColor(e.target.value)}
+                />
+                <label><input
+                  type="checkbox"
+                  checked={cursorColor === 'transparent'}
+                  onChange={e => setCursorColor(e.target.checked ? 'transparent' : PREFS.editorCursorColor.default)}
+                /> Invisible</label>
+              </div>
+            </div>
+            {cursorStyle !== 'underline' && (
+              <div className="settings-row">
+                <span>Cursor border color <em>(1 px outline)</em></span>
+                <div className="settings-cursor-color">
+                  <input
+                    aria-label="Cursor border color"
+                    type="color"
+                    value={/^#[0-9a-f]{6}$/i.test(cursorBorderColor) ? cursorBorderColor : PREFS.editorCursorColor.default}
+                    onChange={e => setCursorBorderColor(e.target.value)}
+                  />
+                  <label><input
+                    type="checkbox"
+                    checked={cursorBorderColor === 'transparent'}
+                    onChange={e => setCursorBorderColor(e.target.checked ? 'transparent' : PREFS.editorCursorColor.default)}
+                  /> Invisible</label>
+                </div>
+              </div>
+            )}
             <label className="settings-check">
               <input type="checkbox" checked={cursorBlink} onChange={e => setCursorBlink(e.target.checked)} />
               <span>Blinking cursor</span>

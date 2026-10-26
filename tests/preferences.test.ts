@@ -80,6 +80,7 @@ test('the shipped defaults are the documented ones', () => {
   assert.equal(PREFS.editorCursorBlink.default, true);
   assert.equal(PREFS.editorCursorBlinkMs.default, 1200);
   assert.equal(PREFS.editorCursorColor.default, '#ffa94d');
+  assert.equal(PREFS.editorCursorBorderColor.default, 'transparent');
 });
 
 test('cursor preferences reject invalid shapes and malformed stored numbers', () => {

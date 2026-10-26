@@ -7,27 +7,40 @@ export const CURSOR_PREF_KEYS: readonly string[] = [
   PREFS.editorCursorBlink.key,
   PREFS.editorCursorBlinkMs.key,
   PREFS.editorCursorColor.key,
+  PREFS.editorCursorBorderColor.key,
 ];
+
+function cursorColor(value: string, fallback: string): string {
+  return value === 'transparent' || /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
 
 export function editorCursorExtension(): Extension[] {
   const style = getPref(PREFS.editorCursorStyle);
   const blinking = getPref(PREFS.editorCursorBlink);
   const blinkMs = Math.max(200, Math.min(10000, Math.round(getPref(PREFS.editorCursorBlinkMs))));
-  const storedColor = getPref(PREFS.editorCursorColor);
-  const color = /^#[0-9a-f]{6}$/i.test(storedColor) ? storedColor : PREFS.editorCursorColor.default;
+  const color = cursorColor(getPref(PREFS.editorCursorColor), PREFS.editorCursorColor.default);
+  const borderColor = cursorColor(
+    getPref(PREFS.editorCursorBorderColor), PREFS.editorCursorBorderColor.default,
+  );
   const cursor: Record<string, string> = style === 'block' ? {
     '--txui-cursor-width': '0.65em',
-    '--txui-cursor-color': `color-mix(in srgb, ${color} 45%, transparent)`,
+    '--txui-cursor-color': color,
+    '--txui-cursor-background': color,
+    '--txui-cursor-border': `1px solid ${borderColor}`,
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '0px',
   } : style === 'underline' ? {
     '--txui-cursor-width': '0px',
     '--txui-cursor-color': color,
+    '--txui-cursor-background': 'transparent',
+    '--txui-cursor-border': 'none',
     '--txui-cursor-underline': `2px solid ${color}`,
     '--txui-cursor-margin': '0px',
   } : {
     '--txui-cursor-width': '2.5px',
     '--txui-cursor-color': color,
+    '--txui-cursor-background': color,
+    '--txui-cursor-border': `1px solid ${borderColor}`,
     '--txui-cursor-underline': '0px solid transparent',
     '--txui-cursor-margin': '-1.25px',
   };

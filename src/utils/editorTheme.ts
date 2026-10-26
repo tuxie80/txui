@@ -16,6 +16,9 @@ const chrome = EditorView.theme({
     borderLeftColor: 'var(--txui-cursor-color, var(--cursor))',
     borderLeftWidth: 'var(--txui-cursor-width, 2.5px)',
     borderBottom: 'var(--txui-cursor-underline, 0px solid transparent)',
+    backgroundColor: 'var(--txui-cursor-background, transparent)',
+    outline: 'var(--txui-cursor-border, none)',
+    outlineOffset: '0px',
     marginLeft: 'var(--txui-cursor-margin, -1.25px)',
   },
   '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
