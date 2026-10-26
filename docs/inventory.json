@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1",
+  "version": "1.4.2",
   "engines": [
     "mysql",
     "postgres",
@@ -795,7 +795,7 @@
       "label": "Watch",
       "menuLabel": "Watch",
       "group": "Activity",
-      "tip": "Watch — interval metrics, a statement's live phase + progress, or a wait-event profile",
+      "tip": "Watch — interval metrics or a PostgreSQL wait-event profile",
       "when": null,
       "inMenu": true
     },
@@ -1511,6 +1511,36 @@
       "name": "editorWrap",
       "key": "dbgui:editor-wrap",
       "default": false
+    },
+    {
+      "name": "editorCursorStyle",
+      "key": "dbgui.editorCursorStyle",
+      "default": "bar"
+    },
+    {
+      "name": "editorCursorBlink",
+      "key": "dbgui.editorCursorBlink",
+      "default": true
+    },
+    {
+      "name": "editorCursorBlinkMs",
+      "key": "dbgui.editorCursorBlinkMs",
+      "default": 1200
+    },
+    {
+      "name": "editorCursorColor",
+      "key": "dbgui.editorCursorColor",
+      "default": "#ffa94d"
+    },
+    {
+      "name": "editorCursorBorderColor",
+      "key": "dbgui.editorCursorBorderColor",
+      "default": "transparent"
+    },
+    {
+      "name": "editorCursorOpacity",
+      "key": "dbgui.editorCursorBarOpacity",
+      "default": 80
     },
     {
       "name": "copyHeaders",
@@ -2887,7 +2917,7 @@
     "commands": 70,
     "engines": 9,
     "capabilities": 32,
-    "prefs": 38,
+    "prefs": 44,
     "dbaViews": 234
   }
 }
