@@ -266,7 +266,7 @@ export interface QueryTab {
    * chips persist; a script run replaces the whole map (and drives the gutter
    * from scriptResults while it exists). The index is resolved at run time;
    * nothing here is derived from the live buffer. The editor clears markers on
-   * substantive edits; whitespace-only edits retain them.
+   * substantive edits; token-preserving whitespace edits retain them.
    */
   stmtRuns: StmtRunMap;
   /**
@@ -1990,7 +1990,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       setTabs(prev => prev.map(t => {
         const live = sqlRefs.current.get(t.id);
         if (live === undefined || live === t.sql) return t;
-        // The editor keeps gutter markers across whitespace-only edits but
+        // The editor keeps gutter markers across token-preserving whitespace edits but
         // clears them after substantive changes. Cached auto-EXPLAIN plans are
         // invalidated conservatively because an edit can renumber statements.
         return { ...t, sql: live, autoPlans: {}, dirty: isDirty(t.file, live) };
@@ -2003,7 +2003,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     setTabs(prev => prev.map(t => {
       const live = sqlRefs.current.get(t.id);
       // Same rule as the debounced sync: cached auto-EXPLAIN plans are
-      // conservatively invalidated; whitespace-only edits keep gutter markers.
+      // conservatively invalidated; token-preserving whitespace edits keep gutter markers.
       return live !== undefined && live !== t.sql ? { ...t, sql: live, autoPlans: {} } : t;
     }));
   }, []);

@@ -658,7 +658,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
             <label className="form-check">
               <input type="checkbox" checked={useIamAuth}
                      onChange={e => setUseIamAuth(e.target.checked)} />
-              IAM
+              Cloud SQL IAM
             </label>
             {useIamAuth && (
               <>

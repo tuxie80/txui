@@ -157,13 +157,27 @@ export function mysqlWorkerStages(rows: readonly (readonly unknown[])[]): MysqlS
   return stages;
 }
 
+function mysqlStageKey(stage: MysqlStage): string {
+  return `${stage.phaseThreadId ?? 'unknown'}:${stage.eventId}`;
+}
+
+function compareMysqlStages(a: MysqlStage, b: MysqlStage): number {
+  return a.eventId - b.eventId || (a.phaseThreadId ?? 0) - (b.phaseThreadId ?? 0);
+}
+
 export function appendMysqlWorkerStages(
   snapshot: MysqlThreadSnapshot,
   rows: readonly (readonly unknown[])[],
 ): MysqlThreadSnapshot {
-  const stages = new Map(snapshot.stages.map(stage => [stage.eventId, stage]));
-  for (const stage of mysqlWorkerStages(rows)) stages.set(stage.eventId, stage);
-  return { ...snapshot, stages: [...stages.values()].sort((a, b) => a.eventId - b.eventId) };
+  const related = rows.filter(row => {
+    const connId = optionalNumber(row[0]);
+    return snapshot.statementEventId !== null
+      && optionalNumber(row[11]) === snapshot.statementEventId
+      && (connId === snapshot.threadId || connId === null);
+  });
+  const stages = new Map(snapshot.stages.map(stage => [mysqlStageKey(stage), stage]));
+  for (const stage of mysqlWorkerStages(related)) stages.set(mysqlStageKey(stage), stage);
+  return { ...snapshot, stages: [...stages.values()].sort(compareMysqlStages) };
 }
 
 export function mysqlThreadSnapshot(rows: readonly (readonly unknown[])[]): MysqlThreadSnapshot | null {
@@ -203,25 +217,26 @@ export function mergeMysqlThreadSnapshots(
   if (!previous || previous.statementEventId !== next.statementEventId || previous.query !== next.query) {
     return next;
   }
-  const stages = new Map(previous.stages.map(stage => [stage.eventId, stage]));
+  const stages = new Map(previous.stages.map(stage => [mysqlStageKey(stage), stage]));
   for (const stage of next.stages) {
-    const before = stages.get(stage.eventId);
+    const key = mysqlStageKey(stage);
+    const before = stages.get(key);
     const elapsed = before?.phaseSecs != null && stage.phaseSecs != null
       ? Math.max(0, stage.phaseSecs - before.phaseSecs) : 0;
     const noWork = before != null && before.workCompleted != null
       && stage.workCompleted === before.workCompleted;
     const stalledForSecs = stage.status === 'running' && noWork
       ? before.stalledForSecs + elapsed : 0;
-    stages.set(stage.eventId, { ...stage, stalledForSecs });
+    stages.set(key, { ...stage, stalledForSecs });
   }
   for (const stage of previous.stages) {
-    if (!next.stages.some(current => current.eventId === stage.eventId)) {
-      stages.set(stage.eventId, { ...stage, status: 'done' });
+    if (!next.stages.some(current => mysqlStageKey(current) === mysqlStageKey(stage))) {
+      stages.set(mysqlStageKey(stage), { ...stage, status: 'done' });
     }
   }
   return {
     ...next,
-    stages: [...stages.values()].sort((a, b) => a.eventId - b.eventId),
+    stages: [...stages.values()].sort(compareMysqlStages),
   };
 }
 
@@ -424,7 +439,11 @@ ORDER BY s.EVENT_ID`,
   };
 }
 
-export const MYSQL_CURRENT_ALTER_STAGES_SQL = `SELECT
+export function mysqlCurrentAlterStagesSql(snapshot: MysqlThreadSnapshot): string | null {
+  const statementThreadId = snapshot.statementThreadId;
+  const statementEventId = snapshot.statementEventId;
+  if (statementThreadId === null || statementEventId === null) return null;
+  return `SELECT
   t.PROCESSLIST_ID AS conn_id, IFNULL(t.PROCESSLIST_INFO, '') AS query,
   ROUND(s.TIMER_WAIT / 1e12, 1) AS query_secs, '' AS state,
   s.EVENT_NAME AS phase, s.WORK_COMPLETED, s.WORK_ESTIMATED,
@@ -438,8 +457,22 @@ export const MYSQL_CURRENT_ALTER_STAGES_SQL = `SELECT
   0 AS warnings, 0 AS errors, s.THREAD_ID AS statement_thread_id
 FROM performance_schema.events_stages_current s
 JOIN performance_schema.threads t USING (THREAD_ID)
-WHERE s.EVENT_NAME LIKE 'stage/innodb/alter%' OR s.EVENT_NAME LIKE 'stage/sql/copy%'
-ORDER BY s.EVENT_ID`;
+JOIN performance_schema.events_statements_current stmt
+  ON stmt.THREAD_ID = ${statementThreadId} AND stmt.EVENT_ID = ${statementEventId}
+WHERE (s.EVENT_NAME LIKE 'stage/innodb/alter%' OR s.EVENT_NAME LIKE 'stage/sql/copy%')
+  AND (
+    (s.THREAD_ID = stmt.THREAD_ID AND s.NESTING_EVENT_ID = stmt.EVENT_ID)
+    OR (
+      t.PROCESSLIST_ID IS NULL AND s.NESTING_EVENT_ID = stmt.EVENT_ID
+      AND NOT EXISTS (
+        SELECT 1 FROM performance_schema.events_statements_current other_stmt
+        WHERE other_stmt.EVENT_ID = stmt.EVENT_ID
+          AND other_stmt.THREAD_ID <> stmt.THREAD_ID
+      )
+    )
+  )
+ORDER BY s.EVENT_ID, s.THREAD_ID`;
+}
 
 export const MYSQL_STAGE_SETUP = [
   "UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES'\n"

@@ -3,6 +3,29 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [1.4.3] - 2026-10-28
+
+### Fixed
+
+- **MySQL thread progress stays scoped to the watched statement** — current
+  ALTER worker stages are correlated by statement thread and event, so another
+  connection or statement can no longer leak into the phase table. Stage
+  identity now includes the thread ID as well as the event ID, preventing
+  same-event workers from overwriting one another.
+- **The split editor follows execution locks live** — starting a run makes both
+  editor panes read-only, and completion restores editing in the split pane as
+  well as the primary one.
+- **Statement timing markers invalidate conservatively** — formatting between
+  SQL tokens still preserves measured times, but whitespace inserted inside a
+  token, literal, quoted identifier or comment now clears stale markers.
+- **The Cloud SQL IAM checkbox is aligned and clearly labeled** — the main
+  Connection tab control no longer stretches or loses its layout to a long
+  label.
+- **macOS quarantine recovery instructions are explicit** — manual DMG users
+  are told to copy TxUI to Applications rather than move it to Trash, then
+  either approve it through Finder or clear its quarantine attributes in
+  Terminal.
+
 ## [1.4.2] - 2026-10-26
 
 ### Added

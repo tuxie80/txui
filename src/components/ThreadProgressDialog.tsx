@@ -6,9 +6,9 @@ import { confirmDialog } from '../utils/appDialog';
 import { audited } from '../utils/panelAudit';
 import {
   appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
-  mysqlCompletionLine, mysqlPhaseTiming, mysqlProgressStats, mysqlStageSetup, mysqlThreadSnapshot,
-  parseThreadId, progressProbe, threadActivityProbe, withMysqlAlterLifecycle,
-  MYSQL_CURRENT_ALTER_STAGES_SQL, MYSQL_STAGE_SETUP, MYSQL_STAGE_STATUS_SQL,
+  mysqlCompletionLine, mysqlCurrentAlterStagesSql, mysqlPhaseTiming, mysqlProgressStats,
+  mysqlStageSetup, mysqlThreadSnapshot, parseThreadId, progressProbe, threadActivityProbe,
+  withMysqlAlterLifecycle, MYSQL_STAGE_SETUP, MYSQL_STAGE_STATUS_SQL,
 } from '../utils/ddlProgress';
 import type { MysqlStageSetup, MysqlThreadSnapshot } from '../utils/ddlProgress';
 import { usePoll } from '../hooks/usePoll';
@@ -147,11 +147,14 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
           recordCompletion(previous, false);
           setCompletionLine('');
         }
-        const workers = await invoke<QueryResult>('monitor_query', {
-          sessionId: session.sessionId, sql: MYSQL_CURRENT_ALTER_STAGES_SQL,
-        });
+        const workersSql = mysqlCurrentAlterStagesSql(parsed);
+        const workers = workersSql ? await invoke<QueryResult>('monitor_query', {
+          sessionId: session.sessionId, sql: workersSql,
+        }) : null;
         if (mine !== epoch.current) return;
-        const next = mergeMysqlThreadSnapshots(previous, appendMysqlWorkerStages(parsed, workers.rows));
+        const next = mergeMysqlThreadSnapshots(
+          previous, appendMysqlWorkerStages(parsed, workers?.rows ?? []),
+        );
         snapshotRef.current = next;
         setSnapshot(withMysqlAlterLifecycle(next));
         setOther(null);
@@ -390,7 +393,7 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
                   {snapshot.stages.map(stage => {
                     const timing = mysqlPhaseTiming(stage);
                     return (
-                      <tr key={`${snapshot.statementEventId}-${stage.eventId}`}
+                      <tr key={`${snapshot.statementEventId}-${stage.phaseThreadId}-${stage.eventId}`}
                           className={`tpd-phase-${stage.status}${stage.stalledForSecs >= 30 && stage.status === 'running' ? ' tpd-phase-paused' : ''}`}>
                         <td className="tpd-phase-name" title={stage.sourceQuery || stage.phase}>{stage.phase}
                           {stage.status === 'running' && stage.stalledForSecs >= 30 && (

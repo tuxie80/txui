@@ -11,6 +11,7 @@
  * `statementRuns`.
  */
 import { StateEffect, StateField, type Transaction } from '@codemirror/state';
+import { tokenizeSql } from '../utils/sqlBeautify.ts';
 
 function whitespaceOnlyChange(tr: Transaction): boolean {
   let onlyWhitespace = true;
@@ -19,7 +20,12 @@ function whitespaceOnlyChange(tr: Transaction): boolean {
       onlyWhitespace = false;
     }
   });
-  return onlyWhitespace;
+  if (!onlyWhitespace) return false;
+  const before = tokenizeSql(tr.startState.doc.toString());
+  const after = tokenizeSql(tr.state.doc.toString());
+  return before.length === after.length && before.every((token, i) =>
+    token.kind === after[i].kind && token.text === after[i].text
+    && token.lineComment === after[i].lineComment);
 }
 
 export interface StatementRun {
@@ -39,9 +45,9 @@ const statementRunsField = StateField.define<StatementRun[]>({
   create: () => [],
   update(value, tr) {
     for (const e of tr.effects) if (e.is(setStatementRuns)) return e.value;
-    // Whitespace does not change what ran: keep the measured outcome and let
-    // markerMap place it on the statement's new line. Substantive edits still
-    // invalidate every marker until the host reports a genuinely NEW run.
+    // Formatting between SQL tokens keeps the measured outcome and lets
+    // markerMap place it on the statement's new line. Whitespace that changes
+    // a token, literal, quoted identifier or comment invalidates every marker.
     if (tr.docChanged && !whitespaceOnlyChange(tr)) return [];
     return value;
   },

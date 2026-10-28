@@ -1044,12 +1044,13 @@ export function SqlEditor({
   const secondaryRef = useRef<HTMLDivElement>(null);
   const shellRef     = useRef<HTMLDivElement>(null);
   const splitViewRef = useRef<EditorView | null>(null);
-  // Own wrap/zoom compartments so the second pane follows those prefs live,
-  // exactly as the primary does, without being rebuilt on every change.
+  // Own compartments so the second pane follows preferences and execution
+  // locks live, exactly as the primary does, without being rebuilt.
   const wrapCompartment2 = useRef(new Compartment());
   const cursorCompartment2 = useRef(new Compartment());
   const zoomCompartment2 = useRef(new Compartment());
   const hintsCompartment2 = useRef(new Compartment());
+  const readOnlyCompartment2 = useRef(new Compartment());
   // Tears down an in-flight divider drag; also called on unmount so a component
   // that disappears mid-drag doesn't leak the window pointer listeners.
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -2492,8 +2493,8 @@ export function SqlEditor({
             : []),
         wrapCompartment2.current.of(wrap ? EditorView.lineWrapping : []),
         zoomCompartment2.current.of(EditorView.theme({ '&': { fontSize: `${zoom}%` } })),
-        // A read-only document is read-only in both panes.
-        readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : [],
+        readOnlyCompartment2.current.of(
+          readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
         scrollPastEnd(),
         keymap.of([
           { key: 'Tab', run: acceptCompletion },
@@ -2567,10 +2568,10 @@ export function SqlEditor({
       splitViewRef.current = null;
       secondary.destroy();
     };
-    // wrap/zoom are seeded here and then tracked by the reconfigure effects
-    // below, so they are intentionally not rebuild triggers.
+    // wrap/zoom/read-only are seeded here and then tracked by reconfigure
+    // effects, so they are intentionally not rebuild triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [split, engine, readOnly, makeCompletionSource]);
+  }, [split, engine, makeCompletionSource]);
 
   // Keep the second pane's wrap / zoom in step with the primary's, live.
   useEffect(() => {
@@ -2676,6 +2677,10 @@ export function SqlEditor({
     }
     viewRef.current?.dispatch({
       effects: readOnlyCompartment.current.reconfigure(
+        readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
+    });
+    splitViewRef.current?.dispatch({
+      effects: readOnlyCompartment2.current.reconfigure(
         readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
     });
     wasReadOnlyRef.current = readOnly;

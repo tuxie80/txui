@@ -14,9 +14,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
-  mysqlCompletionLine, mysqlPhaseTiming, mysqlProgressStats, mysqlStageSetup, mysqlThreadSnapshot,
-  parseThreadId, progressProbe, reportsPhases, withMysqlAlterLifecycle,
-  MYSQL_CURRENT_ALTER_STAGES_SQL, MYSQL_STAGE_SETUP, MYSQL_ALTER_PHASES,
+  mysqlCompletionLine, mysqlCurrentAlterStagesSql, mysqlPhaseTiming, mysqlProgressStats,
+  mysqlStageSetup, mysqlThreadSnapshot, parseThreadId, progressProbe, reportsPhases,
+  withMysqlAlterLifecycle, MYSQL_STAGE_SETUP, MYSQL_ALTER_PHASES,
 } from '../src/utils/ddlProgress.ts';
 
 // ── recognising the statement ───────────────────────────────────────────────
@@ -186,7 +186,7 @@ test('a duplicate statement row takes identity from the actual stage event', () 
   assert.equal(snap.statementEventId, 362);
 });
 
-test('the full current-stage feed retains NULL-conn_id background workers', () => {
+test('the correlated current-stage feed retains NULL-conn_id background workers', () => {
   const watched = mysqlThreadSnapshot([
     phaseRow(364, MYSQL_ALTER_PHASES[0], 'running', 44.8, 393.9),
   ])!;
@@ -201,8 +201,41 @@ test('the full current-stage feed retains NULL-conn_id background workers', () =
   assert.equal(background.connId, null);
   assert.equal(background.phaseThreadId, 5439999);
   assert.equal(background.workCompleted, 1000);
-  assert.match(MYSQL_CURRENT_ALTER_STAGES_SQL, /events_stages_current/);
-  assert.ok(!MYSQL_CURRENT_ALTER_STAGES_SQL.includes('WHERE p.ID'));
+
+  const sql = mysqlCurrentAlterStagesSql(watched)!;
+  assert.match(sql, /stmt\.THREAD_ID = 77 AND stmt\.EVENT_ID = 900/);
+  assert.match(sql, /t\.PROCESSLIST_ID IS NULL AND s\.NESTING_EVENT_ID = stmt\.EVENT_ID/);
+  assert.match(sql, /NOT EXISTS/);
+  assert.match(sql, /other_stmt\.THREAD_ID <> stmt\.THREAD_ID/);
+});
+
+test('the worker feed cannot add another connection or statement to the watch', () => {
+  const watched = mysqlThreadSnapshot([
+    phaseRow(364, MYSQL_ALTER_PHASES[0], 'running', 44.8, 393.9),
+  ])!;
+  const otherConnection = phaseRow(365, MYSQL_ALTER_PHASES[1], 'running', 51.6, 130.3);
+  otherConnection[0] = 999;
+  const otherStatement = phaseRow(366, MYSQL_ALTER_PHASES[2], 'running', 20, 30);
+  otherStatement[0] = null;
+  otherStatement[11] = 901;
+  const merged = appendMysqlWorkerStages(watched, [otherConnection, otherStatement]);
+  assert.equal(merged.stages.length, 1);
+  assert.equal(merged.stages[0].eventId, 364);
+});
+
+test('stage identity is THREAD_ID plus EVENT_ID, not EVENT_ID alone', () => {
+  const watched = mysqlThreadSnapshot([
+    phaseRow(364, MYSQL_ALTER_PHASES[0], 'running', 44.8, 393.9),
+  ])!;
+  const worker = phaseRow(364, MYSQL_ALTER_PHASES[1], 'running', 51.6, 130.3);
+  worker[0] = null;
+  worker[1] = '';
+  worker[22] = 5439999;
+  const merged = appendMysqlWorkerStages(watched, [worker]);
+  assert.equal(merged.stages.length, 2);
+  assert.deepEqual(merged.stages.map(stage => stage.phaseThreadId), [77, 5439999]);
+  assert.equal(merged.stages[0].phase, MYSQL_ALTER_PHASES[0]);
+  assert.equal(merged.stages[1].phase, MYSQL_ALTER_PHASES[1]);
 });
 
 test('overlapping same-name events pause and resume independently by EVENT_ID', () => {

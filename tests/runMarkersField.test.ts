@@ -2,7 +2,7 @@
  * The run-marker StateFields (components/editorRunMarkers.ts), driven through
  * real EditorState transactions — no DOM needed. The load-bearing guarantee:
  * markers are bound to what RAN, so substantive document edits clear them.
- * Whitespace-only edits retain them and their measured times.
+ * Token-preserving whitespace edits retain them and their measured times.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -57,6 +57,26 @@ test('a whitespace edit cannot preserve a marker after SQL text changes', () => 
   assert.deepEqual(runs(s), []);
   s = s.update({ changes: { from: 9, insert: '\n' } }).state;
   assert.deepEqual(runs(s), [], 'later blank lines do not resurrect the cleared run');
+});
+
+test('whitespace inside SQL tokens, literals and quoted identifiers clears markers', () => {
+  for (const [doc, from] of [
+    ['SELECT 1;', 3],
+    ["SELECT 'a b';", 9],
+    ['SELECT "a b" FROM t;', 9],
+  ] as const) {
+    let s = stateWith(doc);
+    s = s.update({ effects: setStatementRuns.of([{ status: 'ok', ms: 12 }]) }).state;
+    s = s.update({ changes: { from, insert: ' ' } }).state;
+    assert.deepEqual(runs(s), [], `whitespace changed executable SQL: ${s.doc.toString()}`);
+  }
+});
+
+test('whitespace inside a comment clears markers conservatively', () => {
+  let s = stateWith('SELECT /* a b */ 1;');
+  s = s.update({ effects: setStatementRuns.of([{ status: 'ok', ms: 12 }]) }).state;
+  s = s.update({ changes: { from: 11, insert: ' ' } }).state;
+  assert.deepEqual(runs(s), []);
 });
 
 test('a genuinely NEW run after an edit sets markers again', () => {
