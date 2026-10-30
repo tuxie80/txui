@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resultKind, resultSummary } from '../src/utils/resultKind.ts';
+import { resultKind, resultSummary, resultWallMs, resultOverheadMs } from '../src/utils/resultKind.ts';
 import type { QueryResult } from '../src/types/index.ts';
 
 function qr(partial: Partial<QueryResult>): QueryResult {
@@ -51,4 +51,17 @@ test('data-modifying CTE counts as DML', () => {
 test('duration sums execution + fetch', () => {
   const r = qr({ rows_affected: 2, execution_ms: 10, fetch_ms: 5 });
   assert.equal(resultSummary(r, 'update t set a=1'), '2 rows affected in 15 ms');
+});
+
+test('result header uses the gutter wall time and exposes only the overhead separately', () => {
+  const r = qr({ execution_ms: 7, fetch_ms: 1 });
+  assert.equal(resultWallMs(r, { 0: { ms: 14 } }), 14);
+  assert.equal(resultOverheadMs(r, 14), 6);
+});
+
+test('an unfinished marker falls back to backend execution + fetch', () => {
+  const r = qr({ execution_ms: 7, fetch_ms: 1 });
+  assert.equal(resultWallMs(r, { 0: {} }), 8);
+  assert.equal(resultOverheadMs(r, 8), 0);
+  assert.equal(resultOverheadMs(r, 2), 0, 'never reports negative overhead');
 });

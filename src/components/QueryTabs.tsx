@@ -82,7 +82,7 @@ import type { ExplainData } from './ExplainView';
 import { useSchemaCompletions } from '../hooks/useSchemaCompletions';
 import { useResizable } from '../hooks/useResizable';
 import { fmtDuration } from '../utils/fmtDuration';
-import { resultKind, resultSummary } from '../utils/resultKind';
+import { resultKind, resultSummary, resultWallMs, resultOverheadMs } from '../utils/resultKind';
 import { txReduce, txIsOpen, txIsBusy, txControls } from '../utils/txUi';
 import { engineGapReason } from '../utils/engineGaps';
 import type { TxMode } from '../utils/txUi';
@@ -3297,8 +3297,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                         ? `${tab.result.rows_affected} row(s) affected`
                         : `${tab.result.rows.length} row(s)`}
                       {' · '}
-                      <span title={`execution: ${Math.round(tab.result.execution_ms)} ms · fetching: ${Math.round(tab.result.fetch_ms ?? 0)} ms`}>
-                        {Math.round(tab.result.execution_ms + (tab.result.fetch_ms ?? 0))}ms
+                      <span title={`wall: ${resultWallMs(tab.result, tab.stmtRuns)} ms · execution: ${Math.round(tab.result.execution_ms)} ms · fetching: ${Math.round(tab.result.fetch_ms ?? 0)} ms · UI overhead: ${resultOverheadMs(tab.result, resultWallMs(tab.result, tab.stmtRuns))} ms`}>
+                        {resultWallMs(tab.result, tab.stmtRuns)}ms
                       </span>
                       {tab.prodCap !== null && (
                         <span className="result-prodcap"

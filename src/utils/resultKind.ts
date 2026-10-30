@@ -13,6 +13,19 @@ import { fmtDuration } from './fmtDuration.ts';
 
 export type ResultKind = 'rows' | 'affected' | 'ok';
 
+/** Wall time shared by the result header and the statement's gutter marker. */
+export function resultWallMs(
+  result: QueryResult,
+  statementRuns: Readonly<Record<number, { ms?: number }>>,
+): number {
+  const wall = statementRuns[0]?.ms;
+  return wall == null ? Math.round(result.execution_ms + (result.fetch_ms ?? 0)) : Math.round(wall);
+}
+
+export function resultOverheadMs(result: QueryResult, wallMs: number): number {
+  return Math.max(0, Math.round(wallMs - result.execution_ms - (result.fetch_ms ?? 0)));
+}
+
 export function resultAffected(result: QueryResult): number | null {
   return result.rows_affected === null ? null : Number(result.rows_affected);
 }
