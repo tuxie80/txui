@@ -12,6 +12,7 @@
  */
 import { StateEffect, StateField, type Transaction } from '@codemirror/state';
 import { tokenizeSql } from '../utils/sqlBeautify.ts';
+import { splitStatements } from '../utils/sqlSplit.ts';
 
 function whitespaceOnlyChange(tr: Transaction): boolean {
   let onlyWhitespace = true;
@@ -41,14 +42,35 @@ export interface StatementRun {
 
 const setStatementRuns = StateEffect.define<StatementRun[]>();
 
+function statementTexts(doc: string): string[] {
+  return splitStatements(doc).filter(s => s.text.trim()).map(s => s.text);
+}
+
+function reconcileStatementRuns(value: StatementRun[], tr: Transaction): StatementRun[] {
+  const before = statementTexts(tr.startState.doc.toString());
+  const after = statementTexts(tr.state.doc.toString());
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+
+  const out: StatementRun[] = after.map(() => ({ status: 'skipped' }));
+  for (let i = 0; i < prefix; i++) if (value[i]) out[i] = value[i];
+  for (let i = 0; i < suffix; i++) {
+    const oldIndex = value.length - 1 - i;
+    if (value[oldIndex]) out[out.length - 1 - i] = value[oldIndex];
+  }
+  return out;
+}
+
 const statementRunsField = StateField.define<StatementRun[]>({
   create: () => [],
   update(value, tr) {
     for (const e of tr.effects) if (e.is(setStatementRuns)) return e.value;
-    // Formatting between SQL tokens keeps the measured outcome and lets
-    // markerMap place it on the statement's new line. Whitespace that changes
-    // a token, literal, quoted identifier or comment invalidates every marker.
-    if (tr.docChanged && !whitespaceOnlyChange(tr)) return [];
+    // Formatting between SQL tokens keeps every measured outcome. A substantive
+    // edit invalidates only statements whose text was removed or rewritten.
+    if (tr.docChanged && !whitespaceOnlyChange(tr)) return reconcileStatementRuns(value, tr);
     return value;
   },
 });

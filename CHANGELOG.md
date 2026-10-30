@@ -21,6 +21,10 @@ this project follows semantic versioning.
 - **Arrow/Parquet 60.1** — the app and DuckDB now share one Arrow line, removing the duplicate Arrow 58 stack. Page-index APIs, metadata lookups, map-schema validation and real-fixture coverage are updated; pushdown, nested/NULL decoding, GeoParquet and streaming behavior remain covered by release tests and a repeatable benchmark.
 - **Compatible dependency refresh** — updated CodeMirror, React, Tauri, Vite, Playwright, MongoDB, rustls, Tokio and other compatible packages. React Hooks lint 7.1.1 was rejected after it introduced 119 new errors in the existing codebase. DuckDB and Rust toolchain migrations remain separate decisions.
 
+### Fixed
+
+- **Statement timing proofs survive unrelated edits** — typing a new command or inserting a statement no longer clears existing status chips and durations. Only deleting or rewriting a statement removes its marker; unaffected statements keep their outcome and measured time even when they move to different line numbers.
+
 ## [1.4.3] - 2026-10-28
 
 ### Fixed
