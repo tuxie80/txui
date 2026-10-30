@@ -17,7 +17,8 @@ this project follows semantic versioning.
 ### Changed
 
 - **TypeScript 7** — the native Go compiler passes strict checks and production builds without source changes; cached project typechecks are about 9× faster locally. The TypeScript 6 API remains side-by-side through Microsoft's documented aliases so typescript-eslint retains full coverage.
-- **Compatible dependency refresh** — updated CodeMirror, React, Tauri, Vite, Playwright, MongoDB, Arrow/Parquet 58, rustls, Tokio and other compatible packages. Calamine stays on its supported line with Zip pinned to 2.4.2; React Hooks lint 7.1.1 was rejected after it introduced 119 new errors in the existing codebase. Arrow 60, DuckDB and Rust toolchain migrations remain separate decisions.
+- **Calamine 0.37** — spreadsheet imports move to the current parser and the Zip 2.4.2 compatibility workaround is removed.
+- **Compatible dependency refresh** — updated CodeMirror, React, Tauri, Vite, Playwright, MongoDB, Arrow/Parquet 58, rustls, Tokio and other compatible packages. React Hooks lint 7.1.1 was rejected after it introduced 119 new errors in the existing codebase. Arrow 60, DuckDB and Rust toolchain migrations remain separate decisions.
 
 ## [1.4.3] - 2026-10-28
 
