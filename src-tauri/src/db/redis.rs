@@ -15,6 +15,7 @@ pub use super::redis_connection::RedisConnection;
 /// username, TLS via `rediss://`, the database index (Redis has 16 numbered
 /// databases and the browser needs to target one), and an SSH tunnel
 /// endpoint. Credentials are percent-encoded.
+#[cfg(test)]
 fn build_url(
     config: &ConnectionConfig,
     password: Option<String>,
