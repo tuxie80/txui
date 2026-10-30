@@ -241,7 +241,7 @@ pub async fn server_info(
 }
 
 /// `CONFIG GET *` reshaped into the name/value/… grid the panel expects.
-async fn redis_config(mgr: ::redis::aio::ConnectionManager) -> Result<QueryResult, crate::apperror::AppError> {
+async fn redis_config(mgr: crate::db::redis::RedisConnection) -> Result<QueryResult, crate::apperror::AppError> {
     use crate::db::types::ColumnInfo;
     let mut mgr = mgr;
     let pairs: Vec<String> = ::redis::cmd("CONFIG").arg("GET").arg("*")
@@ -269,7 +269,7 @@ async fn redis_config(mgr: ::redis::aio::ConnectionManager) -> Result<QueryResul
 
 /// `INFO all` parsed into section/name/value rows — the INFO text format is
 /// `# Section` headers followed by `key:value` lines.
-async fn redis_info(mgr: ::redis::aio::ConnectionManager) -> Result<QueryResult, crate::apperror::AppError> {
+async fn redis_info(mgr: crate::db::redis::RedisConnection) -> Result<QueryResult, crate::apperror::AppError> {
     use crate::db::types::ColumnInfo;
     let mut mgr = mgr;
     let text: String = ::redis::cmd("INFO").arg("all")

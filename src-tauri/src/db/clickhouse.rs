@@ -49,6 +49,9 @@ pub struct ChSession {
     /// Ceiling on bytes read before the query is aborted (`max_bytes_to_read`).
     /// `None`/0 = no limit. Same readonly caveat as `max_memory_usage`.
     max_bytes_to_read: Option<u64>,
+    /// Allowlisted generic session settings from `extra_params`, attached to
+    /// every request. Validated at open so unsupported keys never disappear.
+    session_settings: Vec<(&'static str, String)>,
 }
 
 impl std::fmt::Debug for ChSession {
@@ -178,6 +181,7 @@ pub fn open(
         .or(config.pool_acquire_timeout_secs)
         .unwrap_or(60)
         .max(1);
+    let session_settings = ch_session_settings(config)?;
     let mut builder = reqwest::Client::builder()
         .connect_timeout(timeout)
         // Overall ceiling on the WHOLE request (connect → body fully read):
@@ -238,6 +242,7 @@ pub fn open(
         max_memory_usage:  ch_ceiling(config, "max_memory_usage"),
         max_rows_to_read:  ch_ceiling(config, "max_rows_to_read"),
         max_bytes_to_read: ch_ceiling(config, "max_bytes_to_read"),
+        session_settings,
     })
 }
 
@@ -262,6 +267,58 @@ fn ch_ceiling(config: &ConnectionConfig, key: &str) -> Option<u64> {
     config.extra_params.get(key)
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
+}
+
+/// Generic execution/resource settings accepted from `extra_params`. Keep in
+/// sync with CH_SESSION_SETTING_KEYS in src/utils/connUrl.ts. Output format,
+/// HTTP protocol, identity and TxUI-owned limits are deliberately not generic:
+/// forwarding those could corrupt row decoding or bypass a driver guarantee.
+const CH_GENERIC_SETTINGS: &[&str] = &[
+    "max_threads",
+    "max_block_size",
+    "preferred_block_size_bytes",
+    "max_insert_block_size",
+    "max_bytes_before_external_group_by",
+    "max_bytes_before_external_sort",
+];
+const CH_DEDICATED_SETTINGS: &[&str] = &[
+    "max_memory_usage", "max_rows_to_read", "max_bytes_to_read",
+];
+const CH_PROTECTED_SETTINGS: &[&str] = &[
+    "database", "default_format", "max_execution_time", "max_result_rows",
+    "result_overflow_mode", "readonly", "query_id",
+    "output_format_json_quote_64bit_integers", "output_format_json_quote_decimals",
+    "output_format_json_quote_denormals",
+    "cancel_http_readonly_queries_on_client_close", "send_progress_in_http_headers",
+    "http_headers_progress_interval_ms",
+];
+
+/// Validate and canonicalize generic settings before any network request.
+/// Dedicated ceilings keep their legacy "invalid means unset" behavior; every
+/// other unrecognized key is a configuration error rather than a silent no-op.
+fn ch_session_settings(config: &ConnectionConfig) -> Result<Vec<(&'static str, String)>> {
+    let mut out = Vec::new();
+    for (key, raw_value) in &config.extra_params {
+        if CH_DEDICATED_SETTINGS.contains(&key.as_str()) { continue; }
+        let Some(canonical) = CH_GENERIC_SETTINGS.iter().copied()
+            .find(|candidate| *candidate == key.as_str()) else {
+            if CH_PROTECTED_SETTINGS.contains(&key.as_str()) {
+                anyhow::bail!(
+                    "ClickHouse parameter `{key}` is managed by TxUI and cannot be overridden in extra_params"
+                );
+            }
+            anyhow::bail!(
+                "unsupported ClickHouse session setting `{key}` in extra_params; supported generic settings: {}",
+                CH_GENERIC_SETTINGS.join(", ")
+            );
+        };
+        let value = raw_value.trim();
+        if value.is_empty() {
+            anyhow::bail!("ClickHouse session setting `{key}` has an empty value");
+        }
+        out.push((canonical, value.to_string()));
+    }
+    Ok(out)
 }
 
 impl ChSession {
@@ -297,11 +354,11 @@ impl ChSession {
             ("output_format_json_quote_decimals", "1".to_string()),
             ("output_format_json_quote_denormals", "1".to_string()),
         ];
-        // Memory / row ceilings are *setting changes*, and `readonly=1` refuses
-        // every setting change — attaching them to a read-only request would
-        // make the server reject the whole query with "Cannot modify ... in
-        // readonly mode". So they ride only a read-write connection; the form
-        // disables the control and says as much when READ-ONLY is on.
+        // HTTP query parameters are applied before `readonly=1` takes effect,
+        // so generic settings remain valid on read-only requests (verified on
+        // 26.9). Dedicated ceilings retain their legacy withheld-when-readonly
+        // behavior even though they use the same transport.
+        s.extend(self.session_settings.iter().cloned());
         if !self.read_only {
             if let Some(n) = self.max_memory_usage {
                 s.push(("max_memory_usage", n.to_string()));
@@ -1775,6 +1832,68 @@ mod tests {
     }
 
     #[test]
+    fn allowlisted_session_settings_attach_to_every_request() {
+        let mut c = cfg();
+        for key in super::CH_GENERIC_SETTINGS {
+            c.extra_params.insert((*key).into(), "1".into());
+        }
+        c.extra_params.insert("max_threads".into(), " 4 ".into());
+        let settings = open(&c, None, None).unwrap().settings();
+        for key in super::CH_GENERIC_SETTINGS {
+            let expected = if *key == "max_threads" { "4" } else { "1" };
+            assert!(settings.iter().any(|(k, v)| k == key && v == expected),
+                "{key} must ride the shared request settings: {settings:?}");
+        }
+    }
+
+    #[test]
+    fn unsupported_session_settings_are_connect_time_errors() {
+        let mut c = cfg();
+        c.extra_params.insert("allow_experimental_object_type".into(), "1".into());
+        let err = open(&c, None, None).expect_err("unsupported keys must not disappear");
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported ClickHouse session setting"), "{msg}");
+        assert!(msg.contains("allow_experimental_object_type"), "{msg}");
+        assert!(msg.contains("max_threads"), "the useful allowlist should be named: {msg}");
+    }
+
+    #[test]
+    fn txui_owned_settings_cannot_be_clobbered() {
+        for key in [
+            "database", "max_execution_time", "result_overflow_mode",
+            "output_format_json_quote_decimals", "readonly", "max_result_rows",
+        ] {
+            let mut c = cfg();
+            c.extra_params.insert(key.into(), "0".into());
+            let err = open(&c, None, None)
+                .expect_err("a protected request parameter must not be replaceable");
+            let msg = err.to_string();
+            assert!(msg.contains(key) && msg.contains("managed by TxUI"), "{key}: {msg}");
+        }
+    }
+
+    #[test]
+    fn generic_settings_ride_alongside_readonly() {
+        // Live-verified on ClickHouse 26.9: HTTP query parameters are applied
+        // before readonly=1, unlike a SQL SETTINGS clause.
+        let mut c = cfg();
+        c.read_only = true;
+        c.extra_params.insert("max_threads".into(), "4".into());
+        let settings = open(&c, None, None).unwrap().settings();
+        assert!(settings.iter().any(|(k, v)| *k == "readonly" && v == "1"));
+        assert!(settings.iter().any(|(k, v)| *k == "max_threads" && v == "4"),
+            "readonly must not discard a supported HTTP setting: {settings:?}");
+    }
+
+    #[test]
+    fn blank_generic_values_are_configuration_errors() {
+        let mut c = cfg();
+        c.extra_params.insert("max_threads".into(), "  ".into());
+        let err = open(&c, None, None).unwrap_err().to_string();
+        assert!(err.contains("max_threads") && err.contains("empty value"), "{err}");
+    }
+
+    #[test]
     fn memory_and_row_ceilings_attach_from_extra_params() {
         let mut c = cfg();
         c.extra_params.insert("max_memory_usage".into(), "1000000000".into());
@@ -1943,6 +2062,34 @@ mod live_tests {
         assert!(msg.contains("readonly") || msg.contains("READONLY"),
                 "refused, but not by the readonly guard: {msg}");
         println!("  write refused by the server: {msg}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn ch_live_allowlisted_settings_are_effective_with_readonly() {
+        let Some(mut c) = config() else { return };
+        for (key, value) in [
+            ("max_threads", "1"),
+            ("max_block_size", "12345"),
+            ("preferred_block_size_bytes", "234567"),
+            ("max_insert_block_size", "1234"),
+            ("max_bytes_before_external_group_by", "1048576"),
+            ("max_bytes_before_external_sort", "2097152"),
+        ] {
+            c.extra_params.insert(key.into(), value.into());
+        }
+        // config() pins readonly=1. HTTP query settings are applied before that
+        // guard, so the real driver must see every requested value on the server.
+        let s = super::open(&c, std::env::var("CH_PASS").ok(), None).expect("open");
+        let r = super::execute(&s,
+            "SELECT getSetting('max_threads'), getSetting('max_block_size'), \
+             getSetting('preferred_block_size_bytes'), getSetting('max_insert_block_size'), \
+             getSetting('max_bytes_before_external_group_by'), \
+             getSetting('max_bytes_before_external_sort')").await.expect("effective settings");
+        let got: Vec<Option<u64>> = r.rows[0].iter().map(|v| v.as_u64()).collect();
+        assert_eq!(got, vec![
+            Some(1), Some(12345), Some(234567), Some(1234), Some(1048576), Some(2097152),
+        ]);
     }
 
     #[tokio::test]

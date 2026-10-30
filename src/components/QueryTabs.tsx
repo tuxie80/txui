@@ -47,6 +47,7 @@ const TableDesigner = lazy(() => import('./TableDesigner').then(m => ({ default:
 const ComparePanel = lazy(() => import('./ComparePanel').then(m => ({ default: m.ComparePanel })));
 const PgListenPanel = lazy(() => import('./PgListenPanel').then(m => ({ default: m.PgListenPanel })));
 const StmtStatsPanel = lazy(() => import('./StmtStatsPanel').then(m => ({ default: m.StmtStatsPanel })));
+const PgWorkloadPanel = lazy(() => import('./PgWorkloadPanel').then(m => ({ default: m.PgWorkloadPanel })));
 const BinlogPanel = lazy(() => import('./BinlogPanel').then(m => ({ default: m.BinlogPanel })));
 const SlowLogPanel = lazy(() => import('./SlowLogPanel').then(m => ({ default: m.SlowLogPanel })));
 const MaintenancePanel = lazy(() => import('./MaintenancePanel').then(m => ({ default: m.MaintenancePanel })));
@@ -348,6 +349,7 @@ const PANEL_ENGINE_CAP: Record<string, Parameters<typeof can>[1] | undefined> = 
   locks:       'lockWaits',
   sequences:   'sequences',
   stmtstats:   'stmtStats',
+  pgworkload:  'pgWorkload',
   querystore:  'queryStore',
   users:       'userAdmin',
   tuner:       'tuner',
@@ -720,6 +722,11 @@ const PANEL_META: Record<string, {
     label: 'Statement statistics',
     render: (c, close) =>
       <StmtStatsPanel session={c.session} onClose={close} />,
+  },
+  pgworkload: {
+    label: 'PostgreSQL Workload',
+    render: (c, close) =>
+      <PgWorkloadPanel session={c.session} onClose={close} />,
   },
   binlog: {
     label: 'Binary logs',

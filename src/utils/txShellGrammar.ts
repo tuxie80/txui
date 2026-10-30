@@ -85,6 +85,13 @@ export const VERBS: VerbSpec[] = [
     summary: 'Count / sum / avg / min / max over numeric columns.' },
   { name: 'distinct', kind: 'stage', minArgs: 0, maxArgs: null,
     usage: 'distinct [col…]', summary: 'Drop duplicate rows.' },
+  { name: 'diff', kind: 'stage', minArgs: 1, maxArgs: null,
+    usage: 'diff #<result-id> [key <col> [col…]]',
+    summary: 'Compare these rows with an earlier transcript result.',
+    detail: 'The other result is always explicit: its #id is shown above its grid. '
+      + 'With no key, every shared column is the key; duplicate keys are reported. '
+      + 'With `key id`, matched rows report per-column changes. Columns and declared '
+      + 'types that differ between the two shapes are reported, never silently ignored.' },
 
   // ── sinks ──
   { name: 'save', kind: 'sink', minArgs: 1, maxArgs: 1,

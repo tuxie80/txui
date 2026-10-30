@@ -845,6 +845,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .pi-watch       { color: #e07a5f; }
 .pi-replication { color: var(--accent); }
 .pi-stmtstats   { color: #8fa8c8; }
+.pi-pgworkload  { color: #7fc8a0; }
 .pi-pglisten    { color: #b48ec8; }
 .pi-serverinfo  { color: #a8b8e0; }
 .pi-dbaviews    { color: #d18eb0; }

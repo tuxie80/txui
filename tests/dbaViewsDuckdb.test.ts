@@ -3,8 +3,8 @@
  * the catalog table functions do NOT share one column set, and getting that
  * wrong is a hard binder error rather than an empty grid.
  *
- * Verified against the bundled engine (DuckDB v1.5.1, via duckdb-rs
- * ~1.10505.0): duckdb_tables/views/columns/functions/databases carry
+ * Targets the bundled engine (DuckDB v2.0.0, via duckdb-rs ~1.20000.1):
+ * duckdb_tables/views/columns/functions/databases carry
  * `internal`; duckdb_indexes/constraints/sequences do NOT — they list user
  * objects only. duckdb_databases() spells the access-mode flag `readonly`.
  */
@@ -15,7 +15,7 @@ import { STATEMENT_SHORTCUTS } from '../src/utils/sqlKeywords.ts';
 
 const dd = DBA_VIEWS.duckdb;
 
-/** Catalog functions that have no `internal` column in DuckDB 1.5.x. */
+/** Catalog functions that have no `internal` column in DuckDB 2.0.x. */
 const NO_INTERNAL = ['duckdb_indexes', 'duckdb_constraints', 'duckdb_sequences'];
 /** …and the ones that do, so the filter is not dropped where it belongs. */
 const HAS_INTERNAL = ['duckdb_tables', 'duckdb_views', 'duckdb_columns', 'duckdb_functions'];
@@ -32,7 +32,7 @@ describe('DuckDB catalog columns', () => {
       for (const fn of NO_INTERNAL) {
         if (!sql.includes(`${fn}()`)) continue;
         assert.ok(!/\binternal\b/.test(sql),
-          `${where}: ${fn}() has no \`internal\` column in DuckDB 1.5 — ` +
+          `${where}: ${fn}() has no \`internal\` column in DuckDB 2.0 — ` +
           'referencing it is a Binder Error, not an empty result');
       }
     }

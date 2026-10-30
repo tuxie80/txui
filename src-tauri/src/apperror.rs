@@ -436,10 +436,9 @@ impl From<redis::RedisError> for AppError {
             // and retrying is exactly right.
             Some("LOADING") | Some("BUSY") | Some("MASTERDOWN") => ErrorCode::ConnectionLost,
             Some("CLUSTERDOWN") | Some("TRYAGAIN") => ErrorCode::ConnectionLost,
-            // MOVED/ASK: the key's slot lives on another cluster node and
-            // this client follows no redirects (a single-node
-            // ConnectionManager — no cluster routing). A capability gap,
-            // never transient: retrying the same node cannot succeed.
+            // MOVED/ASK on a path that cannot route (for example a standalone
+            // connection to one cluster node) is a capability gap, never
+            // transient. Routed cluster commands follow redirects in the driver.
             Some("MOVED") | Some("ASK") => ErrorCode::Unsupported,
             _ if e.is_timeout() => ErrorCode::Timeout,
             _ if e.is_connection_dropped() => ErrorCode::ConnectionLost,

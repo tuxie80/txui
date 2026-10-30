@@ -110,6 +110,7 @@ export function categoryOf(id: string): string {
     case 'X':  return 'Execution (ANALYZE)';
     case 'T':  return 'Data types';
     case 'NAME': return 'Naming & upgrades';
+    case 'CR': return 'Change review';
     default:   return 'General';
   }
 }

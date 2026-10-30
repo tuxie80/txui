@@ -163,6 +163,28 @@ pub async fn create_sqlite_file(path: PathBuf) -> Result<(), crate::apperror::Ap
     crate::db::sqlite::create(&path).await.map_err(Into::into)
 }
 
+/// Create a new, empty DuckDB database without weakening the driver's rule
+/// that opening a missing path is an error.
+#[tauri::command]
+pub async fn create_duckdb_file(path: PathBuf) -> Result<(), crate::apperror::AppError> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if path.exists() {
+            anyhow::bail!("{} already exists", path.display());
+        }
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() && !dir.exists() {
+                anyhow::bail!("no such directory: {}", dir.display());
+            }
+        }
+        let conn = duckdb::Connection::open(&path)?;
+        conn.execute_batch("SELECT 1")?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| crate::apperror::AppError::from(anyhow::anyhow!("DuckDB create task failed: {e}")))?
+    .map_err(Into::into)
+}
+
 /// One column of the schema for a new, empty Parquet file, as the connection
 /// form's *New…* dialog sends it. `data_type` is one of the names in
 /// [`resolve_parquet_type`] — the allowlist mirrored by the frontend's
@@ -246,6 +268,37 @@ pub async fn create_parquet_file(
         .await
         .map_err(|e| crate::apperror::AppError::from(format!("create task failed: {e}")))?
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod create_duckdb_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creates_reopens_and_refuses_to_overwrite() {
+        let dir = std::env::temp_dir().join(format!("txui-duckdb-create-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("new.duckdb");
+        let _ = std::fs::remove_file(&path);
+
+        create_duckdb_file(path.clone()).await.unwrap();
+        assert!(path.exists());
+        let conn = duckdb::Connection::open(&path).unwrap();
+        let answer: i32 = conn.query_row("SELECT 42", [], |r| r.get(0)).unwrap();
+        assert_eq!(answer, 42);
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let err = create_duckdb_file(path.clone()).await.unwrap_err().to_string();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let missing = dir.join("missing").join("new.duckdb");
+        assert!(create_duckdb_file(missing.clone()).await.is_err());
+        assert!(!missing.exists());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
 
 #[cfg(test)]

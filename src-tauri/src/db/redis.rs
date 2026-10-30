@@ -1,9 +1,13 @@
 use anyhow::Result;
 use redis::aio::ConnectionManager;
-use redis::Client;
-use std::time::Instant;
+use redis::cluster::ClusterClient;
+use redis::{Client, IntoConnectionInfo};
+use std::time::{Duration, Instant};
 
+use super::redis_connection::{topology_from_info, RedisTopology, SentinelSettings};
 use super::types::{ConnectionConfig, LiveSession, PingResult, QueryResult, SchemaNode, SslMode};
+
+pub use super::redis_connection::RedisConnection;
 
 /// Build the connection URL.
 ///
@@ -76,42 +80,119 @@ async fn connect_manager(client: Client, connect_timeout_secs: Option<u32>) -> R
         .map_err(Into::into)
 }
 
-/// Dial with the connection's TLS posture, returning the manager, the client
-/// (the client is just the parsed URL; db sweeps use it for dedicated
-/// connections) and whether the connection that succeeded uses TLS — the
-/// staged-connect diagnostics (commands/conndiag.rs) report that third value
-/// instead of guessing the scheme from the config.
-///
-/// `SslMode::Preferred` is OPPORTUNISTIC — TLS if the server speaks it, plain
-/// otherwise, MySQL's semantics: a default connection to a stock local Redis
-/// must not fail because it attempted TLS against a plaintext port. The
-/// downgrade is logged, never silent.
+fn connect_timeout(config: &ConnectionConfig) -> Duration {
+    Duration::from_secs(config.connect_timeout_secs
+        .filter(|secs| *secs > 0)
+        .map(u64::from)
+        .unwrap_or(crate::db::types::DEFAULT_CONNECT_TIMEOUT_SECS))
+}
+
+fn database_index(config: &ConnectionConfig) -> i64 {
+    config.database.as_deref().unwrap_or("").trim().parse().unwrap_or(0)
+}
+
+fn validate_topology(
+    config: &ConnectionConfig,
+    topology: RedisTopology,
+    via_ssh: bool,
+) -> Result<()> {
+    if via_ssh && topology != RedisTopology::Standalone {
+        anyhow::bail!(
+            "Redis {topology:?} discovery returns additional node addresses, which one SSH port-forward cannot route to. Connect without SSH or provide direct network access; TxUI will not bypass the tunnel."
+        );
+    }
+    match topology {
+        RedisTopology::Cluster if database_index(config) != 0 => anyhow::bail!(
+            "Redis Cluster supports only database 0; clear the Database # field."
+        ),
+        RedisTopology::Sentinel
+            if config.sentinel_master.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() =>
+            anyhow::bail!(
+                "This endpoint is Redis Sentinel. Set Sentinel master to the monitored service name (for example mymaster); TxUI will not guess a master or run data commands on the Sentinel port."
+            ),
+        _ => Ok(()),
+    }
+}
+
+async fn dial_seed(
+    config: &ConnectionConfig,
+    password: Option<String>,
+    host_override: Option<(&str, u16)>,
+    tls: bool,
+) -> Result<(ConnectionManager, Client)> {
+    let url = build_url_tls(config, password, host_override, tls);
+    let client = Client::open(url)?;
+    let mgr = connect_manager(client.clone(), config.connect_timeout_secs).await?;
+    Ok((mgr, client))
+}
+
+/// Identify the seed before choosing the session driver. The probe uses db0
+/// because Sentinel has no selectable databases; standalone connections with
+/// a non-zero database are redialled with that database in their Client so
+/// reconnects preserve it.
 pub(crate) async fn dial(
     config: &ConnectionConfig,
     password: Option<String>,
     host_override: Option<(&str, u16)>,
-) -> Result<(ConnectionManager, Client, bool)> {
-    if matches!(config.ssl_mode, SslMode::Preferred) {
-        let url = build_url_tls(config, password.clone(), host_override, true);
-        let attempt = match Client::open(url) {
-            Ok(client) => connect_manager(client.clone(), config.connect_timeout_secs).await
-                .map(|mgr| (mgr, client)),
-            Err(e) => Err(e.into()),
-        };
-        match attempt {
-            Ok((mgr, client)) => return Ok((mgr, client, true)),
-            Err(e) => log::warn!(
-                "Redis TLS connect failed (ssl_mode=preferred): {e:#} — retrying without TLS"),
+) -> Result<(RedisConnection, Client, bool)> {
+    let mut probe_config = config.clone();
+    probe_config.database = None;
+    let mut tls = !matches!(config.ssl_mode, SslMode::Disable);
+    let (mut seed, client) = if matches!(config.ssl_mode, SslMode::Preferred) {
+        match dial_seed(&probe_config, password.clone(), host_override, true).await {
+            Ok(connected) => connected,
+            Err(e) => {
+                log::warn!(
+                    "Redis TLS connect failed (ssl_mode=preferred): {e:#} — retrying without TLS");
+                tls = false;
+                dial_seed(&probe_config, password.clone(), host_override, false).await?
+            }
+        }
+    } else {
+        dial_seed(&probe_config, password.clone(), host_override, tls).await?
+    };
+
+    let info: String = redis::cmd("INFO").arg("server").query_async(&mut seed).await
+        .map_err(|e| anyhow::anyhow!("could not identify Redis topology: {e}"))?;
+    let topology = topology_from_info(&info);
+    validate_topology(config, topology, host_override.is_some())?;
+
+    let seed_info = build_url_tls(&probe_config, password.clone(), host_override, tls)
+        .into_connection_info()?;
+    match topology {
+        RedisTopology::Standalone if database_index(config) != 0 => {
+            let (mgr, client) = dial_seed(config, password, host_override, tls).await?;
+            Ok((RedisConnection::standalone(mgr), client, tls))
+        }
+        RedisTopology::Standalone => Ok((RedisConnection::standalone(seed), client, tls)),
+        RedisTopology::Cluster => {
+            let cluster = ClusterClient::builder([seed_info])
+                .connection_timeout(connect_timeout(config))
+                .retries(3)
+                .build()?;
+            let connection = RedisConnection::cluster(cluster, connect_timeout(config)).await?;
+            Ok((connection, client, tls))
+        }
+        RedisTopology::Sentinel => {
+            let service_name = config.sentinel_master.as_deref().unwrap().trim().to_string();
+            let settings = SentinelSettings {
+                sentinels: vec![seed_info],
+                service_name,
+                master: redis::RedisConnectionInfo {
+                    db: database_index(config),
+                    username: config.user.as_deref().map(str::trim)
+                        .filter(|user| !user.is_empty()).map(str::to_string),
+                    password,
+                    ..Default::default()
+                },
+                tls,
+                connect_timeout: connect_timeout(config),
+                db: database_index(config),
+            };
+            let connection = RedisConnection::sentinel(settings, seed).await?;
+            Ok((connection, client, tls))
         }
     }
-    let tls = !matches!(config.ssl_mode, SslMode::Disable);
-    let url = build_url(config, password, host_override);
-    let client = Client::open(url)?;
-    // The Client is kept on the session (cheap: it is just the parsed URL) so
-    // db sweeps can open a DEDICATED connection instead of SELECT-switching
-    // the shared manager.
-    let mgr = connect_manager(client.clone(), config.connect_timeout_secs).await?;
-    Ok((mgr, client, tls))
 }
 
 /// `host_override` = Some(("127.0.0.1", local_port)) when an SSH tunnel is up.
@@ -161,11 +242,17 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
 /// Arguments are tokenised by `redisguard::split_args`, not `split_whitespace`:
 /// the latter turned `SET greeting "hello world"` into four arguments and
 /// stored the literal `"hello`, silently writing the wrong value.
-pub async fn execute(mut mgr: ConnectionManager, sql: &str) -> Result<QueryResult> {
+pub async fn execute(mut mgr: RedisConnection, sql: &str) -> Result<QueryResult> {
     let start = Instant::now();
     let parts = crate::redisguard::split_args(sql).map_err(|e| anyhow::anyhow!(e))?;
     if parts.is_empty() {
         anyhow::bail!("empty command");
+    }
+    if mgr.is_cluster()
+        && parts[0].eq_ignore_ascii_case("CLIENT")
+        && parts.get(1).is_some_and(|arg| arg.eq_ignore_ascii_case("KILL"))
+    {
+        anyhow::bail!("CLIENT KILL is disabled for Redis Cluster: client ids and routing are node-local");
     }
 
     let mut cmd = redis::cmd(parts[0].to_ascii_uppercase().as_str());
@@ -240,11 +327,7 @@ const SCAN_COUNT: usize = 512;
 /// SQL *schemas*, which rendered with the schema icon and led nowhere. Redis
 /// has 16 numbered databases; `INFO keyspace` lists the non-empty ones in a
 /// single cheap call.
-pub async fn list_schema(mut mgr: ConnectionManager) -> Result<Vec<SchemaNode>> {
-    let info: String = redis::cmd("INFO").arg("keyspace")
-        .query_async(&mut mgr).await.unwrap_or_default();
-
-    let mut out: Vec<SchemaNode> = Vec::new();
+fn keyspace_counts(info: &str, counts: &mut std::collections::BTreeMap<String, i64>) {
     for line in info.lines() {
         let line = line.trim();
         if !line.starts_with("db") { continue; }
@@ -253,10 +336,35 @@ pub async fn list_schema(mut mgr: ConnectionManager) -> Result<Vec<SchemaNode>> 
             .find_map(|kv| kv.strip_prefix("keys="))
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
-        out.push(SchemaNode::Database { name: format!("{name} ({keys} keys)") });
+        *counts.entry(name.to_string()).or_insert(0) += keys;
+    }
+}
+
+pub async fn list_schema(mut mgr: RedisConnection) -> Result<Vec<SchemaNode>> {
+    let mut counts = std::collections::BTreeMap::new();
+    let mut cmd = redis::cmd("INFO");
+    cmd.arg("keyspace");
+    if let Some(raw) = mgr.all_masters(&cmd).await? {
+        let redis::Value::Map(replies) = raw else {
+            anyhow::bail!("cluster INFO keyspace returned an unexpected reply");
+        };
+        for (_, value) in replies {
+            match value {
+                redis::Value::BulkString(bytes) =>
+                    keyspace_counts(&String::from_utf8_lossy(&bytes), &mut counts),
+                redis::Value::SimpleString(info) | redis::Value::VerbatimString { text: info, .. } =>
+                    keyspace_counts(&info, &mut counts),
+                _ => anyhow::bail!("cluster INFO keyspace returned a non-text node reply"),
+            }
+        }
+    } else {
+        let info: String = cmd.query_async(&mut mgr).await.unwrap_or_default();
+        keyspace_counts(&info, &mut counts);
     }
 
-    // A completely empty server still needs a place to stand.
+    let mut out: Vec<SchemaNode> = counts.into_iter()
+        .map(|(name, keys)| SchemaNode::Database { name: format!("{name} ({keys} keys)") })
+        .collect();
     if out.is_empty() {
         out.push(SchemaNode::Database { name: "db0 (empty)".to_string() });
     }
@@ -268,51 +376,69 @@ fn db_index(label: &str) -> Option<u32> {
     label.trim_start_matches("db").split_whitespace().next()?.parse().ok()
 }
 
-/// Key namespaces inside one database, from a BOUNDED `SCAN` sweep.
-///
-/// Never `KEYS *`: that is O(N) and blocks the single-threaded server for the
-/// whole scan — the reason it is one of the prod hard limits. `SCAN` is
-/// incremental and cursor-based, so the sweep can stop early and say so.
-///
-/// Runs on a DEDICATED connection (built from the session's Client), never
-/// the shared ConnectionManager: `SELECT <idx>` there raced every concurrent
-/// command onto the wrong database, and an early `?` between the switch and
-/// the restoring `SELECT 0` left the app's one shared connection pointed at
-/// the wrong db permanently. The dedicated connection needs no restore at
-/// all — it is dropped when the sweep ends, on every exit path.
-pub async fn list_prefixes(client: &Client, db_label: &str) -> Result<Vec<SchemaNode>> {
-    use std::collections::BTreeMap;
+enum PrefixScanConnection {
+    Single(redis::aio::MultiplexedConnection),
+    Cluster(RedisConnection),
+}
 
-    let mut mgr = client.get_multiplexed_async_connection().await?;
-    if let Some(idx) = db_index(db_label) {
-        if idx != 0 {
-            redis::cmd("SELECT").arg(idx).query_async::<()>(&mut mgr).await?;
+impl PrefixScanConnection {
+    async fn scan(&mut self, cursor: u64) -> Result<(u64, Vec<String>)> {
+        match self {
+            Self::Single(connection) => {
+                let raw = redis::cmd("SCAN").arg(cursor).arg("MATCH").arg("*")
+                    .arg("COUNT").arg(SCAN_COUNT).query_async(connection).await?;
+                let (next, keys): (u64, Vec<String>) = raw;
+                Ok((next, keys))
+            }
+            Self::Cluster(connection) => Ok(connection.scan("*", cursor, SCAN_COUNT as u64).await?),
         }
     }
+}
+
+/// Bounded, non-blocking namespace sweep. Cluster sweeps continue every
+/// master's cursor; standalone and Sentinel sweeps use a dedicated connection
+/// so SELECT cannot leak into concurrent session commands.
+pub async fn list_prefixes(
+    session: &RedisConnection,
+    client: &Client,
+    db_label: &str,
+) -> Result<Vec<SchemaNode>> {
+    use std::collections::BTreeMap;
+
+    let idx = db_index(db_label).unwrap_or(0);
+    let mut connection = if session.is_cluster() {
+        if idx != 0 {
+            anyhow::bail!("Redis Cluster supports only database 0");
+        }
+        PrefixScanConnection::Cluster(session.clone())
+    } else {
+        let mut connection = match session.dedicated_connection().await? {
+            Some(connection) => connection,
+            None => client.get_multiplexed_async_connection().await?,
+        };
+        if idx != 0 {
+            redis::cmd("SELECT").arg(idx).query_async::<()>(&mut connection).await?;
+        }
+        PrefixScanConnection::Single(connection)
+    };
 
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
     let mut bare = 0i64;
     let mut seen = 0usize;
-    let mut cursor = "0".to_string();
+    let mut cursor = 0;
     let mut sampled = false;
 
     loop {
-        let (next, keys): (String, Vec<String>) = redis::cmd("SCAN")
-            .arg(&cursor).arg("COUNT").arg(SCAN_COUNT)
-            .query_async(&mut mgr).await?;
-
+        let (next, keys) = connection.scan(cursor).await?;
         for k in &keys {
             seen += 1;
-            // Namespace = everything up to the FIRST separator, the convention
-            // every Redis codebase uses ("user:1", "cache:page:home").
             match k.find([':', '|', '/']) {
                 Some(p) if p > 0 => *counts.entry(k[..=p].to_string()).or_insert(0) += 1,
                 _ => bare += 1,
             }
         }
-
         cursor = next;
-        if cursor == "0" { break; }
+        if cursor == 0 { break; }
         if seen >= PREFIX_SCAN_CAP { sampled = true; break; }
     }
 
@@ -320,7 +446,6 @@ pub async fn list_prefixes(client: &Client, db_label: &str) -> Result<Vec<Schema
     let mut out: Vec<SchemaNode> = counts.into_iter()
         .map(|(name, count)| SchemaNode::KeyPrefix { name, schema: ns.clone(), count, sampled })
         .collect();
-    // Largest namespaces first — that is what a DBA is looking for.
     out.sort_by(|a, b| match (a, b) {
         (SchemaNode::KeyPrefix { count: x, .. }, SchemaNode::KeyPrefix { count: y, .. }) => y.cmp(x),
         _ => std::cmp::Ordering::Equal,
@@ -448,6 +573,38 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_requires_an_explicit_service_name() {
+        let mut c = cfg();
+        let error = validate_topology(&c, RedisTopology::Sentinel, false).unwrap_err();
+        assert!(error.to_string().contains("Sentinel master"), "{error}");
+        c.sentinel_master = Some("  mymaster  ".into());
+        assert!(validate_topology(&c, RedisTopology::Sentinel, false).is_ok());
+    }
+
+    #[test]
+    fn cluster_rejects_nonzero_databases_and_ssh_bypass() {
+        let mut c = cfg();
+        c.database = Some("3".into());
+        assert!(validate_topology(&c, RedisTopology::Cluster, false).unwrap_err()
+            .to_string().contains("only database 0"));
+        c.database = Some("0".into());
+        assert!(validate_topology(&c, RedisTopology::Cluster, false).is_ok());
+        let error = validate_topology(&c, RedisTopology::Cluster, true).unwrap_err();
+        assert!(error.to_string().contains("will not bypass the tunnel"), "{error}");
+        c.sentinel_master = Some("mymaster".into());
+        assert!(validate_topology(&c, RedisTopology::Sentinel, true).is_err());
+        assert!(validate_topology(&c, RedisTopology::Standalone, true).is_ok());
+    }
+
+    #[test]
+    fn cluster_keyspace_counts_are_summed_across_masters() {
+        let mut counts = std::collections::BTreeMap::new();
+        keyspace_counts("db0:keys=10,expires=1,avg_ttl=0\r\n", &mut counts);
+        keyspace_counts("db0:keys=7,expires=0,avg_ttl=0\r\n", &mut counts);
+        assert_eq!(counts.get("db0"), Some(&17));
+    }
+
+    #[test]
     fn bulk_strings_are_text_when_utf8_hex_when_not() {
         assert_eq!(redis_value_to_json(redis::Value::BulkString(b"hello".to_vec())),
                    serde_json::json!("hello"));
@@ -507,7 +664,7 @@ mod live_tests {
         c
     }
 
-    async fn mgr(db: Option<&str>) -> Option<(redis::aio::ConnectionManager, redis::Client)> {
+    async fn mgr(db: Option<&str>) -> Option<(super::RedisConnection, redis::Client)> {
         match super::open(&config(db), None, None).await.ok()? {
             crate::db::types::LiveSession::Redis(m, c) => Some((m, c)),
             _ => None,
@@ -558,7 +715,7 @@ mod live_tests {
                 "Redis must not emit SQL schema nodes");
 
         // Expanding db0 = key namespaces from a bounded SCAN.
-        let prefixes = super::list_prefixes(&client, "db0 (1014 keys)").await.expect("prefixes");
+        let prefixes = super::list_prefixes(&m, &client, "db0 (1014 keys)").await.expect("prefixes");
         let mut found: Vec<(String, i64)> = prefixes.iter().filter_map(|n| match n {
             SchemaNode::KeyPrefix { name, count, .. } => Some((name.clone(), *count)),
             _ => None,

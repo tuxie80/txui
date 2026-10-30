@@ -252,6 +252,77 @@ export function namedTargets(fixtures) {
       assert: ({ html }) => (html.length > 100 ? undefined : 'grid rendered almost nothing'),
     },
     {
+      name: 'PgWorkloadPanel', file: 'src/components/PgWorkloadPanel.tsx', tier: 'mount',
+      props: {
+        session: {
+          connectionId: 'c-pg', sessionId: 's-pg', connectionName: 'prod-orders (postgres)',
+          engine: 'postgres', environment: 'dev', readOnly: false,
+        },
+      },
+      mock: (() => {
+        let captures = 0;
+        let lastSnapshotAt = 0;
+        const columns = ['queryid', 'query', 'calls', 'total_exec_time', 'mean_exec_time', 'rows', 'shared_blks_hit', 'shared_blks_read'];
+        return {
+          monitor_query: args => {
+            const sql = String(args?.sql ?? '');
+            if (sql.includes('pg_available_extensions')) return fixtures.queryResult(['installed', 'available'], [['1.10', '1.10']]);
+            if (sql.includes('server_version_num')) return fixtures.queryResult(['version'], [['170000']]);
+            if (sql.includes('FROM pg_stat_statements')) {
+              captures += 1;
+              lastSnapshotAt = Date.now();
+              const rows = captures === 1
+                ? [['10', 'SELECT * FROM orders WHERE id = $1', 10, 100, 10, 20, 90, 10]]
+                : [['10', 'SELECT * FROM orders WHERE id = $1', 15, 400, 400 / 15, 35, 140, 15]];
+              return fixtures.queryResult(columns, rows);
+            }
+            return fixtures.queryResult(['unused'], []);
+          },
+          incident_timeline: () => [
+            { id: 'long_query:1', kind: 'long_query', at_ms: lastSnapshotAt, title: 'Long query — SELECT orders', detail: 'SELECT * FROM orders WHERE id = $1', ok: true, duration_ms: 2400, ref_id: 1 },
+            { id: 'deadlock:1', kind: 'deadlock', at_ms: lastSnapshotAt, title: 'Deadlock — victim 42', detail: 'orders ↔ order_lines', ok: false, duration_ms: 0, ref_id: 1 },
+          ],
+          pg_wait_sample_start: null,
+          pg_wait_sample_stop: null,
+        };
+      })(),
+      interact: async ({ container, act, hub }) => {
+        const click = async text => {
+          const walk = (n, out = []) => {
+            if (n.nodeName === 'BUTTON' && n.textContent.includes(text)) out.push(n);
+            for (const child of n.childNodes ?? []) walk(child, out);
+            return out;
+          };
+          const button = walk(container)[0];
+          if (!button) throw new Error(`button not found: ${text}`);
+          await act(async () => {
+            button.dispatchEvent(new Event('click', { bubbles: true }));
+            await new Promise(r => setTimeout(r, 10));
+          });
+        };
+        await click('1. Capture baseline');
+        await click('Start wait sampling');
+        const start = hub.calls.find(c => c.cmd === 'pg_wait_sample_start');
+        if (!start) throw new Error('wait sampler was not started');
+        await act(async () => {
+          start.args.onEvent.onmessage({ type: 'Sampling', intervalMs: 150 });
+          start.args.onEvent.onmessage({
+            type: 'Snapshot', atMs: Date.now(),
+            backends: [{ pid: 42, waitEventType: 'IO', waitEvent: 'DataFileRead', state: 'active', query: 'SELECT 1' }],
+          });
+          await new Promise(r => setTimeout(r, 5));
+        });
+        await click('2. Capture after');
+      },
+      assert: ({ html, calls }) => {
+        for (const needle of ['Ranked statement deltas', '+300', 'DataFileRead', 'Deadlock — victim 42', 'Local incidents in the same window']) {
+          if (!html.includes(needle)) return `workload report lacks "${needle}"`;
+        }
+        if (!calls.some(c => c.cmd === 'incident_timeline')) return 'local incidents were not fetched';
+        if (!calls.some(c => c.cmd === 'pg_wait_sample_stop')) return 'after capture did not stop wait sampling';
+      },
+    },
+    {
       // The whole app chrome: File/Help menu events arrive from the native
       // menu as Tauri events; App translates them into dgui:* window events
       // and modal state. This drives that translation end to end.

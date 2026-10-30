@@ -477,6 +477,10 @@ pub fn run() {
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/stmtstats.png"))?)
                 .build(app)?;
+            let t_pgworkload = IconMenuItemBuilder::with_id("tool:pgworkload", "PostgreSQL Workload")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/pgworkload.png"))?)
+                .build(app)?;
             let t_binlog = IconMenuItemBuilder::with_id("tool:binlog", "Binary logs")
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/binlog.png"))?)
@@ -540,6 +544,7 @@ pub fn run() {
                 .build()?;
             let m_insights = SubmenuBuilder::new(app, "Insights")
                 .item(&t_stmtstats)
+                .item(&t_pgworkload)
                 .item(&t_querystore)
                 .item(&t_slowlog)
                 .item(&t_binlog)
@@ -763,6 +768,7 @@ pub fn run() {
             list_folder_meta,
             save_folder_meta,
             create_sqlite_file,
+            create_duckdb_file,
             write_parquet_file,
             create_parquet_file,
             panel_query,

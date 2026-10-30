@@ -21,7 +21,8 @@ import type { QueryResult, Session } from '../types';
 import { ResultGrid } from './ResultGrid';
 import { StatusIcon } from './StatusIcon';
 import {
-  parseLine, substituteVars, isComplete, quotesClosed, pushHistory, completions,
+  parseLine, substituteVars, substituteCommands, resultToCommandText,
+  isComplete, quotesClosed, pushHistory, completions,
 } from '../utils/txShell';
 import type { ParsedLine } from '../utils/txShell';
 import { VERBS, METAS, PIPE, findMeta } from '../utils/txShellGrammar';
@@ -107,6 +108,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
   // `\source` runs lines through `execute`, which is defined after the meta
   // handler that calls it. A ref breaks the cycle without reordering the file.
   const executeRef = useRef<((line: string) => Promise<void>) | null>(null);
+  const commandRef = useRef<((line: string, depth: number) => Promise<string>) | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -148,7 +150,9 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
    * largest hole in it, and the statement is redacted on the way in
    * (utils/panelAudit).
    */
-  const queryRows = useCallback(async (sql: string): Promise<QueryResult | null> => {
+  const queryRows = useCallback(async (
+    sql: string, reportErrors = true,
+  ): Promise<QueryResult | null> => {
     try {
       return await audited({
         sessionId: session.sessionId, engine: session.engine,
@@ -166,6 +170,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         }),
       });
     } catch (e) {
+      if (!reportErrors) throw e;
       say(errorDisplay(e), 'err');
       return null;
     }
@@ -553,18 +558,25 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
    * outright and a wide match is named before it runs — a mistyped pattern
    * that hits fourteen servers should be visible, not discovered afterwards.
    */
-  const runFanout = useCallback(async (pattern: string, sql: string) => {
+  const runFanout = useCallback(async (
+    pattern: string, sql: string, reportErrors = true,
+  ): Promise<QueryResult | null> => {
+    const fail = (message: string, tone: 'err' | 'muted' = 'err'): null => {
+      if (!reportErrors) throw new Error(message);
+      say(message, tone);
+      return null;
+    };
     const all = await ConnectionsStore.list().catch(() => []);
     const hits = all.filter(c => matchesPattern(c.name, pattern));
     if (hits.length === 0) {
-      return say(`No connection matches \`@${pattern}\`. `
-        + `Known: ${all.map(c => c.name).join(', ') || '(none)'}`, 'err');
+      return fail(`No connection matches \`@${pattern}\`. `
+        + `Known: ${all.map(c => c.name).join(', ') || '(none)'}`);
     }
     if (!/^\s*(select|show|explain|with|describe|desc)\b/i.test(sql)) {
-      return say(
+      return fail(
         'Fan-out runs read-only statements only. A write across many servers needs '
         + 'to be done deliberately, one at a time or through ⚡ Fleet exec — not from '
-        + 'a pattern that might match more than you meant. Nothing was run.', 'err');
+        + 'a pattern that might match more than you meant. Nothing was run.');
     }
     const prod = hits.filter(c => c.environment === 'prod');
     if (hits.length >= FANOUT_CONFIRM_AT || prod.length > 0) {
@@ -573,7 +585,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         + hits.map(c => `  ${c.name}${c.environment === 'prod' ? '  (prod)' : ''}`).join('\n')
         + `\n\n${sql}`,
         prod.length > 0 ? { danger: true } : {});
-      if (!ok) return say('Cancelled.', 'muted');
+      if (!ok) return fail('Cancelled.', 'muted');
     }
 
     const parts: Array<{ name: string; result: QueryResult }> = [];
@@ -603,14 +615,17 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
       });
       await done;
     } catch (e) {
-      return say(errorDisplay(e), 'err');
+      return fail(errorDisplay(e));
     }
+    if (!reportErrors && failures.length) throw new Error(failures.join('\n'));
     for (const f of failures) say(f, 'err');
     return unionResults(parts);
   }, [say]);
 
   /** `from <file>` — a delimited file as a result set. */
-  const runSource = useCallback(async (file: string): Promise<QueryResult | null> => {
+  const runSource = useCallback(async (
+    file: string, reportErrors = true,
+  ): Promise<QueryResult | null> => {
     try {
       const text = await invoke<string>('read_text_file', { path: file });
       const delim = /\.tsv$/i.test(file) ? '\t' : ',';
@@ -626,10 +641,85 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
       }
       return delimitedToResult(text, delim);
     } catch (e) {
+      if (!reportErrors) throw e;
       say(`Could not read ${file}: ${errorDisplay(e)}`, 'err');
       return null;
     }
   }, [say]);
+
+  const resolveCaptured = useCallback((id: number) => {
+    const hit = entries.find(e => e.id === id && e.kind === 'result');
+    return hit?.kind === 'result' ? hit.result : undefined;
+  }, [entries]);
+
+  const expandCommands = useCallback(async (text: string, depth = 0) => {
+    return substituteCommands(text, async (command, nextDepth) => {
+      const run = commandRef.current;
+      if (!run) throw new Error('Command substitution is not ready.');
+      return run(command, nextDepth);
+    }, { depth });
+  }, []);
+
+  // Substitution happens after parsing, so captured text cannot add a pipeline
+  // or turn a SQL value into shell syntax. Variable substitution keeps its
+  // existing behavior and is deliberately not applied to assignment values.
+  const subst = useCallback(async (text: string, depth = 0) => {
+    const expanded = await expandCommands(text, depth);
+    const { text: out, missing } = substituteVars(expanded, vars);
+    if (missing.length) {
+      throw new Error(`Unset variable${missing.length > 1 ? 's' : ''}: `
+        + missing.map(m => `$${m}`).join(', ')
+        + '. Nothing was run — set it with `$name = value`, or `\\vars` to see what is set.');
+    }
+    return out;
+  }, [expandCommands, vars]);
+
+  const expandStages = useCallback(async (stages: ParsedLine['stages'], depth = 0) => {
+    const out: ParsedLine['stages'] = [];
+    for (const stage of stages) {
+      out.push({ ...stage, args: await Promise.all(
+        stage.args.map(arg => expandCommands(arg, depth))) });
+    }
+    return out;
+  }, [expandCommands]);
+
+  const runCaptured = useCallback(async (line: string, depth: number): Promise<string> => {
+    const parsed = parseLine(line);
+    const head = parsed.head;
+    if (head.kind === 'error') throw new Error(head.message);
+    if (parsed.error) throw new Error(parsed.error);
+    if (head.kind === 'os') {
+      throw new Error('Command substitution runs TxShell commands, not `!` OS commands.');
+    }
+    if (!['sql', 'fanout', 'source'].includes(head.kind)) {
+      throw new Error('Command substitution needs SQL, @fan-out or `from`, optionally piped.');
+    }
+    const sideEffect = parsed.stages.find(s => ['save', 'append', 'insert', 'chart'].includes(s.name));
+    if (sideEffect) {
+      throw new Error(`\`${sideEffect.name}\` is not allowed inside command substitution; `
+        + 'use `to <format>` or the default structured text conversion.');
+    }
+
+    const stages = await expandStages(parsed.stages, depth);
+    let rows: QueryResult | null = null;
+    if (head.kind === 'sql') {
+      rows = await queryRows(await subst(head.sql, depth), false);
+    } else if (head.kind === 'fanout') {
+      rows = await runFanout(head.pattern, await subst(head.sql, depth), false);
+    } else if (head.kind === 'source') {
+      rows = await runSource(await subst(head.args[0], depth), false);
+    }
+    if (!rows) throw new Error('Command substitution produced no result.');
+    const out = runPipeline(rows, stages, { resolveResult: resolveCaptured });
+    if ('error' in out) throw new Error(out.error);
+    if (out.sink?.kind === 'to') {
+      return serialize(TO_EXPORTER[out.sink.format!], out.result.columns.map(c => c.name),
+        out.result.rows, 'result', session.engine);
+    }
+    return resultToCommandText(out.result);
+  }, [expandStages, queryRows, runFanout, runSource, subst, resolveCaptured, session.engine]);
+
+  useEffect(() => { commandRef.current = runCaptured; }, [runCaptured]);
 
   const execute = useCallback(async (line: string) => {
     const parsed: ParsedLine = parseLine(line);
@@ -639,91 +729,80 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
     if (head.kind === 'error') return say(head.message, 'err');
     if (parsed.error) return say(parsed.error, 'err');
 
-    // Variables are substituted after parsing, so a value containing `|>` or a
-    // quote cannot change what the line MEANS — only what it says.
-    const subst = (text: string): string | null => {
-      const { text: out, missing } = substituteVars(text, vars);
-      if (missing.length) {
-        say(`Unset variable${missing.length > 1 ? 's' : ''}: `
-          + missing.map(m => `$${m}`).join(', ')
-          + '. Nothing was run — set it with `$name = value`, or `\\vars` to see what is set.',
-          'err');
-        return null;
-      }
-      return out;
-    };
-
-    // Meta, OS and assignment take no pipeline — they produce no rows.
-    if (head.kind === 'meta') {
-      if (parsed.stages.length) return say('A `\\command` cannot be piped yet.', 'err');
-      // A psql backslash command maps onto a catalog query or a display toggle;
-      // the mapped SQL runs through the same `runSql` path a typed query does.
-      // `null` means "not a psql meta I own" — fall through to the shell's own
-      // handling (\\help, \\c, \\watch, and the MySQL catalog equivalents).
-      const mapped = psqlMeta(line.trim(), session.engine);
-      if (mapped) {
-        if (mapped.toggle === 'timing') {
-          setTiming(t => (head.args[0] ? head.args[0].toLowerCase() === 'on' : !t));
-          return say(`Timing ${head.args[0] ? head.args[0] : !timing ? 'on' : 'off'}`, 'muted');
-        }
-        if (mapped.toggle === 'expanded') {
-          setExpanded(x => (head.args[0] ? head.args[0].toLowerCase() === 'on' : !x));
-          return say(`Expanded display ${head.args[0] ? head.args[0] : !expanded ? 'on' : 'off'}`, 'muted');
-        }
-        if (mapped.note) return say(mapped.note, 'muted');
-        if (mapped.sql) return void await runSql(mapped.sql);
-      }
-      return runMeta(head.name, head.args);
-    }
-    if (head.kind === 'os') {
-      const cmd = subst(head.command);
-      if (cmd === null) return;
-      setBusy(true);
-      await runOs(cmd);
-      setBusy(false);
-      return;
-    }
-    if (head.kind === 'assign') {
-      setVars(v => ({ ...v, [head.name]: head.value }));
-      return say(`$${head.name} = ${head.value}`, 'muted');
-    }
-
-    // Everything else produces rows, which the pipeline then shapes.
-    setBusy(true);
     try {
-      const t0 = performance.now();
-      let rows: QueryResult | null | undefined;
-      let label = '';
-
-      if (head.kind === 'sql') {
-        const sql = subst(head.sql);
-        if (sql === null) return;
-        label = sql;
-        // With no pipeline this is the plain path, warnings and all.
-        if (parsed.stages.length === 0) return void await runSql(sql);
-        rows = await queryRows(sql);
-      } else if (head.kind === 'fanout') {
-        const sql = subst(head.sql);
-        if (sql === null) return;
-        label = `@${head.pattern} ${sql}`;
-        rows = await runFanout(head.pattern, sql) || null;
-      } else if (head.kind === 'source') {
-        const file = subst(head.args[0]);
-        if (file === null) return;
-        label = `from ${file}`;
-        rows = await runSource(file);
+      // Meta, OS and assignment take no pipeline — they produce no rows.
+      if (head.kind === 'meta') {
+        if (parsed.stages.length) return say('A `\\command` cannot be piped yet.', 'err');
+        const args = await Promise.all(head.args.map(a => expandCommands(a)));
+        // A psql backslash command maps onto a catalog query or a display toggle;
+        // the mapped SQL runs through the same `runSql` path a typed query does.
+        const mapped = psqlMeta(`\\${head.name}${args.length ? ` ${args.join(' ')}` : ''}`,
+          session.engine);
+        if (mapped) {
+          if (mapped.toggle === 'timing') {
+            setTiming(t => (args[0] ? args[0].toLowerCase() === 'on' : !t));
+            return say(`Timing ${args[0] ? args[0] : !timing ? 'on' : 'off'}`, 'muted');
+          }
+          if (mapped.toggle === 'expanded') {
+            setExpanded(x => (args[0] ? args[0].toLowerCase() === 'on' : !x));
+            return say(`Expanded display ${args[0] ? args[0] : !expanded ? 'on' : 'off'}`, 'muted');
+          }
+          if (mapped.note) return say(mapped.note, 'muted');
+          if (mapped.sql) return void await runSql(mapped.sql);
+        }
+        return await runMeta(head.name, args);
+      }
+      if (head.kind === 'os') {
+        // OS lines stay verbatim: their $(…) belongs to the user's real shell.
+        const cmd = await subst(head.command);
+        setBusy(true);
+        try { await runOs(cmd); } finally { setBusy(false); }
+        return;
+      }
+      if (head.kind === 'assign') {
+        const value = await expandCommands(head.value);
+        setVars(v => ({ ...v, [head.name]: value }));
+        return say(`$${head.name} = ${value}`, 'muted');
       }
 
-      if (!rows) return;
-      const ms = Math.round(performance.now() - t0);
-      const out = runPipeline(rows, parsed.stages);
-      if ('error' in out) return say(out.error, 'err');
-      await performSink(out.result, out.sink, label, ms);
-    } finally {
-      setBusy(false);
+      // Everything else produces rows, which the pipeline then shapes.
+      setBusy(true);
+      try {
+        const t0 = performance.now();
+        let rows: QueryResult | null = null;
+        let label = '';
+        const stages = await expandStages(parsed.stages);
+
+        if (head.kind === 'sql') {
+          const sql = await subst(head.sql);
+          label = sql;
+          // With no pipeline this is the plain path, warnings and all.
+          if (stages.length === 0) return void await runSql(sql);
+          rows = await queryRows(sql);
+        } else if (head.kind === 'fanout') {
+          const sql = await subst(head.sql);
+          label = `@${head.pattern} ${sql}`;
+          rows = await runFanout(head.pattern, sql);
+        } else if (head.kind === 'source') {
+          const file = await subst(head.args[0]);
+          label = `from ${file}`;
+          rows = await runSource(file);
+        }
+
+        if (!rows) return;
+        const ms = Math.round(performance.now() - t0);
+        const out = runPipeline(rows, stages, { resolveResult: resolveCaptured });
+        if ('error' in out) return say(out.error, 'err');
+        for (const notice of out.notices ?? []) say(notice, 'muted');
+        await performSink(out.result, out.sink, label, ms);
+      } finally {
+        setBusy(false);
+      }
+    } catch (e) {
+      say(errorDisplay(e), 'err');
     }
-  }, [vars, say, runSql, queryRows, runMeta, runOs, runFanout, runSource, performSink,
-      session.engine, timing, expanded]);
+  }, [say, runSql, queryRows, runMeta, runOs, runFanout, runSource, performSink,
+    expandCommands, expandStages, subst, resolveCaptured, session.engine, timing, expanded]);
 
   useEffect(() => { executeRef.current = execute; }, [execute]);
 
@@ -904,6 +983,7 @@ const EntryView = memo(function EntryView({ entry, timing, expanded }: { entry: 
   return (
     <div className="txsh-result">
       <div className="txsh-result-meta">
+        {`#${entry.id} · `}
         {affected !== null && affected !== undefined
           ? `${affected} row${affected === 1 ? '' : 's'} affected`
           : `${rows} row${rows === 1 ? '' : 's'}`}
@@ -954,6 +1034,7 @@ function HelpView({ topic }: { topic?: string }) {
         ['\\command', 'a shell command (below)'],
         ['!line', 'hand the line to your own shell'],
         ['$name = value', 'set a variable; use $name or ${name}'],
+        ['$(command)', 'capture TxShell output as text (4 levels, 64K chars)'],
         ['# text', 'comment'],
       ]} />
       <HelpGroup title="Pipeline" items={group('stage').map(v => [v.usage, v.summary])} />
@@ -963,6 +1044,8 @@ function HelpView({ topic }: { topic?: string }) {
       <div className="txsh-help-detail">
         <code>\help &lt;name&gt;</code> explains one. Tab completes. ↑/↓ walks history.
         Enter runs a bare line — no <code>;</code> needed. Shift-Enter adds a line.
+        Substitution returns one cell as a scalar; larger results become headerless TSV
+        (NULL is literal, embedded whitespace is escaped). SQL strings/comments are untouched.
       </div>
     </div>
   );

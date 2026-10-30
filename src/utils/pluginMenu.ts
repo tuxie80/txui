@@ -60,6 +60,7 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
     label: 'Insights',
     items: [
       { panel: 'stmtstats', label: 'Statement statistics', tip: 'Statement statistics — snapshot and diff cumulative statement digests over time', when: 'stmtStats' },
+      { panel: 'pgworkload', label: 'PostgreSQL Workload', tip: 'PostgreSQL Workload — correlate a manual statement diff, sampled waits, and local incidents', when: 'pgWorkload' },
       { panel: 'querystore', label: 'Query Store', tip: 'Query Store — plan regressions and plan forcing (SQL Server)', when: 'queryStore' },
       { panel: 'slowlog', label: 'Slow-log analyzer', tip: 'Slow-query-log analyzer (pt-query-digest style)', when: 'mysql' },
       { panel: 'binlog', label: 'Binary logs', tip: 'Binary log events viewer + PITR helper', when: 'mysql' },

@@ -54,6 +54,7 @@ const NAMED_MOUNTED = [
   'ResultChart',       // chart presets bar/line/area/pie/scatter
   'SeriesChart',       // the chart sub-renderer
   'FastGrid',          // the grid everything sits on
+  'PgWorkloadPanel',   // manual baseline/after + waits + incidents
   'App',               // whole app chrome + File/Help menu event translation
 ];
 

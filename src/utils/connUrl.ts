@@ -10,6 +10,8 @@
  * Pure module: no React/Tauri imports, unit-tested with `node --test`.
  */
 
+import { isQuackUri, parseQuackUri } from './quack.ts';
+
 /**
  * ClickHouse per-connection memory / row ceilings, stored as ordinary session
  * settings in `extra_params` under their ClickHouse names. `max_execution_time`
@@ -19,6 +21,34 @@
  * out of the generic Extra-params editor to avoid showing the same key twice.
  */
 export const CH_CEILING_KEYS = ['max_memory_usage', 'max_rows_to_read'] as const;
+
+/**
+ * Generic ClickHouse session settings accepted from URL / extra-params input.
+ * Keep this execution/resource-only allowlist in sync with `ch_session_settings`
+ * in src-tauri/src/db/clickhouse.rs. Output, protocol, identity and TxUI-owned
+ * limits are deliberately excluded so a pasted URL cannot change result decoding
+ * or weaken the driver's safeguards.
+ */
+export const CH_SESSION_SETTING_KEYS = [
+  'max_threads',
+  'max_block_size',
+  'preferred_block_size_bytes',
+  'max_insert_block_size',
+  'max_bytes_before_external_group_by',
+  'max_bytes_before_external_sort',
+] as const;
+
+const CH_DEDICATED_SETTING_KEYS = new Set<string>([
+  ...CH_CEILING_KEYS, 'max_bytes_to_read',
+]);
+const CH_PROTECTED_SETTING_KEYS = new Set([
+  'database', 'default_format', 'max_execution_time', 'max_result_rows',
+  'result_overflow_mode', 'readonly', 'query_id',
+  'output_format_json_quote_64bit_integers', 'output_format_json_quote_decimals',
+  'output_format_json_quote_denormals',
+  'cancel_http_readonly_queries_on_client_close', 'send_progress_in_http_headers',
+  'http_headers_progress_interval_ms',
+]);
 
 /**
  * The `extra_params` entries for the chosen ceilings. Blank / zero / negative /
@@ -42,7 +72,7 @@ export function clickhouseCeilingParams(
 
 /** Same values as the app's SslMode (src/types) including the new verify_ca. */
 export type UrlSslMode = 'disable' | 'preferred' | 'require' | 'verify_ca' | 'verify_full';
-export type UrlEngine = 'mysql' | 'postgres' | 'redis' | 'clickhouse' | 'mongodb' | 'sqlserver';
+export type UrlEngine = 'mysql' | 'postgres' | 'redis' | 'clickhouse' | 'duckdb' | 'mongodb' | 'sqlserver';
 
 export interface ParsedConnectionUrlOk {
   ok: true;
@@ -58,6 +88,8 @@ export interface ParsedConnectionUrlOk {
   connectTimeoutSecs: number | null;
   applicationName: string | null;
   socketPath: string | null;
+  /** DuckDB Quack endpoint, with credentials removed. Null for other URLs. */
+  filePath: string | null;
   /** redis:// only: numeric path segment (`redis://h/2` → 2). */
   redisDb: number | null;
   /** `?readonly=1` (ClickHouse's own spelling) → the form's READONLY box. */
@@ -152,6 +184,19 @@ function parseQuery(search: string): Array<[string, string]> {
 export function parseConnectionUrl(raw: string): ParsedConnectionUrl {
   let input = raw.trim();
   if (!input) return fail('empty URL');
+
+  if (isQuackUri(input)) {
+    const q = parseQuackUri(input);
+    if (!q) {
+      return fail('invalid Quack URI — use quack:host[:port] and put the token in the password field');
+    }
+    return {
+      ok: true, engine: 'duckdb', host: q.host, port: q.port, user: null,
+      password: q.password, database: null, sslMode: null, connectTimeoutSecs: null,
+      applicationName: null, socketPath: null, filePath: q.endpoint, redisDb: null,
+      readOnly: false, extraParams: {}, warnings: [],
+    };
+  }
 
   // ADO-style `host\instance`: a backslash is not a valid URL host character,
   // and the driver does no named-instance resolution (UDP 1434 is off), so
@@ -375,10 +420,20 @@ export function parseConnectionUrl(raw: string): ParsedConnectionUrl {
           else if (val === '0') readOnly = false;
           else { warnings.push(`unknown readonly value "${val}", kept in extraParams`); extraParams[key] = val; }
           continue;
-        // Everything else is a legitimate ClickHouse session setting
-        // (max_threads, max_memory_usage, …) — carried through untouched.
+        // Preserve every key for the backend, but only the documented allowlist
+        // is a usable session setting. Unsupported/protected keys must be visible
+        // here rather than looking configured and then being ignored.
         default:
           extraParams[key] = val;
+          if (CH_PROTECTED_SETTING_KEYS.has(key)) {
+            warnings.push(`ClickHouse parameter "${key}" is managed by TxUI and cannot be overridden`);
+          } else if (!CH_DEDICATED_SETTING_KEYS.has(key)
+            && !(CH_SESSION_SETTING_KEYS as readonly string[]).includes(key)) {
+            warnings.push(
+              `unsupported ClickHouse session setting "${key}"; supported settings: `
+              + CH_SESSION_SETTING_KEYS.join(', '),
+            );
+          }
           continue;
       }
     }
@@ -390,7 +445,7 @@ export function parseConnectionUrl(raw: string): ParsedConnectionUrl {
 
   return {
     ok: true, engine, host, port, user, password, database,
-    sslMode, connectTimeoutSecs, applicationName, socketPath, redisDb, readOnly,
+    sslMode, connectTimeoutSecs, applicationName, socketPath, filePath: null, redisDb, readOnly,
     extraParams, warnings,
   };
 }
@@ -406,6 +461,7 @@ export interface ConnectionUrlFields {
   connectTimeoutSecs?: number | null;
   applicationName?: string | null;
   socketPath?: string | null;
+  filePath?: string | null;
   redisDb?: number | null;
   readOnly?: boolean;
   extraParams?: Record<string, string>;
@@ -426,6 +482,9 @@ const SSL_TO_PG: Record<UrlSslMode, string> = {
  * deliberately omitted — this is for "copy as URL" sharing, not for secrets.
  */
 export function buildConnectionUrl(f: ConnectionUrlFields): string {
+  if (f.engine === 'duckdb') {
+    return f.filePath ? (parseQuackUri(f.filePath)?.endpoint ?? '') : '';
+  }
   const params: Array<[string, string]> = [];
 
   // rediss:// when redis runs over TLS, else the plain engine scheme.
@@ -509,9 +568,13 @@ export function configToConnectionUrl(cfg: {
   connect_timeout_secs?: number | null;
   application_name?: string | null;
   socket_path?: string | null;
+  file_path?: string | null;
   read_only?: boolean;
   extra_params?: Record<string, string>;
 }): string | null {
+  if (cfg.engine === 'duckdb') {
+    return cfg.file_path ? (parseQuackUri(cfg.file_path)?.endpoint ?? null) : null;
+  }
   const URL_ENGINES: readonly string[] = ['mysql', 'postgres', 'redis', 'clickhouse', 'mongodb', 'sqlserver'];
   if (!URL_ENGINES.includes(cfg.engine)) return null;
   const engine = cfg.engine as UrlEngine;

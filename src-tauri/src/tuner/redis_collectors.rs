@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use redis::aio::ConnectionManager;
+use crate::db::redis::RedisConnection;
 
 #[derive(Debug, Clone, Default)]
 pub struct SlowEntry {
@@ -142,7 +142,7 @@ fn detect_fork(info: &HashMap<String, String>) -> (String, String) {
     }
 }
 
-pub async fn collect(mgr: &ConnectionManager) -> anyhow::Result<RedisTunerData> {
+pub async fn collect(mgr: &RedisConnection) -> anyhow::Result<RedisTunerData> {
     let mut m = mgr.clone();
     let mut d = RedisTunerData::default();
 

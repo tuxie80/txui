@@ -1,6 +1,6 @@
-//! DuckDB — an in-process OLAP engine over a file, or `:memory:`.
+//! DuckDB — an embedded OLAP engine over a file, `:memory:`, or a Quack remote.
 //!
-//! Like SQLite the file is the connection (`config.file_path` is the whole
+//! Like SQLite a local file is the connection (`config.file_path` is the whole
 //! address; `:memory:` is a first-class value, since an analytical scratch
 //! database with no file is the normal way to query Parquet/CSV/JSON). Unlike
 //! SQLite this is a different library: `duckdb-rs`, with `bundled` compiling
@@ -16,15 +16,25 @@
 //!    equivalent of `KILL QUERY` / `pg_cancel_backend` — a request the engine
 //!    honours at its next interrupt point. The session exposes it so the
 //!    app's Stop button reaches in (`commands::query::stop_in_flight`).
-//! 3. **Read-only is the library's guarantee, not ours.** A read-only
-//!    connection opens with `access_mode = READ_ONLY`, so DuckDB itself
-//!    refuses the write — the same posture as SQLite's `mode=ro` and
-//!    ClickHouse's `readonly=1`.
+//! 3. **Local read-only is the library's guarantee, not ours.** A local file
+//!    connection opens with `access_mode = READ_ONLY`, so DuckDB itself refuses
+//!    the write — the same posture as SQLite's `mode=ro` and ClickHouse's
+//!    `readonly=1`.
 //!
 //! File locking is DuckDB's own and is reported as-is: one read-write process
 //! per file, so a second read-write session to the same path fails at open
 //! with DuckDB's lock error; read-only sessions share a file freely. That is
 //! the engine's concurrency contract, surfaced rather than papered over.
+//!
+//! A `quack:` path instead opens a local in-memory connection and runs Quack
+//! ATTACH + USE. USE keeps the attached catalog on duckdb-rs's classic prepared
+//! statement path; CONNECT is incompatible with that C API and can execute a
+//! remote statement during prepare. The token comes from the existing password
+//! secret path and lives only in memory. Local `access_mode` is NOT remote
+//! authorization: remote read-only is enforced by TxUI's app and driver guards,
+//! while server-side authorization remains a separate deployment control.
+//! Localhost defaults to HTTP; non-local endpoints default to HTTPS, with
+//! optional certificate fingerprint pinning and no trust-all switch.
 //!
 //! Statement splitting for multi-statement input goes through sqlparser's
 //! `DuckDbDialect` (already a dependency) so each statement's row count is
@@ -37,7 +47,123 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::types::{json_f64, ColumnInfo, ConnectionConfig, PingResult, QueryResult, Row, SchemaNode};
+use super::types::{json_f64, ColumnInfo, ConnectionConfig, Engine, PingResult, QueryResult, Row, SchemaNode};
+
+const QUACK_ALIAS: &str = "txui_quack";
+pub const QUACK_SSL_FINGERPRINT_PARAM: &str = "quack_ssl_fingerprint";
+
+#[derive(Clone)]
+struct QuackConfig {
+    endpoint: String,
+    token: String,
+    ssl_fingerprint: Option<String>,
+    read_only: bool,
+}
+
+pub fn is_quack_uri(path: &str) -> bool {
+    path.trim().get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("quack:"))
+}
+
+fn quack_endpoint(uri: &str) -> Result<String> {
+    let uri = uri.trim();
+    if !is_quack_uri(uri) {
+        return Err(anyhow!("not a Quack URI — expected quack:host[:port]"));
+    }
+    let endpoint = &uri[6..];
+    if endpoint.is_empty() {
+        return Err(anyhow!("no Quack host chosen — use quack:host[:port]"));
+    }
+    if endpoint.contains('@') || endpoint.contains('?') || endpoint.contains('#') {
+        return Err(anyhow!(
+            "a Quack URI contains only host and port — put the token in the password field"
+        ));
+    }
+    if endpoint.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(anyhow!("invalid whitespace in Quack URI"));
+    }
+    Ok(format!("quack:{endpoint}"))
+}
+
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn quack_open_command(config: &QuackConfig) -> Result<String> {
+    let endpoint = quack_endpoint(&config.endpoint)?;
+    if config.token.is_empty() {
+        return Err(anyhow!(
+            "Quack requires an authentication token — enter it in the password field"
+        ));
+    }
+    let mut options = vec![format!("TOKEN {}", sql_literal(&config.token))];
+    if let Some(fingerprint) = &config.ssl_fingerprint {
+        options.push(format!("ssl_fingerprint {}", sql_literal(fingerprint)));
+    }
+    Ok(format!(
+        "ATTACH {} AS {QUACK_ALIAS} ({}); USE {QUACK_ALIAS}",
+        sql_literal(&endpoint),
+        options.join(", "),
+    ))
+}
+
+fn quack_error(error: impl std::fmt::Display, token: &str) -> anyhow::Error {
+    let message = error.to_string();
+    if token.is_empty() {
+        anyhow!(message)
+    } else {
+        anyhow!(message
+            .replace(&token.replace('\'', "''"), "****")
+            .replace(token, "****"))
+    }
+}
+
+fn quack_config(config: &ConnectionConfig, password: Option<String>) -> Result<Option<QuackConfig>> {
+    let Some(path) = config.file_path.as_deref().filter(|path| is_quack_uri(path)) else {
+        return Ok(None);
+    };
+    if config.use_ssh {
+        return Err(anyhow!(
+            "SSH tunnels are not supported for Quack — connect to the endpoint directly or through its TLS reverse proxy"
+        ));
+    }
+    let ssl_fingerprint = config.extra_params.get(QUACK_SSL_FINGERPRINT_PARAM)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    Ok(Some(QuackConfig {
+        endpoint: quack_endpoint(path)?,
+        token: password.unwrap_or_default(),
+        ssl_fingerprint,
+        read_only: config.read_only,
+    }))
+}
+
+fn open_quack_blocking(config: &QuackConfig) -> Result<duckdb::Connection> {
+    // Never apply local access_mode=READ_ONLY here: DuckDB refuses it for an
+    // in-memory connection, and it would say nothing about the remote server.
+    // Remote writes are refused before execution by guard_quack_read_only.
+    #[cfg(test)]
+    let conn = if let Ok(dir) = std::env::var("TXUI_DUCKDB_EXTENSION_DIRECTORY") {
+        duckdb::Connection::open_in_memory_with_flags(
+            duckdb::Config::default().with("extension_directory", dir)?,
+        )?
+    } else {
+        duckdb::Connection::open_in_memory()?
+    };
+    #[cfg(not(test))]
+    let conn = duckdb::Connection::open_in_memory()?;
+    if conn.execute_batch("LOAD quack").is_err() {
+        conn.execute_batch("INSTALL quack")
+            .map_err(|e| quack_error(e, &config.token))?;
+        conn.execute_batch("LOAD quack")
+            .map_err(|e| quack_error(e, &config.token))?;
+    }
+    let sql = quack_open_command(config)?;
+    let (attach, use_catalog) = sql.split_once("; ").expect("ATTACH and USE");
+    conn.execute_batch(attach).map_err(|e| quack_error(e, &config.token))?;
+    conn.execute_batch(use_catalog).map_err(|e| quack_error(e, &config.token))?;
+    Ok(conn)
+}
 
 /// A live DuckDB session: one connection, a cancel handle, and what it was
 /// opened against.
@@ -49,6 +175,9 @@ pub struct DuckDbSession {
     interrupt: Arc<duckdb::InterruptHandle>,
     read_only: bool,
     memory: bool,
+    /// Remote connection details live only in memory. Debug output exposes
+    /// only whether this is remote, never the endpoint credentials or token.
+    quack: Option<QuackConfig>,
     /// The path the session opened (`":memory:"` for a scratch), kept so the
     /// latency probe can open a FRESH connection instead of queueing on this
     /// session's mutex behind a long query.
@@ -60,6 +189,7 @@ impl std::fmt::Debug for DuckDbSession {
         f.debug_struct("DuckDbSession")
             .field("read_only", &self.read_only)
             .field("memory", &self.memory)
+            .field("quack_remote", &self.quack.is_some())
             .finish()
     }
 }
@@ -77,18 +207,17 @@ impl DuckDbSession {
     }
 
     /// `SELECT version()` on a FRESH connection to the same database — the
-    /// sidebar's latency probe. The session's own connection is mutexed and
-    /// may be held for the whole length of a user query; asking through it
-    /// made a 30 s ping stack behind a long statement. A second in-process
-    /// connection attaches to the same DuckDB instance for a file; for
-    /// `:memory:` it is an empty scratch — either way `version()` answers
-    /// without touching any data. Same access mode as the session, so the
-    /// instance cache never sees conflicting flags.
+    /// sidebar's latency probe. For Quack this is a SECOND authenticated remote
+    /// connection, not a local-file version check and not work queued behind the
+    /// session's running query. File and `:memory:` probes stay local as before.
     pub async fn probe_version(&self) -> Result<String> {
         let path = self.path.clone();
         let read_only = self.read_only;
+        let quack = self.quack.clone();
         tokio::task::spawn_blocking(move || -> Result<String> {
-            let conn = if path == ":memory:" {
+            let conn = if let Some(quack) = quack {
+                open_quack_blocking(&quack)?
+            } else if path == ":memory:" {
                 duckdb::Connection::open_in_memory()?
             } else {
                 let cfg = duckdb::Config::default()
@@ -108,19 +237,32 @@ impl DuckDbSession {
     }
 }
 
+/// Backwards-compatible local open. Existing file/scratch callers have no
+/// password to pass; a Quack URI deliberately fails here with the token hint.
 pub async fn open(config: &ConnectionConfig) -> Result<DuckDbSession> {
+    open_authenticated(config, None).await
+}
+
+/// Open a local DuckDB file/scratch or an authenticated Quack remote session.
+pub async fn open_authenticated(
+    config: &ConnectionConfig,
+    password: Option<String>,
+) -> Result<DuckDbSession> {
+    let quack = quack_config(config, password)?;
     let path = config
         .file_path
         .as_deref()
         .filter(|p| !p.trim().is_empty())
-        .ok_or_else(|| anyhow!("no database file chosen for this connection — \
-                                use a path, or :memory: for a scratch database"))?;
+        .ok_or_else(|| anyhow!("no database chosen — use a file, :memory:, or quack:host[:port]"))?;
 
     // The Config holds a raw pointer (not Send), so it is built inside the
-    // blocking closure. Opening does file I/O (reads the database header), so
-    // it runs off the async runtime.
+    // blocking closure. Opening does file/network I/O off the async runtime.
     let (path_owned, read_only) = (path.to_string(), config.read_only);
+    let quack_for_open = quack.clone();
     let conn = tokio::task::spawn_blocking(move || -> Result<duckdb::Connection> {
+        if let Some(quack) = quack_for_open {
+            return open_quack_blocking(&quack);
+        }
         let duckdb_config = duckdb::Config::default()
             .access_mode(if read_only {
                 duckdb::AccessMode::ReadOnly
@@ -149,7 +291,8 @@ pub async fn open(config: &ConnectionConfig) -> Result<DuckDbSession> {
         conn: Arc::new(Mutex::new(conn)),
         interrupt,
         read_only,
-        memory: path == ":memory:",
+        memory: path == ":memory:" && quack.is_none(),
+        quack,
         path: path.to_string(),
     })
 }
@@ -177,8 +320,18 @@ pub fn open_memory_sync(read_only: bool) -> Result<DuckDbSession> {
         interrupt,
         read_only,
         memory: true,
+        quack: None,
         path: ":memory:".to_string(),
     })
+}
+
+fn guard_quack_read_only(session: &DuckDbSession, sql: &str) -> Result<()> {
+    if session.quack.as_ref().is_some_and(|q| q.read_only)
+        && crate::sqlguard::is_write_for(Some(Engine::Duckdb), sql)
+    {
+        return Err(anyhow!("Connection is read-only — remote writes are blocked by TxUI"));
+    }
+    Ok(())
 }
 
 /// Synchronous twin of [`execute_params`], for callers already on a blocking
@@ -188,6 +341,7 @@ pub fn execute_params_blocking(
     sql: &str,
     params: &[String],
 ) -> Result<QueryResult> {
+    guard_quack_read_only(session, sql)?;
     let guard = session.conn.lock().unwrap_or_else(|e| e.into_inner());
     run(&guard, sql, params, None)
 }
@@ -253,6 +407,7 @@ pub async fn execute_capped(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<QueryResult> {
+    guard_quack_read_only(session, sql)?;
     let sql = sql.to_string();
     with_conn(session, move |conn| run(conn, &sql, &[], max_rows)).await
 }
@@ -265,6 +420,7 @@ pub async fn execute_params(
     sql: &str,
     params: &[String],
 ) -> Result<QueryResult> {
+    guard_quack_read_only(session, sql)?;
     let sql = sql.to_string();
     let params = params.to_vec();
     with_conn(session, move |conn| run(conn, &sql, &params, None)).await
@@ -298,11 +454,11 @@ fn run(conn: &duckdb::Connection, sql: &str, params: &[String], max_rows: Option
     let budget = |rows_so_far: usize| max_rows.map(|cap| cap.saturating_sub(rows_so_far));
 
     for (sql, is_write) in &statements {
-        let mut stmt = conn.prepare(sql)?;
+        let (mut stmt, logical_types) = prepare_decodable(conn, sql, params)?;
         if !params.is_empty() {
             // Parameterised form: `query` = execute + row iterator in one.
             let mut rows_it = stmt.query(duckdb::params_from_iter(params.iter()))?;
-            let (cols, data, t_first, cut) = collect_rows(&mut rows_it, &start, budget(rows.len()))?;
+            let (cols, data, t_first, cut) = collect_rows(&mut rows_it, &start, budget(rows.len()), &logical_types)?;
             truncated |= cut;
             if !cols.is_empty() {
                 saw_result_set = true;
@@ -324,7 +480,7 @@ fn run(conn: &duckdb::Connection, sql: &str, params: &[String], max_rows: Option
         }
 
         let mut rows_it = stmt.raw_query();
-        let (cols, data, t_first, cut) = collect_rows(&mut rows_it, &start, budget(rows.len()))?;
+        let (cols, data, t_first, cut) = collect_rows(&mut rows_it, &start, budget(rows.len()), &logical_types)?;
         truncated |= cut;
         if !cols.is_empty() {
             saw_result_set = true;
@@ -359,6 +515,93 @@ fn run(conn: &duckdb::Connection, sql: &str, params: &[String], max_rows: Option
     })
 }
 
+/// duckdb-rs 1.20000 exposes VARIANT metadata but its classic row decoder
+/// rejects VARIANT, including VARIANT nested in another container; its row
+/// decoder also panics on DuckDB 2.0's untyped SQLNULL. Convert those result
+/// columns inside DuckDB before executing the original statement. Keeping
+/// VARIANT as DuckDB's JSON text avoids a second, host-side conversion.
+fn prepare_decodable<'conn>(
+    conn: &'conn duckdb::Connection,
+    sql: &str,
+    params: &[String],
+) -> Result<(duckdb::Statement<'conn>, Vec<duckdb::core::LogicalTypeId>)> {
+    use duckdb::core::{LogicalTypeHandle, LogicalTypeId};
+
+    fn contains_variant(logical_type: &LogicalTypeHandle) -> bool {
+        logical_type.id() == LogicalTypeId::Variant
+            || (0..logical_type.num_children())
+                .any(|i| contains_variant(&logical_type.child(i)))
+    }
+
+    let stmt = conn.prepare(sql)?;
+    let logical_types: Vec<_> = (0..stmt.column_count())
+        .map(|i| stmt.column_logical_type(i).id())
+        .collect();
+    let conversions: Vec<(usize, LogicalTypeId)> = (0..stmt.column_count())
+        .filter_map(|i| {
+            let logical_type = stmt.column_logical_type(i);
+            if contains_variant(&logical_type) {
+                Some((i, LogicalTypeId::Variant))
+            } else if logical_type.id() == LogicalTypeId::SqlNull {
+                Some((i, LogicalTypeId::SqlNull))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if conversions.is_empty() {
+        return Ok((stmt, logical_types));
+    }
+    let dialect = sqlparser::dialect::DuckDbDialect {};
+    let is_dml = sqlparser::parser::Parser::parse_sql(&dialect, sql).is_ok_and(|stmts| {
+        matches!(stmts.first(),
+            Some(sqlparser::ast::Statement::Insert(_)
+                | sqlparser::ast::Statement::Update(_)
+                | sqlparser::ast::Statement::Delete(_)))
+    });
+    if is_dml {
+        if conversions.iter().all(|(_, kind)| *kind == LogicalTypeId::SqlNull) {
+            // SQLNULL has no upstream pre-mutation rejection. Do not let the
+            // binding execute DML and then panic while decoding its result.
+            return Err(anyhow!("decoding untyped NULL in DML RETURNING is not supported"));
+        }
+        // The binding deliberately rejects VARIANT RETURNING before mutation.
+        // Leave DML untouched rather than executing it to obtain column names.
+        return Ok((stmt, logical_types));
+    }
+    drop(stmt);
+
+    // `Statement::column_name` needs an executed result in duckdb-rs 1.20000.
+    // DESCRIBE binds a result query without running it.
+    let names = {
+        let mut describe = conn.prepare(&format!("DESCRIBE\n{sql}"))?;
+        let mut rows = describe.query(duckdb::params_from_iter(params.iter()))?;
+        let mut names = Vec::with_capacity(logical_types.len());
+        while let Some(row) = rows.next()? {
+            names.push(row.get::<_, String>(0)?);
+        }
+        names
+    };
+    let replacements: Vec<String> = conversions.into_iter().map(|(i, kind)| {
+        let name = names.get(i).ok_or_else(|| anyhow!("missing DESCRIBE column {i}"))?;
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        let expression = if kind == LogicalTypeId::Variant {
+            format!("to_json({quoted})")
+        } else {
+            format!("CAST({quoted} AS VARCHAR)")
+        };
+        Ok(format!("{expression} AS {quoted}"))
+    }).collect::<Result<_>>()?;
+
+    // Newlines around the original statement keep a trailing `--` comment
+    // from consuming the wrapper's closing parenthesis.
+    let wrapped = format!(
+        "SELECT * REPLACE ({}) FROM (\n{sql}\n)",
+        replacements.join(", "),
+    );
+    Ok((conn.prepare(&wrapped)?, logical_types))
+}
+
 /// Drain one executed statement's rows, decoding each cell. `max_rows` caps
 /// the collection: past it iteration stops and the last tuple element is true.
 /// Returns (columns, rows, time-to-first-row relative to `start`, truncated).
@@ -366,6 +609,7 @@ fn collect_rows(
     rows_it: &mut duckdb::Rows<'_>,
     start: &Instant,
     max_rows: Option<usize>,
+    logical_types: &[duckdb::core::LogicalTypeId],
 ) -> Result<(Vec<ColumnInfo>, Vec<Row>, Option<u64>, bool)> {
     let stmt = rows_it.as_ref().ok_or_else(|| anyhow!("statement gone"))?;
     let ncols = stmt.column_count();
@@ -380,12 +624,21 @@ fn collect_rows(
             // BLOB at the arrow level (duckdb-rs maps LogicalTypeId::Geometry
             // to Binary with no extension metadata), so the column's DuckDB
             // logical type is the only place that still says GEOMETRY.
-            let type_name =
-                if stmt.column_logical_type(i).id() == duckdb::core::LogicalTypeId::Geometry {
+            // VARIANT and SQLNULL are converted by prepare_decodable, so their
+            // original logical types must likewise survive in the metadata.
+            let type_name = match logical_types.get(i) {
+                Some(duckdb::core::LogicalTypeId::Variant) => "VARIANT".to_string(),
+                Some(duckdb::core::LogicalTypeId::SqlNull) => "NULL".to_string(),
+                Some(duckdb::core::LogicalTypeId::List) => "LIST".to_string(),
+                Some(duckdb::core::LogicalTypeId::Array) => "ARRAY".to_string(),
+                Some(duckdb::core::LogicalTypeId::Struct) => "STRUCT".to_string(),
+                Some(duckdb::core::LogicalTypeId::Map) => "MAP".to_string(),
+                Some(duckdb::core::LogicalTypeId::Union) => "UNION".to_string(),
+                _ if stmt.column_logical_type(i).id() == duckdb::core::LogicalTypeId::Geometry => {
                     "GEOMETRY".to_string()
-                } else {
-                    duckdb_type_name(field.data_type())
-                };
+                }
+                _ => duckdb_type_name(field.data_type()),
+            };
             ColumnInfo {
                 name: field.name().clone(),
                 type_name,
@@ -1110,6 +1363,66 @@ mod tests {
         dir.join("t.duckdb")
     }
 
+    #[test]
+    fn quack_open_command_quotes_credentials_and_redacts_errors() {
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "remote");
+        c.file_path = Some("quack://localhost:9494".into());
+        c.read_only = true;
+        c.extra_params.insert(QUACK_SSL_FINGERPRINT_PARAM.into(), "AA:BB:CC".into());
+        let token = "s3cr'et";
+        let q = quack_config(&c, Some(token.into())).unwrap().unwrap();
+        let sql = quack_open_command(&q).unwrap();
+        assert_eq!(sql,
+            "ATTACH 'quack://localhost:9494' AS txui_quack \
+             (TOKEN 's3cr''et', ssl_fingerprint 'AA:BB:CC'); USE txui_quack");
+
+        let safe = quack_error(&sql, token).to_string();
+        assert!(!safe.contains(token), "token leaked: {safe}");
+        assert!(safe.contains("****"));
+        assert!(!serde_json::to_string(&c).unwrap().contains(token));
+    }
+
+    #[test]
+    fn quack_config_fails_closed_on_bad_credentials_and_ssh() {
+        for uri in [
+            "quack:",
+            "quack://user:token@localhost",
+            "quack:localhost?token=secret",
+            "quack:local host",
+        ] {
+            let mut c = ConnectionConfig::new(Engine::Duckdb, "bad");
+            c.file_path = Some(uri.into());
+            let err = quack_config(&c, Some("secret".into())).err().unwrap().to_string();
+            assert!(!err.contains("secret"), "credential leaked in {err}");
+        }
+
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "no-token");
+        c.file_path = Some("quack:localhost".into());
+        let q = quack_config(&c, None).unwrap().unwrap();
+        assert!(quack_open_command(&q).unwrap_err().to_string().contains("authentication token"));
+        c.use_ssh = true;
+        assert!(quack_config(&c, Some("secret".into())).err().unwrap().to_string()
+            .contains("SSH tunnels are not supported"));
+
+        assert!(!is_quack_uri(":memory:"));
+        assert!(!is_quack_uri("/tmp/quack.db"));
+        assert!(is_quack_uri(" QUACK:localhost "));
+    }
+
+    #[tokio::test]
+    async fn quack_read_only_is_enforced_by_the_driver_before_execution() {
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "remote-ro");
+        c.file_path = Some("quack:localhost".into());
+        c.read_only = true;
+        let q = quack_config(&c, Some("secret".into())).unwrap().unwrap();
+        let mut s = mem().await;
+        s.quack = Some(q);
+        let err = execute(&s, "CREATE TABLE must_not_run (id INTEGER)")
+            .await.unwrap_err().to_string();
+        assert!(err.contains("read-only"), "{err}");
+        assert_eq!(execute(&s, "SELECT 1").await.unwrap().rows.len(), 1);
+    }
+
     #[tokio::test]
     async fn probe_version_does_not_wait_for_the_session_mutex() {
         // The whole point of the fresh-connection probe: the sidebar ping
@@ -1144,7 +1457,7 @@ mod tests {
         let s = mem().await;
         let p = ping(&s).await;
         assert!(p.ok, "{:?}", p.error);
-        assert!(p.server_version.unwrap().starts_with("DuckDB v1."));
+        assert_eq!(p.server_version.as_deref(), Some("DuckDB v2.0.0"));
 
         execute(&s, "CREATE TABLE t (a INTEGER, b VARCHAR)").await.unwrap();
         let ins = execute(&s, "INSERT INTO t VALUES (1, 'x'), (2, 'y')").await.unwrap();
@@ -1174,7 +1487,7 @@ mod tests {
     async fn every_type_class_decodes_per_the_doctrine() {
         let s = mem().await;
         let r = execute(&s, "SELECT \
-            NULL::INTEGER AS n, \
+            NULL AS n, \
             42::BIGINT AS i64, \
             170141183460469231731687303715884105727::HUGEINT AS huge_max, \
             99999::HUGEINT AS huge_small, \
@@ -1194,6 +1507,7 @@ mod tests {
             'héllo'::VARCHAR AS txt, \
             unhex('DEADBEEF') AS bin, \
             {'a': 1, 'b': 'x'} AS st, \
+            {'d': 0.001000::DECIMAL(38,6)} AS nested_dec, \
             [1, 2, NULL]::INTEGER[] AS lst, \
             MAP {'k1': 10, 'k2': 20} AS mp, \
             true::BOOLEAN AS b, \
@@ -1228,6 +1542,7 @@ mod tests {
         assert_eq!(get("txt"), json!("héllo"));
         assert_eq!(get("bin"), json!("deadbeef"));
         assert_eq!(get("st"), json!({"a": 1, "b": "x"}));
+        assert_eq!(get("nested_dec"), json!({"d": "0.001000"}));
         assert_eq!(get("lst"), json!([1, 2, null]));
         assert_eq!(get("mp"), json!({"k1": 10, "k2": 20}));
         assert_eq!(get("b"), json!(true));
@@ -1236,11 +1551,52 @@ mod tests {
 
         // Column metadata carries real type names.
         let tname = |name: &str| r.columns.iter().find(|c| c.name == name).unwrap().type_name.clone();
+        assert_eq!(tname("n"), "NULL");
         assert_eq!(tname("dec"), "DECIMAL(9,2)");
         assert_eq!(tname("ts"), "TIMESTAMP");
         assert_eq!(tname("txt"), "VARCHAR");
         assert_eq!(tname("bin"), "BLOB");
         assert_eq!(tname("st"), "STRUCT");
+    }
+
+    #[tokio::test]
+    async fn variant_decodes_as_json_text() {
+        let s = mem().await;
+        let r = execute(&s, "SELECT \
+            {'a': 42, 'nested': [1, NULL]}::VARIANT AS v, \
+            NULL::VARIANT AS n, \
+            [123::VARIANT] AS nested_v -- trailing comment").await.unwrap();
+
+        assert_eq!(r.columns[0].type_name, "VARIANT");
+        assert_eq!(r.columns[1].type_name, "VARIANT");
+        assert_eq!(r.columns[2].type_name, "LIST");
+        let text = r.rows[0][0].as_str().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(text).unwrap(),
+                   serde_json::json!({"a": 42, "nested": [1, null]}));
+        assert_eq!(r.rows[0][1], serde_json::Value::Null);
+        assert_eq!(r.rows[0][2], serde_json::json!("[123]"));
+
+        let r = execute_params(&s, "SELECT ?::VARIANT AS v", &["hello".into()]).await.unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!("\"hello\""));
+
+        execute(&s, "CREATE TABLE variant_rows (id INTEGER, v VARIANT)").await.unwrap();
+        let err = execute(&s,
+            "INSERT INTO variant_rows VALUES (1, {'x': 'y'}::VARIANT) RETURNING id, v",
+        ).await.unwrap_err().to_string();
+        assert!(err.contains("Variant"), "{err}");
+        assert_eq!(execute(&s, "SELECT count(*) FROM variant_rows").await.unwrap().rows[0][0],
+                   serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn dml_returning_untyped_null_errors_before_mutation() {
+        let s = mem().await;
+        execute(&s, "CREATE TABLE null_rows (id INTEGER)").await.unwrap();
+        let err = execute(&s, "INSERT INTO null_rows VALUES (1) RETURNING NULL AS n")
+            .await.unwrap_err().to_string();
+        assert!(err.contains("untyped NULL"), "{err}");
+        assert_eq!(execute(&s, "SELECT count(*) FROM null_rows").await.unwrap().rows[0][0],
+                   serde_json::json!(0));
     }
 
     /// GEOMETRY columns must report GEOMETRY in ColumnInfo.type_name, not
@@ -1296,6 +1652,41 @@ mod tests {
         // The case rust_decimal cannot represent: 38-digit payload.
         assert_eq!(format_decimal(99999999999999999999999999999999999999i128, 38),
                    "0.99999999999999999999999999999999999999");
+    }
+
+    #[tokio::test]
+    async fn legacy_storage_stays_legacy_after_reads_and_writes() {
+        let path = tmp_path("legacy-storage");
+        let _ = std::fs::remove_file(&path);
+        let storage_version = "SELECT tags['storage_version'] FROM duckdb_databases() \
+                               WHERE NOT internal AND database_name <> 'memory'";
+
+        {
+            let s = mem().await;
+            execute(&s, &format!(
+                "ATTACH '{}' AS legacy (STORAGE_VERSION 'v1.2.0'); \
+                 CREATE TABLE legacy.t (a INTEGER); INSERT INTO legacy.t VALUES (1)",
+                path.display(),
+            )).await.unwrap();
+            let r = execute(&s, storage_version).await.unwrap();
+            assert_eq!(r.rows[0][0], serde_json::json!("v1.2.0+"));
+            execute(&s, "DETACH legacy").await.unwrap();
+        }
+
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "legacy");
+        c.file_path = Some(path.to_string_lossy().into_owned());
+        let s = open(&c).await.unwrap();
+        assert_eq!(execute(&s, "SELECT a FROM t").await.unwrap().rows[0][0], serde_json::json!(1));
+        assert_eq!(execute(&s, storage_version).await.unwrap().rows[0][0], serde_json::json!("v1.2.0+"));
+        execute(&s, "INSERT INTO t VALUES (2)").await.unwrap();
+        assert_eq!(execute(&s, storage_version).await.unwrap().rows[0][0], serde_json::json!("v1.2.0+"));
+        drop(s);
+
+        let s = open(&c).await.unwrap();
+        assert_eq!(execute(&s, "SELECT count(*) FROM t").await.unwrap().rows[0][0], serde_json::json!(2));
+        assert_eq!(execute(&s, storage_version).await.unwrap().rows[0][0], serde_json::json!("v1.2.0+"));
+        drop(s);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -1520,6 +1911,117 @@ mod tests {
                    vec!["SELECT $tag$ ; $tag$", " SELECT 2"]);
         assert_eq!(split_on_semicolons("SELECT 'it''s;fine'; SELECT 2"),
                    vec!["SELECT 'it''s;fine'", " SELECT 2"]);
+    }
+
+    fn quack_live_uri() -> String {
+        std::env::var("TXUI_QUACK_TEST_URI").unwrap_or_else(|_| "quack:127.0.0.1:19494".into())
+    }
+
+    fn quack_live_token() -> String {
+        std::env::var("TXUI_QUACK_TEST_TOKEN").unwrap_or_else(|_| "txui-quack-live-secret".into())
+    }
+
+    fn quack_live_extension_dir() -> std::path::PathBuf {
+        std::env::var("TXUI_DUCKDB_EXTENSION_DIRECTORY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("txui-quack-live-extensions"))
+    }
+
+    fn quack_live_config(read_only: bool) -> ConnectionConfig {
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "quack-live");
+        c.file_path = Some(quack_live_uri());
+        c.read_only = read_only;
+        c
+    }
+
+    /// Run in one process; run quack_live_client and quack_live_cancel in
+    /// others, then stop this process and remove the disposable files.
+    #[tokio::test]
+    #[ignore = "manual two-process Quack live verification"]
+    async fn quack_live_server() {
+        let extension_dir = quack_live_extension_dir();
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        let dir = std::env::temp_dir().join(format!("txui-quack-live-server-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.duckdb");
+        let uri = quack_live_uri();
+        let token = quack_live_token();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let cfg = duckdb::Config::default()
+                .with("extension_directory", extension_dir.to_string_lossy())?;
+            let conn = duckdb::Connection::open_with_flags(&path, cfg)?;
+            conn.execute_batch("INSTALL quack; LOAD quack")?;
+            let serve = format!(
+                "CALL quack_serve({}, token = {}, disable_ssl => true)",
+                sql_literal(&quack_endpoint(&uri)?), sql_literal(&token),
+            );
+            conn.execute_batch(&serve)?;
+            conn.execute_batch(
+                "CREATE TABLE live_data (id INTEGER, value VARCHAR); \
+                 INSERT INTO live_data VALUES (1, 'from-server')",
+            )?;
+            println!("QUACK_SERVER_READY");
+            std::thread::park();
+            Ok(())
+        }).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "manual two-process Quack live verification"]
+    async fn quack_live_client() {
+        let token = quack_live_token();
+        let s = open_authenticated(&quack_live_config(false), Some(token.clone())).await.unwrap();
+        let r = execute(&s, "SELECT id, value FROM live_data").await.unwrap();
+        assert_eq!(r.rows[0][0], serde_json::json!(1));
+        assert_eq!(r.rows[0][1], serde_json::json!("from-server"));
+
+        let databases = list_databases(&s).await.unwrap();
+        assert!(databases.iter().any(|n| matches!(n,
+            SchemaNode::Database { name } if name == QUACK_ALIAS)), "{databases:?}");
+        let objects = list_objects(&s, QUACK_ALIAS).await.unwrap();
+        assert!(objects.iter().any(|n| matches!(n,
+            SchemaNode::Table { name, .. } if name == "main.live_data")), "{objects:?}");
+
+        execute(&s, "CREATE TABLE IF NOT EXISTS client_writes (id INTEGER); \
+                     DELETE FROM client_writes; INSERT INTO client_writes VALUES (7)")
+            .await.unwrap();
+        let second = open_authenticated(&quack_live_config(false), Some(token.clone())).await.unwrap();
+        assert_eq!(execute(&second, "SELECT count(*) FROM client_writes").await.unwrap().rows[0][0],
+                   serde_json::json!(1));
+        // probe_version returns the engine's bare v-prefixed version string.
+        assert!(second.probe_version().await.unwrap().starts_with('v'));
+
+        let ro = open_authenticated(&quack_live_config(true), Some(token.clone())).await.unwrap();
+        let err = execute(&ro, "INSERT INTO client_writes VALUES (8)").await.unwrap_err().to_string();
+        assert!(err.to_ascii_lowercase().contains("read"), "{err}");
+        assert_eq!(execute(&second, "SELECT count(*) FROM client_writes").await.unwrap().rows[0][0],
+                   serde_json::json!(1));
+
+        let wrong = open_authenticated(
+            &quack_live_config(false), Some("definitely-wrong-token".into()),
+        ).await.err().unwrap().to_string();
+        assert!(!wrong.contains("definitely-wrong-token"), "token leaked: {wrong}");
+    }
+
+    #[tokio::test]
+    #[ignore = "manual two-process Quack live verification"]
+    async fn quack_live_cancel() {
+        let s = Arc::new(open_authenticated(
+            &quack_live_config(false), Some(quack_live_token()),
+        ).await.unwrap());
+        let s2 = s.clone();
+        let query = tokio::spawn(async move {
+            execute(&s2, "SELECT count(*) FROM range(100000000) a, range(100000000) b \
+                          WHERE a.range = b.range").await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        s.interrupt();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(15), query)
+            .await.expect("remote interrupt did not reach the query")
+            .unwrap();
+        let err = r.unwrap_err().to_string().to_lowercase();
+        assert!(err.contains("interrupt"), "expected an interrupt error, got: {err}");
+        assert_eq!(execute(&s, "SELECT 1").await.unwrap().rows.len(), 1);
     }
 
 }

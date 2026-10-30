@@ -33,6 +33,7 @@
     "playground",
     "namespaceDdl",
     "stmtStats",
+    "pgWorkload",
     "queryStore",
     "maintenance",
     "tuner",
@@ -68,6 +69,7 @@
       "playground": true,
       "namespaceDdl": true,
       "stmtStats": true,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": true,
       "tuner": true,
@@ -102,6 +104,7 @@
       "playground": true,
       "namespaceDdl": true,
       "stmtStats": true,
+      "pgWorkload": true,
       "queryStore": false,
       "maintenance": true,
       "tuner": true,
@@ -136,6 +139,7 @@
       "playground": false,
       "namespaceDdl": false,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": false,
       "tuner": true,
@@ -170,6 +174,7 @@
       "playground": false,
       "namespaceDdl": false,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": false,
       "tuner": true,
@@ -204,6 +209,7 @@
       "playground": false,
       "namespaceDdl": false,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": true,
       "tuner": true,
@@ -238,6 +244,7 @@
       "playground": false,
       "namespaceDdl": false,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": false,
       "tuner": false,
@@ -272,6 +279,7 @@
       "playground": false,
       "namespaceDdl": false,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": false,
       "tuner": false,
@@ -306,6 +314,7 @@
       "playground": false,
       "namespaceDdl": false,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": false,
       "maintenance": false,
       "tuner": false,
@@ -340,6 +349,7 @@
       "playground": true,
       "namespaceDdl": true,
       "stmtStats": false,
+      "pgWorkload": false,
       "queryStore": true,
       "maintenance": true,
       "tuner": true,
@@ -467,6 +477,10 @@
       "detail": [
         "Needs a server-side, cumulative statement digest keyed by a stable id. MySQL has `performance_schema.events_statements_summary_by_digest` (requires performance_schema, on by default), PostgreSQL has `pg_stat_statements` (an extension — the panel detects it and offers to enable it). SQL Server's Query Store is richer than a diff (plan history and forcing — see `queryStore`) and keeps its own panel, so it is deliberately not here."
       ]
+    },
+    "pgWorkload": {
+      "summary": "Correlated pg_stat_statements deltas, pg_stat_activity samples, and local incidents.",
+      "detail": []
     },
     "queryStore": {
       "summary": "The engine keeps a HISTORY of query plans, and can be told to use one.",
@@ -671,6 +685,15 @@
       "group": "Insights",
       "tip": "Statement statistics — snapshot and diff cumulative statement digests over time",
       "when": "stmtStats",
+      "inMenu": true
+    },
+    {
+      "id": "pgworkload",
+      "label": "PostgreSQL Workload",
+      "menuLabel": "PostgreSQL Workload",
+      "group": "Insights",
+      "tip": "PostgreSQL Workload — correlate a manual statement diff, sampled waits, and local incidents",
+      "when": "pgWorkload",
       "inMenu": true
     },
     {
@@ -2913,10 +2936,10 @@
     }
   },
   "counts": {
-    "panels": 36,
+    "panels": 37,
     "commands": 70,
     "engines": 9,
-    "capabilities": 32,
+    "capabilities": 33,
     "prefs": 44,
     "dbaViews": 234
   }

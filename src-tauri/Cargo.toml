@@ -99,7 +99,7 @@ sqlx             = { version = "0.9", default-features = false, features = [
     "rust_decimal",
     "uuid",
 ] }
-redis            = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+redis            = { version = "0.26", features = ["tokio-comp", "connection-manager", "cluster-async"] }
 
 # MongoDB driver (DBA-first push, workstream 4: connect + tree + find editor + JSON
 # grid; read-only by design — see db/mongodb.rs). 3.8 is the line whose MSRV
@@ -171,13 +171,13 @@ tokio-util       = { version = "0.7", features = ["compat"] } # tiberius speaks 
 # the first build is slow (~20-40 min), and this is the one dependency that
 # makes the binary meaningfully larger.
 #
-# duckdb-rs versions after the bundled engine: `1.10505.x` bundles DuckDB
-# v1.5.x. The tilde requirement lets duckdb-rs PATCH releases flow (Rust-side
-# fixes) while pinning the bundled engine line — bumping `1.10505` to
-# `1.10506`+ is a deliberate act that moves the DuckDB version every file is
+# duckdb-rs versions after the bundled engine: `1.20000.x` bundles DuckDB
+# v2.0.x. The tilde requirement lets duckdb-rs PATCH releases flow (Rust-side
+# fixes) while pinning the bundled engine line — bumping `1.20000` to
+# `1.20001`+ is a deliberate act that moves the DuckDB version every file is
 # read with, on every platform, so it is done by hand. (See the duckdb-rs
 # README's versioning section.)
-duckdb           = { version = "~1.10505.0", features = ["bundled"] }
+duckdb           = { version = "~1.20000.1", features = ["bundled"] }
 
 # Secrets: encrypted-at-rest file (src/secretstore.rs) — see AGENTS.md; the OS
 # keychain was dropped as unreliable for unsigned desktop builds.
@@ -215,6 +215,9 @@ walkdir          = "2"
 # reading is not — real workbooks are DEFLATE-compressed and use a shared
 # string table, so this is a job for a library rather than another hand roll.
 calamine         = "0.26"
+# calamine 0.26 uses ZipFile without its new generic argument and does not
+# compile against zip 2.6. Keep the compatible line until calamine is upgraded.
+zip              = "=2.4.2"
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
@@ -237,9 +240,9 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # (see the sqlx feature list above). Left on webpki roots it would keep
 # rejecting internal CAs for ClickHouse alone — the same bug, one engine over.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
-# Pinned to the SAME major line the bundled DuckDB uses (WP-15 15.1): two
-# arrow stacks (54 + 58) doubled several MB of columnar kernels and the
-# lto/codegen-units=1 compile time.
+# The app's Parquet stack stays on Arrow 58; duckdb-rs 1.20000 uses Arrow 60
+# internally. Keep these direct dependencies on 58 until the Parquet migration
+# is deliberate — upgrading them is separate from moving the embedded engine.
 parquet = { version = "58", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "lz4", "flate2", "flate2-rust_backened"] }
 arrow-array = "58"
 arrow-schema = "58"

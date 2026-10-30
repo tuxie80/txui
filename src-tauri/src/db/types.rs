@@ -165,6 +165,10 @@ pub struct ConnectionConfig {
     pub port:     Option<u16>,
     pub user:     Option<String>,
     pub database: Option<String>,
+    /// Redis Sentinel service name. Used only when the seed identifies itself
+    /// as Sentinel; never guessed from the monitored topology.
+    #[serde(default)]
+    pub sentinel_master: Option<String>,
     pub ssl_mode: SslMode,
     /// For grouping in the sidebar
     pub group:    Option<String>,
@@ -403,6 +407,7 @@ impl ConnectionConfig {
             port:     Some(port),
             user:     None,
             database: None,
+            sentinel_master: None,
             ssl_mode: SslMode::Preferred,
             group:    None,
             color:    None,
@@ -543,10 +548,9 @@ pub struct ColumnInfo {
 pub enum LiveSession {
     Mysql(sqlx::MySqlPool),
     Postgres(sqlx::PgPool),
-    /// The shared multiplexed manager, plus the Client it was built from so
-    /// callers that must change connection state (SELECT for a db sweep) can
-    /// open a DEDICATED connection instead of mutating the shared one.
-    Redis(::redis::aio::ConnectionManager, ::redis::Client),
+    /// Standalone manager, routed cluster connection, or Sentinel-discovered
+    /// master. The seed Client opens dedicated standalone connections.
+    Redis(super::redis_connection::RedisConnection, ::redis::Client),
     /// HTTP is stateless, so this holds a configured client rather than a pool.
     Clickhouse(super::clickhouse::ChSession),
     Sqlite(sqlx::SqlitePool),

@@ -21,6 +21,10 @@ import { parseLabels, formatLabels, labelsFromTags } from '../utils/labels';
 import { dbFilterApplies, parseDbFilter, formatDbFilter } from '../utils/dbFilter';
 import { ParquetSchemaDialog } from './ParquetSchemaDialog';
 import { securityCopyFrom, securityCopySources } from '../utils/connSecurity';
+import { sentinelMasterConfig } from '../utils/redisTopology';
+import {
+  isQuackUri, parseQuackUri, quackPathError, QUACK_SSL_FINGERPRINT_PARAM,
+} from '../utils/quack';
 
 const ENGINE_LABELS: Record<Engine, string> = {
   mysql:    'MySQL / MariaDB / Percona',
@@ -31,7 +35,7 @@ const ENGINE_LABELS: Record<Engine, string> = {
   clickhouse: 'ClickHouse (HTTP)',
   sqlite:  'SQLite (file)',
   parquet: 'Parquet (file or folder)',
-  duckdb:  'DuckDB (file or :memory:)',
+  duckdb:  'DuckDB (file, :memory: or Quack)',
   mongodb: 'MongoDB',
   // SQL logins only (no Windows/integrated auth, no named instances) — the
   // label says what the driver actually does.
@@ -73,7 +77,14 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [user,     setUser]     = useState(initial?.user ?? '');
   const [password, setPassword] = useState('');
   const [database, setDatabase] = useState(initial?.database ?? '');
+  const [sentinelMaster, setSentinelMaster] = useState(initial?.sentinel_master ?? '');
   const [filePath, setFilePath] = useState(initial?.file_path ?? '');
+  const [duckdbMode, setDuckdbMode] = useState<'local' | 'remote'>(
+    initial?.file_path && isQuackUri(initial.file_path) ? 'remote' : 'local',
+  );
+  const [quackFingerprint, setQuackFingerprint] = useState(
+    initial?.extra_params?.[QUACK_SSL_FINGERPRINT_PARAM] ?? '',
+  );
   const [group,    setGroup]    = useState(initial?.group ?? initialGroup ?? '');
   const [color,    setColor]    = useState<string | null>(initial?.color ?? null);
   const [knownGroups, setKnownGroups] = useState<string[]>([]);
@@ -163,7 +174,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [chMaxRows,   setChMaxRows]   = useState(initial?.extra_params?.['max_rows_to_read'] ?? '');
   const [extraRows,   setExtraRows]   = useState<Array<{ k: string; v: string }>>(
     Object.entries(initial?.extra_params ?? {})
-      .filter(([k]) => !(CH_CEILING_KEYS as readonly string[]).includes(k))
+      .filter(([k]) => !(CH_CEILING_KEYS as readonly string[]).includes(k)
+        && k !== QUACK_SSL_FINGERPRINT_PARAM)
       .map(([k, v]) => ({ k, v }))
   );
 
@@ -232,6 +244,10 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       return;
     }
     setEngine(p.engine);
+    if (p.engine === 'duckdb') {
+      setDuckdbMode('remote');
+      if (p.filePath) setFilePath(p.filePath);
+    }
     if (p.host) setHost(p.host);
     // Blank means the engine default now, so a URL without a port leaves the
     // box empty and its placeholder does the talking.
@@ -316,6 +332,24 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     }
   }
 
+  async function newDuckdbFile() {
+    const picked = await saveDialog({
+      defaultPath: 'new-database.duckdb',
+      filters: [{ name: 'DuckDB database', extensions: ['duckdb', 'ddb', 'db'] }],
+    });
+    if (!picked) return;
+    try {
+      await invoke('create_duckdb_file', { path: picked });
+      setFilePath(picked);
+      if (!name.trim()) {
+        setName(basename(picked).replace(/\.[^.]+$/, '') ?? picked);
+      }
+      setError(null);
+    } catch (e) {
+      setError(`Could not create the database — ${errorDisplay(e)}`);
+    }
+  }
+
   function onEngineChange(e: Engine) {
     const next = clearStaleDefaults(
       { host: host ?? '', port, user: user ?? '', database: database ?? '' }, engine, e,
@@ -342,14 +376,20 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     if (engine === 'clickhouse') {
       Object.assign(extraParams, clickhouseCeilingParams(chMaxMemory, chMaxRows));
     }
+    if (engine === 'duckdb' && duckdbMode === 'remote' && quackFingerprint.trim()) {
+      extraParams[QUACK_SSL_FINGERPRINT_PARAM] = quackFingerprint.trim();
+    }
     return {
       id:       initial?.id ?? '00000000-0000-0000-0000-000000000000',
       name:     name.trim(),
       engine,
-      file_path: filePath.trim() || null,
+      file_path: engine === 'duckdb' && duckdbMode === 'remote'
+        ? (parseQuackUri(filePath)?.endpoint ?? (filePath.trim() || null))
+        : filePath.trim() || null,
       ...resolveDefaults(
         { host: host ?? '', port, user: user ?? '', database: database ?? '' }, engine,
       ),
+      sentinel_master: sentinelMasterConfig(engine, sentinelMaster),
       ssl_mode: sslMode,
       group:    group || null,
       color,
@@ -409,6 +449,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   // Validation lives ahead of BOTH paths that build a config — Test and Save
   // — so an impossible value never leaves the form.
   function validateForm(): string | null {
+    if (engine === 'duckdb' && duckdbMode === 'remote') return quackPathError(filePath);
     if (isFile) return filePathError(filePath, engine as 'sqlite' | 'parquet' | 'duckdb');
     const p = portError(port);
     if (p) return p;
@@ -467,20 +508,22 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   }
 
   const isRedis  = engine === 'redis';
-  // SQLite, Parquet and DuckDB open a path. Host, port, user, password, SSL
-  // and SSH are all meaningless for them, so the form hides that half rather
-  // than showing boxes that do nothing. DuckDB's "path" may also be the
-  // literal `:memory:` — a scratch database, the normal way to query
-  // Parquet/CSV/JSON files in SQL.
+  const isQuack  = engine === 'duckdb' && duckdbMode === 'remote';
+  // File engines hide the generic network half. Quack keeps DuckDB in this
+  // group but gets dedicated endpoint/token/fingerprint controls below; the
+  // generic SSH/SSL/password-command controls stay greyed rather than implying
+  // capabilities this driver does not claim.
   const isFile   = engine === 'sqlite' || engine === 'parquet' || engine === 'duckdb';
   const engineDefaults = ENGINE_DEFAULTS[engine];
 
   // W5.4: why the database Fetch button is greyed, or null when it works.
   // Host/port/user must be real values — the lookup connects with exactly
   // what the form shows, and a guess at the defaults is not that.
-  const dbFetchWhy: string | null = isFile
-    ? 'Database lookup — not applicable here: a file engine opens a local path'
-    : isRedis
+  const dbFetchWhy: string | null = isQuack
+    ? 'Database lookup — Quack catalogs are listed after connecting'
+    : isFile
+      ? 'Database lookup — not applicable here: a file engine opens a local path'
+      : isRedis
       ? 'Database lookup — Redis databases are numbered 0–15; type the number'
       : !(host.trim() && port != null && user.trim())
         ? 'Fill in host, port and user first'
@@ -488,9 +531,11 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
 
   // W5.6: why the database visibility filter is greyed, or null when it
   // applies. Each reason names the mechanism that already does the job.
-  const dbFilterWhy: string | null = isFile
-    ? 'Database filter — not applicable here: a file engine opens one local path'
-    : isRedis
+  const dbFilterWhy: string | null = isQuack
+    ? 'Database filter — not applicable to a Quack ATTACH connection'
+    : isFile
+      ? 'Database filter — not applicable here: a file engine opens one local path'
+      : isRedis
       ? 'Database filter — Redis databases are numbered 0–15; the Database # field picks one'
       : engine === 'postgres'
         ? 'Database filter — PostgreSQL connects to one database; the Database field already scopes the tree'
@@ -576,7 +621,46 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           <label>Name</label>
           <input value={name} onChange={e => setName(e.target.value)} placeholder="My database" />
         </div>
-        {isFile && (
+        {engine === 'duckdb' && (
+          <div className="cf-row">
+            <label>Mode</label>
+            <select value={duckdbMode} onChange={e => {
+              const remote = e.target.value === 'remote';
+              setDuckdbMode(remote ? 'remote' : 'local');
+              if (remote && !isQuackUri(filePath)) setFilePath('quack:localhost');
+              if (!remote && isQuackUri(filePath)) setFilePath('');
+            }}>
+              <option value="local">Local file / :memory:</option>
+              <option value="remote">Quack remote</option>
+            </select>
+          </div>
+        )}
+        {isQuack && (
+          <>
+            <div className="cf-row">
+              <label>Quack endpoint</label>
+              <input value={filePath} onChange={e => setFilePath(e.target.value)}
+                     placeholder="quack:localhost — default port 9494" spellCheck={false}
+                     title="quack:host[:port]. localhost defaults to HTTP; non-local endpoints default to HTTPS" />
+            </div>
+            <div className="cf-row">
+              <label>Quack token</label>
+              <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                     placeholder="blank keeps the saved token"
+                     title="Stored only in TxUI's existing secret store, never in connections.json or the endpoint" />
+            </div>
+            <div className="cf-row">
+              <label>TLS fingerprint</label>
+              <div>
+                <input value={quackFingerprint} onChange={e => setQuackFingerprint(e.target.value)}
+                       placeholder="optional SHA-256 certificate fingerprint" spellCheck={false}
+                       title="Required for a self-signed Quack certificate. CA-verified HTTPS (for example a reverse proxy) needs no fingerprint" />
+                <p className="form-hint">localhost defaults to plain HTTP; non-local endpoints default to HTTPS. Self-signed certificates require this fingerprint — there is no trust-all option.</p>
+              </div>
+            </div>
+          </>
+        )}
+        {isFile && !isQuack && (
           <div className="cf-row">
             <label>{engine === 'parquet' ? 'File / folder' : 'File'}</label>
             <div className="cf-pair">
@@ -608,6 +692,12 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
               {engine === 'parquet' && (
                 <button type="button" className="toolbar-btn" onClick={() => setShowParquetNew(true)}
                         title="Create a new, empty Parquet file with a schema you design">
+                  New…
+                </button>
+              )}
+              {engine === 'duckdb' && (
+                <button type="button" className="toolbar-btn" onClick={newDuckdbFile}
+                        title="Create a new, empty DuckDB database; existing files are never overwritten">
                   New…
                 </button>
               )}
@@ -714,6 +804,17 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           {dbListError && <p className="form-hint" style={{ margin: 0 }}>Fetch databases: {dbListError}</p>}
         </div>
         )}
+        {isRedis && (
+        <div className="cf-row">
+          <label>Sentinel master</label>
+          <div>
+            <input value={sentinelMaster} onChange={e => setSentinelMaster(e.target.value)}
+                   placeholder="mymaster — only for a Sentinel endpoint"
+                   title="When the endpoint identifies itself as Sentinel, TxUI discovers this master and rediscovers it after connection failure. Required for Sentinel; ignored for standalone and Cluster." />
+            <p className="form-hint">Leave blank for standalone and Cluster. No monitored master is guessed.</p>
+          </div>
+        </div>
+        )}
         <div className="cf-row">
           <label>Folder</label>
           <input
@@ -780,16 +881,18 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
         </label>
         {readOnly && (
           <div className="cf-ro-note">
-            Writes are refused client-side and by the server (
+            Writes are refused by TxUI and, where available, the engine (
             {engine === 'postgres'
               ? <code>default_transaction_read_only = on</code>
               : engine === 'mysql'
                 ? <code>SET SESSION transaction_read_only = 1</code>
                 : engine === 'clickhouse'
                   ? <><code>readonly=1</code> on every request</>
-                  : engine === 'duckdb'
-                    ? <><code>access_mode = READ_ONLY</code> at open</>
-                    : engine === 'mongodb'
+                  : isQuack
+                    ? <>TxUI app + driver SQL guards; local <code>access_mode</code> is not used, and server-side authorization is a separate deployment control</>
+                    : engine === 'duckdb'
+                      ? <><code>access_mode = READ_ONLY</code> at open</>
+                      : engine === 'mongodb'
                       ? <>driver has no write path</>
                       : engine === 'sqlserver'
                         ? <>client-side only — TDS has no read-only flag</>

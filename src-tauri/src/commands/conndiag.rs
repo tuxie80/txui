@@ -114,7 +114,9 @@ struct PlannedStage {
 /// the reason on the stage), and what dns/tcp will dial. Pure — the unit
 /// tests drive this without any network.
 fn plan_stages(config: &ConnectionConfig) -> Vec<PlannedStage> {
-    let file_backed = config.engine.is_file_backed();
+    let quack_remote = config.engine == Engine::Duckdb
+        && config.file_path.as_deref().is_some_and(duckdb::is_quack_uri);
+    let file_backed = config.engine.is_file_backed() && !quack_remote;
     // A Unix socket replaces the whole network path (MySQL/PG only — the
     // field is ignored by every other driver). A tunnel overrides the socket.
     let socket = matches!(config.engine, Engine::Mysql | Engine::Postgres)
@@ -154,7 +156,9 @@ fn plan_stages(config: &ConnectionConfig) -> Vec<PlannedStage> {
     let literal_ip = host.parse::<std::net::IpAddr>().is_ok();
     let target = || Some((host.clone(), port, via_ssh));
 
-    let dns_skip = if file_backed {
+    let dns_skip = if quack_remote {
+        Some("Quack ATTACH resolves DNS inside the auth stage".to_string())
+    } else if file_backed {
         Some("file-backed engine — nothing to resolve".to_string())
     } else if socket {
         Some("Unix socket connection — no DNS lookup".to_string())
@@ -168,7 +172,9 @@ fn plan_stages(config: &ConnectionConfig) -> Vec<PlannedStage> {
         None
     };
 
-    let tcp_skip = if file_backed {
+    let tcp_skip = if quack_remote {
+        Some("Quack ATTACH dials inside the auth stage".to_string())
+    } else if file_backed {
         Some("file-backed engine — nothing to dial".to_string())
     } else if socket {
         Some(format!("Unix socket connection ({}) — no TCP dial",
@@ -181,7 +187,9 @@ fn plan_stages(config: &ConnectionConfig) -> Vec<PlannedStage> {
         None
     };
 
-    let ssh_skip = if !config.use_ssh {
+    let ssh_skip = if quack_remote {
+        Some("Quack SSH tunneling is unsupported — use a direct endpoint or TLS reverse proxy".to_string())
+    } else if !config.use_ssh {
         Some("no SSH tunnel configured".to_string())
     } else if file_backed {
         Some("file-backed engine — a tunnel has nothing to forward".to_string())
@@ -191,7 +199,12 @@ fn plan_stages(config: &ConnectionConfig) -> Vec<PlannedStage> {
 
     let tls_measure: Option<TlsMeasure>;
     let tls_skip: Option<String>;
-    if file_backed {
+    if quack_remote {
+        tls_measure = None;
+        tls_skip = Some(
+            "Quack chooses HTTP(S) from the URI; CA/fingerprint verification runs inside ATTACH auth — no separate cipher probe".to_string(),
+        );
+    } else if file_backed {
         tls_measure = None;
         tls_skip = Some("file-backed engine — no transport encryption".to_string());
     } else if matches!(config.ssl_mode, SslMode::Disable) {
@@ -213,13 +226,13 @@ fn plan_stages(config: &ConnectionConfig) -> Vec<PlannedStage> {
         PlannedStage {
             id: "dns", label: "DNS resolution".into(),
             skip_reason: dns_skip,
-            target: if file_backed || socket || srv { None } else { target() },
+            target: if file_backed || quack_remote || socket || srv { None } else { target() },
             tls: None,
         },
         PlannedStage {
             id: "tcp", label: "TCP connect".into(),
             skip_reason: tcp_skip,
-            target: if file_backed || socket || srv { None } else { target() },
+            target: if file_backed || quack_remote || socket || srv { None } else { target() },
             tls: None,
         },
         PlannedStage {
@@ -370,7 +383,7 @@ async fn auth_open(
         ),
         Engine::Duckdb => (
             LiveSession::Duckdb(std::sync::Arc::new(
-                duckdb::open(config).await.map_err(one_line)?)),
+                duckdb::open_authenticated(config, password).await.map_err(one_line)?)),
             None,
         ),
         Engine::MongoDb => {
@@ -785,6 +798,21 @@ mod tests {
             assert!(stage(&plan, id).skip_reason.is_some(), "{id} must be skipped");
         }
         assert_eq!(stage(&plan, "auth").label, "Open file");
+        assert!(stage(&plan, "auth").skip_reason.is_none());
+        assert!(stage(&plan, "probe").skip_reason.is_none());
+    }
+
+    #[test]
+    fn quack_network_work_is_measured_by_auth_and_probe_not_fake_tls_dials() {
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "remote");
+        c.file_path = Some("quack:localhost".into());
+        let plan = plan_stages(&c);
+        for id in ["dns", "tcp", "ssh", "tls"] {
+            let reason = stage(&plan, id).skip_reason.clone().unwrap_or_default();
+            assert!(reason.contains("Quack"), "{id}: {reason}");
+            assert!(stage(&plan, id).target.is_none(), "{id} must not dial");
+        }
+        assert_eq!(stage(&plan, "auth").label, "Authenticate");
         assert!(stage(&plan, "auth").skip_reason.is_none());
         assert!(stage(&plan, "probe").skip_reason.is_none());
     }

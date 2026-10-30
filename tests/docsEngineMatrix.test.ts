@@ -69,10 +69,11 @@ describe('engine ordering — most complete first', () => {
   });
 
   test('SQL Server lands third, behind MySQL and PostgreSQL', () => {
-    // Not cosmetic: it is the concrete claim 0.63.0 makes about the engine,
-    // and the ordering is what puts it in front of a reader.
-    assert.deepEqual(cols.slice(0, 3), ['mysql', 'postgres', 'sqlserver'],
-      `first three columns are ${cols.slice(0, 3).join(', ')}`);
+    // PostgreSQL Workload can put PG one capability ahead; either of the two
+    // full engines may lead, but SQL Server remains third.
+    assert.deepEqual([...cols.slice(0, 2)].sort(), ['mysql', 'postgres'],
+      `first two columns are ${cols.slice(0, 2).join(', ')}`);
+    assert.equal(cols[2], 'sqlserver', `third column is ${cols[2]}`);
   });
 
   test('the published counts are the real ones', () => {

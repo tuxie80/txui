@@ -17,6 +17,8 @@ export interface ConnectionConfig {
   port:     number | null;
   user:     string | null;
   database: string | null;
+  /** Redis Sentinel service name; required only when connecting to Sentinel. */
+  sentinel_master?: string | null;
   ssl_mode: SslMode;
   group:    string | null;
   color:    string | null;

@@ -232,6 +232,8 @@ export interface EngineCaps {
    * deliberately not here.
    */
   stmtStats: boolean;
+  /** Correlated pg_stat_statements deltas, pg_stat_activity samples, and local incidents. */
+  pgWorkload: boolean;
   /**
    * The engine keeps a HISTORY of query plans, and can be told to use one.
    *
@@ -290,13 +292,13 @@ export interface EngineCaps {
 export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
   mysql: {
     sql: true, transactions: true, databaseSelect: true, processList: true,
-    serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
+    serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, pgWorkload: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
     csvImport: true, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
     statementTimeout: true,
   },
   postgres: {
     sql: true, transactions: true, databaseSelect: true, processList: true,
-    serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
+    serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, pgWorkload: true, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
     csvImport: true, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
     statementTimeout: true,
   },
@@ -309,7 +311,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // pruning, ESTIMATE volumes, query_log history), not the MySQL analyzer
     // pointed at CH output.
     sql: true, transactions: false, databaseSelect: true, processList: true,
-    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
+    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
     // csvImport IS supported: the importer's standard multi-row INSERT path
     // speaks CH natively (backslash-first literal quoting, no transaction
     // wrap — CH has none — TRUNCATE for the clear-first option). dataGen
@@ -323,7 +325,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // Not SQL at all: no catalog, no databases to select in this sense, no
     // statement to bound. CLIENT LIST / CLIENT KILL do give a process list.
     sql: false, transactions: false, databaseSelect: false, processList: true,
-    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
+    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
     dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: false,
     writes: true, tableDesigner: false, statementTimeout: false,
   },
@@ -341,7 +343,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // errored on every choice. A picker that errors when touched is worse than
     // none; the gap is registered in utils/engineGaps.ts.
     sql: true, transactions: true, databaseSelect: false, processList: false,
-    serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true,
+    serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true,
     dataGen: false, csvImport: true, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: true, statementTimeout: false,
   },
@@ -352,7 +354,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // engine), so the picker only rendered to error when touched — registered
     // in utils/engineGaps.ts.
     sql: true, transactions: false, databaseSelect: false, processList: false,
-    serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
+    serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: true,
     writes: false, tableDesigner: false, statementTimeout: false,
   },
@@ -370,7 +372,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // passes through as text and the panel degrades to static lint, as on
     // SQLite. The table designer has no DuckDB dialect; it refuses gracefully.
     sql: true, transactions: true, databaseSelect: false, processList: false,
-    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
+    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: false, statementTimeout: false,
   },
@@ -386,7 +388,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // driver exposes no write path at all (db/mongodb.rs), so nothing may
     // claim one.
     sql: false, transactions: false, databaseSelect: false, processList: true,
-    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
+    serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: false,
     writes: false, tableDesigner: false, statementTimeout: false,
   },
@@ -422,7 +424,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // issues the same KILL the Stop button does, and `kill_backend` finally has
     // a SqlServer arm (before, the timer fired and nothing happened).
     sql: true, transactions: true, databaseSelect: false, processList: true,
-    serverInfo: true, sqlDba: false, lockWaits: true, sequences: true, longQueryWatch: true, replication: false,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: false, queryStore: true, maintenance: true, tuner: true, erDiagram: true,
+    serverInfo: true, sqlDba: false, lockWaits: true, sequences: true, longQueryWatch: true, replication: false,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: false, pgWorkload: false, queryStore: true, maintenance: true, tuner: true, erDiagram: true,
     dataGen: true, csvImport: true, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: true, statementTimeout: false,
   },

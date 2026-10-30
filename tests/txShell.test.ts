@@ -11,7 +11,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseLine, dispatchHead, splitPipeline, splitArgs, unquote,
-  substituteVars, isComplete, quotesClosed, pushHistory, HISTORY_CAP, completions,
+  substituteVars, substituteCommands, resultToCommandText,
+  isComplete, quotesClosed, pushHistory, HISTORY_CAP, completions,
 } from '../src/utils/txShell.ts';
 import { parseWhere, findVerb, findMeta, suggest, PIPE } from '../src/utils/txShellGrammar.ts';
 
@@ -123,6 +124,18 @@ test('a pipeline splits into head and stages', () => {
   assert.deepEqual(p.stages[0].args, ['total', '>', '100']);
 });
 
+test('diff requires an explicit captured result id and accepts key columns', () => {
+  const p = parseLine('SELECT id, value FROM new |> diff #12 key id tenant');
+  assert.deepEqual(p.stages[0], {
+    name: 'diff', args: ['#12', 'key', 'id', 'tenant'], raw: 'diff #12 key id tenant',
+  });
+  assert.equal(parseLine('SELECT 1 |> diff').head.kind, 'error');
+  const followed = parseLine('SELECT 1 |> diff #12 |> head 5');
+  assert.deepEqual(followed.stages.map(s => s.name), ['diff', 'head']);
+  assert.equal(parseLine('SELECT 1 #123 |> head 5').stages.length, 0,
+    'an ordinary numeric SQL comment still hides the pipe');
+});
+
 test('a sink ends the pipeline and takes the filename', () => {
   const p = parseLine('SELECT 1 |> save out.csv');
   assert.deepEqual(p.stages.map(s => s.name), ['save']);
@@ -209,7 +222,7 @@ test('where reports a missing value', () => {
 // ── registry and completion ─────────────────────────────────────────────────
 
 test('every verb documents itself', () => {
-  for (const n of ['where', 'select', 'sort', 'head', 'save', 'to', 'from']) {
+  for (const n of ['where', 'select', 'sort', 'head', 'diff', 'save', 'to', 'from']) {
     const v = findVerb(n);
     assert.ok(v, n);
     assert.ok(v.usage.length > 2 && v.summary.length > 10, `${n} is undocumented`);
@@ -231,6 +244,8 @@ test('completion offers stages after a pipe and meta commands after a backslash'
   const afterPipe = completions('SELECT 1 |> he', 14);
   assert.ok(afterPipe.includes('head'), afterPipe.join(','));
   assert.ok(!afterPipe.includes('from'), 'a source cannot follow a pipe');
+  assert.ok(completions('SELECT 1 |> di', 14).includes('diff'));
+  assert.match(findVerb('diff')?.usage ?? '', /#<result-id>.*key/);
 
   const afterSlash = completions('\\d', 3);
   assert.ok(afterSlash.some(c => c.startsWith('\\d')), afterSlash.join(','));
@@ -289,6 +304,92 @@ test('a variable set to an empty string is not "missing"', () => {
 test('each missing name is reported once', () => {
   const r = substituteVars('$a $a $b', {});
   assert.deepEqual(r.missing, ['a', 'b']);
+});
+
+// ── command substitution ────────────────────────────────────────────────────
+
+test('command substitution expands through the supplied TxShell executor', async () => {
+  const calls: Array<[string, number]> = [];
+  const out = await substituteCommands('SELECT $(SELECT 41 + 1) AS n', async (command, depth) => {
+    calls.push([command, depth]);
+    return '42';
+  });
+  assert.equal(out, 'SELECT 42 AS n');
+  assert.deepEqual(calls, [['SELECT 41 + 1', 1]]);
+});
+
+test('multiple substitutions run deterministically from left to right', async () => {
+  const calls: string[] = [];
+  const out = await substituteCommands('$(one) / $(two) / $(three)', async command => {
+    calls.push(command);
+    return command.toUpperCase();
+  });
+  assert.equal(out, 'ONE / TWO / THREE');
+  assert.deepEqual(calls, ['one', 'two', 'three']);
+});
+
+test('SQL strings, identifiers, dollar quotes and comments are preserved', async () => {
+  let calls = 0;
+  const execute = async () => { calls++; return 'BAD'; };
+  const input = "SELECT '$(literal)', \"$(identifier)\", `$(tick)`, $$ $(body) $$ "
+    + '-- $(line comment)\n/* $(block comment) */ 1';
+  assert.equal(await substituteCommands(input, execute), input);
+  assert.equal(calls, 0);
+  assert.equal(await substituteCommands('SELECT 1 -- note\n + $(SELECT 2)', async () => '2'),
+    'SELECT 1 -- note\n + 2');
+});
+
+test('nested parens, quoted close parens and nested substitutions are scanned correctly', async () => {
+  const commands: string[] = [];
+  await substituteCommands('x $(SELECT fn(\')\', (1 + 2), $(SELECT 3))) y', async command => {
+    commands.push(command);
+    return 'ok';
+  });
+  assert.deepEqual(commands, ["SELECT fn(')', (1 + 2), $(SELECT 3))"]);
+  assert.equal(await substituteCommands('$(SELECT 1 |> diff #12)', async () => 'same'), 'same');
+});
+
+test('nested execution is bounded and cannot recurse without limit', async () => {
+  const run: (command: string, depth: number) => Promise<string> = async (command, depth) =>
+    substituteCommands(command, run, { depth });
+  let nested = 'SELECT 1';
+  for (let i = 0; i < 4; i++) nested = `$(${nested})`;
+  assert.equal(await run(nested, 0), 'SELECT 1');
+  await assert.rejects(run(`$(${nested})`, 0), /nested more than 4 levels/);
+});
+
+test('combined substitution output is capped across one line', async () => {
+  await assert.rejects(substituteCommands('$(a) $(b)', async () => '123456', { maxOutput: 10 }),
+    /output exceeded 10 characters.*Nothing was run/);
+  await assert.rejects(substituteCommands('$(a)', async () => '12345', { maxOutput: 4 }),
+    /output exceeded/);
+});
+
+test('empty, unclosed and failed substitutions propagate errors', async () => {
+  await assert.rejects(substituteCommands('$()', async () => ''), /Empty/);
+  await assert.rejects(substituteCommands('$(SELECT 1', async () => ''), /Unclosed/);
+  const failure = new Error('database said no');
+  await assert.rejects(substituteCommands('$(SELECT broken)', async () => { throw failure; }),
+    e => e === failure);
+});
+
+test('single-cell results become deterministic scalars', () => {
+  assert.equal(resultToCommandText({ rows: [] }), '');
+  assert.equal(resultToCommandText({ rows: [[42]] }), '42');
+  assert.equal(resultToCommandText({ rows: [[null]] }), 'NULL');
+  assert.equal(resultToCommandText({ rows: [[true]] }), 'true');
+  assert.equal(resultToCommandText({ rows: [[{ z: 1, a: { d: 2, c: 3 } }]] }),
+    '{"a":{"c":3,"d":2},"z":1}');
+  assert.equal(resultToCommandText({ rows: [[{ text: 'a"b', nil: null, list: ['x', 2] }]] }),
+    '{"list":["x",2],"nil":null,"text":"a\\"b"}');
+});
+
+test('structured results become headerless TSV with unambiguous whitespace', () => {
+  const text = resultToCommandText({ rows: [
+    [1, 'a\tb', 'line\nbreak'],
+    [2, null, 'c:\\d'],
+  ] });
+  assert.equal(text, '1\ta\\tb\tline\\nbreak\n2\tNULL\tc:\\\\d');
 });
 
 // ── multi-line input ────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@
  * Pure and dependency-free — driven by `node --test`.
  */
 import { skipQuoted } from './routineDdl.ts';
+import type { QueryResult } from '../types/index.ts';
 import {
   PIPE, findVerb, findMeta, suggest, checkArity, VERB_NAMES, META_NAMES,
 } from './txShellGrammar.ts';
@@ -39,6 +40,13 @@ export interface ParsedLine {
   error?: string;
 }
 
+/** Only diff's first argument makes #digits a reference rather than a comment. */
+function skipShellQuoted(text: string, i: number): number {
+  const resultRef = text[i] === '#' && /\d/.test(text[i + 1] ?? '')
+    && /(?:^|\|>)\s*diff\s+$/i.test(text.slice(0, i));
+  return resultRef ? i : skipQuoted(text, i);
+}
+
 /**
  * Split on `|>` at the top level.
  *
@@ -54,7 +62,7 @@ export function splitPipeline(line: string): string[] {
   let i = 0;
   let depth = 0;
   while (i < line.length) {
-    const skipped = skipQuoted(line, i);
+    const skipped = skipShellQuoted(line, i);
     if (skipped > i) { i = skipped; continue; }
     const ch = line[i];
     if (ch === '(') depth++;
@@ -283,6 +291,107 @@ export function substituteVars(
       return whole;
     });
   return { text: out, missing };
+}
+
+// ── command substitution ─────────────────────────────────────────────────────
+
+export const COMMAND_SUBSTITUTION_MAX_DEPTH = 4;
+export const COMMAND_SUBSTITUTION_MAX_OUTPUT = 64 * 1024;
+
+export interface CommandSubstitutionOptions {
+  /** Depth of the line containing these substitutions (top level is zero). */
+  depth?: number;
+  maxDepth?: number;
+  /** Combined cap for all substitutions on one line, in UTF-16 code units. */
+  maxOutput?: number;
+}
+
+/** A stable scalar rendering; object keys are sorted rather than driver-ordered. */
+function commandValue(value: unknown, nested = false): string {
+  if (value === null || value === undefined) return nested ? 'null' : 'NULL';
+  if (typeof value === 'string') return nested ? JSON.stringify(value) : value;
+  if (typeof value === 'number') return nested && !Number.isFinite(value) ? 'null' : String(value);
+  if (typeof value === 'bigint') return nested ? JSON.stringify(String(value)) : String(value);
+  if (typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `[${value.map(v => commandValue(v, true)).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(
+      k => `${JSON.stringify(k)}:${commandValue(record[k], true)}`).join(',')}}`;
+  }
+  return String(value);
+}
+
+/**
+ * Convert captured rows without locale-sensitive formatting. A single cell is a
+ * scalar; otherwise rows are newline-separated and cells tab-separated. Tabs,
+ * newlines, carriage returns and backslashes in structured output are escaped,
+ * so one result row always remains one output line. There are no headers.
+ */
+export function resultToCommandText(result: Pick<QueryResult, 'rows'>): string {
+  if (!result.rows.length) return '';
+  if (result.rows.length === 1 && result.rows[0].length === 1) {
+    return commandValue(result.rows[0][0]);
+  }
+  const cell = (value: unknown) => commandValue(value)
+    .replace(/\\/g, '\\\\').replace(/\t/g, '\\t')
+    .replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+  return result.rows.map(row => row.map(cell).join('\t')).join('\n');
+}
+
+/**
+ * Expand `$(…)` from left to right through a caller-supplied TxShell executor.
+ * This function never calls an OS shell. SQL strings, quoted identifiers,
+ * dollar-quoted bodies and comments are copied verbatim. Executor errors abort
+ * the whole expansion, and nested execution is bounded by `depth` as well as by
+ * the combined output cap.
+ */
+export async function substituteCommands(
+  text: string,
+  execute: (command: string, depth: number) => Promise<string>,
+  options: CommandSubstitutionOptions = {},
+): Promise<string> {
+  const depth = options.depth ?? 0;
+  const maxDepth = options.maxDepth ?? COMMAND_SUBSTITUTION_MAX_DEPTH;
+  const maxOutput = options.maxOutput ?? COMMAND_SUBSTITUTION_MAX_OUTPUT;
+  let out = '';
+  let copied = 0;
+  let produced = 0;
+  let i = 0;
+
+  while (i < text.length) {
+    const skipped = skipShellQuoted(text, i);
+    if (skipped > i) { i = skipped; continue; }
+    if (!text.startsWith('$(', i)) { i++; continue; }
+    if (depth >= maxDepth) {
+      throw new Error(`Command substitution is nested more than ${maxDepth} levels deep.`);
+    }
+
+    out += text.slice(copied, i);
+    const start = i + 2;
+    let j = start;
+    let parens = 1;
+    while (j < text.length && parens > 0) {
+      const quoted = skipShellQuoted(text, j);
+      if (quoted > j) { j = quoted; continue; }
+      if (text[j] === '(') parens++;
+      else if (text[j] === ')') parens--;
+      j++;
+    }
+    if (parens > 0) throw new Error('Unclosed `$(…)` command substitution.');
+    const command = text.slice(start, j - 1).trim();
+    if (!command) throw new Error('Empty `$()` command substitution.');
+
+    const replacement = await execute(command, depth + 1);
+    produced += replacement.length;
+    if (produced > maxOutput) {
+      throw new Error(`Command substitution output exceeded ${maxOutput} characters. Nothing was run.`);
+    }
+    out += replacement;
+    i = j;
+    copied = j;
+  }
+  return out + text.slice(copied);
 }
 
 // ── multi-line input ─────────────────────────────────────────────────────────

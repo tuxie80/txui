@@ -13,6 +13,7 @@ pub mod connection;
 pub mod mysql;
 pub mod postgres;
 pub mod redis;
+pub mod redis_connection;
 pub mod redis_shape;
 pub mod types;
 pub mod browser;

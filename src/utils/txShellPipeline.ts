@@ -18,6 +18,12 @@ import type { ColumnInfo, QueryResult } from '../types';
 import type { PipelineStage } from './txShell.ts';
 import { parseWhere, findVerb } from './txShellGrammar.ts';
 import type { WhereOp } from './txShellGrammar.ts';
+import { diffToQueryResult } from './resultDiff.ts';
+
+export interface PipelineContext {
+  /** Resolve an explicit transcript #id for the diff stage. */
+  resolveResult?: (id: number) => QueryResult | undefined;
+}
 
 export interface SinkAction {
   kind: 'save' | 'append' | 'to' | 'chart' | 'grid' | 'insert';
@@ -34,6 +40,7 @@ export interface SinkAction {
 export interface PipelineResult {
   result: QueryResult;
   sink?: SinkAction;
+  notices?: string[];
 }
 
 export type PipelineOutcome = PipelineResult | { error: string };
@@ -190,7 +197,9 @@ const empty = (columns: ColumnInfo[], rows: unknown[][]): QueryResult => ({
 // ── stages ───────────────────────────────────────────────────────────────────
 
 /** Apply one stage. Errors are already user-facing. */
-export function applyStage(result: QueryResult, stage: PipelineStage): PipelineOutcome {
+export function applyStage(
+  result: QueryResult, stage: PipelineStage, context: PipelineContext = {},
+): PipelineOutcome {
   const { name, args } = stage;
 
   switch (name) {
@@ -303,6 +312,36 @@ export function applyStage(result: QueryResult, stage: PipelineStage): PipelineO
       return { result: empty(cols, rows) };
     }
 
+    case 'diff': {
+      const ref = args[0];
+      const match = /^#?(\d+)$/.exec(ref);
+      if (!match) return { error: 'Usage: `diff #<result-id> [key <col> [col…]]`' };
+      const keyAt = args.indexOf('key');
+      if (keyAt >= 0 && (keyAt !== 1 || keyAt === args.length - 1)) {
+        return { error: 'Usage: `diff #<result-id> [key <col> [col…]]`' };
+      }
+      if (keyAt < 0 && args.length !== 1) {
+        return { error: 'Name the other result first, then optionally `key <col> [col…]`.' };
+      }
+      if (!context.resolveResult) {
+        return { error: 'diff needs the TxShell transcript; no captured results are available here.' };
+      }
+      const id = Number(match[1]);
+      const other = context.resolveResult(id);
+      if (!other) {
+        return { error: `No captured result #${id} is still in the transcript. `
+          + 'Result ids are shown above each grid; older entries may have scrolled out.' };
+      }
+      try {
+        const out = diffToQueryResult(result, other,
+          keyAt >= 0 ? args.slice(keyAt + 1) : undefined,
+          'current result', `#${id}`);
+        return { result: out.result, notices: out.notices };
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+
     // ── sinks ──
     case 'save':
     case 'append': {
@@ -364,20 +403,24 @@ export function applyStage(result: QueryResult, stage: PipelineStage): PipelineO
  * Stops at the first failure and reports which stage it was — "row 3 of your
  * pipeline" is the difference between fixing it and retyping it.
  */
-export function runPipeline(result: QueryResult, stages: PipelineStage[]): PipelineOutcome {
+export function runPipeline(
+  result: QueryResult, stages: PipelineStage[], context: PipelineContext = {},
+): PipelineOutcome {
   let cur = result;
   let sink: SinkAction | undefined;
+  const notices: string[] = [];
   for (let i = 0; i < stages.length; i++) {
     const spec = findVerb(stages[i].name);
     if (!spec) return { error: `\`${stages[i].name}\` is not a pipeline verb` };
-    const out = applyStage(cur, stages[i]);
+    const out = applyStage(cur, stages[i], context);
     if ('error' in out) {
       return { error: `${out.error}   (stage ${i + 1}: \`${stages[i].raw}\`)` };
     }
     cur = out.result;
     if (out.sink) sink = out.sink;
+    if (out.notices) notices.push(...out.notices);
   }
-  return { result: cur, sink };
+  return { result: cur, sink, notices: notices.length ? notices : undefined };
 }
 
 // ── CSV, for `from` ──────────────────────────────────────────────────────────

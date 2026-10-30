@@ -3,6 +3,21 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **DuckDB 2.0 and Quack remote connections** — the embedded engine upgrades to DuckDB 2.0 with VARIANT/untyped-NULL normalization and legacy-storage preservation. The same engine connects to Quack servers with token authentication, optional certificate-fingerprint pinning, schema/completion reuse, health probes, remote cancellation and driver-enforced read-only behavior. DuckDB files can also be created explicitly from the connection form without weakening missing-file or overwrite checks.
+- **Redis Cluster and Sentinel connectivity** — real MOVED/ASK routing, cluster-wide key scans and counts, slot-aware key operations, Sentinel master discovery, verified roles, and rediscovery after failover without replaying the failed command.
+- **PostgreSQL Workload** — manual baseline/after investigations correlate statement deltas, optionally sampled waits, and retained long-query/deadlock/failed-statement incidents in one time window, with editor/timeline drill-downs and no always-on collector.
+- **SQL Quality Change review** — a third analysis mode builds sequential/final table models for MySQL/MariaDB/PostgreSQL migrations, reporting narrowing, nullability, index/FK, destructive-rewrite, cascade and lock/rebuild findings with source positions. Unsupported syntax is reported rather than treated as safe.
+- **TxShell result diff and command substitution** — compare a pipeline with an explicitly selected captured result using typed keys and column-name alignment; execute nested TxShell pipelines through `$(…)` with scalar/TSV conversion, nesting and output limits.
+- **Allowlisted ClickHouse session settings** — `extra_params` now applies `max_threads`, block-size and external-aggregation/sort settings on every request, including `readonly=1`; unsupported/protected keys fail explicitly instead of being silently ignored.
+
+### Changed
+
+- **Compatible dependency refresh** — updated CodeMirror, React, Tauri, Vite, Playwright, MongoDB, Arrow/Parquet 58, rustls, Tokio and other compatible packages. Calamine stays on its supported line with Zip pinned to 2.4.2; React Hooks lint 7.1.1 was rejected after it introduced 119 new errors in the existing codebase. TypeScript, Arrow 60, DuckDB and Rust toolchain migrations remain separate decisions.
+
 ## [1.4.3] - 2026-10-28
 
 ### Fixed

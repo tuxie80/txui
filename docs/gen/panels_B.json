@@ -13,6 +13,18 @@
    "engines": "MySQL/MariaDB (performance_schema digests) and PostgreSQL (pg_stat_statements). Other engines keep no cumulative statement digest, so the menu entry is gated on the stmtStats capability; SQL Server's richer Query Store keeps its own panel.",
    "caveats": "Read-only. PostgreSQL needs the pg_stat_statements extension (which may need shared_preload_libraries and a restart); MySQL needs performance_schema enabled. In-memory snapshots are per panel lifetime (PostgreSQL keeps the last 12); capture at least two with workload in between before any diff appears. A counter reset between snapshots invalidates the deltas and is flagged on PostgreSQL."
   },
+  "pgworkload": {
+   "summary": "Correlated PostgreSQL incident analysis over one manual baseline/after window. The panel combines ranked pg_stat_statements deltas, optionally sampled wait events, and retained long-query, deadlock and failed-statement incidents from the local timeline, so 'what changed while this workload ran?' is answered in one place rather than three separate panels. Statement rows and SQL-bearing incidents drill into the editor; the full incident timeline is one click away.",
+   "howToOpen": "Session menu bar, Insights group, 'PostgreSQL Workload' (also native Tools > Insights). Available only on PostgreSQL sessions.",
+   "keyActions": [
+    "Capture a baseline, run the workload, then capture After",
+    "Optionally sample waits during the measurement; sampling stops on After and on panel close",
+    "Read ranked statement deltas with reset/eviction warnings, exact-window wait aggregates and matching local incidents",
+    "Insert statement or incident SQL into the editor, or open the full incident timeline"
+   ],
+   "engines": "PostgreSQL only, gated by the pgWorkload capability. pg_stat_statements uses the same availability/enable flow as Statement statistics.",
+   "caveats": "Wait samples are in-memory, capped at 2,000 and cover only time actively sampled while the panel is open; they are not server history. Incidents are limited by the existing local stores' retention. There is no always-on collector or additional snapshot database."
+  },
   "binlog": {
    "summary": "Binary-log events viewer and point-in-time-recovery (PITR) helper for MySQL/MariaDB. Runs SHOW BINARY LOGS to list files, then SHOW BINLOG EVENTS IN <file> LIMIT 500 to show what happened in the selected file. From a chosen event position it generates (never runs) the mysqlbinlog command line for a PITR replay.",
    "howToOpen": "Session menu bar, Monitor group, 'Binary logs'. Renders as the BinlogPanel tab with the current session.",

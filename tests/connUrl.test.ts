@@ -298,11 +298,29 @@ test('clickhouse: native-protocol ports are flagged, not silently accepted', () 
   assert.deepEqual(ok('clickhouse://u@h:8443/db').warnings, []);
 });
 
-test('clickhouse: unknown params are session settings, kept without a warning', () => {
-  // Unlike MySQL/PG, any query param is a legitimate ClickHouse setting.
-  const p = ok('clickhouse://h/db?max_threads=4&max_memory_usage=1000000');
-  assert.deepEqual(p.extraParams, { max_threads: '4', max_memory_usage: '1000000' });
+test('clickhouse: allowlisted session settings and ceilings are kept without warnings', () => {
+  const p = ok('clickhouse://h/db?max_threads=4&max_block_size=65536&max_memory_usage=1000000');
+  assert.deepEqual(p.extraParams, {
+    max_threads: '4', max_block_size: '65536', max_memory_usage: '1000000',
+  });
   assert.deepEqual(p.warnings, []);
+});
+
+test('clickhouse: unsupported settings are preserved but explicitly warned about', () => {
+  const p = ok('clickhouse://h/db?allow_experimental_object_type=1');
+  assert.equal(p.extraParams['allow_experimental_object_type'], '1');
+  assert.equal(p.warnings.length, 1);
+  assert.match(p.warnings[0], /unsupported ClickHouse session setting/);
+  assert.match(p.warnings[0], /max_threads/);
+});
+
+test('clickhouse: TxUI-owned request parameters cannot masquerade as generic settings', () => {
+  const p = ok('clickhouse://h/db?max_execution_time=0&output_format_json_quote_decimals=0');
+  assert.deepEqual(p.extraParams, {
+    max_execution_time: '0', output_format_json_quote_decimals: '0',
+  });
+  assert.equal(p.warnings.length, 2);
+  assert.ok(p.warnings.every(w => w.includes('managed by TxUI')), p.warnings.join(';'));
 });
 
 test('clickhouse: build → parse round-trip keeps ssl, readonly and settings', () => {

@@ -83,7 +83,7 @@ pub async fn open_session(
         // File-backed: `file_path` is the address. No dial, no tunnel, no auth.
         Engine::Sqlite   => LiveSession::Sqlite(sqlite::open(config).await?),
         Engine::Parquet  => LiveSession::Parquet(Arc::new(parquet::open_async(config).await?)),
-        Engine::Duckdb   => LiveSession::Duckdb(Arc::new(duckdb::open(config).await?)),
+        Engine::Duckdb   => LiveSession::Duckdb(Arc::new(duckdb::open_authenticated(config, password).await?)),
         Engine::MongoDb  => mongodb::open(config, password, host_override).await?,
         Engine::SqlServer => {
             // The driver takes host/port from the config, so an active SSH
@@ -261,7 +261,7 @@ pub async fn ping(config: &ConnectionConfig, password: Option<String>) -> PingRe
             Err(e) => PingResult { ok: false, latency_ms: 0, server_version: None,
                                    error: Some(e.to_string()) },
         },
-        Engine::Duckdb => match duckdb::open(config).await {
+        Engine::Duckdb => match duckdb::open_authenticated(config, password).await {
             Ok(s) => duckdb::ping(&s).await,
             Err(e) => PingResult { ok: false, latency_ms: 0, server_version: None,
                                    error: Some(e.to_string()) },
@@ -764,7 +764,7 @@ pub async fn list_schema(
         LiveSession::Postgres(pool) => postgres::list_schema(pool, context).await,
         // Redis: no context = the databases; a db label = its key namespaces.
         LiveSession::Redis(mgr, client) => match context {
-            Some(db) => redis::list_prefixes(client, db).await,
+            Some(db) => redis::list_prefixes(mgr, client, db).await,
             None     => redis::list_schema(mgr.clone()).await,
         },
         LiveSession::Clickhouse(s) => clickhouse::list_schema(s, context).await,

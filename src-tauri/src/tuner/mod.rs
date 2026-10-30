@@ -155,7 +155,7 @@ pub async fn analyze_pg(pool: &sqlx::PgPool, data_dir: &std::path::Path) -> anyh
 /// Shares the report contract, scoring and ordering with the SQL engines, so
 /// the panel renders all three without branching.
 pub async fn analyze_redis(
-    mgr: &::redis::aio::ConnectionManager,
+    mgr: &crate::db::redis::RedisConnection,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<TunerReport> {
     let data = redis_collectors::collect(mgr).await?;
@@ -882,7 +882,7 @@ mod redis_live_tests {
     //!   TXUI_REDIS_TEST_PORT=7790 cargo test --lib redis_tuner_live -- --ignored --nocapture
     use crate::db::types::{ConnectionConfig, Engine, LiveSession, SslMode};
 
-    async fn mgr() -> Option<::redis::aio::ConnectionManager> {
+    async fn mgr() -> Option<crate::db::redis::RedisConnection> {
         let mut c = ConnectionConfig::new(Engine::Redis, "redis");
         c.host = Some("127.0.0.1".into());
         c.port = Some(std::env::var("TXUI_REDIS_TEST_PORT").ok()

@@ -251,7 +251,7 @@ function engineMatrixSection() {
     lockWaits: 'Lock waits, blocking chains & deadlocks',
     replication: 'Replication topology', serverInfo: 'Server settings & status',
     sqlDba: 'DBA views & tooling', tuner: 'Configuration tuner',
-    stmtStats: 'Statement statistics over time',
+    stmtStats: 'Statement statistics over time', pgWorkload: 'PostgreSQL workload correlation',
     queryStore: 'Query Store — plan history', sqlQuality: 'SQL quality audit',
     maintenance: 'Maintenance',
     fleet: 'Fleet comparison', playground: 'Contention playground',
@@ -270,7 +270,7 @@ function engineMatrixSection() {
     ['Watching a live server', 'Who is running what, and what is stuck behind what.',
       ['processList', 'longQueryWatch', 'lockWaits', 'replication', 'serverInfo']],
     ['DBA & performance', 'The diagnostic tooling — why it is slow, and what to change.',
-      ['sqlDba', 'tuner', 'stmtStats', 'queryStore', 'sqlQuality', 'maintenance', 'fleet', 'playground']],
+      ['sqlDba', 'tuner', 'stmtStats', 'pgWorkload', 'queryStore', 'sqlQuality', 'maintenance', 'fleet', 'playground']],
     ['Understanding a schema', 'Reading a database you did not write.',
       ['erDiagram', 'documenter', 'dbSearch', 'findUsages', 'columnProfile', 'routines', 'sequences']],
     ['Changing a schema & its data', 'The write-capable tooling.',
@@ -308,8 +308,7 @@ function engineMatrixSection() {
     <td class="cap">
       <b>${esc(CAP_LABEL[cap])}</b>
       ${summary ? `<div class="cap-desc">${prose(summary)}</div>` : ''}
-      ${detail.length ? `<details class="cap-why"><summary>Why it works this way</summary>${detail.map(d => `<p>${prose(d)}</p>`).join('')}</details>` : ''}
-      ${unlocks.length ? `<div class="cap-unlocks">Opens: ${unlocks.map(p => `<a href="#panel-${p.id}">${esc(p.label)}</a>`).join(', ')}</div>` : ''}
+      ${detail.length ? `<details class="cap-why"><summary>Why it works this way</summary>${detail.map(d => `<p>${prose(d)}</p>`).join('')}</details>` : ''}${unlocks.length ? `<div class="cap-unlocks">Opens: ${unlocks.map(p => `<a href="#panel-${p.id}">${esc(p.label)}</a>`).join(', ')}</div>` : ''}
       <code class="cap-key">${esc(cap)}</code>
     </td>
     ${ENGINE_ORDER.map(e => `<td class="ctr">${inv.capabilityMatrix[e][cap] ? '<span class="yes">✓</span>' : '<span class="no" title="Not available on this engine">—</span>'}</td>`).join('')}

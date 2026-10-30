@@ -709,6 +709,9 @@ pub(crate) async fn do_kill_processes(
             }
         }
         LiveSession::Redis(mgr, _) => {
+            if mgr.is_cluster() {
+                return Err("CLIENT KILL is node-local and is disabled for routed Redis Cluster sessions because client ids are not cluster-wide.".into());
+            }
             // CLIENT KILL ID <id> disconnects a client. Redis has no
             // "cancel the running command" equivalent of KILL QUERY — a
             // command is atomic — so both modes terminate the connection and

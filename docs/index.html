@@ -232,10 +232,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="overview" class="doc-section">
   <h1>TxUI <span class="ver">v1.4.3</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 36 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.4.3.</p>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 37 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.4.3.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
-    <div class="card"><div class="big">36</div><div>tool panels</div></div>
+    <div class="card"><div class="big">37</div><div>tool panels</div></div>
     <div class="card"><div class="big">70</div><div>editor commands</div></div>
     <div class="card"><div class="big">234</div><div>DBA views</div></div>
     <div class="card"><div class="big">44</div><div>settings</div></div>
@@ -254,8 +254,8 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </div>
   <div class="scroll-x"><table class="ref matrix" id="engTable">
     <thead>
-      <tr><th>Capability</th><th class="e-mysql">MySQL</th><th class="e-postgres">PostgreSQL</th><th class="e-sqlserver">SQL Server</th><th class="e-clickhouse">ClickHouse</th><th class="e-sqlite">SQLite</th><th class="e-duckdb">DuckDB</th><th class="e-redis">Redis</th><th class="e-parquet">Parquet</th><th class="e-mongodb">MongoDB</th></tr>
-      <tr class="cap-score"><th>of 32 capabilities</th><th class="ctr">31</th><th class="ctr">31</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">2</th><th class="ctr">2</th></tr>
+      <tr><th>Capability</th><th class="e-postgres">PostgreSQL</th><th class="e-mysql">MySQL</th><th class="e-sqlserver">SQL Server</th><th class="e-clickhouse">ClickHouse</th><th class="e-sqlite">SQLite</th><th class="e-duckdb">DuckDB</th><th class="e-redis">Redis</th><th class="e-parquet">Parquet</th><th class="e-mongodb">MongoDB</th></tr>
+      <tr class="cap-score"><th>of 33 capabilities</th><th class="ctr">32</th><th class="ctr">31</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">2</th><th class="ctr">2</th></tr>
     </thead>
     <tbody>
   <tr class="cap-group"><td colspan="10"><b>Running queries</b> <span class="dim">What you can do with the connection itself.</span></td></tr>
@@ -263,7 +263,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>SQL editor</b>
       <div class="cap-desc">Speaks SQL at all. Redis does not.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-txshell">TxShell</a>, <a href="#panel-views">Views</a></div>
       <code class="cap-key">sql</code>
     </td>
@@ -274,7 +273,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Writing data at all</b>
       <div class="cap-desc">Anything can be written at all.</div>
       
-      
       <code class="cap-key">writes</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -283,7 +281,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Transactions</b>
       <div class="cap-desc">BEGIN / COMMIT / ROLLBACK against a pinned connection.</div>
-      
       
       <code class="cap-key">transactions</code>
     </td>
@@ -294,7 +291,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Pick a default database</b>
       <div class="cap-desc">A default database can be chosen for the editor (USE / search_path / a request parameter).</div>
       
-      
       <code class="cap-key">databaseSelect</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -303,7 +299,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Query variables (:name)</b>
       <div class="cap-desc">Statements can be parameterised with <code>:name</code> variables before running.</div>
-      
       
       <code class="cap-key">sqlVariables</code>
     </td>
@@ -314,7 +309,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Statement timeout</b>
       <div class="cap-desc">A server-side ceiling on a single statement can be set.</div>
       <details class="cap-why"><summary>Why it works this way</summary><p>True does not mean it covers writes — on MySQL it does not. See <code>DEFAULT_STATEMENT_TIMEOUT_SECS</code> in the backend.</p></details>
-      
       <code class="cap-key">statementTimeout</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -325,7 +319,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Process list &amp; kill</b>
       <div class="cap-desc">A server-side list of running work that can be inspected and killed.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-processes">Processes</a></div>
       <code class="cap-key">processList</code>
     </td>
@@ -336,7 +329,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Long-query watchdog</b>
       <div class="cap-desc">A watchdog can list running statements server-wide, with age, and kill one.</div>
       <details class="cap-why"><summary>Why it works this way</summary><p>Distinct from <code>processList</code>, which is the raw list: this is the watcher that ages entries against a threshold and alerts. Needs a per-statement elapsed time and the statement text, which ClickHouse and the file engines do not offer in that shape.</p></details>
-      
       <code class="cap-key">longQueryWatch</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -345,8 +337,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Lock waits, blocking chains &amp; deadlocks</b>
       <div class="cap-desc">Blocking chains can be read: who waits on whom, for how long, on what.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Split out of <code>sqlDba</code> because that flag gates fifteen panels at once, and those panels are not one feature — they are fifteen, each needing its own catalog queries per engine. SQL Server can do blocking chains today (<code>sys.dm_os_waiting_tasks</code>) while it still cannot do, say, the documenter, so a single flag could only be wrong in one direction or the other: fifteen hidden panels, or fifteen broken ones.</p><p>This also gates the Locks &amp; Deadlocks panel&#39;s deadlock tab (wait-for graph + incident history): the three engines that publish anything about deadlocks — SQL Server&#39;s system_health graph history, MySQL&#39;s latest detected deadlock, PostgreSQL&#39;s per-database counters — are exactly the three with blocking chains, so the old separate <code>deadlocks</code> flag could only ever echo this one and was folded into it.</p><p>Expect more of these as SQL Server gains the rest — each one is added only when the panel behind it actually works. Phase 2. Each one is added when the panel behind it actually works.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-locks">Locks &amp; Deadlocks</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Split out of <code>sqlDba</code> because that flag gates fifteen panels at once, and those panels are not one feature — they are fifteen, each needing its own catalog queries per engine. SQL Server can do blocking chains today (<code>sys.dm_os_waiting_tasks</code>) while it still cannot do, say, the documenter, so a single flag could only be wrong in one direction or the other: fifteen hidden panels, or fifteen broken ones.</p><p>This also gates the Locks &amp; Deadlocks panel&#39;s deadlock tab (wait-for graph + incident history): the three engines that publish anything about deadlocks — SQL Server&#39;s system_health graph history, MySQL&#39;s latest detected deadlock, PostgreSQL&#39;s per-database counters — are exactly the three with blocking chains, so the old separate <code>deadlocks</code> flag could only ever echo this one and was folded into it.</p><p>Expect more of these as SQL Server gains the rest — each one is added only when the panel behind it actually works. Phase 2. Each one is added when the panel behind it actually works.</p></details><div class="cap-unlocks">Opens: <a href="#panel-locks">Locks &amp; Deadlocks</a></div>
       <code class="cap-key">lockWaits</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -355,8 +346,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Replication topology</b>
       <div class="cap-desc">A primary/replica topology this panel can draw: replicas that report a log position and a lag.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Split from <code>sqlDba</code> because SQL Server replicates but does <b>not</b> fit that shape — Always On availability groups are per-database, with a synchronisation state and a redo queue rather than a byte offset. That gap is registered in <code>utils/engineGaps.ts</code> and shown greyed with the reason instead of being silently absent.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-replication">Replication</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Split from <code>sqlDba</code> because SQL Server replicates but does <b>not</b> fit that shape — Always On availability groups are per-database, with a synchronisation state and a redo queue rather than a byte offset. That gap is registered in <code>utils/engineGaps.ts</code> and shown greyed with the reason instead of being silently absent.</p></details><div class="cap-unlocks">Opens: <a href="#panel-replication">Replication</a></div>
       <code class="cap-key">replication</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -365,7 +355,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Server settings &amp; status</b>
       <div class="cap-desc">Server settings and status are readable.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-serverinfo">Server</a></div>
       <code class="cap-key">serverInfo</code>
     </td>
@@ -378,7 +367,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>DBA views &amp; tooling</b>
       <div class="cap-desc">The catalog-driven DBA panels: tuner rule sets, replication topology, ANALYZE, locks, GRANTs, saved SQL, the playground, schema compare, the documenter, whole-schema value search.</div>
       
-      
       <code class="cap-key">sqlDba</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -387,7 +375,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Configuration tuner</b>
       <div class="cap-desc">Configuration advice (the tuner).</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-tuner">Tuner</a></div>
       <code class="cap-key">tuner</code>
     </td>
@@ -397,18 +384,25 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Statement statistics over time</b>
       <div class="cap-desc">Cumulative per-statement statistics can be snapshotted and diffed over time — &quot;which statements got slower between these two moments&quot;.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Needs a server-side, cumulative statement digest keyed by a stable id. MySQL has <code>performance_schema.events_statements_summary_by_digest</code> (requires performance_schema, on by default), PostgreSQL has <code>pg_stat_statements</code> (an extension — the panel detects it and offers to enable it). SQL Server&#39;s Query Store is richer than a diff (plan history and forcing — see <code>queryStore</code>) and keeps its own panel, so it is deliberately not here.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-stmtstats">Statement statistics</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Needs a server-side, cumulative statement digest keyed by a stable id. MySQL has <code>performance_schema.events_statements_summary_by_digest</code> (requires performance_schema, on by default), PostgreSQL has <code>pg_stat_statements</code> (an extension — the panel detects it and offers to enable it). SQL Server&#39;s Query Store is richer than a diff (plan history and forcing — see <code>queryStore</code>) and keeps its own panel, so it is deliberately not here.</p></details><div class="cap-unlocks">Opens: <a href="#panel-stmtstats">Statement statistics</a></div>
       <code class="cap-key">stmtStats</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+  </tr>
+<tr data-search="postgresql workload correlation pgworkload correlated pg_stat_statements deltas, pg_stat_activity samples, and local incidents. postgresql workload">
+    <td class="cap">
+      <b>PostgreSQL workload correlation</b>
+      <div class="cap-desc">Correlated pg_stat_statements deltas, pg_stat_activity samples, and local incidents.</div>
+      <div class="cap-unlocks">Opens: <a href="#panel-pgworkload">PostgreSQL Workload</a></div>
+      <code class="cap-key">pgWorkload</code>
+    </td>
+    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
 <tr data-search="query store — plan history querystore the engine keeps a history of query plans, and can be told to use one. not &quot;has query statistics&quot; — mysql&#39;s digests and postgresql&#39;s `pg_stat_statements` both have those, and neither keeps a plan or can pin it. this flag means the two things that make a regression actionable: every plan a query has had, and `sp_query_store_force_plan`. query store">
     <td class="cap">
       <b>Query Store — plan history</b>
       <div class="cap-desc">The engine keeps a HISTORY of query plans, and can be told to use one.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Not &quot;has query statistics&quot; — MySQL&#39;s digests and PostgreSQL&#39;s <code>pg_stat_statements</code> both have those, and neither keeps a plan or can pin it. This flag means the two things that make a regression actionable: every plan a query has had, and <code>sp_query_store_force_plan</code>.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-querystore">Query Store</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Not &quot;has query statistics&quot; — MySQL&#39;s digests and PostgreSQL&#39;s <code>pg_stat_statements</code> both have those, and neither keeps a plan or can pin it. This flag means the two things that make a regression actionable: every plan a query has had, and <code>sp_query_store_force_plan</code>.</p></details><div class="cap-unlocks">Opens: <a href="#panel-querystore">Query Store</a></div>
       <code class="cap-key">queryStore</code>
     </td>
     <td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -417,7 +411,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>SQL quality audit</b>
       <div class="cap-desc">The SQL quality audit (EXPLAIN + statistics + index advice).</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-quality">SQL Quality</a></div>
       <code class="cap-key">sqlQuality</code>
     </td>
@@ -427,7 +420,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Maintenance</b>
       <div class="cap-desc">The Maintenance panel: table upkeep — CHECK / ANALYZE / OPTIMIZE / REPAIR, plus the invalid-objects scan — and, on SQLite, file upkeep (VACUUM, integrity checks, ANALYZE). ANALYZE is the one WRITE in the read-only DBA set: the panel pre-flights the server&#39;s read-only state before running it (<code>super_read_only</code>, <code>pg_is_in_recovery()</code>, <code>DATABASEPROPERTYEX(…, &#39;Updateability&#39;)</code>). Broader than <code>sqlDba</code>, which SQLite lacks.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-maintenance">Maintenance</a></div>
       <code class="cap-key">maintenance</code>
     </td>
@@ -437,8 +429,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Fleet comparison</b>
       <div class="cap-desc">A label&#39;s servers can be compared with each other.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Needs three things the engine must actually have: a name/value settings catalogue, a listable index set, and a per-table statistics timestamp. Without the last one the panel&#39;s third tab is permanently empty, which is why this is not simply <code>sqlDba</code>.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-fleet">Fleet</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Needs three things the engine must actually have: a name/value settings catalogue, a listable index set, and a per-table statistics timestamp. Without the last one the panel&#39;s third tab is permanently empty, which is why this is not simply <code>sqlDba</code>.</p></details><div class="cap-unlocks">Opens: <a href="#panel-fleet">Fleet</a></div>
       <code class="cap-key">fleet</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -447,8 +438,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Contention playground</b>
       <div class="cap-desc">A contention scenario can be manufactured on this server.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Needs N real, concurrent server sessions and a way to make them queue on a row — so an in-process engine cannot do it however much SQL it speaks, and an engine without row locks has nothing to demonstrate.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-playground">Playground</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Needs N real, concurrent server sessions and a way to make them queue on a row — so an in-process engine cannot do it however much SQL it speaks, and an engine without row locks has nothing to demonstrate.</p></details><div class="cap-unlocks">Opens: <a href="#panel-playground">Playground</a></div>
       <code class="cap-key">playground</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -459,7 +449,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>ER diagram</b>
       <div class="cap-desc">Foreign keys and a schema graph exist to draw.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-erdiagram">ER diagram</a></div>
       <code class="cap-key">erDiagram</code>
     </td>
@@ -469,7 +458,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Schema documenter</b>
       <div class="cap-desc">A schema can be documented: columns, types, keys, indexes, foreign keys, routines and whatever comments the engine stores.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-documenter">Documenter</a></div>
       <code class="cap-key">documenter</code>
     </td>
@@ -480,7 +468,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Search every table for a value</b>
       <div class="cap-desc">Every table in a schema can be searched for a value.</div>
       <details class="cap-why"><summary>Why it works this way</summary><p>Needs a catalog to enumerate columns and a LIKE with an escape clause — which all three SQL engines have, in three different spellings.</p></details>
-      
       <code class="cap-key">dbSearch</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -490,7 +477,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Find usages</b>
       <div class="cap-desc">Where a table or column is referenced by the server&#39;s own SQL — views, routines, triggers, constraints, defaults, and whatever else the engine stores a definition for.</div>
       <details class="cap-why"><summary>Why it works this way</summary><p>Needs a catalog that hands back the <i>text</i> of those definitions, which the three SQL engines do in three different ways (<code>SHOW CREATE</code>, <code>pg_get_*def</code>, <code>OBJECT_DEFINITION</code>).</p></details>
-      
       <code class="cap-key">findUsages</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -499,8 +485,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Column profiling</b>
       <div class="cap-desc">A column can be profiled: nulls, distinct counts, extremes, value lengths.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Needs only ordinary aggregates and a row-count estimate, so it is set for every engine with a real catalog and cheap row counts.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-colprofile">Column profile</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Needs only ordinary aggregates and a row-count estimate, so it is set for every engine with a real catalog and cheap row counts.</p></details><div class="cap-unlocks">Opens: <a href="#panel-colprofile">Column profile</a></div>
       <code class="cap-key">columnProfile</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -509,8 +494,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Stored routines</b>
       <div class="cap-desc">Stored routines can be listed, read, edited and saved.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>The write is the reason this is its own flag: the panel replaces a live procedure. MySQL has to DROP then CREATE and keeps the original in hand to restore; PostgreSQL and SQL Server replace in one statement (<code>CREATE OR REPLACE</code>, <code>CREATE OR ALTER</code>) and cannot leave a hole. An engine that cannot do one of those safely does not belong here.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-routines">Routines</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>The write is the reason this is its own flag: the panel replaces a live procedure. MySQL has to DROP then CREATE and keeps the original in hand to restore; PostgreSQL and SQL Server replace in one statement (<code>CREATE OR REPLACE</code>, <code>CREATE OR ALTER</code>) and cannot leave a hole. An engine that cannot do one of those safely does not belong here.</p></details><div class="cap-unlocks">Opens: <a href="#panel-routines">Routines</a></div>
       <code class="cap-key">routines</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -519,8 +503,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Sequences</b>
       <div class="cap-desc">Sequences exist as objects that can be listed, created and altered.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Not <code>sqlDba</code>, for the same reason as <code>lockWaits</code>. Note this is <i>not</i> the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says &quot;ask&quot;, and the menu surfaces (the session plugin menu and the Tools-menu opener in QueryTabs) consult the runtime flavour probe (<code>store/serverFlavors</code> + <code>capabilities()</code> in <code>utils/serverFlavor</code>) before offering Sequences for the mysql engine, while <code>SequencePanel</code> says &quot;MySQL has none&quot; when the flavour comes back plain.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-sequences">Sequences</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Not <code>sqlDba</code>, for the same reason as <code>lockWaits</code>. Note this is <i>not</i> the same set as the SQL engines: MySQL proper has no sequences at all (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL Server do — so the panel is gated on the object existing, not on the engine family. MySQL-vs-MariaDB is decided at runtime from the server flavour, which a static table cannot express; this flag says &quot;ask&quot;, and the menu surfaces (the session plugin menu and the Tools-menu opener in QueryTabs) consult the runtime flavour probe (<code>store/serverFlavors</code> + <code>capabilities()</code> in <code>utils/serverFlavor</code>) before offering Sequences for the mysql engine, while <code>SequencePanel</code> says &quot;MySQL has none&quot; when the flavour comes back plain.</p></details><div class="cap-unlocks">Opens: <a href="#panel-sequences">Sequences</a></div>
       <code class="cap-key">sequences</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -532,7 +515,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Table designer</b>
       <div class="cap-desc">The table designer can serve this engine — it has CREATE/ALTER TABLE DDL the designer models. True for the four SQL engines that own real tables; Redis has no tables and Parquet has nothing to write to.</div>
       
-      
       <code class="cap-key">tableDesigner</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -542,7 +524,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Create / drop schemas</b>
       <div class="cap-desc">Namespaces (schemas / databases) can be created and dropped from the tree.</div>
       <details class="cap-why"><summary>Why it works this way</summary><p>Its own flag rather than <code>sqlDba</code> because the three engines that have them spell every part differently — <code>IF NOT EXISTS</code> does not exist on SQL Server, <code>CASCADE</code> is PostgreSQL&#39;s alone, and <code>CREATE SCHEMA</code> must lead its own batch in T-SQL. An engine here needs a real builder in <code>utils/schemaObjSql.ts</code>, not a generic one.</p></details>
-      
       <code class="cap-key">namespaceDdl</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -551,7 +532,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Data generator</b>
       <div class="cap-desc">Rows can be generated and inserted.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-datagen">Data generator</a></div>
       <code class="cap-key">dataGen</code>
     </td>
@@ -561,7 +541,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>CSV import</b>
       <div class="cap-desc">CSV can be loaded into a table.</div>
-      
       <div class="cap-unlocks">Opens: <a href="#panel-csvimport">CSV import</a></div>
       <code class="cap-key">csvImport</code>
     </td>
@@ -572,7 +551,6 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <b>Data compare &amp; reconcile</b>
       <div class="cap-desc">Two tables can be compared row by row, across sessions, and a reconciliation script generated.</div>
       <details class="cap-why"><summary>Why it works this way</summary><p>Both sides must be the SAME engine — the panel filters the session list on it — because the generated INSERT/UPDATE/DELETE is written in one dialect, and the value representations have to agree before a diff means anything.</p></details>
-      
       <code class="cap-key">dataCompare</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
@@ -581,15 +559,14 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <td class="cap">
       <b>Users &amp; permissions</b>
       <div class="cap-desc">Accounts and their permissions can be listed and edited.</div>
-      <details class="cap-why"><summary>Why it works this way</summary><p>Editing means <i>generating</i> SQL for review — this panel never executes a write — but the engine still has to have a security model TxUI can read back and diff against, which is why it is not simply <code>sqlDba</code>.</p></details>
-      <div class="cap-unlocks">Opens: <a href="#panel-users">Users</a></div>
+      <details class="cap-why"><summary>Why it works this way</summary><p>Editing means <i>generating</i> SQL for review — this panel never executes a write — but the engine still has to have a security model TxUI can read back and diff against, which is why it is not simply <code>sqlDba</code>.</p></details><div class="cap-unlocks">Opens: <a href="#panel-users">Users</a></div>
       <code class="cap-key">userAdmin</code>
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr></tbody>
   </table></div>
   <h2>Panels every engine gets</h2>
-  <p>8 of the 36 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
+  <p>8 of the 37 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
   <h2>Panels only one engine can have</h2>
   <p>7 more panels are gated on the engine itself rather than on a capability, because nothing else has an equivalent to expose:</p>
   <ul class="cap-exclusives">
@@ -1106,76 +1083,76 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="coverage" class="doc-section">
   <h1>Feature-coverage matrix</h1>
-  <p class="lede">Every one of the 36 tool panels, cross-checked against the source at build time — the menu group it lives in, the engines it supports, whether it is documented here, and whether a screenshot could be captured. <b>35/36</b> panels have screenshots; the rest are marked <span class="na">NA</span> (they need a live server to render meaningfully) and are still fully documented in text.</p>
+  <p class="lede">Every one of the 37 tool panels, cross-checked against the source at build time — the menu group it lives in, the engines it supports, whether it is documented here, and whether a screenshot could be captured. <b>35/37</b> panels have screenshots; the rest are marked <span class="na">NA</span> (they need a live server to render meaningfully) and are still fully documented in text.</p>
   <div class="toolbar">
     <input id="covFilter" class="filter" placeholder="Filter panels…" oninput="filterTable('covFilter','covTable')">
     <select id="covEngine" class="filter" onchange="filterEngine('covEngine','covTable')">
       <option value="">All engines</option>
-      <option value="mysql">MySQL</option><option value="postgres">PostgreSQL</option><option value="sqlserver">SQL Server</option><option value="clickhouse">ClickHouse</option><option value="sqlite">SQLite</option><option value="duckdb">DuckDB</option><option value="redis">Redis</option><option value="parquet">Parquet</option><option value="mongodb">MongoDB</option>
+      <option value="postgres">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option><option value="clickhouse">ClickHouse</option><option value="sqlite">SQLite</option><option value="duckdb">DuckDB</option><option value="redis">Redis</option><option value="parquet">Parquet</option><option value="mongodb">MongoDB</option>
     </select>
   </div>
   <table class="ref" id="covTable">
     <thead><tr><th>Panel</th><th>Group</th><th>Engines</th><th>Documented</th><th>Screenshot</th></tr></thead>
-    <tbody><tr data-search="processes activity processes" data-engines="mysql postgres sqlserver clickhouse redis mongodb">
+    <tbody><tr data-search="processes activity processes" data-engines="postgres mysql sqlserver clickhouse redis mongodb">
       <td><a href="#panel-processes">Processes</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="replication activity replication" data-engines="mysql postgres">
+<tr data-search="replication activity replication" data-engines="postgres mysql">
       <td><a href="#panel-replication">Replication</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="dba views server dbaviews" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="dba views server dbaviews" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-dbaviews">DBA views</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="tuner server tuner" data-engines="mysql postgres sqlserver clickhouse sqlite redis">
+<tr data-search="tuner server tuner" data-engines="postgres mysql sqlserver clickhouse sqlite redis">
       <td><a href="#panel-tuner">Tuner</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="routines schema routines" data-engines="mysql postgres sqlserver">
+<tr data-search="routines schema routines" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-routines">Routines</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="txshell sql txshell" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb parquet">
+<tr data-search="txshell sql txshell" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb parquet">
       <td><a href="#panel-txshell">TxShell</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="find find &amp; compare find" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="find find &amp; compare find" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-find">Find</a></td>
       <td class="dim">Find &amp; Compare</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="column profile data colprofile" data-engines="mysql postgres sqlserver">
+<tr data-search="column profile data colprofile" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-colprofile">Column profile</a></td>
       <td class="dim">Data</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="sequences schema sequences" data-engines="mysql postgres sqlserver">
+<tr data-search="sequences schema sequences" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-sequences">Sequences</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1186,10 +1163,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="views schema views" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb parquet">
+<tr data-search="views schema views" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb parquet">
       <td><a href="#panel-views">Views</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1200,17 +1177,17 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="table designer schema designer" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="table designer schema designer" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-designer">Table designer</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="compare find &amp; compare compare" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="compare find &amp; compare compare" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-compare">Compare</a></td>
       <td class="dim">Find &amp; Compare</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1221,12 +1198,19 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="statement statistics insights stmtstats" data-engines="mysql postgres">
+<tr data-search="statement statistics insights stmtstats" data-engines="postgres mysql">
       <td><a href="#panel-stmtstats">Statement statistics</a></td>
       <td class="dim">Insights</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
+    </tr>
+<tr data-search="postgresql workload insights pgworkload" data-engines="postgres">
+      <td><a href="#panel-pgworkload">PostgreSQL Workload</a></td>
+      <td class="dim">Insights</td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
     </tr>
 <tr data-search="binary logs insights binlog" data-engines="mysql">
       <td><a href="#panel-binlog">Binary logs</a></td>
@@ -1242,10 +1226,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="maintenance server maintenance" data-engines="mysql postgres sqlserver sqlite">
+<tr data-search="maintenance server maintenance" data-engines="postgres mysql sqlserver sqlite">
       <td><a href="#panel-maintenance">Maintenance</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1256,17 +1240,17 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="documenter schema documenter" data-engines="mysql postgres sqlserver">
+<tr data-search="documenter schema documenter" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-documenter">Documenter</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="fleet server fleet" data-engines="mysql postgres sqlserver">
+<tr data-search="fleet server fleet" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-fleet">Fleet</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1277,59 +1261,59 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="er diagram schema erdiagram" data-engines="mysql postgres sqlserver sqlite">
+<tr data-search="er diagram schema erdiagram" data-engines="postgres mysql sqlserver sqlite">
       <td><a href="#panel-erdiagram">ER diagram</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="data generator data datagen" data-engines="mysql postgres sqlserver">
+<tr data-search="data generator data datagen" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-datagen">Data generator</a></td>
       <td class="dim">Data</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="csv import data csvimport" data-engines="mysql postgres sqlserver clickhouse sqlite">
+<tr data-search="csv import data csvimport" data-engines="postgres mysql sqlserver clickhouse sqlite">
       <td><a href="#panel-csvimport">CSV import</a></td>
       <td class="dim">Data</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="playground activity playground" data-engines="mysql postgres sqlserver">
+<tr data-search="playground activity playground" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-playground">Playground</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="sql quality sql quality" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb">
+<tr data-search="sql quality sql quality" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb">
       <td><a href="#panel-quality">SQL Quality</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="server server serverinfo" data-engines="mysql postgres sqlserver clickhouse duckdb redis mongodb">
+<tr data-search="server server serverinfo" data-engines="postgres mysql sqlserver clickhouse duckdb redis mongodb">
       <td><a href="#panel-serverinfo">Server</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="watch activity watch" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="watch activity watch" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-watch">Watch</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="locks &amp; deadlocks activity locks" data-engines="mysql postgres sqlserver">
+<tr data-search="locks &amp; deadlocks activity locks" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-locks">Locks &amp; Deadlocks</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1340,31 +1324,31 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
     </tr>
-<tr data-search="users server users" data-engines="mysql postgres sqlserver">
+<tr data-search="users server users" data-engines="postgres mysql sqlserver">
       <td><a href="#panel-users">Users</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="saved sql saved" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="saved sql saved" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-saved">Saved</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="history insights history" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="history insights history" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-history">History</a></td>
       <td class="dim">Insights</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="incident timeline insights timeline" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="incident timeline insights timeline" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-timeline">Incident timeline</a></td>
       <td class="dim">Insights</td>
-      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr></tbody>
@@ -1373,12 +1357,12 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="panels" class="doc-section">
   <h1>Tool panels</h1>
-  <p class="lede">TxUI ships 36 tool panels, opened from the workspace menus (<b>Monitor · Server · Schema · Data · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
+  <p class="lede">TxUI ships 37 tool panels, opened from the workspace menus (<b>Monitor · Server · Schema · Data · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
   <figure><img src="shots/06-menu-monitor.png" alt="Plugins menu" loading="lazy"><figcaption>The workspace menus — each panel is one click away, and only the panels the current engine supports appear.</figcaption></figure><h2 class="group-h">Server</h2>
 <div class="panel-doc" id="panel-dbaviews">
   <div class="panel-head">
     <h3>DBA views</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>A curated catalog of read-only DBA lookups (MySQL sys / performance_schema, PostgreSQL pg_stat_*, ClickHouse system.*, Redis INFO/CLIENT/etc.) chosen from a categorized list on the left and shown in a grid on the right. It diagnoses empty results honestly: it detects when a performance_schema consumer or ClickHouse query_log is disabled and shows copyable fix SQL instead of a misleading blank. A DBA uses it to run known health queries without writing them.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Server -&gt; DBA views (also on the native Tools menu)</p>
@@ -1390,7 +1374,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-tuner">
   <div class="panel-head">
     <h3>Tuner</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></div>
   </div>
   <p>A read-only server health analyzer that produces a 0-100 health score with Performance/Security/Resilience sub-scores, an end-of-life banner, and findings grouped by category with guided fixes. It has per-engine rule sets (MySQL family scored MySQLTuner-style, PostgreSQL, and Redis). Fixes are never executed here; they are only copied or inserted into the editor for review.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Server -&gt; Tuner (labelled &#39;Server tuner&#39;; also on the native Tools menu)</p>
@@ -1402,7 +1386,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-maintenance">
   <div class="panel-head">
     <h3>Maintenance</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
   </div>
   <p>A schema-health and table-upkeep panel covering two concerns: running table maintenance operations (ANALYZE/CHECK/OPTIMIZE/REPAIR and equivalents) and detecting what a prior schema change quietly broke. It has three tabs - &#39;Upkeep &amp; invalid objects&#39;, &#39;Bulk edit&#39;, and a conditional &#39;Vacuum advisor&#39; - plus a separate whole-file view for SQLite. Unlike most panels it actually executes statements (rewriting tables, and MySQL DDL that cannot be rolled back), routing every run through an audited runner that writes a persistent audit log; the exact SQL is always shown before running.</p>
   <p class="how"><b>Open:</b> Session menu bar, Server group, &#39;Maintenance&#39;. Renders as the MaintenancePanel tab (title &#39;🩹 Maintenance&#39;) with the current session and selected database; a &#39;prod&#39; badge shows when the environment is prod.</p>
@@ -1426,7 +1410,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-fleet">
   <div class="panel-head">
     <h3>Fleet</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Fleet runs read-only checks across every server sharing a label (labels, not sidebar folders, are what the checks operate on). It connects to all members of a chosen label, detects each one&#39;s role (primary/replica) from the server itself rather than config, and compares them across three tabs: Variables (config drift), Indexes (which indexes diverge and in which direction), and Statistics (freshness of table stats). Judgement of what is a real finding vs expected difference lives in utils/fleetChecks.</p>
   <p class="how"><b>Open:</b> Session menu bar, Server group, &#39;Fleet&#39; (can also be opened from a label chip). Renders as the FleetPanel tab; it opens its own sessions to each labeled connection and closes them on unmount.</p>
@@ -1450,7 +1434,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-serverinfo">
   <div class="panel-head">
     <h3>Server</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Server variables &amp; status browser. MySQL shows SHOW GLOBAL VARIABLES / STATUS; PostgreSQL shows pg_settings / pg_stat_database; Redis shows config / INFO. You can search across all cells, and on PostgreSQL narrow variables to changed-from-default only. MySQL/MariaDB and PostgreSQL variables are also editable: selecting a row and setting a new value generates a review-only statement (MySQL SET GLOBAL with a persistence hint, or PG ALTER SYSTEM SET) that is inserted into the editor, never executed here.</p>
   <p class="how"><b>Open:</b> Session menu bar, Server group, &#39;Server variables &amp; status&#39;. Renders as the ServerInfoPanel tab with sessionId and engine.</p>
@@ -1462,7 +1446,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-users">
   <div class="panel-head">
     <h3>Users</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>A DBA security view for database users/roles and their grants. Reading is live and instant (lists accounts, shows grants, decodes ACLs), but every mutation - create/alter/drop user or role, GRANT/REVOKE, role management, default privileges - is strictly review-only: it generates SQL and inserts it into the editor for the DBA to inspect and run deliberately. The panel never executes any write itself, and it adapts its whole UI to MySQL/MariaDB vs PostgreSQL.</p>
   <p class="how"><b>Open:</b> Session menu bar, Server group, &#39;Users &amp; grants&#39;. Renders as the UsersPanel tab (title &#39;👤 Users &amp; grants&#39;) with sessionId and engine. MariaDB is detected via an async server-flavor probe.</p>
@@ -1474,7 +1458,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-routines">
   <div class="panel-head">
     <h3>Routines</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>An editor for stored procedures, functions, triggers and events. It lists routines in the current schema, loads one via SHOW CREATE / catalog reconstruction, and edits its metadata, parameters and body, always showing the exact DROP+CREATE that will run before it runs. A DBA uses it to safely change routines; on MySQL, where there is no CREATE OR REPLACE and DDL auto-commits, the backend keeps the original and restores it if a save fails.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Schema -&gt; Routines (also on the native Tools menu); can also be opened on a specific routine from the schema tree</p>
@@ -1486,7 +1470,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-sequences">
   <div class="panel-head">
     <h3>Sequences</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>An editor for sequence objects: create, alter every property in place, restart the position, and drop. It never drops-and-recreates (which would silently reset the position) and shows the exact ALTER/CREATE statements before running. A DBA uses it to inspect and adjust a sequence without hand-writing the SELECT-then-ALTER dance.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Schema -&gt; Sequences (also on the native Tools menu); can be opened on a specific sequence from the schema tree</p>
@@ -1510,7 +1494,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-views">
   <div class="panel-head">
     <h3>Views</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
   </div>
   <p>An editor for views and materialized views: create, replace (via CREATE OR REPLACE or drop-and-recreate), refresh, and drop, editing the SELECT body in a full SQL editor. Existing definitions are read back through the same get_ddl the schema tree uses, and the exact statements are shown before running. A DBA uses it to edit a view without hand-writing CREATE OR REPLACE VIEW.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Schema -&gt; Views (also on the native Tools menu); can be opened on a specific view from the schema tree</p>
@@ -1534,7 +1518,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-designer">
   <div class="panel-head">
     <h3>Table designer</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>A visual table designer that edits a draft (never the database directly) and shows the implied change set - each entry labelled with its cost and what it can destroy - alongside the SQL that would run. It handles columns (including generated columns), indexes (including MySQL INVISIBLE), primary keys, storage engine, and partitions. A DBA uses it to create or alter a table&#39;s structure with the risk of each change made explicit before Apply.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Schema -&gt; Table designer (also on the native Tools menu); can be opened on an existing table from the schema tree</p>
@@ -1546,7 +1530,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-documenter">
   <div class="panel-head">
     <h3>Documenter</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Schema documenter that produces commit-ready schema documentation (Markdown primary, or HTML) intended to be committed next to migrations so schema changes show up as diffs in review. It introspects the selected database via up to four catalog queries (tables, columns, indexes, foreign keys, routines), each run separately so a missing privilege loses one section rather than the whole document. Output is deterministically ordered and free of timestamps; rendering lives in utils/schemaDoc.</p>
   <p class="how"><b>Open:</b> Session menu bar, Schema group, &#39;Documenter&#39;. Renders as the DocumenterPanel tab with the current session and selected database (schema).</p>
@@ -1558,7 +1542,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-erdiagram">
   <div class="panel-head">
     <h3>ER diagram</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
   </div>
   <p>An interactive schema map built from the foreign-key graph. It introspects the selected schema live (via monitor_query against information_schema / pg_catalog), lays tables out in FK-depth layers on a pannable/zoomable canvas with draggable nodes, and draws crow&#39;s-foot relationship edges between referencing and referenced columns. It is strictly catalog-only: no table data is ever read or mutated.</p>
   <p class="how"><b>Open:</b> Session menu bar, Schema group, &#39;ER diagram&#39;. Renders as the ErDiagram tab with sessionId, connectionId, and engine (no readOnly/environment - it never writes).</p>
@@ -1570,7 +1554,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-colprofile">
   <div class="panel-head">
     <h3>Column profile</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Profiles what is actually in each column of a table - row/null/distinct counts, selectivity, min/max/avg and length ranges - in a single scan, sampling large tables (with the sample size stated on screen). Distinct from Analyze, which reports the optimizer&#39;s beliefs; this reports the data. A DBA uses it to understand an unfamiliar table before writing queries or migrations.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; Data -&gt; Column profile (also on the native Tools menu)</p>
@@ -1582,7 +1566,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-datagen">
   <div class="panel-head">
     <h3>Data generator</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>A three-step wizard for generating and inserting fake data. Step 1 (Target) picks one of three targets - generate a whole database from a schema kit, fill an existing table, or create a new table; Step 2 configures per-column generators (70+ types with rich params) or per-table row counts; Step 3 (Preview &amp; Run) shows sample rows / DDL plus exact SQL, then runs a chunked, streamed insert with a live progress bar and ETA. Generation happens in the Rust backend and continues even if the panel is closed.</p>
   <p class="how"><b>Open:</b> Session menu bar, Data group, &#39;Data generator&#39;. Renders as the DataGenPanel tab (title &#39;🎲 Data generator&#39;) with sessionId, engine, environment, readOnly, connectionName, and schema.</p>
@@ -1594,7 +1578,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-csvimport">
   <div class="panel-head">
     <h3>CSV import</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></div>
   </div>
   <p>A three-step CSV import wizard: (1) File &amp; target - pick a CSV/JSON/spreadsheet (delimiter and header auto-detected and re-detectable), importing into an existing table or creating a new one; (2) Columns - per-column mapping with skip toggles (existing: matched by name; new: editable name/type inferred from data); (3) Run - options plus live byte-based progress, run transactionally. Non-CSV files (JSON, xlsx/xls/ods, ndjson) are converted to a temporary CSV first and then follow the same path.</p>
   <p class="how"><b>Open:</b> Session menu bar, Data group, &#39;CSV import&#39;. Renders as the CsvImportPanel tab with sessionId, engine, environment, and readOnly.</p>
@@ -1606,7 +1590,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-txshell">
   <div class="panel-head">
     <h3>TxShell</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
   </div>
   <p>A SQL command line inside the app with a structured transcript: a bare line is SQL and runs, results render as real sortable/exportable grids, and lines can be piped through stages to sinks. It adds psql-style backslash commands, variables, OS command escapes, file sources, and fan-out across matching connections. A DBA uses it as a fast keyboard-driven console that can also export, insert into another server, and script setups.</p>
   <p class="how"><b>Open:</b> Plugins menu -&gt; SQL -&gt; TxShell (also on the native Tools menu)</p>
@@ -1618,7 +1602,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-quality">
   <div class="panel-head">
     <h3>SQL Quality</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></div>
   </div>
   <p>A deep query-analysis panel modeled on a manual DBA review. In &#39;Query&#39; mode you paste or load one statement, tick which checks to run, and get a findings report: static lint, referenced-table DDL and sizes, a join/filter data-type audit, integer AUTO_INCREMENT ceilings, InnoDB statistics, an index advisor, EXPLAIN (+SHOW WARNINGS), EXPLAIN FORMAT=JSON cost overview, and a guarded EXPLAIN ANALYZE. A second MySQL-only &#39;Schema&#39; mode reviews an entire schema&#39;s catalog with no SQL input. Reports render on screen with detail/severity controls and export to Markdown or raw text.</p>
   <p class="how"><b>Open:</b> Session menu bar, SQL group, &#39;SQL Quality&#39;. Renders as the SqlQualityPanel tab with the current session.</p>
@@ -1630,7 +1614,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="panel-doc" id="panel-saved">
   <div class="panel-head">
     <h3>Saved</h3>
-    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Saved queries / snippets: a SQLite-backed, folder-organized, searchable library of reusable SQL. Clicking an item inserts its SQL into the editor; a Save current button stores the current editor buffer under a name and optional folder. Search uses fuzzy matching over folder+name. Saved queries support positional aliases (:1, :2, ...) that substitute values when run from the editor as &#39;name val1 val2&#39;.</p>
   <p class="how"><b>Open:</b> Session menu bar, SQL group, &#39;Saved queries&#39;. Renders as the SavedQueriesPanel tab; it takes the current editor buffer (for saving) and inserts selected SQL into the editor.</p>
@@ -2051,7 +2035,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.4.3 · 36 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.4.3 · 37 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

@@ -25,6 +25,8 @@ import { useServerFlavor } from '../store/serverFlavors';
 import type { Severity } from '../utils/sqlLint';
 import { ASSUMPTIONS } from '../utils/ddlCost';
 import { reviewSchema } from '../utils/schemaRules';
+import type { SchemaSnapshot } from '../utils/schemaRules';
+import { reviewChanges } from '../utils/changeReview';
 import { MYSQL_SNAPSHOT_SQL, PG_SNAPSHOT_SQL, buildSnapshot } from '../utils/schemaCollect';
 import type { Grid } from '../utils/schemaCollect';
 import { saveTextAs, copyToClipboard } from '../utils/exportersIo';
@@ -119,13 +121,8 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     findings: Finding[]; sections: ReportSection[];
     meta: Parameters<typeof buildMarkdown>[0]; txt: string;
   } | null>(null);
-  /**
-   * Two questions, one panel. `query` asks "will this statement be fast and
-   * correct"; `schema` asks "is the database it lands in sane" — the
-   * catalog-driven two thirds of the rulebook, which needs no SQL input at
-   * all. They share the report, the detail control and the exports.
-   */
-  const [mode, setMode] = useState<'query' | 'schema'>('query');
+  /** Query, live-schema and sequential migration review share one report/export pipeline. */
+  const [mode, setMode] = useState<'query' | 'schema' | 'change'>('query');
   const [detail, setDetail] = usePreference(PREFS.qualityDetail);
   const [floor, setFloor] = usePreference(PREFS.qualityFloor);
   const [showPassed, setShowPassed] = usePreference(PREFS.qualityShowPassed);
@@ -319,6 +316,74 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     }
   }, [running, dbOverride, session, isMysql]);
 
+  const runChangeReview = useCallback(async () => {
+    if (!sql.trim() || running) return;
+    setRunning(true);
+    setReport(null);
+    const logs: string[] = [];
+    const say = (m: string) => { logs.push(m); setLog([...logs]); };
+    setLog([]);
+    const schema = dbOverride.trim();
+    try {
+      let catalog: SchemaSnapshot | undefined;
+      if (schema) {
+        say(`Reading the before-state catalog of \`${schema}\`…`);
+        const grid = async (query: string): Promise<Grid | null> => {
+          try {
+            const r = await invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql: query });
+            return { columns: r.columns.map(c => c.name), rows: r.rows };
+          } catch {
+            return null;
+          }
+        };
+        const SNAP = isMysql ? MYSQL_SNAPSHOT_SQL : PG_SNAPSHOT_SQL;
+        const [defaults, tables, columns, indexes, foreignKeys, sequences] = await Promise.all([
+          grid(SNAP.defaults(schema)), grid(SNAP.tables(schema)), grid(SNAP.columns(schema)),
+          grid(SNAP.indexes(schema)), grid(SNAP.foreignKeys(schema)),
+          isMysql ? Promise.resolve(null) : grid(PG_SNAPSHOT_SQL.sequences(schema)),
+        ]);
+        // A partial catalog is not a before-state: using it would make absent
+        // columns/tables look absent on the server rather than merely unreadable.
+        if (tables && columns && indexes && foreignKeys) {
+          let stats = await grid(SNAP.stats(schema));
+          let statsSource = isMysql ? 'mysql.innodb_table_stats' : 'pg_stat_user_tables + pg_relation_size';
+          if (!stats) {
+            stats = await grid(SNAP.statsFallback(schema));
+            statsSource = isMysql ? 'information_schema.TABLES (estimated)' : 'pg_class.reltuples (estimated)';
+          }
+          catalog = buildSnapshot({
+            schema, engine: session.engine, defaults, tables, columns, indexes, foreignKeys,
+            stats, statsSource, sequences,
+          });
+          say(`Seeded ${catalog.tables.length} live tables; applying migration statements in order.`);
+        } else {
+          say('Core catalog reads were incomplete — falling back to migration-only analysis, not a complete live before-state.');
+        }
+      } else {
+        say('No DB selected — migration-only analysis. ALTER targets need an earlier CREATE or their model stays partial.');
+      }
+      const out = reviewChanges({ sql, engine: isMysql ? 'mysql' : 'postgres', catalog, mariaDb: isMariaDb });
+      setReport({
+        findings: out.findings,
+        sections: out.sections,
+        meta: {
+          connectionName: session.connectionName,
+          engine: session.engine,
+          date: reportTimestamp(),
+          sql,
+        },
+        txt: buildFindingsTxt(out.findings),
+      });
+      setRawBlocks([]);
+      say(`Done — ${out.summary.supported}/${out.summary.statements} statements modeled, `
+        + `${out.summary.unsupported} unsupported, ${out.findings.length} findings.`);
+    } catch (e) {
+      say(`Aborted: ${errorDisplay(e)}`);
+    } finally {
+      setRunning(false);
+    }
+  }, [sql, running, dbOverride, session, isMysql, isMariaDb]);
+
   const sevCounts = useMemo(() => {
     const c = { red: 0, orange: 0, yellow: 0, info: 0 };
     for (const f of report?.findings ?? []) c[f.severity]++;
@@ -329,9 +394,8 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     <div className="proc-panel">
       <div className="proc-toolbar">
         <span className="proc-title">🔍 SQL Quality</span>
-        {/* Two questions, one panel — see the `mode` state. The switch is a
-            pair of buttons rather than a dropdown because which one you are
-            in changes what the whole left half of the panel is. */}
+        {/* The mode changes the whole input/run path, so the three modes are
+            explicit buttons rather than a dropdown. */}
         <button
           className={`toolbar-btn${mode === 'query' ? ' toolbar-btn-on' : ''}`}
           data-tip="Analyse one statement: plan, types, indexes"
@@ -354,13 +418,23 @@ export function SqlQualityPanel({ session, onClose }: Props) {
           aria-disabled={canSchemaReview ? undefined : true}
           onClick={() => { if (canSchemaReview) setMode('schema'); }}
         >Schema</button>
-        {mode === 'query' && <button className="toolbar-btn" onClick={loadFile}>Load .sql…</button>}
+        <button
+          className={`toolbar-btn${mode === 'change' ? ' toolbar-btn-on' : ''}${canSchemaReview ? '' : ' unavail'}`}
+          data-tip={canSchemaReview
+            ? 'Review an ordered table migration: post-change columns/indexes/FKs, destructive changes, narrowing, locks and rebuilds'
+            : `Change review currently supports MySQL/MariaDB and PostgreSQL table migrations, not ${session.engine}.`}
+          aria-disabled={canSchemaReview ? undefined : true}
+          onClick={() => { if (canSchemaReview) setMode('change'); }}
+        >Change</button>
+        {mode !== 'schema' && <button className="toolbar-btn" onClick={loadFile}>Load .sql…</button>}
         {panelCapable && (
-          <label className="sqp-db" title="Run all analysis against THIS database — fixes cross-schema 'table not found' errors">
+          <label className="sqp-db" title={mode === 'change'
+            ? 'Optional for Change review: seed a complete live before-state from this database. Leave empty for migration-only analysis.'
+            : "Run all analysis against THIS database — fixes cross-schema 'table not found' errors"}>
             <span>DB:</span>
             <input list="sqp-db-list" value={dbOverride}
               onChange={e => setDbOverride(e.target.value)}
-              placeholder="(session default)"
+              placeholder={mode === 'change' ? '(migration only)' : '(session default)'}
               spellCheck={false} autoComplete="off" autoCorrect="off" autoCapitalize="off" />
             <datalist id="sqp-db-list">
               {schemas.map(sc => <option key={sc} value={sc} />)}
@@ -490,13 +564,27 @@ export function SqlQualityPanel({ session, onClose }: Props) {
               )}
             </div>
           ) : (
-            <textarea
-              className="sqp-sql"
-              value={sql}
-              onChange={e => setSql(e.target.value)}
-              placeholder="Paste the query to analyze (or Load .sql)…"
-              spellCheck={false}
-            />
+            <>
+              {mode === 'change' && (
+                <div className="sqp-schema-intro">
+                  <h3>Change review — {dbOverride.trim() ? `live before-state: ${dbOverride.trim()}` : 'migration only'}</h3>
+                  <p className="sqp-schema-note">
+                    Models CREATE/ALTER/DROP TABLE, columns, plain indexes and foreign keys in statement order.
+                    Unsupported syntax is a finding, never a pass. Views, triggers, partitions, grants and data
+                    contents are not simulated; without a complete live catalog, pre-existing tables stay partial.
+                  </p>
+                </div>
+              )}
+              <textarea
+                className="sqp-sql"
+                value={sql}
+                onChange={e => setSql(e.target.value)}
+                placeholder={mode === 'change'
+                  ? 'Paste the ordered migration to review (or Load .sql)…'
+                  : 'Paste the query to analyze (or Load .sql)…'}
+                spellCheck={false}
+              />
+            </>
           )}
           {mode === 'query' && needsParams && (
             <div className="sqp-params">
@@ -515,7 +603,7 @@ export function SqlQualityPanel({ session, onClose }: Props) {
         </div>
 
         <div className="sqp-right">
-          <div className="sqp-checks" style={mode === 'schema' ? { display: 'none' } : undefined}>
+          <div className="sqp-checks" style={mode !== 'query' ? { display: 'none' } : undefined}>
             <div className="sqp-check-title">Verify</div>
             <label className="gsp-check"><input type="checkbox" checked={checks.lint}
               onChange={e => set({ lint: e.target.checked })} /> Static analysis (offline lint)</label>
@@ -604,6 +692,15 @@ export function SqlQualityPanel({ session, onClose }: Props) {
             >{running ? 'Reviewing…' : '▶ Review schema'}</button>
           )}
 
+          {mode === 'change' && (
+            <button
+              className="primary"
+              style={{ marginTop: 10 }}
+              disabled={running || !sql.trim()}
+              onClick={runChangeReview}
+            >{running ? 'Reviewing…' : '▶ Review migration'}</button>
+          )}
+
           <div className="sqp-log">
             {log.map((l, i) => <div key={i} className="sqp-log-line">{l}</div>)}
           </div>
@@ -626,6 +723,7 @@ export function SqlQualityPanel({ session, onClose }: Props) {
                 <div key={`${f.id}-${i}`} className={`sqp-finding sqp-${f.severity}`}>
                   <div className="sqp-f-title">{SEVERITY_ICON[f.severity]} <b>{categoryOf(f.id)}</b> — {f.title}</div>
                   <div className="sqp-f-detail">{f.detail}</div>
+                  {f.at && <div className="sqp-f-evidence">Line {f.at.line}{f.at.col ? `, column ${f.at.col}` : ''}</div>}
                   {f.snippet && <code className="sqp-f-snippet">{f.snippet}</code>}
                   {detail !== 'summary' && detail !== 'oneline' && f.fix && (
                     <code className="sqp-f-snippet sqp-f-fix">{f.fix}</code>

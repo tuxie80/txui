@@ -4,8 +4,8 @@
 /// redis_key_audit, redis_sentinel_overview, redis_geo_points
 ///
 /// Every command is a thin `tauri::command` shell (session lookup, read-only
-/// guard) over a `pub(crate)` body taking the ConnectionManager — the same
-/// factored-body convention as `do_kill_processes`, and what makes the bodies
+/// guard) over a `pub(crate)` body taking the topology-aware RedisConnection —
+/// the same factored-body convention as `do_kill_processes`, and what makes the bodies
 /// drivable from the live tests at the bottom of this file.
 use tauri::State;
 use uuid::Uuid;
@@ -71,7 +71,7 @@ pub(crate) async fn guard_read_only(session_id: Uuid, state: &AppState, action: 
 async fn get_mgr(
     session_id: Uuid,
     state: &State<'_, AppState>,
-) -> Result<redis::aio::ConnectionManager, crate::apperror::AppError> {
+) -> Result<crate::db::redis::RedisConnection, crate::apperror::AppError> {
     let session = get_session_pub(session_id, &state.sessions)
         .await
         ?;
@@ -129,39 +129,12 @@ pub async fn redis_scan(
 }
 
 pub(crate) async fn scan_body(
-    mgr:        &mut redis::aio::ConnectionManager,
+    mgr:        &mut crate::db::redis::RedisConnection,
     pattern:    &str,
     cursor:     u64,
     count:      u64,
 ) -> Result<RedisScanResult, crate::apperror::AppError> {
-    let raw: redis::Value = redis::cmd("SCAN")
-        .arg(cursor)
-        .arg("MATCH").arg(pattern)
-        .arg("COUNT").arg(count)
-        .query_async(mgr)
-        .await
-        ?;
-
-    // SCAN returns [cursor_bulk, [key, key, ...]]
-    let (next_cursor, keys) = match raw {
-        redis::Value::Array(ref items) if items.len() == 2 => {
-            let cur: u64 = match &items[0] {
-                redis::Value::BulkString(b) =>
-                    String::from_utf8_lossy(b).parse().unwrap_or(0),
-                redis::Value::Int(n) => *n as u64,
-                redis::Value::SimpleString(s) => s.parse().unwrap_or(0),
-                _ => 0,
-            };
-            let ks = match &items[1] {
-                redis::Value::Array(arr) =>
-                    arr.iter().filter_map(bulk_to_string).collect(),
-                _ => vec![],
-            };
-            (cur, ks)
-        }
-        _ => (0, vec![]),
-    };
-
+    let (next_cursor, keys) = mgr.scan(pattern, cursor, count).await?;
     Ok(RedisScanResult { cursor: next_cursor, keys })
 }
 
@@ -180,7 +153,7 @@ fn size_command(key_type: &str) -> Option<&'static str> {
 }
 
 /// OBJECT ENCODING as an Option — nil (gone key, module type) becomes None.
-async fn object_encoding(mgr: &mut redis::aio::ConnectionManager, key: &str) -> Option<String> {
+async fn object_encoding(mgr: &mut crate::db::redis::RedisConnection, key: &str) -> Option<String> {
     let raw: redis::Value = redis::cmd("OBJECT").arg("ENCODING").arg(key)
         .query_async(mgr).await.ok()?;
     bulk_to_string(&raw)
@@ -198,7 +171,7 @@ pub async fn redis_key_info(
 }
 
 pub(crate) async fn key_info_body(
-    mgr: &mut redis::aio::ConnectionManager,
+    mgr: &mut crate::db::redis::RedisConnection,
     key: &str,
 ) -> Result<RedisKeyInfo, crate::apperror::AppError> {
     let type_str: String = redis::cmd("TYPE").arg(key)
@@ -229,7 +202,7 @@ pub async fn redis_get_value(
 }
 
 pub(crate) async fn get_value_body(
-    mgr: &mut redis::aio::ConnectionManager,
+    mgr: &mut crate::db::redis::RedisConnection,
     key: &str,
 ) -> Result<RedisValue, crate::apperror::AppError> {
     let type_str: String = redis::cmd("TYPE").arg(key)
@@ -355,7 +328,7 @@ pub async fn redis_set_string(
 }
 
 pub(crate) async fn set_string_body(
-    mgr:      &mut redis::aio::ConnectionManager,
+    mgr:      &mut crate::db::redis::RedisConnection,
     key:      &str,
     value:    &str,
     ttl_secs: Option<i64>,
@@ -411,7 +384,7 @@ fn ttl_op(ttl_secs: i64) -> Result<TtlOp, crate::apperror::AppError> {
 }
 
 pub(crate) async fn set_ttl_body(
-    mgr:      &mut redis::aio::ConnectionManager,
+    mgr:      &mut crate::db::redis::RedisConnection,
     key:      &str,
     ttl_secs: i64,
 ) -> Result<(), crate::apperror::AppError> {
@@ -441,7 +414,7 @@ pub async fn redis_delete_keys(
 }
 
 pub(crate) async fn delete_keys_body(
-    mgr:  &mut redis::aio::ConnectionManager,
+    mgr:  &mut crate::db::redis::RedisConnection,
     keys: &[String],
 ) -> Result<i64, crate::apperror::AppError> {
     let mut cmd = redis::cmd("DEL");
@@ -462,7 +435,7 @@ pub async fn redis_server_info(
 }
 
 pub(crate) async fn server_info_body(
-    mgr:     &mut redis::aio::ConnectionManager,
+    mgr:     &mut crate::db::redis::RedisConnection,
     section: Option<&str>,
 ) -> Result<String, crate::apperror::AppError> {
     let mut cmd = redis::cmd("INFO");
@@ -501,12 +474,40 @@ pub async fn redis_key_audit(
 }
 
 pub(crate) async fn key_audit_body(
-    mgr:  &mut redis::aio::ConnectionManager,
+    mgr:  &mut crate::db::redis::RedisConnection,
     keys: Vec<String>,
 ) -> Result<Vec<RedisKeyAudit>, crate::apperror::AppError> {
     let keys: Vec<String> = keys.into_iter().take(AUDIT_MAX_KEYS).collect();
     if keys.is_empty() { return Ok(vec![]); }
+    if !mgr.is_cluster() {
+        return key_audit_batch(mgr, keys, None).await;
+    }
 
+    let mut slots: std::collections::BTreeMap<u16, Vec<(usize, String)>> =
+        std::collections::BTreeMap::new();
+    for (index, key) in keys.into_iter().enumerate() {
+        let slot = redis::cluster_routing::get_slot(key.as_bytes());
+        slots.entry(slot).or_default().push((index, key));
+    }
+    let mut rows = Vec::new();
+    for (slot, keys) in slots {
+        let indices: Vec<usize> = keys.iter().map(|(index, _)| *index).collect();
+        let batch = key_audit_batch(
+            mgr,
+            keys.into_iter().map(|(_, key)| key).collect(),
+            Some(slot),
+        ).await?;
+        rows.extend(indices.into_iter().zip(batch));
+    }
+    rows.sort_by_key(|(index, _)| *index);
+    Ok(rows.into_iter().map(|(_, row)| row).collect())
+}
+
+async fn key_audit_batch(
+    mgr:  &mut crate::db::redis::RedisConnection,
+    keys: Vec<String>,
+    slot: Option<u16>,
+) -> Result<Vec<RedisKeyAudit>, crate::apperror::AppError> {
     // Pass 1: TYPE, TTL, OBJECT ENCODING per key — three replies per key.
     let mut pipe = redis::pipe();
     for k in &keys {
@@ -514,7 +515,7 @@ pub(crate) async fn key_audit_body(
             .cmd("TTL").arg(k)
             .cmd("OBJECT").arg("ENCODING").arg(k);
     }
-    let raw: Vec<redis::Value> = pipe.query_async(mgr).await?;
+    let raw: Vec<redis::Value> = mgr.pipeline_at_slot(&pipe, slot).await?;
 
     let mut rows: Vec<RedisKeyAudit> = Vec::with_capacity(keys.len());
     for (i, k) in keys.iter().enumerate() {
@@ -537,7 +538,7 @@ pub(crate) async fn key_audit_body(
         }
     }
     if !size_idx.is_empty() {
-        let sizes: Vec<redis::Value> = pipe.query_async(mgr).await?;
+        let sizes: Vec<redis::Value> = mgr.pipeline_at_slot(&pipe, slot).await?;
         for (j, i) in size_idx.into_iter().enumerate() {
             if let Some(redis::Value::Int(n)) = sizes.get(j) {
                 rows[i].size = *n;
@@ -634,8 +635,10 @@ pub async fn redis_sentinel_overview(
 }
 
 pub(crate) async fn sentinel_overview_body(
-    mgr: &mut redis::aio::ConnectionManager,
+    mgr: &mut crate::db::redis::RedisConnection,
 ) -> Result<RedisSentinelOverview, crate::apperror::AppError> {
+    let mut control = mgr.sentinel_control().map(crate::db::redis::RedisConnection::standalone);
+    let mgr = control.as_mut().unwrap_or(mgr);
     let info: String = redis::cmd("INFO").arg("server")
         .query_async(mgr).await?;
     let mode = parse_redis_mode(&info);
@@ -735,7 +738,7 @@ pub async fn redis_geo_points(
 }
 
 pub(crate) async fn geo_points_body(
-    mgr:   &mut redis::aio::ConnectionManager,
+    mgr:   &mut crate::db::redis::RedisConnection,
     key:   &str,
     limit: Option<u32>,
 ) -> Result<RedisGeoResult, crate::apperror::AppError> {
@@ -1038,15 +1041,23 @@ mod live_tests {
         std::env::var(name).ok()?.parse().ok()
     }
 
-    async fn open_on(port: u16) -> Option<(redis::aio::ConnectionManager, redis::Client)> {
+    fn live_config(port: u16) -> ConnectionConfig {
         let mut c = ConnectionConfig::new(Engine::Redis, "live");
         c.host = Some("127.0.0.1".into());
         c.port = Some(port);
         c.ssl_mode = SslMode::Disable;
-        match crate::db::redis::open(&c, None, None).await.ok()? {
+        c
+    }
+
+    async fn open_config(c: &ConnectionConfig) -> Option<(crate::db::redis::RedisConnection, redis::Client)> {
+        match crate::db::redis::open(c, None, None).await.ok()? {
             LiveSession::Redis(m, client) => Some((m, client)),
             _ => None,
         }
+    }
+
+    async fn open_on(port: u16) -> Option<(crate::db::redis::RedisConnection, redis::Client)> {
+        open_config(&live_config(port)).await
     }
 
     /// The full browse path the key browser drives, against the fixture.
@@ -1115,78 +1126,68 @@ mod live_tests {
         assert!(info.contains("redis_version:"), "INFO server has no version");
     }
 
-    /// Cluster topology through a single-node connection: browse works for
-    /// what the node owns, cross-slot access fails loudly with MOVED (the
-    /// client follows no redirects), and only db0 exists.
+    /// A seed node opens a routed cluster session: writes and reads cross
+    /// slots, SCAN visits every master, and multi-slot audit/delete work.
     #[tokio::test]
     #[ignore]
-    async fn live_cluster_node_browse_and_moved() {
+    async fn live_cluster_routes_and_scans_every_master() {
         let Some(port) = env_port("TXUI_REDIS_TEST_CLUSTER_PORT") else { return };
         let Some((mut mgr, client)) = open_on(port).await else { println!("no cluster node on {port} — skipping"); return };
+        assert!(mgr.is_cluster(), "the seed must auto-detect cluster mode");
 
-        // The node knows it is in cluster mode.
-        let info = server_info_body(&mut mgr, Some("server")).await.expect("info");
-        assert!(info.contains("redis_mode:cluster"), "not a cluster node:\n{info}");
-
-        // Seed keys until at least one lands on THIS node's slots and at
-        // least one is refused with MOVED — the split is the finding.
-        let mut local_key: Option<String> = None;
-        let mut moved_key: Option<String> = None;
-        for i in 0..64 {
-            let key = format!("dbgui:cluster:probe:{i}");
-            match set_string_body(&mut mgr, &key, "v", None).await {
-                Ok(()) => { local_key = local_key.or(Some(key)); }
-                Err(e) => {
-                    let msg = crate::apperror::AppError::display(&e);
-                    assert!(msg.contains("MOVED"), "unexpected cluster error: {msg}");
-                    moved_key = moved_key.or(Some(key));
-                }
-            }
+        let namespace = format!("txui:test:cluster:{}:", std::process::id());
+        let keys: Vec<String> = (0..24).map(|i| format!("{namespace}{i}")).collect();
+        let slots: std::collections::HashSet<u16> = keys.iter()
+            .map(|key| redis::cluster_routing::get_slot(key.as_bytes())).collect();
+        assert!(slots.len() > 1, "test keys must exercise cross-slot routing");
+        for key in &keys {
+            set_string_body(&mut mgr, key, "cluster-value", None).await.expect("routed SET");
         }
-        let local_key = local_key.expect("64 keys, none local — is this really a cluster?");
-        let moved_key = moved_key.expect("64 keys, no MOVED — single-node cluster?");
-        println!("  local key: {local_key} · cross-slot write refused (MOVED): {moved_key}");
+        for key in &keys {
+            let info = key_info_body(&mut mgr, key).await.expect("routed key info");
+            assert_eq!(info.key_type, "string");
+            assert_eq!(info.size, 13);
+        }
 
-        // Browse works for keys the connected node owns…
-        let info = key_info_body(&mut mgr, &local_key).await.expect("local key info");
-        assert_eq!(info.key_type, "string");
-        // …and fails loudly with MOVED, never silently wrong, for a key whose
-        // slot lives on another node — the client follows no redirects.
-        let err = key_info_body(&mut mgr, &moved_key).await.unwrap_err();
-        assert!(crate::apperror::AppError::display(&err).contains("MOVED"),
-                "cross-slot read must surface MOVED: {err:?}");
-        println!("  cross-slot read: {}", crate::apperror::AppError::display(&err));
+        let mut found = std::collections::HashSet::new();
+        let mut cursor = 0;
+        for _ in 0..1000 {
+            let page = scan_body(&mut mgr, &format!("{namespace}*"), cursor, 3).await.expect("cluster SCAN");
+            for key in page.keys {
+                assert!(found.insert(key.clone()), "duplicate key across cluster SCAN pages: {key}");
+            }
+            cursor = page.cursor;
+            if cursor == 0 { break; }
+        }
+        assert_eq!(cursor, 0, "cluster SCAN did not finish");
+        assert_eq!(found, keys.iter().cloned().collect(), "cluster SCAN missed keys");
 
-        // SCAN only ever sees the connected node's own slots.
-        let scan = scan_body(&mut mgr, "dbgui:cluster:probe:*", 0, 100).await.expect("scan");
-        assert!(scan.keys.contains(&local_key));
+        let audit = key_audit_body(&mut mgr, keys.clone()).await.expect("cross-slot audit");
+        assert_eq!(audit.iter().map(|row| row.key.clone()).collect::<Vec<_>>(), keys);
+        assert!(audit.iter().all(|row| row.key_type == "string" && row.size == 13));
 
-        // Cluster mode has exactly one logical database: INFO keyspace shows
-        // db0 only, so the tree never offers a db3 for SELECT to fail on.
-        let dbs = crate::db::redis::list_schema(mgr.clone()).await.expect("list_schema");
-        let names: Vec<String> = dbs.iter().filter_map(|n| match n {
-            crate::db::types::SchemaNode::Database { name } => Some(name.clone()),
-            _ => None,
-        }).collect();
-        assert!(names.iter().all(|n| n.starts_with("db0")), "cluster must expose db0 only: {names:?}");
+        let prefixes = crate::db::redis::list_prefixes(&mgr, &client, "db0").await.expect("prefixes");
+        assert!(prefixes.iter().any(|node| matches!(node,
+            crate::db::types::SchemaNode::KeyPrefix { name, count, .. }
+                if name == "txui:" && *count >= keys.len() as i64)));
+        assert!(crate::db::redis::list_prefixes(&mgr, &client, "db3").await.is_err());
 
-        // Belt and braces: if a db>0 label ever arrives, SELECT must fail
-        // rather than silently reading the wrong database.
-        let err = crate::db::redis::list_prefixes(&client, "db3 (1 keys)").await.unwrap_err();
-        println!("  SELECT 3 in cluster mode: {err}");
-
-        // Cleanup: DEL is single-slot per key; delete only the local probe.
-        delete_keys_body(&mut mgr, &[local_key]).await.ok();
+        let deleted = delete_keys_body(&mut mgr, &keys).await.expect("cross-slot DEL");
+        assert_eq!(deleted, keys.len() as i64);
+        println!("  routed 24 keys; full cluster SCAN/audit/prefix browse passed; cleanup deleted {deleted}");
     }
 
-    /// Sentinel: connecting to the Sentinel PORT (not through it — there is
-    /// no master-discovery client path) gives the monitored topology; data
-    /// commands fail cleanly instead of hanging.
+    /// Sentinel sessions discover and verify mymaster, retain the Sentinel
+    /// control connection for topology display, and run data commands on the
+    /// discovered master rather than on the Sentinel port.
     #[tokio::test]
     #[ignore]
-    async fn live_sentinel_overview_lists_topology() {
+    async fn live_sentinel_discovers_master_and_browses_data() {
         let Some(port) = env_port("TXUI_REDIS_TEST_SENTINEL_PORT") else { return };
-        let Some((mut mgr, _)) = open_on(port).await else { println!("no sentinel on {port} — skipping"); return };
+        let mut config = live_config(port);
+        config.sentinel_master = Some("mymaster".into());
+        let Some((mut mgr, _)) = open_config(&config).await else { println!("no sentinel on {port} — skipping"); return };
+        assert_eq!(mgr.topology(), crate::db::redis_connection::RedisTopology::Sentinel);
 
         let ov = sentinel_overview_body(&mut mgr).await.expect("overview");
         assert_eq!(ov.mode, "sentinel");
@@ -1195,18 +1196,63 @@ mod live_tests {
         assert_eq!(m.name, "mymaster");
         assert_eq!(m.ip, "127.0.0.1");
         assert!(m.port.parse::<u16>().is_ok(), "master port {m:?}");
-        // Redis ≥ 6-era Sentinels have no `status` field — the state is the
-        // `flags` word; either way the banner must not render blank.
         assert!(!m.status.is_empty(), "master status/flags missing: {m:?}");
         assert_eq!(m.replicas.len(), 1, "the replica must be listed");
         assert_eq!(m.replicas[0].ip, "127.0.0.1");
         assert!(!m.replicas[0].status.is_empty(), "replica status/flags missing");
-        println!("  sentinel: master {}:{} status={} + replica :{}",
-                 m.ip, m.port, m.status, m.replicas[0].port);
 
-        // A Sentinel is not a data node: GET must error, not hang or pretend.
-        let err = crate::db::redis::execute(mgr.clone(), "GET anything").await.unwrap_err();
-        println!("  GET on a sentinel port: {err}");
+        let key = format!("txui:test:sentinel:{}", std::process::id());
+        set_string_body(&mut mgr, &key, "through-sentinel", None).await.expect("master SET");
+        let info = key_info_body(&mut mgr, &key).await.expect("master key info");
+        assert_eq!(info.key_type, "string");
+        match get_value_body(&mut mgr, &key).await.expect("master GET") {
+            RedisValue::String { value } => assert_eq!(value.as_deref(), Some("through-sentinel")),
+            other => panic!("wrong value kind: {other:?}"),
+        }
+        assert_eq!(delete_keys_body(&mut mgr, &[key]).await.expect("master DEL"), 1);
+        println!("  Sentinel topology + discovered-master SET/GET/DEL passed; temporary key removed");
+    }
+
+    /// Destructive fixture test, additionally gated on
+    /// TXUI_REDIS_TEST_SENTINEL_FAILOVER=1: shuts down the current master and
+    /// verifies later commands rediscover the promoted one.
+    #[tokio::test]
+    #[ignore]
+    async fn live_sentinel_rediscovers_after_master_failure() {
+        let Some(port) = env_port("TXUI_REDIS_TEST_SENTINEL_PORT") else { return };
+        if std::env::var("TXUI_REDIS_TEST_SENTINEL_FAILOVER").as_deref() != Ok("1") { return; }
+        let mut config = live_config(port);
+        config.sentinel_master = Some("mymaster".into());
+        let Some((mut mgr, _)) = open_config(&config).await else { return };
+        let key = format!("txui:test:sentinel:failover:{}", std::process::id());
+        set_string_body(&mut mgr, &key, "before", None).await.expect("initial SET");
+
+        let old_master = sentinel_overview_body(&mut mgr).await.expect("overview")
+            .masters.into_iter().next().expect("mymaster");
+        let client = redis::Client::open(format!("redis://{}:{}", old_master.ip, old_master.port))
+            .expect("master URL");
+        let mut direct = client.get_multiplexed_async_connection().await.expect("master connection");
+        let _ = redis::cmd("SHUTDOWN").arg("NOSAVE").query_async::<()>(&mut direct).await;
+
+        let mut failed_before_recovery = false;
+        let mut recovered = false;
+        for _ in 0..150 {
+            match set_string_body(&mut mgr, &key, "after", None).await {
+                Ok(()) => { recovered = true; break; }
+                Err(_) => {
+                    failed_before_recovery = true;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        assert!(failed_before_recovery, "a failed command must not be replayed silently");
+        assert!(recovered, "Sentinel did not promote a reachable master within 15s");
+        match get_value_body(&mut mgr, &key).await.expect("GET after failover") {
+            RedisValue::String { value } => assert_eq!(value.as_deref(), Some("after")),
+            other => panic!("wrong value kind: {other:?}"),
+        }
+        assert_eq!(delete_keys_body(&mut mgr, &[key]).await.expect("DEL after failover"), 1);
+        println!("  failed master was not retried implicitly; later command rediscovered promoted master");
     }
 
     /// "View as geo" end to end: GEOADD real members, resolve them through

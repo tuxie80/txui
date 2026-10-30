@@ -324,3 +324,43 @@ test('a destination without @ is refused rather than treated as a table', () => 
   const o = applyStage(ORDERS, stage('insert into staging.t dev'));
   assert.ok('error' in o && /must be written `@dev`/.test(o.error));
 });
+
+// ── result diff ───────────────────────────────────────────────────────────────
+
+test('diff explicitly resolves the other captured result and returns typed rows', () => {
+  const other = res(cols(['email', 'text'], ['id', 'int'], ['total', 'numeric']),
+    [['a@x.com', 1, 9], ['b@y.com', 2, 125]]);
+  const out = applyStage(ORDERS, stage('diff #7 key id'), {
+    resolveResult: id => id === 7 ? other : undefined,
+  });
+  assert.ok(!('error' in out));
+  const r = (out as { result: QueryResult; notices: string[] });
+  assert.deepEqual(r.result.columns.map(c => c.name), ['change', 'key', 'column', 'left', 'right']);
+  assert.ok(r.result.rows.some(row => row[0] === 'changed' && row[2] === 'total'
+    && row[3] === 100 && row[4] === 125));
+  assert.ok(r.result.rows.some(row => row[0] === 'only_left'));
+  assert.match(r.notices[0], /Diff:/);
+});
+
+test('diff notices survive later pipeline stages', () => {
+  const other = res(cols(['id', 'int'], ['other', 'text']), [[1, 'x']]);
+  const out = runPipeline(ORDERS, [stage('diff #3 key id'), stage('head 1')], {
+    resolveResult: () => other,
+  });
+  assert.ok(!('error' in out));
+  const r = out as { notices?: string[]; result: QueryResult };
+  assert.ok(r.notices?.some(n => /only in #3: other/.test(n)));
+  assert.ok(r.notices?.some(n => /only in current result: email, total/.test(n)));
+  assert.ok(r.result.rows.length <= 1);
+});
+
+test('diff never guesses a comparison target', () => {
+  const missingResolver = applyStage(ORDERS, stage('diff #7'));
+  assert.ok('error' in missingResolver && /captured results/.test(missingResolver.error));
+  const missingEntry = applyStage(ORDERS, stage('diff #7'), { resolveResult: () => undefined });
+  assert.ok('error' in missingEntry && /No captured result #7/.test(missingEntry.error));
+  const malformed = applyStage(ORDERS, stage('diff latest'), { resolveResult: () => ORDERS });
+  assert.ok('error' in malformed && /Usage/.test(malformed.error));
+  const missingKey = applyStage(ORDERS, stage('diff #7 key'), { resolveResult: () => ORDERS });
+  assert.ok('error' in missingKey && /Usage/.test(missingKey.error));
+});

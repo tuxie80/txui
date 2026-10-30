@@ -431,6 +431,7 @@ const PANEL_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   watch: LongQueryIcon,
   replication: ReplicationIcon,
   stmtstats: StmtStatsIcon,
+  pgworkload: StmtStatsIcon,
   pglisten: PgListenIcon,
   serverinfo: ServerInfoIcon,
   dbaviews: DbaViewsIcon,
