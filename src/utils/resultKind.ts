@@ -16,9 +16,15 @@ export type ResultKind = 'rows' | 'affected' | 'ok';
 /** Wall time shared by the result header and the statement's gutter marker. */
 export function resultWallMs(
   result: QueryResult,
-  statementRuns: Readonly<Record<number, { ms?: number }>>,
+  statementRuns: Readonly<Record<number, { ms?: number; startedAt?: number }>>,
+  resultStmtIdx?: number,
 ): number {
-  const wall = statementRuns[0]?.ms;
+  let wall = resultStmtIdx == null ? undefined : statementRuns[resultStmtIdx]?.ms;
+  if (wall == null && resultStmtIdx == null) {
+    wall = Object.values(statementRuns)
+      .filter(r => r.ms != null && r.startedAt != null)
+      .sort((a, b) => b.startedAt! - a.startedAt!)[0]?.ms;
+  }
   return wall == null ? Math.round(result.execution_ms + (result.fetch_ms ?? 0)) : Math.round(wall);
 }
 

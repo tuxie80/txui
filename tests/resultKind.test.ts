@@ -55,8 +55,19 @@ test('duration sums execution + fetch', () => {
 
 test('result header uses the gutter wall time and exposes only the overhead separately', () => {
   const r = qr({ execution_ms: 7, fetch_ms: 1 });
-  assert.equal(resultWallMs(r, { 0: { ms: 14 } }), 14);
+  assert.equal(resultWallMs(r, { 0: { ms: 14 } }, 0), 14);
   assert.equal(resultOverheadMs(r, 14), 6);
+});
+
+test('a later query cannot reuse the first statement duration', () => {
+  const r = qr({ execution_ms: 7, fetch_ms: 1 });
+  const runs = {
+    0: { status: 'ok', ms: 14, startedAt: 100 },
+    2: { status: 'ok', ms: 23, startedAt: 200 },
+  };
+  assert.equal(resultWallMs(r, runs, 2), 23, 'exact run binding wins');
+  assert.equal(resultWallMs(r, runs), 23, 'legacy results use the latest completed run');
+  assert.equal(resultWallMs(r, runs, 1), 8, 'an unfinished statement never borrows an older time');
 });
 
 test('an unfinished marker falls back to backend execution + fetch', () => {

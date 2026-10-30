@@ -376,6 +376,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       const acc = foldScriptInto(tabNow?.scriptResults, tabNow?.stmtRuns ?? {});
       patchTab(tabId, { running: true, error: null, result: null, resultSql: null, scriptResults: null,
         scriptResultView: null, autoLimited: null, prodCap: null, runningSql: sql, runStartedAt: startedMs,
+        resultStmtIdx: idx,
         stmtRuns: { ...acc, [idx]: { status: 'running', startedAt: startedMs } } });
       markRunning(tabId, sql);
       try {
@@ -392,7 +393,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         const ms = Date.now() - startedMs;
         patchTab(tabId, {
           result, resultSql: sql, running: false, view: 'grid',
-          autoLimited: limit, prodCap: prodCapped ? limit : null,
+          autoLimited: limit, prodCap: prodCapped ? limit : null, resultStmtIdx: idx,
           stmtRuns: { ...acc, [idx]: { status: 'ok', ms, startedAt: startedMs } },
         });
         beepIfLong(startedMs, true);

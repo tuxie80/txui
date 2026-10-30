@@ -24,7 +24,7 @@ this project follows semantic versioning.
 ### Fixed
 
 - **Statement timing proofs survive unrelated edits** — typing a new command or inserting a statement no longer clears existing status chips and durations. Only deleting or rewriting a statement removes its marker; unaffected statements keep their outcome and measured time even when they move to different line numbers.
-- **Result headers and gutter markers show the same wall time** — the result summary no longer reports only backend execution + fetch time beside a different gutter duration. Its tooltip breaks out backend execution, fetching and UI overhead separately.
+- **Result headers and gutter markers show the same wall time for the same statement** — the result summary no longer reports only backend execution + fetch time, and a later query cannot inherit statement zero's duration. Results are bound to the exact executed statement index, with a latest-completed-run fallback for restored tabs. The tooltip breaks out backend execution, fetching and UI overhead separately.
 
 ## [1.4.3] - 2026-10-28
 

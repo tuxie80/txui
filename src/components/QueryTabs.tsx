@@ -253,6 +253,8 @@ export interface QueryTab {
   result: QueryResult | null;
   /** the statement that produced `result` (write-feedback wording needs it) */
   resultSql: string | null;
+  /** Exact buffer statement whose wall time accompanies `result`. */
+  resultStmtIdx?: number;
   scriptResults: ScriptLine[] | null;   // multi-statement run: one line per statement
   /**
    * The BUFFER statement index the last script run started at — 0 for a
@@ -3297,8 +3299,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                         ? `${tab.result.rows_affected} row(s) affected`
                         : `${tab.result.rows.length} row(s)`}
                       {' · '}
-                      <span title={`wall: ${resultWallMs(tab.result, tab.stmtRuns)} ms · execution: ${Math.round(tab.result.execution_ms)} ms · fetching: ${Math.round(tab.result.fetch_ms ?? 0)} ms · UI overhead: ${resultOverheadMs(tab.result, resultWallMs(tab.result, tab.stmtRuns))} ms`}>
-                        {resultWallMs(tab.result, tab.stmtRuns)}ms
+                      <span title={`wall: ${resultWallMs(tab.result, tab.stmtRuns, tab.resultStmtIdx)} ms · execution: ${Math.round(tab.result.execution_ms)} ms · fetching: ${Math.round(tab.result.fetch_ms ?? 0)} ms · UI overhead: ${resultOverheadMs(tab.result, resultWallMs(tab.result, tab.stmtRuns, tab.resultStmtIdx))} ms`}>
+                        {resultWallMs(tab.result, tab.stmtRuns, tab.resultStmtIdx)}ms
                       </span>
                       {tab.prodCap !== null && (
                         <span className="result-prodcap"
