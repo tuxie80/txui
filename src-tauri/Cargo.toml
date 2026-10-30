@@ -237,13 +237,12 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # (see the sqlx feature list above). Left on webpki roots it would keep
 # rejecting internal CAs for ClickHouse alone — the same bug, one engine over.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
-# The app's Parquet stack stays on Arrow 58; duckdb-rs 1.20000 uses Arrow 60
-# internally. Keep these direct dependencies on 58 until the Parquet migration
-# is deliberate — upgrading them is separate from moving the embedded engine.
-parquet = { version = "58", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "lz4", "flate2", "flate2-rust_backened"] }
-arrow-array = "58"
-arrow-schema = "58"
-arrow-cast = "58"
+# Keep the app's Parquet stack on the same Arrow line duckdb-rs 1.20000 uses
+# internally, so Arrow arrays and schemas have one canonical version.
+parquet = { version = "=60.1.0", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "lz4", "flate2", "flate2-rust_backened"] }
+arrow-array = "=60.1.0"
+arrow-schema = "=60.1.0"
+arrow-cast = "=60.1.0"
 argon2 = "0.5.3"
 zeroize = "1.8.2"
 rand = "0.9.5"

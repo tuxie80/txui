@@ -847,6 +847,7 @@ fn file_info(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
     let fm = f.metadata.file_metadata();
     let total_compressed: i64 = f.metadata.row_groups().iter().map(|rg| rg.compressed_size()).sum();
     let total_raw: i64 = f.metadata.row_groups().iter().map(|rg| rg.total_byte_size()).sum();
+    let page_index = f.metadata.page_index();
     let mut rows: Vec<Row> = vec![
         vec![s("path"), s(f.path.to_string_lossy())],
         vec![s("file size"), s(human_bytes(f.file_size as i64))],
@@ -860,11 +861,11 @@ fn file_info(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
         vec![s("compression ratio"), s(ratio(total_raw, total_compressed))],
         vec![
             s("column index"),
-            s(if f.metadata.column_index().is_some() { "present" } else { "absent" }),
+            s(if page_index.as_ref().is_some_and(|p| p.has_column_indexes()) { "present" } else { "absent" }),
         ],
         vec![
             s("offset index"),
-            s(if f.metadata.offset_index().is_some() { "present" } else { "absent" }),
+            s(if page_index.as_ref().is_some_and(|p| p.has_offset_indexes()) { "present" } else { "absent" }),
         ],
     ];
     match geo_state(f) {
@@ -2853,6 +2854,82 @@ mod pushdown_tests {
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Release-only comparison workload for Arrow/Parquet upgrades. Run with:
+    /// cargo test --release --lib release_workload_benchmark -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore = "release-only performance comparison"]
+    fn release_workload_benchmark() {
+        const GROUPS: i64 = 16;
+        const GROUP_ROWS: i64 = 8192;
+        const ROWS: i64 = GROUPS * GROUP_ROWS;
+        const ITERATIONS: usize = 5;
+
+        let path = tmp("release-benchmark.parquet");
+        let out = tmp("release-benchmark.csv");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(GROUP_ROWS as usize))
+            .build();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+        for group in 0..GROUPS {
+            let ids: Vec<i64> = (0..GROUP_ROWS).map(|i| group * GROUP_ROWS + i).collect();
+            let labels: Vec<Option<String>> = ids
+                .iter()
+                .map(|id| if id % 7 == 0 { None } else { Some(format!("row-{id:06}")) })
+                .collect();
+            writer
+                .write(&RecordBatch::try_new(schema.clone(), vec![
+                    Arc::new(Int64Array::from(ids)) as ArrayRef,
+                    Arc::new(StringArray::from(labels)) as ArrayRef,
+                ]).unwrap())
+                .unwrap();
+        }
+        writer.close().unwrap();
+
+        let f = open_path(&path).unwrap();
+        assert_eq!(f.metadata.num_row_groups(), GROUPS as usize);
+        let preview_offset = (ROWS - 5000) as usize;
+        let filters = [filt("id", FilterOp::Gte, Some(&(ROWS - 12000).to_string()))];
+        // Warm the reader and page cache before recording either version.
+        assert_eq!(preview(&f, 256, preview_offset).unwrap().rows.len(), 256);
+        assert_eq!(preview_filtered(&f, ROWS as usize + 1, 0, &filters, &[]).unwrap().rows.len(), 12000);
+        assert_eq!(export_to_file(&f, &out, "csv").unwrap(), ROWS as u64);
+
+        let mut preview_ms = Vec::with_capacity(ITERATIONS);
+        let mut filter_ms = Vec::with_capacity(ITERATIONS);
+        let mut export_ms = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let start = Instant::now();
+            let page = preview(&f, 256, preview_offset).unwrap();
+            preview_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(page.rows.len(), 256);
+            assert_eq!(page.rows[0][0], serde_json::json!(preview_offset.to_string()));
+
+            let start = Instant::now();
+            let filtered = preview_filtered(&f, ROWS as usize + 1, 0, &filters, &[]).unwrap();
+            filter_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(filtered.rows.len(), 12000);
+            assert_eq!(filtered.rows[0][0], serde_json::json!((ROWS - 12000).to_string()));
+
+            let start = Instant::now();
+            assert_eq!(export_to_file(&f, &out, "csv").unwrap(), ROWS as u64);
+            export_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let export_bytes = std::fs::metadata(&out).unwrap().len();
+        let total = |values: &[f64]| values.iter().sum::<f64>();
+        println!("workload rows={ROWS} groups={GROUPS} iterations={ITERATIONS} export_bytes={export_bytes}");
+        println!("preview_ms={preview_ms:.3?} total_ms={:.3}", total(&preview_ms));
+        println!("filter_ms={filter_ms:.3?} total_ms={:.3}", total(&filter_ms));
+        println!("export_ms={export_ms:.3?} total_ms={:.3}", total(&export_ms));
+
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Tests against the sample file in the repo root. They run when it is there
@@ -3299,8 +3376,8 @@ mod nested_json_tests {
                     Arc::new(Field::new(
                         "entries",
                         DataType::Struct(Fields::from(vec![
-                            Field::new("keys", DataType::Utf8, false),
-                            Field::new("values", DataType::Int64, true),
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Int64, true),
                         ])),
                         false,
                     )),
@@ -3485,7 +3562,7 @@ mod nested_json_tests {
 fn pages(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
     use parquet::file::page_index::column_index::ColumnIndexMetaData;
 
-    let (Some(ci), Some(oi)) = (f.metadata.column_index(), f.metadata.offset_index()) else {
+    let Some(page_index) = f.metadata.page_index().filter(|p| p.is_complete()) else {
         return (
             cols(&["note"]),
             vec![vec![s("This file has no page index — it was written without one, so \
@@ -3495,10 +3572,11 @@ fn pages(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
 
     let leaves = f.leaf_names();
     let mut rows = Vec::new();
-    for (gi, groups) in ci.iter().enumerate() {
-        for (li, index) in groups.iter().enumerate() {
+    for gi in 0..f.metadata.num_row_groups() {
+        for li in 0..leaves.len() {
+            let Some(index) = page_index.column_index(gi, li) else { continue };
             let name = leaves.get(li).cloned().unwrap_or_default();
-            let locations = oi.get(gi).and_then(|g| g.get(li)).map(|o| o.page_locations());
+            let locations = page_index.page_locations(gi, li);
             // Every Index variant carries the same shape; the macro keeps the
             // eight physical types from becoming eight copies of this loop.
             macro_rules! emit {
@@ -3517,11 +3595,9 @@ fn pages(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
                     }
                 };
             }
-            // parquet 58 renamed Index → ColumnIndexMetaData and swapped the
-            // per-page structs for typed min/max/null accessors — the shape
-            // of the emitted rows is unchanged.
+            // Parquet 60 returns only populated column indexes; a missing
+            // per-column index is the `None` handled above.
             match index {
-                ColumnIndexMetaData::NONE => {}
                 ColumnIndexMetaData::BOOLEAN(i) => emit!(i, |v: &bool| v.to_string()),
                 ColumnIndexMetaData::INT32(i) => emit!(i, |v: &i32| v.to_string()),
                 ColumnIndexMetaData::INT64(i) => emit!(i, |v: &i64| v.to_string()),
@@ -3857,7 +3933,7 @@ fn health(f: &ParquetFile) -> (Vec<ColumnInfo>, Vec<Row>) {
     }
 
     // Page index — the difference between skipping a chunk and skipping a page.
-    if f.metadata.column_index().is_none() {
+    if !f.metadata.page_index().is_some_and(|p| p.has_column_indexes()) {
         out.push((
             "advice",
             "No page index".into(),
@@ -4003,6 +4079,62 @@ mod deep_view_tests {
         let rank = |s: &str| match s { "critical" => 0, "warn" => 1, "advice" => 2, _ => 3 };
         let ranks: Vec<i32> = h.rows.iter().map(|r| rank(r[0].as_str().unwrap())).collect();
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "findings are not worst-first");
+    }
+
+    #[test]
+    fn page_views_read_the_parquet_60_page_index_provider() {
+        use arrow_array::{Int64Array, RecordBatch, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::{EnabledStatistics, WriterProperties};
+        use serde_json::json;
+
+        let dir = std::env::temp_dir().join(format!("txui-pqpages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pages.parquet");
+        let _ = std::fs::remove_file(&path);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .set_max_row_group_row_count(Some(2))
+            .set_data_page_row_count_limit(2)
+            .build();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+        writer.write(&RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(vec![0i64, 1, 2, 3])) as ArrayRef,
+            Arc::new(StringArray::from(vec![Some("a"), None, Some("c"), None])) as ArrayRef,
+        ]).unwrap()).unwrap();
+        writer.close().unwrap();
+
+        let f = open_path(&path).unwrap();
+        let info = execute_file(&f, "FILEINFO").unwrap();
+        for key in ["column index", "offset index"] {
+            let value = info.rows.iter().find(|r| r[0] == json!(key)).unwrap();
+            assert_eq!(value[1], json!("present"));
+        }
+        let page = execute_file(&f, "PAGES").unwrap();
+        assert_eq!(page.rows.len(), 4); // two row groups x two single-page columns
+        let index = |name: &str| page.columns.iter().position(|c| c.name == name).unwrap();
+        let (rg, column, first, min, max, nulls) = (
+            index("row_group"), index("column"), index("first_row"),
+            index("min"), index("max"), index("nulls"),
+        );
+        let first_id = page.rows.iter()
+            .find(|r| r[rg] == json!(0) && r[column] == json!("id")).unwrap();
+        assert_eq!(first_id[first], json!(0));
+        assert_eq!(first_id[min], json!("0"));
+        assert_eq!(first_id[max], json!("1"));
+        assert_eq!(first_id[nulls], json!(0));
+        let first_label = page.rows.iter()
+            .find(|r| r[rg] == json!(0) && r[column] == json!("label")).unwrap();
+        assert_eq!(first_label[min], json!("a"));
+        assert_eq!(first_label[max], json!("a"));
+        assert_eq!(first_label[nulls], json!(1));
+        let _ = std::fs::remove_file(&path);
     }
 }
 
