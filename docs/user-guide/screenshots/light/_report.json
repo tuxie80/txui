@@ -45,6 +45,11 @@
     "note": "SQL editor: dialect-aware highlighting, run and transaction controls"
   },
   {
+    "name": "16-overall-workspace-clean",
+    "ok": true,
+    "note": "unmarked full workspace: schema explorer, SQL editor and result grid"
+  },
+  {
     "name": "06-result-grid",
     "ok": true,
     "note": "result grid: many columns and rows"

@@ -24,7 +24,7 @@
 
 **Website: [tuxie.eu/txui](https://tuxie.eu/txui/)**
 
-![TxUI workspace with the schema explorer, SQL editor, and live result grid](docs/user-guide/screenshots/dark/06-result-grid.png)
+![TxUI workspace with the schema explorer, SQL editor, and live result grid](docs/user-guide/screenshots/dark/16-overall-workspace-clean.png)
 
 ## Install
 

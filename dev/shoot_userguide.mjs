@@ -468,10 +468,15 @@ try {
     await page.keyboard.press('Escape');
     await cm.click();
     await page.keyboard.press('Meta+a');
-    await page.keyboard.type('SELECT * FROM orders ORDER BY created_at DESC;');
+    await page.keyboard.type('SELECT * FROM `mysql`.`innodb_table_stats` LIMIT 100;');
     await page.waitForTimeout(300);
     await page.keyboard.press('Meta+Enter');
     await page.waitForTimeout(1400);
+    if (await page.locator('.cm-diag').count()) {
+      throw new Error('clean workspace capture contains a spelling/vocabulary/diagnostic underline');
+    }
+    await full(page, '16-overall-workspace-clean',
+      'unmarked full workspace: schema explorer, SQL editor and result grid');
     await full(page, '06-result-grid', 'result grid: many columns and rows', [
       { sel: '.status-bar', label: 'Rows · timing', pad: 2 },
     ]);
