@@ -5,6 +5,7 @@ import App from './App.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { RevealGate } from './components/RevealGate'
 import { installInputBehaviour } from './utils/inputBehaviour'
+import { initMonoFont } from './utils/fontFamily'
 import { hydrateFolderMeta } from './store/folderMeta'
 import { invoke } from '@tauri-apps/api/core'
 import { getPref, PREFS } from './store/preferences'
@@ -13,6 +14,7 @@ import { maybeRunSmoke } from './utils/smoke'
 // Before the first render: no autofill, autocorrect, capitalisation or
 // spellcheck on any text box in the app. See utils/inputBehaviour.ts.
 installInputBehaviour()
+initMonoFont()
 
 // Folder colours/notes/replica-set flags now live with the connections rather
 // than in localStorage. Load them (migrating any legacy copy) before the

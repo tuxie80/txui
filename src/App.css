@@ -1,3 +1,8 @@
+@font-face { font-family: 'TxUI Mono'; src: url('/fonts/txui-mono-regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'TxUI Mono'; src: url('/fonts/txui-mono-medium.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'TxUI Mono'; src: url('/fonts/txui-mono-semibold.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'TxUI Mono'; src: url('/fonts/txui-mono-bold.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+
 /* ── Reset & tokens ─────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -20,7 +25,7 @@
   /* Editor caret — bright orange on the (dark) default; applyTheme rewrites
      it per theme kind (utils/themes.ts cursorColor). */
   --cursor:    #ffa94d;
-  --font-mono: 'JetBrains Mono', 'Fira Mono', 'Menlo', 'Consolas',
+  --font-mono: 'TxUI Mono', 'JetBrains Mono', 'Fira Mono', 'Menlo', 'Consolas',
                'DejaVu Sans Mono', monospace,
                'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
   /* The emoji faces are the tail of the stack so a connection called

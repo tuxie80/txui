@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { aiHasKey, aiSetKey } from '../utils/aiClient';
 import { PREFS, usePreference } from '../store/preferences';
 import { THEMES, applyTheme } from '../utils/themes';
+import { MONO_FONTS, applyMonoFont } from '../utils/fontFamily';
 import { clampFontSize, FONT_SIZE_MIN, FONT_SIZE_MAX } from '../utils/fontScale';
 import { beep } from '../utils/beep';
 import {
@@ -62,6 +63,7 @@ export function SettingsModal({ onClose }: Props) {
   const [autoFormat, setAutoFormat] = usePreference(PREFS.editorAutoFormat);
   const [writeConfirm, setWriteConfirm] = usePreference(PREFS.writeConfirm);
   const [fontSize, setFontSize] = usePreference(PREFS.appFontSize);
+  const [monoFont, setMonoFont] = usePreference(PREFS.monoFontFamily);
   const [prodRowCap, setProdRowCap] = usePreference(PREFS.prodRowCap);
   const [serverLog, setServerLog] = usePreference(PREFS.serverLog);
   const [queryWarnings, setQueryWarnings] = usePreference(PREFS.queryWarnings);
@@ -152,6 +154,12 @@ export function SettingsModal({ onClose }: Props) {
               </select>
             </label>
             <label className="settings-row">
+              <span>Code & data font <em>(SQL, grids, logs and values)</em></span>
+              <select aria-label="Code and data font" value={monoFont} onChange={e => { setMonoFont(e.target.value as typeof monoFont); applyMonoFont(e.target.value as typeof monoFont); }}>
+                {MONO_FONTS.map(font => <option key={font.id} value={font.id}>{font.label}</option>)}
+              </select>
+            </label>
+            <label className="settings-row">
               <span>Font size <em>(app-wide; the grid has its own Aa popover)</em></span>
               <span className="settings-stepper">
                 <button
@@ -171,7 +179,7 @@ export function SettingsModal({ onClose }: Props) {
                 >+</button>
               </span>
             </label>
-            <p className="settings-hint">Grid font, density and zebra stripes live in the grid's Aa popover (they apply per-grid, live).</p>
+            <p className="settings-hint">Grid font, density and zebra stripes live in the grid's Aa popover (they apply per-grid, live). TxUI Mono is derived from Victor Mono; both use SIL OFL 1.1. See FONT-LICENSES.md for attribution and permitted use.</p>
           </section>
           </>)}
 

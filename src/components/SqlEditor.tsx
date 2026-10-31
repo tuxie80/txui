@@ -2351,7 +2351,7 @@ export function SqlEditor({
           // calc+var so the editor follows the app font size live (CM emits
           // the value verbatim; the browser resolves the var).
           '&': { height: '100%', fontSize: 'calc(13px * var(--font-scale, 1))' },
-          '.cm-scroller': { fontFamily: "'JetBrains Mono','Fira Mono',monospace", overflow: 'auto' },
+          '.cm-scroller': { fontFamily: 'var(--font-mono)', overflow: 'auto' },
           '.cm-content': { padding: '8px 0' },
           '.cm-placeholder': { color: 'var(--text2)' },
         }),
@@ -2538,7 +2538,7 @@ export function SqlEditor({
         ]),
         EditorView.theme({
           '&': { height: '100%', fontSize: 'calc(13px * var(--font-scale, 1))' },
-          '.cm-scroller': { fontFamily: "'JetBrains Mono','Fira Mono',monospace", overflow: 'auto' },
+          '.cm-scroller': { fontFamily: 'var(--font-mono)', overflow: 'auto' },
           '.cm-content': { padding: '8px 0' },
         }),
       ],

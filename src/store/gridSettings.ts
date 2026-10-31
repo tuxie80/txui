@@ -17,6 +17,7 @@ export interface GridSettings {
 }
 
 export const FONT_PRESETS = [
+  { label: 'TxUI Mono',      value: "'TxUI Mono', monospace" },
   { label: 'JetBrains Mono', value: "'JetBrains Mono', monospace" },
   { label: 'SF Mono',        value: "'SF Mono', ui-monospace, monospace" },
   { label: 'Menlo',          value: 'Menlo, monospace' },
@@ -26,7 +27,7 @@ export const FONT_PRESETS = [
 ];
 
 export const DEFAULT_SETTINGS: GridSettings = {
-  fontFamily:     "'JetBrains Mono', monospace",
+  fontFamily:     "'TxUI Mono', monospace",
   fontSize:       12,
   density:        'normal',
   showRowNumbers: true,

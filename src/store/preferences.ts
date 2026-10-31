@@ -170,6 +170,10 @@ export const PREFS = {
   editorAutoFormat: choice<AutoFormatMode>('dbgui.editorAutoFormat', 'off', AUTO_FORMAT_MODES),
   /** When to show the write-confirmation window with the affected-row count. */
   writeConfirm: choice<WriteConfirmMode>('dbgui.writeConfirm', 'destructive', WRITE_CONFIRM_MODES),
+  /** Monospace face for SQL, grids, logs and data values. */
+  monoFontFamily: choice('dbgui.monoFontFamily', 'txui-mono', [
+    'txui-mono', 'jetbrains-mono', 'sf-mono', 'menlo', 'fira-code', 'system-mono', 'system-ui',
+  ]),
   /** App-wide base font size in px (clamped 10–20 by utils/fontScale). */
   appFontSize: num('dbgui.appFontSize', 13),
   /** Line endings written into exported files (not the clipboard). */

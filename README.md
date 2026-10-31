@@ -52,6 +52,7 @@ brew install --cask tuxie80/tap/txui
 
 - [User guide and complete reference](https://tuxie.eu/txui/docs/)
 - [Development documentation](https://tuxie.eu/txui/dev/)
+- [Font licenses and permitted use](FONT-LICENSES.md) — TxUI Mono is an OFL derivative of Victor Mono; application code remains MIT
 
 ## Engines and highlights
 
