@@ -67,16 +67,18 @@
    "caveats": "Requires a live connection. Read-only on prod-tagged and read-only connections (editing disabled with a banner). Debug executes the routine body (rolled back) so it is blocked on prod/read-only."
   },
   "txshell": {
-   "summary": "A SQL command line inside the app with a structured transcript: a bare line is SQL and runs, results render as real sortable/exportable grids, and lines can be piped through stages to sinks. It adds psql-style backslash commands, variables, OS command escapes, file sources, and fan-out across matching connections. A DBA uses it as a fast keyboard-driven console that can also export, insert into another server, and script setups.",
+   "summary": "A SQL command line inside the app with a structured transcript: a bare line is SQL and runs, results render as real sortable/exportable grids, and lines can be piped through stages to sinks. It adds psql-style backslash commands, variables, command substitution, OS command escapes, file sources, fan-out across matching connections, and typed result diffs. A DBA uses it as a fast keyboard-driven console that can also compare, export, insert into another server, and script setups.",
    "howToOpen": "Plugins menu -> SQL -> TxShell (also on the native Tools menu)",
    "keyActions": [
     "Run SQL directly; pipe rows with |> to stages and sinks (grid, chart, to <format>, save/append <file>, insert into <table> [@dest])",
+    "diff #42 [key id ...] compares the pipeline input with an explicitly selected captured result, aligning columns by name and emitting typed change rows",
+    "$(...) executes a nested TxShell command or file pipeline (never the OS shell): one cell becomes a scalar, larger results deterministic TSV",
     "Meta commands: \\help, \\clear, \\vars, \\unset, \\history, \\timing, \\l, \\dt, \\dv, \\df, \\d, \\source <file>, \\edit, plus psql catalog metas",
     "$name = value variables; !line runs your OS shell; @pattern SQL fans out read-only across matching connections",
     "from <file> loads a CSV/TSV/JSON file as a result set; Tab-complete, up/down history, Shift-Enter for newline, Clear"
    ],
    "engines": "All SQL engines (the sql capability: MySQL, PostgreSQL, ClickHouse, SQLite, Parquet). Not Redis.",
-   "caveats": "Requires live connection(s). All statements are audited (with redaction). Fan-out refuses writes and confirms wide/prod matches; cross-server insert requires the destination session to be open and confirms on prod. \\source stops at the first failing statement."
+   "caveats": "Requires live connection(s). All statements are audited (with redaction). Fan-out refuses writes and confirms wide/prod matches; cross-server insert requires the destination session to be open and confirms on prod. \\source stops at the first failing statement. Command substitution is capped at four nesting levels and 64K combined output; result diffs require an explicit captured-result id and report NULL, key and shape problems."
   },
   "find": {
    "summary": "One panel for the three scopes of 'find', switched by a tab strip: Usages finds where a table or column is referenced inside the database itself (view definitions, routine and trigger bodies, events, constraints, indexes, generated-column/default expressions, plus open script buffers; matches ranked certain/likely/possible, catalog reads only, so prod-safe); In database searches every table in the current schema for a value, streaming hits smallest-table-first and saying what it skipped; In files searches a folder of .sql scripts on the local filesystem, grouped by file, opening a hit at its line. A DBA reaches for it before a DROP COLUMN or rename, during an incident to trace a value, or to find which migration script touches an object.",
