@@ -528,6 +528,11 @@ try {
     await page.locator('.tpd-picker button', { hasText: 'Watch' }).click();
     await page.waitForSelector('.tpd-phase-table .tpd-phase-running', { timeout: 8000 });
     await page.waitForTimeout(500);
+    await full(page, '15-mysql-progress-full',
+      'full-window thread progress over the processlist: statement metadata and seven InnoDB phases', [
+        { sel: '.tpd-summary', label: 'Statement + timing', pad: 4 },
+        { sel: '.tpd-phase-table', label: 'Seven InnoDB phases', pad: 4 },
+      ]);
     await crop(page, '14-mysql-progress', '.tpd-modal',
       'Thread progress: ALTER TABLE / CREATE INDEX phases, completion and timing', {
         pad: 18,

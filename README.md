@@ -24,6 +24,8 @@
 
 **Website: [tuxie.eu/txui](https://tuxie.eu/txui/)**
 
+![TxUI watching a live ALTER TABLE through all seven InnoDB phases](docs/user-guide/screenshots/dark/15-mysql-progress-full.png)
+
 ## Install
 
 **macOS · Linux** — one-liner (checksum-verified, quarantine handled):
@@ -101,5 +103,3 @@ brew install --cask tuxie80/tap/txui
 **Kimi was used almost exclusively as the AI coding model throughout development. Database queries and their tuning are my own work.** Every feature is reviewed, cross-referenced and tested; AI assistance does not replace verification. It remains a one-man hobby project, running on enthusiasm and no shortage of tokens. Feedback, bugs and feature requests are welcome!
 
 *The name: Tx = Tuxie (my nickname), and also (database) transaction ;-)*
-
-![TxUI — SQL editor with a live result grid](docs/shots/05-editor-results.png)

@@ -65,6 +65,11 @@
     "note": "EXPLAIN visualization of a join"
   },
   {
+    "name": "15-mysql-progress-full",
+    "ok": true,
+    "note": "full-window thread progress over the processlist: statement metadata and seven InnoDB phases"
+  },
+  {
     "name": "14-mysql-progress",
     "ok": true,
     "note": "Thread progress: ALTER TABLE / CREATE INDEX phases, completion and timing"
