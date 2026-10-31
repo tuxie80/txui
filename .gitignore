@@ -32,6 +32,8 @@ database.png
 # ...and the small two-version CHANGELOG.md (GitHub release notes are
 # auto-extracted from it). The full history lives in a local-only file.
 !/CHANGELOG.md
+# Font licensing must remain visible to anyone receiving the bundled fonts.
+!/FONT-LICENSES.md
 
 # OS / editor noise
 .DS_Store
