@@ -24,7 +24,7 @@
 
 **Website: [tuxie.eu/txui](https://tuxie.eu/txui/)**
 
-![TxUI watching a live ALTER TABLE through all seven InnoDB phases](docs/user-guide/screenshots/dark/15-mysql-progress-full.png)
+![TxUI workspace with the schema explorer, SQL editor, and live result grid](docs/user-guide/screenshots/dark/06-result-grid.png)
 
 ## Install
 

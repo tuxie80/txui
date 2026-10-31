@@ -8,7 +8,7 @@ this project follows semantic versioning.
 ### Added
 
 - **Branch-aware self-updates** — automatic patch/minor updates stay inside the current major branch, while a newer major remains available through an explicit **Upgrade to X.Y.Z** button. Update notices remain visible alongside branch downloads, and the download indicator keeps a stable width as percentages change.
-- **Accessible documentation navigation and media** — every heading has a direct URL, every screenshot opens full-size in a new tab with a left click or the right-click menu, and the help theme switch selects matching Ayu Dark or Ayu Light captures. The website and help now use the TxUI penguin `.ico` favicon, and the README leads with a full-window live DDL-progress capture.
+- **Accessible documentation navigation and media** — every heading has a direct URL, every screenshot opens full-size in a new tab with a left click or the right-click menu, and the help theme switch selects matching Ayu Dark or Ayu Light captures. The website and help now use the TxUI penguin `.ico` favicon, and the README leads with a full-workspace Ayu Dark capture.
 
 ### Fixed
 
