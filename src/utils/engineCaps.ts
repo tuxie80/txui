@@ -82,38 +82,33 @@ export interface EngineCaps {
    * Blocking chains can be read: who waits on whom, for how long, on what.
    *
    * Split out of `sqlDba` because that flag gates fifteen panels at once, and
-   * those panels are not one feature — they are fifteen, each needing its own
-   * catalog queries per engine. SQL Server can do blocking chains today
-   * (`sys.dm_os_waiting_tasks`) while it still cannot do, say, the documenter,
-   * so a single flag could only be wrong in one direction or the other:
-   * fifteen hidden panels, or fifteen broken ones.
+   * those panels are not one feature — each needs its own catalog queries.
    *
-   * This also gates the Locks & Deadlocks panel's deadlock tab (wait-for
-   * graph + incident history): the three engines that publish anything about
-   * deadlocks — SQL Server's system_health graph history, MySQL's latest
-   * detected deadlock, PostgreSQL's per-database counters — are exactly the
-   * three with blocking chains, so the old separate `deadlocks` flag could
-   * only ever echo this one and was folded into it.
+   * SQL Server can do blocking chains (`sys.dm_os_waiting_tasks`) while it
+   * cannot do, say, the documenter. One shared flag would either hide working
+   * panels or offer broken ones.
    *
-   * Expect more of these as SQL Server gains the rest — each one is added only
-   * when the panel behind it actually works.
-   * Phase 2. Each one is added when the panel behind it actually works.
+   * This also gates the deadlock tab (wait-for graph + incident history). SQL
+   * Server has system_health graphs, MySQL has the latest detected deadlock,
+   * and PostgreSQL has per-database counters.
+   *
+   * Those are exactly the engines with blocking chains, so the old separate
+   * `deadlocks` flag only echoed this one and was folded into it. More
+   * fine-grained flags are added only when the panel behind them works.
    */
   lockWaits: boolean;
   /**
    * Sequences exist as objects that can be listed, created and altered.
    *
-   * Not `sqlDba`, for the same reason as `lockWaits`. Note this is *not* the
-   * same set as the SQL engines: MySQL proper has no sequences at all
-   * (AUTO_INCREMENT is a column property), while MariaDB, PostgreSQL and SQL
-   * Server do — so the panel is gated on the object existing, not on the engine
-   * family. MySQL-vs-MariaDB is decided at runtime from the server flavour,
-   * which a static table cannot express; this flag says "ask", and the menu
-   * surfaces (the session plugin menu and the Tools-menu opener in QueryTabs)
-   * consult the runtime flavour probe (`store/serverFlavors` +
-   * `capabilities()` in `utils/serverFlavor`) before offering Sequences for
-   * the mysql engine, while `SequencePanel` says "MySQL has none" when the
-   * flavour comes back plain.
+   * Not `sqlDba`, for the same reason as `lockWaits`. This is *not* the same
+   * set as the SQL engines: MySQL proper has AUTO_INCREMENT instead, while
+   * MariaDB, PostgreSQL and SQL Server have sequence objects.
+   *
+   * MySQL-vs-MariaDB is decided at runtime because a static table cannot
+   * express server flavour. The menus consult `store/serverFlavors` and
+   * `capabilities()` in `utils/serverFlavor` before offering Sequences.
+   *
+   * `SequencePanel` says "MySQL has none" when the flavour comes back plain.
    */
   sequences: boolean;
   /**
@@ -224,12 +219,12 @@ export interface EngineCaps {
    * time — "which statements got slower between these two moments".
    *
    * Needs a server-side, cumulative statement digest keyed by a stable id.
-   * MySQL has `performance_schema.events_statements_summary_by_digest`
-   * (requires performance_schema, on by default), PostgreSQL has
-   * `pg_stat_statements` (an extension — the panel detects it and offers to
-   * enable it). SQL Server's Query Store is richer than a diff (plan history
-   * and forcing — see `queryStore`) and keeps its own panel, so it is
-   * deliberately not here.
+   * MySQL uses `performance_schema.events_statements_summary_by_digest`;
+   * PostgreSQL uses `pg_stat_statements`, with extension detection and an
+   * enable offer in the panel.
+   *
+   * SQL Server's Query Store also keeps plan history and supports forcing
+   * (see `queryStore`), so it deliberately has its own panel instead.
    */
   stmtStats: boolean;
   /** Correlated pg_stat_statements deltas, pg_stat_activity samples, and local incidents. */

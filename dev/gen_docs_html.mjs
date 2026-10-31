@@ -150,7 +150,7 @@ function guidesSection() {
 }
 
 // group panels by menu group in canonical order
-const GROUP_ORDER = ['Monitor', 'Server', 'Schema', 'Data', 'SQL'];
+const GROUP_ORDER = ['Activity', 'Insights', 'Server', 'Schema', 'Data', 'Find & Compare', 'SQL'];
 const panelsByGroup = {};
 for (const p of inv.panels) (panelsByGroup[p.group] ??= []).push(p);
 
@@ -180,7 +180,9 @@ function overviewSection() {
     <div class="card"><div class="big">${inv.counts.prefs}</div><div>settings</div></div>
   </div>
   <div class="callout">
-    <strong>Every shortcut works on every platform.</strong> TxUI binds commands to <code>Mod</code>, which is <b>⌘ Command</b> on macOS and <b>Ctrl</b> on Windows/Linux. Use the <b>macOS / Windows·Linux</b> switch in the top bar to render every shortcut in your notation. Screenshots are taken on macOS; the unified <span style="color:${ACCENT}">red</span> outline marks the element under discussion.
+    <p><strong>Every shortcut works on every platform.</strong> TxUI binds commands to <code>Mod</code>, which is <b>⌘ Command</b> on macOS and <b>Ctrl</b> on Windows/Linux. Use the <b>macOS / Windows·Linux</b> switch in the top bar to render every shortcut in your notation.</p>
+    <p><strong>Screenshots:</strong> taken on macOS with the red outline marking the element under discussion. <b>Click any screenshot to open it full-size in a new tab.</b> Right-click → <b>Open image in new tab</b> works too. The theme switch shows Ayu Dark or Ayu Light captures to match the page.</p>
+    <p><strong>Direct topic links:</strong> every heading has its own URL. Hover a heading to reveal <b>#</b>, then copy the link to jump directly to that topic.</p>
   </div>
   ${shotFiles.has('01-shell.png') ? `<figure><img src="shots/01-shell.png" alt="TxUI connection manager"><figcaption>The connection manager — connections grouped by folder, each engine with its own icon. <span class="cap-mac">Captured on macOS.</span></figcaption></figure>` : ''}
 </section>`;
@@ -222,7 +224,8 @@ function coverageMatrixSection() {
   return `
 <section id="coverage" class="doc-section">
   <h1>Feature-coverage matrix</h1>
-  <p class="lede">Every one of the ${inv.counts.panels} tool panels, cross-checked against the source at build time — the menu group it lives in, the engines it supports, whether it is documented here, and whether a screenshot could be captured. <b>${withShots}/${inv.counts.panels}</b> panels have screenshots; the rest are marked <span class="na">NA</span> (they need a live server to render meaningfully) and are still fully documented in text.</p>
+  <p class="lede">All ${inv.counts.panels} tool panels, cross-checked against the source at build time: menu group, supported engines, documentation and screenshot coverage.</p>
+  <p class="lede"><b>${withShots}/${inv.counts.panels}</b> panels have screenshots. Panels marked <span class="na">NA</span> need a live server to render meaningfully and are still fully documented in text.</p>
   <div class="toolbar">
     <input id="covFilter" class="filter" placeholder="Filter panels…" oninput="filterTable('covFilter','covTable')">
     <select id="covEngine" class="filter" onchange="filterEngine('covEngine','covTable')">
@@ -386,7 +389,7 @@ function panelsSection() {
 <section id="panels" class="doc-section">
   <h1>Tool panels</h1>
   <p class="lede">TxUI ships ${inv.counts.panels} tool panels, opened from the workspace menus (<b>${GROUP_ORDER.join(' · ')}</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
-  ${shotFiles.has('06-menu-monitor.png') ? `<figure><img src="shots/06-menu-monitor.png" alt="Plugins menu" loading="lazy"><figcaption>The workspace menus — each panel is one click away, and only the panels the current engine supports appear.</figcaption></figure>` : ''}`;
+  ${shotFiles.has('06-menu-activity.png') ? `<figure><img src="shots/06-menu-activity.png" alt="Plugins menu" loading="lazy"><figcaption>The workspace menus — each panel is one click away, and only the panels the current engine supports appear.</figcaption></figure>` : ''}`;
   for (const group of GROUP_ORDER) {
     const ps = panelsByGroup[group] || [];
     if (!ps.length) continue;
@@ -516,12 +519,48 @@ const NAV = [
 const CSS = readFileSync(new URL('./docs.css', import.meta.url), 'utf8');
 const JS = readFileSync(new URL('./docs.js', import.meta.url), 'utf8');
 
-const html = `<!doctype html>
+function addHeadingIds(input) {
+  const used = new Set([...input.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]));
+  return input.replace(/<h([1-4])(?![^>]*\bid=)([^>]*)>([\s\S]*?)<\/h\1>/g,
+    (whole, level, attrs, body) => {
+      const text = body.replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+      const base = slug(text) || 'topic';
+      let id = base;
+      for (let n = 2; used.has(id); n++) id = `${base}-${n}`;
+      used.add(id);
+      return `<h${level} id="${id}"${attrs}>${body}</h${level}>`;
+    });
+}
+
+function themedShot(src, theme) {
+  if (src.startsWith('shots/')) return `shots/${theme}/${src.slice(6)}`;
+  if (src.startsWith('user-guide/screenshots/')) {
+    return `user-guide/screenshots/${theme}/${src.slice(23)}`;
+  }
+  if (src.startsWith('user-guide/../shots/')) {
+    return `user-guide/../shots/${theme}/${src.slice(20)}`;
+  }
+  return null;
+}
+
+function linkThemedScreenshots(input) {
+  return input.replace(/<img src="([^"]+)"([^>]*)>/g, (whole, src, attrs) => {
+    const dark = themedShot(src, 'dark');
+    const light = themedShot(src, 'light');
+    if (!dark || !light) return whole;
+    return `<a class="shot-link" href="${dark}" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="${dark}" data-dark-src="${dark}" data-light-src="${light}"${attrs}></a>`;
+  });
+}
+
+const sourceHtml = `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TxUI Help · v${V}</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>${CSS}</style>
 </head>
 <body class="show-mac">
@@ -563,6 +602,7 @@ const html = `<!doctype html>
 </body>
 </html>`;
 
+const html = addHeadingIds(linkThemedScreenshots(sourceHtml));
 writeFileSync(`${R}/index.html`, html);
 const bytes = Buffer.byteLength(html);
 console.log(`docs/index.html written (${(bytes/1024).toFixed(0)} KB)`);

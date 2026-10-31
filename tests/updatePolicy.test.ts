@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyUpdate, updateAction } from '../src/utils/updatePolicy.ts';
+import { classifyUpdate, selectUpdateCandidates, updateAction } from '../src/utils/updatePolicy.ts';
 
 // The full policy matrix: every version-delta class × both Settings prefs
 // on/off, plus the cases that must never act — equal, downgrade, garbage.
@@ -64,4 +64,30 @@ test('the whole decision: 1.1.0 with default prefs', () => {
   assert.equal(updateAction(classifyUpdate('1.1.0', '1.2.0'), defaults), 'auto');
   assert.equal(updateAction(classifyUpdate('1.1.0', '2.0.0'), defaults), 'notify');
   assert.equal(updateAction(classifyUpdate('1.1.0', '1.1.0'), defaults), 'ignore');
+});
+
+test('candidate selection keeps a branch update and a separate major offer', () => {
+  const latest = { version: '2.0.0' };
+  const branch = { version: '1.3.2' };
+  assert.deepEqual(selectUpdateCandidates('1.3.1', latest, branch), {
+    update: branch,
+    major: latest,
+  });
+});
+
+test('candidate selection never treats an older branch release as an update', () => {
+  const latest = { version: '2.0.0' };
+  const branch = { version: '1.3.0' };
+  assert.deepEqual(selectUpdateCandidates('1.3.1', latest, branch), {
+    update: latest,
+    major: latest,
+  });
+});
+
+test('candidate selection uses the latest same-branch release when no separate branch is needed', () => {
+  const latest = { version: '1.3.2' };
+  assert.deepEqual(selectUpdateCandidates('1.3.1', latest, null), {
+    update: latest,
+    major: null,
+  });
 });

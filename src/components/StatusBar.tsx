@@ -5,7 +5,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { usePoll } from '../hooks/usePoll';
 import { getAllActivities, useActivityVersion } from '../store/tabActivity';
 import { useSchemaScan } from '../store/schemaScan';
-import { useUpdater, cancelDownload, releaseTagUrl } from '../store/updater';
+import { useUpdater, cancelDownload, releaseTagUrl, startDownload } from '../store/updater';
 import { collectRunningTasks } from '../utils/runningTasks';
 
 interface AppMetrics {
@@ -22,48 +22,30 @@ function formatBytes(bytes: number): string {
 }
 
 interface Props {
-  /** open sessions, so the popover can name the server each task runs on */
   sessions: { sessionId: string; connectionName: string }[];
 }
 
-/**
- * App-wide status bar: the TxUI process's own RAM + CPU, refreshed every 1s,
- * plus — while anything is running on a server — a "⟳ N running" popover
- * naming each task with a way to stop it (store/tabActivity's registry).
- */
 export function StatusBar({ sessions }: Props) {
   const [metrics, setMetrics] = useState<AppMetrics | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
-  // The clock the elapsed column renders against. Date.now() is impure, so it
-  // must not be called during render — the 1 s poll tick and the popover-open
-  // click refresh it instead (which is also exactly the freshness it needs).
   const [nowMs, setNowMs] = useState(0);
   const [updateOpen, setUpdateOpen] = useState(false);
+  const { state: update, majorCandidate } = useUpdater();
+  const activeVersion = update.kind === 'downloading' || update.kind === 'ready'
+    ? update.version
+    : update.kind === 'available' ? update.info.version : null;
 
-  // Self-update chip (store/updater): ⇩ while a download runs, ↻ once the
-  // bundle is swapped and only a relaunch is left. `failed` renders nothing —
-  // the updater never opens a dialog.
-  const update = useUpdater();
-
-  // hooks/usePoll with the window-level gate: a minimized window has no
-  // status bar to read, so the 1 s app_metrics tick pauses while
-  // document.hidden (visibleOnly:false — this poller is not inside a tab).
   usePoll(async () => {
     setNowMs(Date.now());
     try {
       const m = await invoke<AppMetrics>('app_metrics');
       setMetrics(m);
     } catch {
-      // keep the previous value; a failed poll is not worth surfacing
+      // Keep the previous value; a failed poll is not worth surfacing.
     }
   }, 1, { visibleOnly: false, windowVisibleOnly: true });
 
-  // Re-render when the SET of running things changes; payloads (elapsed,
-  // progress) are read on demand here, per the registry's contract. The 1 s
-  // metrics tick above is what keeps the elapsed column fresh while open.
   useActivityVersion();
-  // While the object explorer re-scans, its one-liner sits left-aligned in
-  // the bar ("scanning reporting.orders…"); null the rest of the time.
   const scan = useSchemaScan();
   const entries = getAllActivities();
   const rows = collectRunningTasks(
@@ -83,7 +65,6 @@ export function StatusBar({ sessions }: Props) {
     nowMs,
   );
 
-  /** Fire a task's cancel — the closures are already fire-and-forget. */
   const stopOne = (i: number) => {
     try { void entries[i].activity.kill?.(); } catch { /* best-effort */ }
   };
@@ -96,20 +77,36 @@ export function StatusBar({ sessions }: Props) {
   return (
     <div className="status-bar">
       {scan && <span className="sb-scan">{scan.text}</span>}
-      {update.kind === 'available' && update.action === 'notify' && (
+      {majorCandidate && activeVersion !== majorCandidate.version && (
         <button
-          className="sb-tasks-btn"
-          title="A new TxUI release is out — click for the release page"
-          onClick={() => { void open(releaseTagUrl(update.info.version)).catch(() => {}); }}
-        >⇩ {update.info.version} available</button>
+          className="sb-tasks-btn sb-update-available"
+          title={`TxUI ${majorCandidate.version} is available. New releases usually include bug fixes, improvements and new features. Click only when you want to leave your current major branch and install this version.`}
+          onClick={() => { void startDownload(majorCandidate, 'latest'); }}
+        >⬆ Upgrade to {majorCandidate.version}</button>
+      )}
+      {update.kind === 'available' && update.action === 'notify'
+        && update.info.version !== majorCandidate?.version && (
+        <button
+          className="sb-tasks-btn sb-update-available"
+          title={update.notUpdatable
+            ? `TxUI ${update.info.version} is available. This package is owned by your package manager; open the release page.`
+            : `TxUI ${update.info.version} is available, probably with bug fixes and feature improvements. Click to download and install it.`}
+          onClick={() => {
+            if (update.notUpdatable) {
+              void open(releaseTagUrl(update.info.version)).catch(() => {});
+            } else {
+              void startDownload(update.info, 'branch');
+            }
+          }}
+        >⬆ {update.info.version} available</button>
       )}
       {(update.kind === 'downloading' || (update.kind === 'available' && update.action === 'auto')) && (
         <>
           <button
-            className="sb-tasks-btn"
+            className="sb-tasks-btn sb-update-download"
             title="Downloading the update in the background — click for details"
             onClick={() => setUpdateOpen(o => !o)}
-          >⇩ downloading{update.kind === 'downloading' && update.pct !== null ? ` ${update.pct} %` : '…'}</button>
+          ><span aria-hidden="true">↓</span><span>downloading</span><span className="sb-update-pct">{update.kind === 'downloading' && update.pct !== null ? `${update.pct} %` : '…'}</span></button>
           {updateOpen && (
             <>
               <div className="sb-tasks-backdrop" onClick={() => setUpdateOpen(false)} />
@@ -130,8 +127,6 @@ export function StatusBar({ sessions }: Props) {
                     onClick={() => { void open(releaseTagUrl(
                       update.kind === 'available' ? update.info.version : update.version)).catch(() => {}); }}>
                     Notes</button>
-                  {/* Frontend-side only — the backend finishes and installs
-                      anyway (store/updater); the chip just stops telling you. */}
                   <button className="toolbar-btn sb-task-stop"
                     onClick={() => { setUpdateOpen(false); cancelDownload(); }}>
                     Cancel</button>
@@ -175,9 +170,6 @@ export function StatusBar({ sessions }: Props) {
                         {row.sessionName} — {row.detail}
                       </div>
                     </div>
-                    {/* A task with no cancel is greyed WITH its reason, never
-                        hidden and never `disabled` (a disabled button shows no
-                        tooltip) — the repo's unavailability rule. */}
                     {row.canStop ? (
                       <button className="toolbar-btn sb-task-stop" onClick={() => stopOne(i)}>Stop</button>
                     ) : (

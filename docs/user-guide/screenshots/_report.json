@@ -65,6 +65,11 @@
     "note": "EXPLAIN visualization of a join"
   },
   {
+    "name": "14-mysql-progress",
+    "ok": true,
+    "note": "Thread progress: ALTER TABLE / CREATE INDEX phases, completion and timing"
+  },
+  {
     "name": "07-data-browser",
     "ok": true,
     "note": "read-only data browser on a table"
@@ -73,6 +78,11 @@
     "name": "20-pg-session",
     "ok": true,
     "note": "PostgreSQL session: tables, partitions, matviews, sequences"
+  },
+  {
+    "name": "22-pg-workload",
+    "ok": true,
+    "note": "PostgreSQL Workload: baseline/after window with ranked statement deltas"
   },
   {
     "name": "30-redis-browser",

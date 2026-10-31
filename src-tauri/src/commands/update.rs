@@ -1,28 +1,23 @@
-//! Self-update: check, download, install.
+//! Self-update: branch-aware check, explicit-version download, install.
 //!
-//! The heavy lifting is `tauri-plugin-updater`'s; these two commands are the
-//! frontend's typed doorway to it. The endpoint is the signed `latest.json`
-//! on the GitHub release (tauri.conf.json `plugins.updater`), overridable
-//! with `TXUI_UPDATE_ENDPOINT` for a staging manifest without rebuilding —
-//! note the plugin rejects a non-https endpoint in RELEASE builds, so the
-//! local http loop is a debug-build affair.
+//! The endpoint is the signed `latest.json` on each GitHub release. A check
+//! returns both the newest release overall and the newest release in the
+//! running app's major branch. A download always names its target version and
+//! channel, so the backend cannot re-check "latest" and install a different
+//! major than the button the user pressed.
 //!
-//! The download is NOT cancellable from the frontend: Tauri's Channel has no
-//! JS→Rust close signal and a third command just for abort was not worth it.
-//! The status-bar "cancel" therefore means "stop telling me" — the store
-//! forgets the download while the backend finishes and installs; the new
-//! version simply applies on the next natural restart instead of via the
-//! relaunch chip.
+//! `TXUI_UPDATE_ENDPOINT` overrides the latest manifest for staging.
+//! `TXUI_UPDATE_BRANCH_ENDPOINT` supplies a branch manifest in the same kind
+//! of staging loop. `TXUI_UPDATE_RELEASES_URL` overrides the GitHub release
+//! list used to discover an older branch. Release builds still require HTTPS;
+//! a local HTTP loop therefore needs a debug build.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri_plugin_updater::{Updater, UpdaterExt};
 
 use crate::apperror::{AppError, ErrorCode};
 
-/// What `update_check` reports. `None` (no update) is a success, not an
-/// error — the frontend's policy layer (`utils/updatePolicy.ts`) classifies
-/// the version delta and decides between auto-download and a passive chip.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
@@ -31,47 +26,129 @@ pub struct UpdateInfo {
     pub body: Option<String>,
 }
 
-/// Download progress, streamed over the Channel. Tagged on `event` so the
-/// frontend switches exactly like the other streamed commands (`pglisten`'s
-/// ListenEvent, datagen's GenEvent).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCandidates {
+    pub latest: Option<UpdateInfo>,
+    pub branch: Option<UpdateInfo>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "event")]
 pub enum UpdateProgress {
-    /// First event; `content_length` is None when the server does not say.
     Started { content_length: Option<u64> },
     Progress { downloaded: u64, total: Option<u64> },
-    /// Download verified (minisign); install follows before the command
-    /// itself resolves.
     Finished,
 }
 
-/// Build the updater, honouring `TXUI_UPDATE_ENDPOINT`.
-///
-/// Read at command level rather than at plugin registration so a staging
-/// manifest (a local static server, a test file) needs no rebuild — the
-/// plugin's own config endpoint stays the production default.
+#[derive(Deserialize)]
+struct ReleaseRow {
+    tag_name: String,
+}
+
+fn version_parts(value: &str) -> Option<(u64, u64, u64)> {
+    let core = value.trim().trim_start_matches('v').split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() { return None; }
+    Some((major, minor, patch))
+}
+
+fn select_branch_version(releases: &[ReleaseRow], current: &str) -> Option<String> {
+    let (current_major, ..) = version_parts(current)?;
+    releases.iter()
+        .filter_map(|release| {
+            let version = release.tag_name.trim_start_matches('v');
+            let parts = version_parts(version)?;
+            (parts.0 == current_major && parts > version_parts(current)?)
+                .then(|| (parts, version.to_string()))
+        })
+        .max_by_key(|(parts, _)| *parts)
+        .map(|(_, version)| version)
+}
+
+fn custom_updater(app: &tauri::AppHandle, raw: &str) -> Result<Updater, AppError> {
+    let url = raw.trim().parse().map_err(|e| {
+        AppError::new(ErrorCode::BadRequest, format!("update endpoint is not a valid URL: {e}"))
+    })?;
+    app.updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| AppError::local(format!("updater endpoint rejected: {e}")))?
+        .build()
+        .map_err(|e| AppError::local(format!("updater init failed: {e}")))
+}
+
+fn env_endpoint(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
 fn build_updater(app: &tauri::AppHandle) -> Result<Updater, AppError> {
-    match std::env::var("TXUI_UPDATE_ENDPOINT") {
-        Ok(raw) if !raw.trim().is_empty() => {
-            let url = raw.trim().parse().map_err(|e| {
-                AppError::new(ErrorCode::BadRequest, format!(
-                    "TXUI_UPDATE_ENDPOINT is not a valid URL: {e}"))
-            })?;
-            app.updater_builder()
-                .endpoints(vec![url])
-                .map_err(|e| AppError::local(format!("updater endpoint rejected: {e}")))?
-                .build()
-                .map_err(|e| AppError::local(format!("updater init failed: {e}")))
-        }
-        _ => app.updater()
+    match env_endpoint("TXUI_UPDATE_ENDPOINT") {
+        Some(raw) => custom_updater(app, &raw),
+        None => app.updater()
             .map_err(|e| AppError::local(format!("updater init failed: {e}"))),
     }
 }
 
-/// Is this error the "this install cannot auto-update" class? Linux deb/rpm
-/// installs land here (the package manager owns the file), and the frontend
-/// must fall back to the notify-only chip — that fallback is the whole point
-/// of the dedicated code rather than a generic failure.
+fn build_version_updater(
+    app: &tauri::AppHandle,
+    version: &str,
+    channel: Option<&str>,
+) -> Result<Updater, AppError> {
+    let override_url = if channel == Some("branch") {
+        env_endpoint("TXUI_UPDATE_BRANCH_ENDPOINT").or_else(|| env_endpoint("TXUI_UPDATE_ENDPOINT"))
+    } else {
+        env_endpoint("TXUI_UPDATE_ENDPOINT")
+    };
+    if let Some(raw) = override_url { return custom_updater(app, &raw); }
+    if version_parts(version).is_none() {
+        return Err(AppError::new(ErrorCode::BadRequest, "invalid update target version"));
+    }
+    custom_updater(app, &format!(
+        "https://github.com/tuxie80/txui/releases/download/v{version}/latest.json"))
+}
+
+async fn check_updater(updater: Updater) -> Result<Option<UpdateInfo>, AppError> {
+    let update = updater.check().await.map_err(map_updater_err("check"))?;
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version.clone(),
+        date: u.raw_json.get("pub_date")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        body: u.body.clone(),
+    }))
+}
+
+async fn discover_branch_update(
+    app: &tauri::AppHandle,
+    current_version: &str,
+) -> Result<Option<UpdateInfo>, AppError> {
+    if let Some(raw) = env_endpoint("TXUI_UPDATE_BRANCH_ENDPOINT") {
+        return check_updater(custom_updater(app, &raw)?).await;
+    }
+    if env_endpoint("TXUI_UPDATE_ENDPOINT").is_some() { return Ok(None); }
+    let endpoint = env_endpoint("TXUI_UPDATE_RELEASES_URL").unwrap_or_else(||
+        "https://api.github.com/repos/tuxie80/txui/releases?per_page=100".to_string());
+    let client = reqwest::Client::builder()
+        .user_agent("TxUI-updater")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| AppError::local(format!("release-list client failed: {e}")))?;
+    let releases = client.get(endpoint)
+        .send().await
+        .map_err(|e| AppError::local(format!("release-list request failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::local(format!("release-list response failed: {e}")))?
+        .json::<Vec<ReleaseRow>>().await
+        .map_err(|e| AppError::local(format!("release-list decode failed: {e}")))?;
+    let Some(version) = select_branch_version(&releases, current_version) else {
+        return Ok(None);
+    };
+    check_updater(build_version_updater(app, &version, Some("branch"))?).await
+}
+
 fn is_not_updatable(e: &tauri_plugin_updater::Error) -> bool {
     use tauri_plugin_updater::Error as E;
     match e {
@@ -102,46 +179,40 @@ fn map_updater_err(what: &str) -> impl Fn(tauri_plugin_updater::Error) -> AppErr
     }
 }
 
-/// Is a newer version available? `Ok(None)` = up to date. Errors are typed
-/// and quiet: the scheduled background check treats any failure as "try
-/// again next launch" — never a dialog.
 #[tauri::command]
-pub async fn update_check(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, AppError> {
-    let updater = build_updater(&app)?;
-    let update = updater.check().await.map_err(map_updater_err("check"))?;
-    Ok(update.map(|u| UpdateInfo {
-        version: u.version.clone(),
-        // The plugin parses the date into `time::OffsetDateTime`; taking it
-        // back out of the raw JSON avoids depending on the `time` crate just
-        // to format it again.
-        date: u.raw_json.get("pub_date")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        body: u.body.clone(),
-    }))
+pub async fn update_check(
+    app: tauri::AppHandle,
+    current_version: String,
+) -> Result<UpdateCandidates, AppError> {
+    if version_parts(&current_version).is_none() {
+        return Err(AppError::new(ErrorCode::BadRequest, "invalid current version"));
+    }
+    let latest = check_updater(build_updater(&app)?).await?;
+    let branch = match &latest {
+        Some(info) if version_parts(&info.version).map(|v| v.0)
+            == version_parts(&current_version).map(|v| v.0) => latest.clone(),
+        Some(_) => discover_branch_update(&app, &current_version).await?,
+        None => None,
+    };
+    Ok(UpdateCandidates { latest, branch })
 }
 
-/// Re-check, then download (streaming progress over `on_event`) and install.
-///
-/// Resolves once the install has replaced the bundle — the running process is
-/// still the OLD version; the frontend's "↻ Restart to X.Y.Z" chip calls
-/// `relaunch()` from the process plugin. A non-self-updatable install (Linux
-/// deb/rpm) is `not_updatable`, which the frontend turns into the passive
-/// "available" chip instead of a failure.
 #[tauri::command]
 pub async fn update_download_and_install(
     app: tauri::AppHandle,
     on_event: Channel<UpdateProgress>,
+    target_version: String,
+    channel: Option<String>,
 ) -> Result<(), AppError> {
-    let updater = build_updater(&app)?;
-    let update = updater.check().await.map_err(map_updater_err("check"))?;
-    let Some(update) = update else {
-        // The check that opened the chip said there was one; the re-check
-        // disagrees (release pulled, endpoint changed). Not an error anyone
-        // can act on — say so and let the store settle back to idle.
-        return Err(AppError::new(ErrorCode::NotFound,
-            "the update is no longer available"));
-    };
+    let updater = build_version_updater(&app, &target_version, channel.as_deref())?;
+    let update = updater.check().await.map_err(map_updater_err("check"))?.ok_or_else(|| {
+        AppError::new(ErrorCode::NotFound, "the update is no longer available")
+    })?;
+    if update.version != target_version {
+        return Err(AppError::new(ErrorCode::BadRequest, format!(
+            "update target changed: requested {target_version}, manifest offers {}",
+            update.version)));
+    }
 
     let mut downloaded: u64 = 0;
     let mut started = false;
@@ -172,17 +243,12 @@ pub async fn update_download_and_install(
 mod tests {
     use super::*;
 
-    /// The wire shape the frontend matches on: `code: "not_updatable"` is the
-    /// signal for the notify-only fallback, so its spelling is a contract
-    /// (utils/appError.ts lists it).
     #[test]
     fn not_updatable_serializes_to_its_documented_spelling() {
         let e = AppError::new(ErrorCode::NotUpdatable, "x");
         assert_eq!(serde_json::to_value(&e).unwrap()["code"], "not_updatable");
     }
 
-    /// A deb/rpm permission failure on install must classify as NotUpdatable,
-    /// not a generic local error — the frontend's fallback depends on it.
     #[test]
     fn a_permission_denied_install_is_not_updatable() {
         let e = tauri_plugin_updater::Error::Io(
@@ -190,11 +256,26 @@ mod tests {
         assert!(is_not_updatable(&e));
     }
 
-    /// A network failure is NOT "not updatable" — it is transient and just
-    /// retries next launch.
     #[test]
     fn a_network_error_is_not_not_updatable() {
         let e = tauri_plugin_updater::Error::Network("offline".into());
         assert!(!is_not_updatable(&e));
+    }
+
+    #[test]
+    fn branch_discovery_chooses_only_the_newest_release_in_the_current_major() {
+        let rows = ["v1.3.0", "v1.3.2", "v1.4.0", "v2.0.0", "v1.3.1"]
+            .map(|tag_name| ReleaseRow { tag_name: tag_name.to_string() });
+        assert_eq!(select_branch_version(&rows, "1.3.1").as_deref(), Some("1.4.0"));
+        assert_eq!(select_branch_version(&rows, "1.4.0"), None);
+        assert_eq!(select_branch_version(&rows, "1.2.9").as_deref(), Some("1.4.0"));
+    }
+
+    #[test]
+    fn branch_discovery_rejects_bad_versions_and_downgrades() {
+        let rows = ["v1.3.0", "garbage", "v2.0.0"]
+            .map(|tag_name| ReleaseRow { tag_name: tag_name.to_string() });
+        assert_eq!(select_branch_version(&rows, "1.3.1"), None);
+        assert_eq!(select_branch_version(&rows, "not-a-version"), None);
     }
 }

@@ -452,8 +452,8 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       scriptBase,
       scriptResultView: null,
       // The Script overview tab is gone — the Log is where a running script's
-      // per-statement lines live now, so put it in front for the run. A run
-      // that produced row sets lands on Result 1 when it finishes (below).
+      // per-statement lines live now, so put it in front for the run. Each
+      // row-producing statement opens its own result as it completes.
       view: 'log',
       autoLimited: null, prodCap: null,
       // A script run replaces every accumulated single-run marker: its own
@@ -550,6 +550,11 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
           // keep-vs-drop decision lives in utils/scriptRun.scriptResultFor.
           ...scriptResultFor(result, stmts[i].text, noResults, SCRIPT_KEEP_ROWS),
         };
+        if (scriptResultTabs([lines[i]]).length > 0) {
+          patchTab(tabId, {
+            scriptResults: [...lines], scriptResultView: i, view: 'grid',
+          });
+        }
       } catch (err) {
         // ■ Cancel makes the running statement reject. Treating that as a
         // failure would stop and ask whether to ignore the statement the user
@@ -637,14 +642,13 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     // The mode is part of the record: a no-results run says so in the log, so
     // a misdelivered shortcut is obvious immediately.
     if (noResults) summary.text += ' · results discarded';
-    // Land on Result 1 when anything produced rows; a no-results run (F9) or
-    // a run of pure writes/DDL (ANALYZE & friends) has no result sets and
-    // stays on the Log, whose per-statement lines are the whole story.
+    // Keep the newest result in front when anything produced rows; a no-results
+    // run (F9) or pure writes/DDL stays on the Log.
     const resultTabs = scriptResultTabs(lines);
     patchTab(tabId, {
       running: false,
       autoLimited: anyLimit, prodCap: anyProdCap ? anyLimit : null,
-      scriptResultView: resultTabs.length > 0 ? resultTabs[0] : null,
+      scriptResultView: resultTabs.length > 0 ? resultTabs[resultTabs.length - 1] : null,
       view: resultTabs.length > 0 ? 'grid' : 'log',
       // Only a non-clean run puts a message in the error bar; a clean one is
       // reported by the summary line in the Log.

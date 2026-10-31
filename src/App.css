@@ -94,6 +94,20 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-ui); f
   margin-right: 8px;
 }
 .sb-tasks-btn:hover { background: var(--bg3); color: var(--text); }
+.sb-update-available {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.sb-update-download {
+  min-width: 142px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.sb-update-pct { min-width: 34px; text-align: right; }
 .sb-tasks-backdrop { position: fixed; inset: 0; z-index: 40; }
 .sb-tasks-pop {
   position: absolute;

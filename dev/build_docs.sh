@@ -15,8 +15,9 @@ echo "1/4  Cross-check inventory (reads source modules via Vite SSR)…"
 node dev/gen_docs_inventory.mjs
 
 if [[ "${1:-}" == "--shots" ]]; then
-  echo "2/4  Capturing screenshots (macOS, retina, red highlights)…"
-  node dev/shoot.mjs
+  echo "2/4  Capturing panel screenshots (Ayu Dark + Ayu Light)…"
+  TXUI_DOC_THEME=ayu-dark node dev/shoot.mjs
+  TXUI_DOC_THEME=ayu-light node dev/shoot.mjs
 else
   echo "2/4  Skipping screenshot capture (pass --shots to re-run)."
 fi
@@ -25,8 +26,9 @@ echo "3/4  Generating docs/index.html…"
 node dev/gen_docs_html.mjs
 
 if [[ "${1:-}" == "--shots" ]]; then
-  echo "4/4  Capturing user-guide screenshots…"
-  node dev/shoot_userguide.mjs
+  echo "4/4  Capturing user-guide screenshots (Ayu Dark + Ayu Light)…"
+  TXUI_DOC_THEME=ayu-dark node dev/shoot_userguide.mjs
+  TXUI_DOC_THEME=ayu-light node dev/shoot_userguide.mjs
 else
   echo "4/4  Skipping user-guide screenshots (pass --shots to re-capture)."
 fi

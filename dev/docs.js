@@ -14,17 +14,26 @@ function setOS(os){
   setOS(os);
 })();
 
-// ── theme ─────────────────────────────────────────────────────────────────────
+// ── theme + matching Ayu screenshots ─────────────────────────────────────────
+function setTheme(theme){
+  document.documentElement.setAttribute('data-theme', theme);
+  document.querySelectorAll('img[data-dark-src]').forEach(img => {
+    const src = theme === 'light' ? img.dataset.lightSrc : img.dataset.darkSrc;
+    img.src = src;
+    const link = img.closest('a.shot-link');
+    if(link) link.href = src;
+  });
+}
 function toggleTheme(){
   const cur = document.documentElement.getAttribute('data-theme');
   const next = cur === 'light' ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', next);
+  setTheme(next);
   try{ localStorage.setItem('txui-docs-theme', next); }catch(e){}
 }
 (function initTheme(){
   let t;
   try{ t = localStorage.getItem('txui-docs-theme'); }catch(e){}
-  if(t) document.documentElement.setAttribute('data-theme', t);
+  setTheme(t === 'light' ? 'light' : 'dark');
 })();
 
 // ── table filters ─────────────────────────────────────────────────────────────
@@ -108,6 +117,19 @@ function clearGlobal(){
     });
   }, { rootMargin: '-40% 0px -55% 0px' });
   document.querySelectorAll('.doc-section').forEach(s => obs.observe(s));
+})();
+
+// Direct topic links: scroll both on initial load and when the fragment changes.
+(function topicLinks(){
+  const open = () => {
+    if(!location.hash) return;
+    let id;
+    try{ id = decodeURIComponent(location.hash.slice(1)); }catch(e){ return; }
+    const el = document.getElementById(id);
+    if(el) el.scrollIntoView({ block: 'start', behavior: 'instant' });
+  };
+  open();
+  window.addEventListener('hashchange', open);
 })();
 
 // keyboard: '/' focuses search

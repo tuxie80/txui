@@ -1,8 +1,8 @@
 {
  "panels": {
   "stmtstats": {
-   "summary": "One engine-aware panel for 'which statements got slower between two moments': it captures timestamped snapshots of the server's cumulative statement digest and diffs any two, so the statement whose total time grew most between two moments leads the list - the question asked during an incident, not since the last counter reset. On PostgreSQL the source is pg_stat_statements (diffed by queryid, with changed/new/gone status and a reset guard); on MySQL/MariaDB it is performance_schema.events_statements_summary_by_digest (diffed by DIGEST, deltas only). All SQL goes through the read-only monitor path; nothing is written. Captures can also be saved to the persistent digest store shared by both engines.",
-   "howToOpen": "Open the session menu bar, Logs & History group, 'Statement statistics' (also on the native Tools menu). Renders the engine's implementation - PgssHistoryPanel on PostgreSQL, MysqlDigestPanel on MySQL - as one tab receiving the current session.",
+   "summary": "Capture cumulative statement statistics at two moments and rank what changed. PostgreSQL diffs pg_stat_statements by queryid; MySQL/MariaDB diffs performance_schema digests. Read-only captures can also be saved for later comparison.",
+   "howToOpen": "Insights menu -> Statement statistics (also on the native Tools menu). Renders PgssHistoryPanel on PostgreSQL and MysqlDigestPanel on MySQL as one tab receiving the current session.",
    "keyActions": [
     "PostgreSQL: detects pg_stat_statements; offers 'Enable extension' if available but not enabled, or install instructions if absent",
     "Capture snapshot (PostgreSQL keeps the last 12); pick Before and After snapshots",
@@ -11,11 +11,11 @@
     "Save the latest capture into the persistent digest store and diff any two stored snapshots (DigestStoreSection, both engines)"
    ],
    "engines": "MySQL/MariaDB (performance_schema digests) and PostgreSQL (pg_stat_statements). Other engines keep no cumulative statement digest, so the menu entry is gated on the stmtStats capability; SQL Server's richer Query Store keeps its own panel.",
-   "caveats": "Read-only. PostgreSQL needs the pg_stat_statements extension (which may need shared_preload_libraries and a restart); MySQL needs performance_schema enabled. In-memory snapshots are per panel lifetime (PostgreSQL keeps the last 12); capture at least two with workload in between before any diff appears. A counter reset between snapshots invalidates the deltas and is flagged on PostgreSQL."
+   "caveats": "Read-only. PostgreSQL needs pg_stat_statements; MySQL needs performance_schema. Capture at least two snapshots with workload between them. A counter reset invalidates deltas and is flagged on PostgreSQL."
   },
   "pgworkload": {
-   "summary": "Correlated PostgreSQL incident analysis over one manual baseline/after window. The panel combines ranked pg_stat_statements deltas, optionally sampled wait events, and retained long-query, deadlock and failed-statement incidents from the local timeline, so 'what changed while this workload ran?' is answered in one place rather than three separate panels. Statement rows and SQL-bearing incidents drill into the editor; the full incident timeline is one click away.",
-   "howToOpen": "Session menu bar, Insights group, 'PostgreSQL Workload' (also native Tools > Insights). Available only on PostgreSQL sessions.",
+   "summary": "Investigate one manual baseline/after window with ranked statement deltas, optional wait sampling and matching local incidents. Statement and incident SQL opens in the editor; there is no always-on collector.",
+   "howToOpen": "Insights menu -> PostgreSQL Workload (also native Tools > Insights). Available only on PostgreSQL sessions.",
    "keyActions": [
     "Capture a baseline, run the workload, then capture After",
     "Optionally sample waits during the measurement; sampling stops on After and on panel close",
@@ -26,8 +26,8 @@
    "caveats": "Wait samples are in-memory, capped at 2,000 and cover only time actively sampled while the panel is open; they are not server history. Incidents are limited by the existing local stores' retention. There is no always-on collector or additional snapshot database."
   },
   "binlog": {
-   "summary": "Binary-log events viewer and point-in-time-recovery (PITR) helper for MySQL/MariaDB. Runs SHOW BINARY LOGS to list files, then SHOW BINLOG EVENTS IN <file> LIMIT 500 to show what happened in the selected file. From a chosen event position it generates (never runs) the mysqlbinlog command line for a PITR replay.",
-   "howToOpen": "Session menu bar, Monitor group, 'Binary logs'. Renders as the BinlogPanel tab with the current session.",
+   "summary": "Inspect MySQL/MariaDB binary-log files and events, then generate a mysqlbinlog point-in-time-recovery command from a chosen position. The recovery command is copied, never executed by TxUI.",
+   "howToOpen": "Insights menu -> Binary logs. Renders as the BinlogPanel tab with the current session.",
    "keyActions": [
     "Pick a binary-log file from the dropdown (newest selected by default)",
     "Reload the events for the selected file (SHOW BINLOG EVENTS ... LIMIT 500)",
@@ -38,8 +38,8 @@
    "caveats": "Read-only in-app; the generated PITR command is never executed - it contains placeholders (<host>/<port>/<user>) that you fill in and run in a shell yourself. Requires a live MySQL connection with binary logging enabled and privileges to SHOW BINARY LOGS / BINLOG EVENTS. Event list capped at 500 rows."
   },
   "slowlog": {
-   "summary": "Slow-query-log analyzer, a pt-query-digest style fallback for when performance_schema is off or you need history it does not keep. You open a MySQL/MariaDB slow-log file; it is parsed and grouped by statement fingerprint (literals normalized) and ranked by total time. Parsing/aggregation is in utils/slowLogParse.",
-   "howToOpen": "Session menu bar, Monitor group, 'Slow-log analyzer'. Renders as the SlowLogPanel tab.",
+   "summary": "Analyze a local MySQL/MariaDB slow-query log offline. Statements are fingerprinted, grouped and ranked by total time in a pt-query-digest style report. No server connection is needed after opening the file.",
+   "howToOpen": "Insights menu -> Slow-log analyzer. Renders as the SlowLogPanel tab.",
    "keyActions": [
     "Open slow log... (button) - file picker for .log/.slow/.txt files, read via the read_slow_log backend command",
     "Read the ranked table: statement shape, count, total time, avg, max, rows examined (top 200 shapes)"
@@ -48,8 +48,8 @@
    "caveats": "Operates on a file, not a live connection; no server round-trip. Results limited to top 200 statement shapes."
   },
   "documenter": {
-   "summary": "Schema documenter that produces commit-ready schema documentation (Markdown primary, or HTML) intended to be committed next to migrations so schema changes show up as diffs in review. It introspects the selected database via up to four catalog queries (tables, columns, indexes, foreign keys, routines), each run separately so a missing privilege loses one section rather than the whole document. Output is deterministically ordered and free of timestamps; rendering lives in utils/schemaDoc.",
-   "howToOpen": "Session menu bar, Schema group, 'Documenter'. Renders as the DocumenterPanel tab with the current session and selected database (schema).",
+   "summary": "Generate deterministic, commit-ready schema documentation in Markdown or HTML, with an optional relationship diagram. Catalog sections are introspected separately so one missing privilege does not erase the whole document.",
+   "howToOpen": "Schema menu -> Documenter. Renders as the DocumenterPanel tab with the current session and selected database (schema).",
    "keyActions": [
     "Reload - re-introspect the catalog for the selected schema",
     "Choose format: Markdown or HTML (segmented control)",
@@ -63,8 +63,8 @@
    "caveats": "Requires a live MySQL/PostgreSQL connection and a selected database. Row counts are optimizer estimates, not COUNT(*). A missing grant on one catalog silently drops that section. MySQL index expressions need MySQL 8.0.13+; older servers fall back to plain columns."
   },
   "fleet": {
-   "summary": "Fleet runs read-only checks across every server sharing a label (labels, not sidebar folders, are what the checks operate on). It connects to all members of a chosen label, detects each one's role (primary/replica) from the server itself rather than config, and compares them across three tabs: Variables (config drift), Indexes (which indexes diverge and in which direction), and Statistics (freshness of table stats). Judgement of what is a real finding vs expected difference lives in utils/fleetChecks.",
-   "howToOpen": "Session menu bar, Server group, 'Fleet' (can also be opened from a label chip). Renders as the FleetPanel tab; it opens its own sessions to each labeled connection and closes them on unmount.",
+   "summary": "Compare every server sharing a label with read-only checks. Detect roles from the servers, then review Variables, Indexes and Statistics tabs for configuration drift, index divergence and stale table statistics.",
+   "howToOpen": "Server menu -> Fleet (can also be opened from a label chip). Renders as the FleetPanel tab; it opens its own sessions to each labeled connection and closes them on unmount.",
    "keyActions": [
     "Pick a label from the dropdown (only labels naming more than one server qualify)",
     "Re-check (button) - re-run all three checks in one pass",
@@ -76,8 +76,8 @@
    "caveats": "Entirely read-only. Requires live connections to at least two reachable members of the label; fewer and it cannot compare. A member that cannot answer a given query is simply absent from that check rather than counted as 'everything missing'. Role detection falls back to 'unknown' for isolated servers."
   },
   "cluster": {
-   "summary": "Galera cluster group view - ALL nodes of a MariaDB Galera Cluster / Percona XtraDB Cluster monitored at once, the multi-node companion of the per-session Galera dashboard (a tab of the Replication panel). One poll opens a short-lived session per selected node (concurrency-capped, 30s per-node timeout) via the galera_cluster_poll backend command, runs the two read-only probes SHOW GLOBAL STATUS/VARIABLES LIKE 'wsrep%', and closes it again. Per node it shows a card with a state badge (Synced/Donor/Joining/unreachable), cluster size as that node sees it, flow-control %, recv/send queues, write rates diffed between polls (commits/s, replicated/received bytes/s), an inline SST/IST transfer card and the gcache IST window. Across all nodes it computes the findings no single node can see (pure utils/galeraCluster.ts): split-brain (differing cluster state UUIDs, or two Primary components over disjoint memberships), cluster-size and membership disagreement, donor<->joiner SST pairing with elapsed time, unreachable nodes (the 1047 'not yet prepared' signature reported as 'likely mid-SST'), the slowest node, and nodes picked from different clusters.",
-   "howToOpen": "Session menu bar, Server group, 'Galera cluster' (also Tools > Server > Galera cluster). Renders as the GaleraClusterPanel tab; it polls SAVED connections, not the session it is open in - the current connection's folder-mates are pre-selected because the nodes of a cluster are usually already one folder.",
+   "summary": "Monitor all selected MariaDB Galera or PXC nodes at once. Node cards show state, queues, flow control, write rates, transfers and gcache. Cluster-wide findings identify split-brain, membership disagreement, slow nodes and donor/joiner pairs.",
+   "howToOpen": "Server menu -> Galera cluster (also Tools > Server > Galera cluster). Renders as the GaleraClusterPanel tab; it polls SAVED connections, not the session it is open in - the current connection's folder-mates are pre-selected because the nodes of a cluster are usually already one folder.",
    "keyActions": [
     "Tick the cluster's nodes in the picker (grouped by folder; the current connection's folder is pre-selected)",
     "Read the cluster-findings banner - split-brain CRIT is unmissable on top",
@@ -86,11 +86,11 @@
     "Pause/resume the 5s auto-poll; Refresh for a manual round"
    ],
    "engines": "MySQL-family with wsrep only (MariaDB Galera Cluster, Percona XtraDB Cluster); the picker lists MySQL-family connections only and the backend skips anything else with a note event.",
-   "caveats": "Read-only by construction (SHOW STATUS needs no grant, so there is no privilege gate). Polling sessions are ephemeral - opened and closed per poll round. Snapshots, rates and the SST elapsed clocks live in memory only and reset when the panel closes. A hidden tab polls nothing. Every cluster rule tolerates missing keys and dead nodes - a node that does not answer degrades the comparisons it would have joined, never the whole view."
+   "caveats": "Read-only SHOW probes need no special grant. Poll sessions are ephemeral. Rates and transfer clocks reset when the panel closes; hidden tabs do not poll. Missing keys and dead nodes degrade comparisons, never the whole view."
   },
   "csvimport": {
-   "summary": "A three-step CSV import wizard: (1) File & target - pick a CSV/JSON/spreadsheet (delimiter and header auto-detected and re-detectable), importing into an existing table or creating a new one; (2) Columns - per-column mapping with skip toggles (existing: matched by name; new: editable name/type inferred from data); (3) Run - options plus live byte-based progress, run transactionally. Non-CSV files (JSON, xlsx/xls/ods, ndjson) are converted to a temporary CSV first and then follow the same path.",
-   "howToOpen": "Session menu bar, Data group, 'CSV import'. Renders as the CsvImportPanel tab with sessionId, engine, environment, and readOnly.",
+   "summary": "Import CSV, JSON, NDJSON or spreadsheets in three steps: File & target, Columns, Run. Map or skip columns, create or reuse a table, review options, then run transactionally with live byte-based progress.",
+   "howToOpen": "Data menu -> CSV import. Renders as the CsvImportPanel tab with sessionId, engine, environment, and readOnly.",
    "keyActions": [
     "Browse... to pick a CSV/TSV/TXT/JSON/NDJSON/JSONL/XLSX/XLSM/XLS/ODS file; pick a sheet for multi-sheet spreadsheets",
     "Choose delimiter and 'first row is header'",
@@ -100,11 +100,11 @@
     "Import (button) - streams inserts with a live progress bar and row count; imports are audited"
    ],
    "engines": "MySQL, PostgreSQL, and SQLite (gated to csvImport). Upsert wording differs: MySQL ON DUPLICATE KEY UPDATE vs PostgreSQL ON CONFLICT DO NOTHING (skip).",
-   "caveats": "Requires a live connection with write access. Blocked when the connection is read-only. On a 'prod' environment it prompts for confirmation before running (and warns when existing rows will be deleted). The import is transactional (rolls back on any error) and continues in the backend even if the panel/tab is closed (surfaced as a tab activity)."
+   "caveats": "Requires write access and is blocked on read-only connections. Prod confirms first, especially when deleting rows. Import is transactional and continues in the backend if the tab closes, with activity and cancellation still visible."
   },
   "playground": {
-   "summary": "A scenario generator that manufactures database trouble on purpose so you can practise the DBA tools (Processes, Locks, killall) against real server state. It offers three scenarios: 'Sleep mess' (N connections all running the same long SELECT SLEEP), 'Lock storm' (one holder takes a row lock in a transaction while others queue blocked), and 'Mixed mayhem' (rogue family + benign churn + a blocking chain). Every statement carries a txui-playground <tag> comment so the mess is identifiable, and the exact statement shapes are previewed before you spawn.",
-   "howToOpen": "Session menu bar, Server group, 'Playground'. Renders as the PlaygroundPanel tab with the current session.",
+   "summary": "Manufacture real load and lock scenarios for practising Processes, Locks and killall. Choose Sleep mess, Lock storm or Mixed mayhem, review the tagged statement shapes, then spawn and stop real server threads.",
+   "howToOpen": "Activity menu -> Playground. Renders as the PlaygroundPanel tab with the current session.",
    "keyActions": [
     "Pick a scenario card (Sleep mess / Lock storm / Mixed mayhem)",
     "Set parameters: threads, duration, stagger, repeats, jitter %, hold (lock scenarios), database/schema, tag",
@@ -114,11 +114,11 @@
     "Jump to open Processes or open Locks; clear a finished run"
    ],
    "engines": "MySQL and PostgreSQL only (gated to sqlDba). MySQL uses SLEEP()/SELECT ... FOR UPDATE; PostgreSQL uses pg_sleep() and lock_timeout.",
-   "caveats": "Requires a live writable connection. The spawned threads are real server state and deliberately outlive the panel - closing the tab or app does NOT stop them; only Stop (or disconnecting) ends the run, and you are expected to go kill them yourself. Lock/Mixed scenarios need write access (they create one playground table and update one row) and are blocked on read-only connections; Sleep mess is pure SELECT and works read-only."
+   "caveats": "Spawned threads are real and outlive the panel: closing the tab or app does not stop them. Use Stop or disconnect. Lock/Mixed scenarios write one playground table and need write access; Sleep mess is SELECT-only and works read-only."
   },
   "quality": {
-   "summary": "A deep query, schema and migration-analysis panel modeled on a manual DBA review. In 'Query' mode you paste or load one statement, tick which checks to run, and get a findings report: static lint, referenced-table DDL and sizes, a join/filter data-type audit, integer AUTO_INCREMENT ceilings, InnoDB statistics, an index advisor, EXPLAIN (+SHOW WARNINGS), EXPLAIN FORMAT=JSON cost overview, and a guarded EXPLAIN ANALYZE. 'Schema' mode reviews a MySQL catalog. 'Change review' builds sequential and final table models for MySQL/MariaDB or PostgreSQL migrations, reporting narrowing, nullability, index/FK, destructive-rewrite, cascade and lock/rebuild findings with source positions. Reports render on screen with detail/severity controls and export to Markdown or raw text.",
-   "howToOpen": "Session menu bar, SQL group, 'SQL Quality'. Renders as the SqlQualityPanel tab with the current session.",
+   "summary": "Review queries, schemas and migrations before running them. Query mode combines static and server-backed checks; Schema reviews a MySQL catalog; Change review builds sequential and final models for MySQL/MariaDB or PostgreSQL migrations.",
+   "howToOpen": "SQL menu -> SQL Quality. Renders as the SqlQualityPanel tab with the current session.",
    "keyActions": [
     "Switch between Query, Schema and Change review modes",
     "Load .sql... or paste a statement or migration; override the target DB; supply values for ? / :named parameters in Query mode",
@@ -128,12 +128,12 @@
     "Review schema (button, MySQL) - audit a whole database's catalog",
     "Adjust detail level, severity floor, and 'Passed' toggle; Export .md / raw .txt, Copy, Findings .md/.txt; open raw-output chips (EXPLAIN, DDL, sizes, JSON, ANALYZE)"
    ],
-   "engines": "MySQL and PostgreSQL are server-capable (gated to sqlQuality, which also includes SQLite). MySQL gets the full set including InnoDB stats, integer ceilings, the index advisor, DDL audit, and the Schema-review mode. PostgreSQL gets static lint, column map, referenced tables, data-type audit, EXPLAIN+warnings, and EXPLAIN JSON, but the Schema button is disabled (rulebook is MySQL 8's). Change review supports MySQL/MariaDB and PostgreSQL. On SQLite and other engines only the offline static lint runs - all server-backed checks are disabled.",
-   "caveats": "Everything except static lint and migration-only Change review requires a live server connection; each server step degrades gracefully on failure. Change review uses live catalog metadata only when every core read succeeds, otherwise it labels the report migration-only; unsupported or uncertain syntax produces a finding and is never treated as safe or applied to the model. EXPLAIN ANALYZE actually executes the query (guarded by a server-side timeout, default 120s). Sizes/row counts are optimizer estimates, not COUNT(*); stale stats reduce accuracy. InnoDB stats and schema-review sizes need a mysql.* grant, else it falls back to information_schema estimates. Schema review is MySQL-only and scoped to one selected database."
+   "engines": "MySQL and PostgreSQL are server-capable. MySQL adds InnoDB statistics, integer ceilings, index advice and Schema review. Change review supports MySQL/MariaDB and PostgreSQL. SQLite and other engines run offline static lint only.",
+   "caveats": "Server-backed checks need a live connection. Migration-only Change review works offline; unsupported syntax produces a finding. EXPLAIN ANALYZE executes the query with a timeout. Sizes are estimates, and Schema review is MySQL-only."
   },
   "serverinfo": {
-   "summary": "Server variables & status browser. MySQL shows SHOW GLOBAL VARIABLES / STATUS; PostgreSQL shows pg_settings / pg_stat_database; Redis shows config / INFO. You can search across all cells, and on PostgreSQL narrow variables to changed-from-default only. MySQL/MariaDB and PostgreSQL variables are also editable: selecting a row and setting a new value generates a review-only statement (MySQL SET GLOBAL with a persistence hint, or PG ALTER SYSTEM SET) that is inserted into the editor, never executed here.",
-   "howToOpen": "Session menu bar, Server group, 'Server variables & status'. Renders as the ServerInfoPanel tab with sessionId and engine.",
+   "summary": "Search server variables, configuration and status. MySQL uses SHOW GLOBAL VARIABLES/STATUS, PostgreSQL uses pg_settings/pg_stat_database, and Redis uses CONFIG/INFO. MySQL and PostgreSQL changes are generated as SQL for review.",
+   "howToOpen": "Server menu -> Server variables & status. Renders as the ServerInfoPanel tab with sessionId and engine.",
    "keyActions": [
     "Toggle Variables/Config vs Status/INFO view",
     "Search across all cells; on PostgreSQL toggle 'changed only'",
@@ -145,8 +145,8 @@
    "caveats": "Requires a live connection. Generated SET/ALTER statements are never executed by this panel - they are handed to the SQL editor for review and manual running. PG note: ALTER SYSTEM writes postgresql.auto.conf and reloads, but restart-only GUCs still need a restart."
   },
   "locks": {
-   "summary": "Locks & Deadlocks — one panel with two tabs for the whole subject. The Blocking tab shows blocking chains auto-refreshed every 5s: MySQL uses sys.innodb_lock_waits (who waits on whom, wait age, both statements); PostgreSQL uses pg_blocking_pids() joined to pg_stat_activity in the same shape; SQL Server reads sys.dm_os_waiting_tasks. MySQL also surfaces parsed InnoDB status (transactions, buffer, row ops, semaphores). The Deadlocks tab is the deadlock analyzer: a visual wait-for graph plus a local history of past incidents. On MySQL it parses the LATEST DETECTED DEADLOCK section of SHOW ENGINE INNODB STATUS into a graph (utils/deadlockGraph.ts) — transactions as nodes, lock waits as labelled edges (mode, table, index), the wait cycle highlighted, and the transaction InnoDB chose to roll back marked as the victim; SQL Server reads full deadlock graphs from the system_health ring buffer, which keeps a history. Each detection is recorded into history.db (deadlock_events); because the server's \"latest deadlock\" only changes when a new one happens, the store dedupes by raw text so a refresh cannot pile up copies. Any past event re-opens as the same graph from its stored parse, with the raw section alongside it. PostgreSQL gets per-database counters, a history of counter snapshots recorded when the counts move, and a plain statement of why there is no graph.",
-   "howToOpen": "Session menu bar, Monitor group, 'Locks & Deadlocks'. Renders as the LocksPanel tab with the session; the Blocking and Deadlocks tabs sit under the toolbar.",
+   "summary": "One panel with Blocking and Deadlocks tabs. Follow live blocking chains, inspect a deadlock wait-for graph and victim, and reopen retained incidents. MySQL, PostgreSQL and SQL Server use their native lock and deadlock sources.",
+   "howToOpen": "Activity menu -> Locks & Deadlocks. Renders as the LocksPanel tab with the session; the Blocking and Deadlocks tabs sit under the toolbar.",
    "keyActions": [
     "Blocking tab: view blocking chains (waiting vs blocking pid, wait age, statements, locked table/index or wait event)",
     "Kill the blocker (confirm-gated, audited)",
@@ -158,11 +158,11 @@
     "Pause/resume the 5s auto-refresh (Blocking tab)"
    ],
    "engines": "MySQL, PostgreSQL and SQL Server (gated to lockWaits). The graph is MySQL and SQL Server — see caveats.",
-   "caveats": "Requires a live connection. Everything is read-only except the explicit Kill actions (confirm-gated). Overlapping polls are skipped so a slow SHOW ENGINE INNODB STATUS cannot pile up; a hidden tab stops polling. Deadlock detection itself is read-only — a SHOW / pg_stat / system_health read through panel_query — and never writes to the server. PostgreSQL gets counters, not graphs, and says so rather than pretending otherwise: which backends waited on which locks is written only to the server log when deadlock_timeout fires (set log_lock_waits = on for the detail), so the Blocking tab's chain is the live equivalent. MySQL only ever exposes the LATEST detected deadlock, so incidents between two checks are not recoverable from the server — only from the local history."
+   "caveats": "Reads are read-only; Kill is confirmed and audited. Hidden tabs stop polling. PostgreSQL has counters rather than graphs. MySQL exposes only the latest server deadlock, so local history is needed for older incidents."
   },
   "maintenance": {
-   "summary": "A schema-health and table-upkeep panel covering two concerns: running table maintenance operations (ANALYZE/CHECK/OPTIMIZE/REPAIR and equivalents) and detecting what a prior schema change quietly broke. It has three tabs - 'Upkeep & invalid objects', 'Bulk edit', and a conditional 'Vacuum advisor' - plus a separate whole-file view for SQLite. Unlike most panels it actually executes statements (rewriting tables, and MySQL DDL that cannot be rolled back), routing every run through an audited runner that writes a persistent audit log; the exact SQL is always shown before running.",
-   "howToOpen": "Session menu bar, Server group, 'Maintenance'. Renders as the MaintenancePanel tab (title '🩹 Maintenance') with the current session and selected database; a 'prod' badge shows when the environment is prod.",
+   "summary": "Run table upkeep, find objects broken by schema changes, and perform reviewed bulk edits. Tabs cover Upkeep & invalid objects, Bulk edit and conditional Vacuum advisor; SQLite has a separate whole-file view.",
+   "howToOpen": "Server menu -> Maintenance. Renders as the MaintenancePanel tab (title '🩹 Maintenance') with the current session and selected database; a 'prod' badge shows when the environment is prod.",
    "keyActions": [
     "Filter and select tables in the sidebar (all/none); see 'N selected'",
     "Upkeep tab: pick a maintenance operation (engine-specific; destructive ones styled danger and requiring you to type the op name), preview 'N statements for M tables', then Run - EXECUTES via monitor_query with per-table ok/problem results",
@@ -172,11 +172,11 @@
     "SQLite view: whole-file actions (VACUUM, integrity checks, ANALYZE) with impact badges, tuned by PRAGMA auto_vacuum - these EXECUTE"
    ],
    "engines": "MySQL, PostgreSQL, and SQLite (gated to maintenance). MySQL: per-table upkeep + bulk edit (information_schema.TABLES). PostgreSQL: upkeep + Vacuum advisor (bulk edit is empty - a MySQL concept). SQLite: dedicated whole-file view. Engines with no maintenance statements show a note.",
-   "caveats": "Requires a live server connection. This panel EXECUTES SQL directly for Upkeep, Bulk edit, and SQLite actions (SQL is shown first, but running is real); only the Vacuum advisor is review-only. MySQL commits DDL implicitly so bulk ALTER cannot be rolled back and intentionally continues past errors to keep an audit record. Every executed statement is written to a persistent audit log. Operations differ in risk (ANALYZE/CHECK read-only; OPTIMIZE rebuilds+locks InnoDB; REPAIR is a no-op on InnoDB and can lose rows on MyISAM) - hence typed confirmation for destructive ops. Invalid-object scan is best-effort and flagged partial when a probe is rejected."
+   "caveats": "Upkeep, Bulk edit and SQLite actions EXECUTE SQL after preview; only Vacuum advisor is review-only. MySQL DDL cannot roll back. Every run is audited. Destructive operations require typed confirmation; failed invalid-object probes are marked partial."
   },
   "erdiagram": {
-   "summary": "An interactive schema map built from the foreign-key graph. It introspects the selected schema live (via monitor_query against information_schema / pg_catalog), lays tables out in FK-depth layers on a pannable/zoomable canvas with draggable nodes, and draws crow's-foot relationship edges between referencing and referenced columns. It is strictly catalog-only: no table data is ever read or mutated.",
-   "howToOpen": "Session menu bar, Schema group, 'ER diagram'. Renders as the ErDiagram tab with sessionId, connectionId, and engine (no readOnly/environment - it never writes).",
+   "summary": "Explore a live schema as a pannable, zoomable foreign-key graph. Focus related tables, adjust density, search columns, save layouts and notes, compare snapshots, and export the diagram. Catalog metadata only; table data is never read.",
+   "howToOpen": "Schema menu -> ER diagram. Renders as the ErDiagram tab with sessionId, connectionId, and engine (no readOnly/environment - it never writes).",
    "keyActions": [
     "Pick a schema; zoom (-, %, +, Fit), Ctrl/Cmd+wheel zoom, drag-to-pan, drag nodes; Auto-arrange",
     "Density 'Show' select (All columns / Keys only / Names only) and colour-by-name-prefix",
@@ -189,11 +189,11 @@
     "+ Table (design a new table) and a Legend"
    ],
    "engines": "Gated to erDiagram (mysql, postgres, sqlite per the cap table), but the component's introspection SQL only branches MySQL vs PostgreSQL and its unsupported fallback reads 'ER diagram is available for MySQL and PostgreSQL.' Unsupported: ClickHouse, Redis, Parquet.",
-   "caveats": "Requires a live connection - every graph is built from live introspection. Read-only by design; nothing on the canvas mutates the schema ('Design table...' only proposes changes elsewhere). Virtual FKs, saved diagrams, and snapshots are local client-side state per connection, not database objects. FK-less schemas (common in production MySQL) render nearly empty until column comments are scanned; soft refs are proposed, never auto-applied. Although SQLite is marked supported in the cap table, this component's SQL and fallback message target only MySQL/PostgreSQL."
+   "caveats": "Requires live catalog introspection and is read-only. Virtual FKs, saved diagrams and snapshots are local state. FK-less schemas need column-comment scanning for soft references. The current component targets MySQL/PostgreSQL despite the SQLite capability flag."
   },
   "datagen": {
-   "summary": "A three-step wizard for generating and inserting fake data. Step 1 (Target) picks one of three targets - generate a whole database from a schema kit, fill an existing table, or create a new table; Step 2 configures per-column generators (70+ types with rich params) or per-table row counts; Step 3 (Preview & Run) shows sample rows / DDL plus exact SQL, then runs a chunked, streamed insert with a live progress bar and ETA. Generation happens in the Rust backend and continues even if the panel is closed.",
-   "howToOpen": "Session menu bar, Data group, 'Data generator'. Renders as the DataGenPanel tab (title '🎲 Data generator') with sessionId, engine, environment, readOnly, connectionName, and schema.",
+   "summary": "Generate realistic data in three steps: Target, Configure, Preview & Run. Use a schema kit, fill an existing table or design a new one. Preview rows and exact SQL before a chunked insert with progress and ETA.",
+   "howToOpen": "Data menu -> Data generator. Renders as the DataGenPanel tab (title '🎲 Data generator') with sessionId, engine, environment, readOnly, connectionName, and schema.",
    "keyActions": [
     "Step 1: choose target mode (whole database from a schema kit / fill existing table with 'Load columns' introspection / create new table with inline column design or a chart-shape preset); pick a Locale pack",
     "Step 2 (kit): scale buttons (0.1x-50x), seed + reroll, editable per-table row counts, FK indicators",
@@ -201,11 +201,11 @@
     "Step 3: preview sample rows (FastGrid) and exact CREATE/INSERT SQL, optional Postgres COPY fast path, then Insert / Create table & insert - streamed with progress, rows/s, ETA, and Cancel"
    ],
    "engines": "MySQL and PostgreSQL only (gated to dataGen). Engine differences: Database vs Schema labelling, per-engine identifier quoting, server-side bulk path (PG INSERT...SELECT generate_series or COPY FROM STDIN; MySQL digit-table cross-join). False for ClickHouse, Redis, SQLite, Parquet.",
-   "caveats": "Requires a live writable connection. dataGen is deliberately unavailable on SQLite/ClickHouse/Redis/Parquet because the backend writer only speaks MySQL/PG wire protocols (the button is hidden rather than failing on click). Blocked when the connection is read-only; a 'prod' environment requires a confirmation dialog. This generates AND executes (it actually inserts rows), though Step 3 shows the SQL first. An open manual transaction blocks the server-side path. Row limits: 10M for the row-by-row path, 1B overall for the server path; the run is audited and continues (and can be cancelled) even with the tab closed."
+   "caveats": "Requires a writable MySQL/PostgreSQL connection; other engines are unavailable. Prod confirms first. Step 3 shows SQL but Run really inserts rows. Manual transactions block the server-side path. Runs are audited and can be cancelled after closing the tab."
   },
   "users": {
-   "summary": "A DBA security view for database users/roles and their grants. Reading is live and instant (lists accounts, shows grants, decodes ACLs), but every mutation - create/alter/drop user or role, GRANT/REVOKE, role management, default privileges - is strictly review-only: it generates SQL and inserts it into the editor for the DBA to inspect and run deliberately. The panel never executes any write itself, and it adapts its whole UI to MySQL/MariaDB vs PostgreSQL.",
-   "howToOpen": "Session menu bar, Server group, 'Users & grants'. Renders as the UsersPanel tab (title '👤 Users & grants') with sessionId and engine. MariaDB is detected via an async server-flavor probe.",
+   "summary": "Inspect MySQL accounts or PostgreSQL roles and decode their grants. Create, alter, drop, GRANT and REVOKE are always generated into the editor for deliberate review; the panel never executes a mutation.",
+   "howToOpen": "Server menu -> Users & grants. Renders as the UsersPanel tab (title '👤 Users & grants') with sessionId and engine. MariaDB is detected via an async server-flavor probe.",
    "keyActions": [
     "Filter and browse the account/role list; click a row to load its grants (MySQL SHOW GRANTS; PG table-privilege summary)",
     "Create user... / Create role... and Alter/drop... open a lifecycle form (identity, password, auth plugin/attributes, PG role attributes) with a live SQL preview that emits Create/Apply/Drop SQL to the editor",
@@ -215,11 +215,11 @@
     "Grant shortcut templates: grant read/write on a schema, revoke all on a schema"
    ],
    "engines": "MySQL/MariaDB and PostgreSQL only (gated to sqlDba). MySQL reads mysql.user (MariaDB reads mysql.global_priv and surfaces is_role); PostgreSQL reads pg_roles/pg_auth_members and information_schema.table_privileges. Code has only two branches (mysql vs everything-else-as-postgres); no sqlite/clickhouse/redis handling.",
-   "caveats": "Requires a live MySQL/PostgreSQL connection; all reads go through panel_query. Writes are strictly review-only - the panel NEVER executes create/alter/drop/grant/revoke; even DROP only lands in the SQL editor for manual running. Listing needs read privilege on mysql.user / pg_roles; the PG Grant Wizard needs SELECT on pg_class/pg_namespace and loads lazily. PG table-privilege summary is capped at 500 rows, the wizard reads up to 2000 tables. Passwords are never stored or logged."
+   "caveats": "Requires a live MySQL/PostgreSQL connection. Every write is review-only, including DROP. Listing needs catalog read privileges; the PG Grant Wizard loads lazily. PG summaries and wizard results are capped. Passwords are never stored or logged."
   },
   "saved": {
-   "summary": "Saved queries / snippets: a SQLite-backed, folder-organized, searchable library of reusable SQL. Clicking an item inserts its SQL into the editor; a Save current button stores the current editor buffer under a name and optional folder. Search uses fuzzy matching over folder+name. Saved queries support positional aliases (:1, :2, ...) that substitute values when run from the editor as 'name val1 val2'.",
-   "howToOpen": "Session menu bar, SQL group, 'Saved queries'. Renders as the SavedQueriesPanel tab; it takes the current editor buffer (for saving) and inserts selected SQL into the editor.",
+   "summary": "A local, folder-organized library of reusable SQL. Search folders and names, click to insert SQL, or save the current editor buffer. Positional aliases (:1, :2, …) substitute values when invoked from the editor.",
+   "howToOpen": "SQL menu -> Saved queries. Renders as the SavedQueriesPanel tab; it takes the current editor buffer (for saving) and inserts selected SQL into the editor.",
    "keyActions": [
     "Save current (button) - name + optional folder to save the current editor content",
     "Search saved queries (fuzzy over folder/name)",
@@ -230,8 +230,8 @@
    "caveats": "Save current is disabled when the editor is empty. Storage is local to the app, not the connected database."
   },
   "history": {
-   "summary": "Query history for the current connection. Lists recent executed statements (up to 200) with timestamp, rows returned and execution time, or the error if the statement failed. A debounced search box filters server-side, and clicking an entry loads its SQL back into the editor. Individual entries can be deleted, or all history for the connection cleared.",
-   "howToOpen": "Session menu bar, SQL group, 'Query history'. Renders as the HistoryPanel tab with the connectionId.",
+   "summary": "Search the current connection's locally recorded statements with timestamps, row counts, execution times and errors. Click to reuse SQL, delete one entry, or clear the connection's history after confirmation.",
+   "howToOpen": "Insights menu -> Query history. Renders as the HistoryPanel tab with the connectionId.",
    "keyActions": [
     "Filter history (debounced search over stored statements)",
     "Click an entry to load its SQL into the editor",
@@ -242,8 +242,8 @@
    "caveats": "Shows locally recorded history for the given connection only; limited to the 200 most recent matching entries."
   },
   "vacuum": {
-   "summary": "PostgreSQL maintenance, in the order the question is actually asked: is anything vacuuming NOW, what is the BACKLOG against each table's own threshold, how much space is wasted (BLOAT), how close is the WRAPAROUND emergency, and what to DO about it. The backlog is ranked against each table's OWN reloptions-honoured autovacuum threshold rather than a global rule of thumb, so a table with custom settings is judged by its own settings. Bloat figures are estimates by default and exact when pgstattuple is installed, and the panel says which it is showing. All reading SQL is the curated dbaViews SQL verbatim (pulled by id from utils/vacuumBloat.ts); the ranking and parsing are pure functions in that module. It subsumes the old Vacuum advisor section of the Maintenance panel, but database-wide rather than schema-scoped.",
-   "howToOpen": "Session menu bar, Schema group, 'Vacuum & Bloat'. Renders as the VacuumBloatPanel tab for the current session. PostgreSQL only — the menu item is greyed with the reason on every other engine.",
+   "summary": "PostgreSQL vacuum and bloat investigations in one place: current vacuum progress, per-table autovacuum backlog, estimated or exact bloat, wraparound risk, and reviewed maintenance actions with lock/cost warnings.",
+   "howToOpen": "Schema menu -> Vacuum & Bloat. Renders as the VacuumBloatPanel tab for the current session. PostgreSQL only — the menu item is greyed with the reason on every other engine.",
    "keyActions": [
     "See vacuums in progress, with phase and progress, and what is blocking them",
     "Read the autovacuum backlog ranked against each table's own reloptions threshold",
@@ -253,11 +253,11 @@
     "Send any generated statement to the editor instead of executing it"
    ],
    "engines": "PostgreSQL only (gated on the `postgres` engine, not a capability flag).",
-   "caveats": "This is the first PostgreSQL DBA panel that WRITES. Actions execute through the same audited monitor_query path the Maintenance panel uses, so every one is recorded. On a read-only connection the actions are greyed with the reason named — the server-side guard rejects them anyway — and the panel offers to send the SQL to the editor instead. On a prod session the ACCESS EXCLUSIVE rewrites (VACUUM FULL, CLUSTER, REINDEX) warn that the server-side prod hard limit refuses them unless that connection has explicitly opted in. pg_repack is generated as advice only and is never executed. Exact bloat scanning is capped by relation size, because pgstattuple reads the whole table."
+   "caveats": "Maintenance actions WRITE through an audited path; read-only sessions offer editor SQL instead. Prod hard limits apply to ACCESS EXCLUSIVE rewrites. pg_repack is advice only. Exact pgstattuple scans are capped by relation size."
   },
   "querystore": {
-   "summary": "Query Store: the plan history SQL Server keeps for every query, used to find the ones now running a worse plan than they used to — and to pin the good plan back. This is the one capability neither other engine has any answer to: MySQL's performance-schema digests and PostgreSQL's pg_stat_statements both keep timings and no plans, so both can say a statement got slower while neither can say the PLAN changed or put the old one back. The Regressions tab lists queries whose current plan is materially slower than their best one in the window, ordered by TIME WASTED — (current − best) × executions — rather than by ratio, because a query run twice that got ten times slower is noise and one run four million times that got twenty percent slower is the outage. Selecting a query shows every plan it has had with its average duration, maximum, execution count and average logical reads; reads are the honest tiebreak, since duration moves with load and reads move with the plan. Any plan's XML opens in the same plan viewer EXPLAIN feeds, so the good and bad plans can be read side by side. The Forced tab answers the question nobody asks until it bites: what have we pinned, and is the pin still being applied?",
-   "howToOpen": "Session menu bar, Monitor group, 'Query Store'. SQL Server only — the entry is absent on engines that keep no plan history. Renders as the QueryStorePanel tab.",
+   "summary": "Use SQL Server Query Store to find plan regressions, compare every stored plan and review plan forcing. Regressions rank by time wasted, not just ratio. The Forced tab shows pins SQL Server has stopped applying.",
+   "howToOpen": "Insights menu -> Query Store. SQL Server only — the entry is absent on engines that keep no plan history. Renders as the QueryStorePanel tab.",
    "keyActions": [
     "Find the queries running a worse plan than their best, ranked by the execution time it is costing",
     "Compare every plan a query has had by duration, executions and average logical reads",
@@ -266,11 +266,11 @@
     "See every plan already forced, and which forcings SQL Server has silently stopped applying"
    ],
    "engines": "SQL Server (2016+). Requires Query Store to be ON for the database.",
-   "caveats": "Reading is free; FORCING IS A WRITE and follows the same rule as every other write in the app — the statement is generated into the editor for a human to run, never executed from the panel. Three things make an empty list mean different things, and all three are stated above the list rather than left to be guessed: Query Store OFF means there is no history at all and turning it on cannot tell you about the past; READ_ONLY means it has filled its quota and STOPPED capturing, which looks identical to a healthy quiet server; and the default AUTO capture mode deliberately skips cheap and infrequent queries, so 'nothing regressed' means 'nothing it recorded regressed'. Forcing sticks: it survives restarts and stays until un-forced, and a forced plan that later becomes invalid — its index dropped, the schema changed — is silently abandoned by the optimiser, which is why the Forced tab shows last_force_failure_reason_desc beside each one."
+   "caveats": "Reading is free; forcing generates SQL into the editor and is never executed by the panel. Empty results distinguish Query Store OFF, READ_ONLY and AUTO capture skipping cheap queries. The Forced tab exposes abandoned or invalid pins."
   },
   "watch": {
-   "summary": "One panel for the three shapes of 'watch something over time', switched by a mode strip. Metrics re-runs a query every N seconds and tracks numeric values - current value, per-second rate, sparkline (name/value rows become one metric per row, a single row one metric per numeric column; uses monitor_query so it does not pollute history). Statement runs one statement on a dedicated watched connection and follows its live phase (State/current stage) and progress % - exact when the stage reports work_completed/estimated - with a watchdog mode that scans the full processlist for queries over a threshold and can kill/EXPLAIN/copy them; opened from Processes' 'Watch' button it instead pins a thread started ELSEWHERE and follows it read-only (no editor, no KILL) until the thread vanishes from the processlist. Wait profile samples pg_stat_activity wait events fast into a live histogram of where wait time concentrates.",
-   "howToOpen": "Session menu bar, Monitor group, 'Watch' (also on the native Tools menu). The Statement mode's pinned-thread view opens from the Processes panel's 'Watch <id>' button on a selected row.",
+   "summary": "Three monitoring modes: Metrics charts query values over time; Statement follows live work and watchdog candidates; Wait profile samples PostgreSQL waits. Thread progress for ALTER TABLE and CREATE INDEX opens read-only from Processes.",
+   "howToOpen": "Activity menu -> Watch (also on the native Tools menu). The read-only Thread progress dialog opens from the Processes panel's '⏱ Progress <id>' button on a selected row.",
    "keyActions": [
     "Switch modes: Metrics / Statement / Wait profile (a mode the engine or role cannot serve is greyed with the reason)",
     "Metrics: pick an engine preset or type a query, choose the interval (1-60s), Start/Stop; click a metric card for a full-size history chart",
@@ -280,11 +280,11 @@
     "Wait profile (PostgreSQL): choose a sampling interval (100-500 ms), Sample/Stop, read the by-type histogram and by-event breakdown"
    ],
    "engines": "Metrics: all engines. Statement: MySQL, PostgreSQL and SQL Server (the longQueryWatch capability; the processlist-all privilege, else the mode greys with the reason). Wait profile: PostgreSQL only.",
-   "caveats": "Requires a live connection. A watched statement keeps executing on the server even if the tab is hidden/closed (surfaced as a killable tab activity); a pinned thread is followed read-only and killing stays in Processes, where it is audited. MySQL DDL phases need performance_schema stage instruments enabled (off by default) - the panel says so once and gives the fix. PostgreSQL publishes progress for index builds and table rewrites only; SQL Server's percent_complete covers backup/restore/DBCC/index-reorganize, not CREATE INDEX. A hidden tab pauses polling."
+   "caveats": "Watched statements continue on the server when hidden or closed. Pinned-thread watching is read-only; killing stays in Processes. MySQL DDL phases need performance_schema instruments. Hidden tabs pause polling."
   },
   "timeline": {
-   "summary": "Incident timeline for the current connection — one chronological, newest-first list answering 'what happened on this server between 14:00 and 14:30?'. Merges the local stores history.db already keeps: audit statements and connect/disconnect lifecycle, deadlock incidents, digest snapshots, multi-server runs and long-query captures. Rows are grouped by day with a kind badge, status colour and humanized duration; a density strip shows where in the window the action was. The backend normalizes the stores' mixed UTC/local timestamps to epoch ms, so rows sort correctly regardless of source.",
-   "howToOpen": "Session menu bar, Insights group, 'Incident timeline' (also Tools ▸ Insights ▸ Incident timeline). Renders as the IncidentTimelinePanel tab with the session.",
+   "summary": "A chronological incident view for one connection and time window. It merges local audit/session events, deadlocks, digest snapshots, fleet runs and long-query captures, with kind filters, day groups and a density strip.",
+   "howToOpen": "Insights menu -> Incident timeline (also Tools ▸ Insights ▸ Incident timeline). Renders as the IncidentTimelinePanel tab with the session.",
    "keyActions": [
     "Pick a from/to window (datetime-local, defaults to today) and Refresh — no polling",
     "Toggle kind chips (stmt / session / deadlock / snapshot / fleet run / long query) to filter the list",
@@ -292,7 +292,7 @@
     "Copy a row's detail, or insert its statement into the editor"
    ],
    "engines": "All engines (no engine gate, no privilege gate). Everything shown is local data from history.db — nothing is read from the server.",
-   "caveats": "Deadlocks are recorded only while the Locks & Deadlocks panel is open. Every store is capped (50 deadlocks / 100 long queries / 100 snapshots per connection), so an empty window can mean retention, not a quiet server — the footer names the oldest retained event. Audit rows are keyed by connection name: renaming a connection orphans its older rows from this view."
+   "caveats": "Deadlocks are recorded only while Locks & Deadlocks is open. Store caps mean an empty window can reflect retention rather than a quiet server; the footer names the oldest event. Audit rows use connection names, so renaming orphans older rows."
   }
  }
 }

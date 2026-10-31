@@ -665,7 +665,8 @@ function UpdatesSection() {
       const outcome = await runUpdateCheck();
       setResult(
         outcome.status === 'current' ? `You're up to date (v${outcome.version}).`
-        : outcome.status === 'update' ? `Update v${outcome.version} — see the status bar at the bottom.`
+        : outcome.status === 'update'
+          ? `Update v${outcome.version} — see the status bar at the bottom.${outcome.majorVersion && outcome.majorVersion !== outcome.version ? ` Major v${outcome.majorVersion} is also available through the Upgrade button.` : ''}`
         : `Check failed: ${outcome.message}`);
     } finally {
       setChecking(false);

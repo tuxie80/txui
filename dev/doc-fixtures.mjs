@@ -82,6 +82,56 @@ export const PG_ACTIVITY_RESULT = queryResult(
   ],
 );
 
+const MYSQL_PROGRESS_COLUMNS = [
+  'conn_id', 'query', 'query_secs', 'state', 'phase', 'work_completed',
+  'work_estimated', 'pct', 'phase_secs', 'phase_status', 'event_id',
+  'statement_event_id', 'user', 'host', 'db', 'command', 'lock_secs',
+  'rows_affected', 'rows_examined', 'rows_sent', 'warnings', 'errors',
+  'statement_thread_id',
+];
+
+function mysqlProgressRow(eventId, phase, completed, estimated, pct, secs, status, connId, threadId) {
+  return [
+    connId, 'ALTER TABLE order_lines ADD INDEX idx_order (order_id)',
+    184.2, 'Copying to tmp table', phase, completed, estimated, pct, secs,
+    status, eventId, 7001, 'app_rw', '10.0.2.34:51930', 'shop', 'Query',
+    0.3, 0, 1_250_000, 0, 0, 0, threadId,
+  ];
+}
+
+export function mysqlProgressFixture() {
+  return {
+    thread: queryResult(MYSQL_PROGRESS_COLUMNS, [
+      mysqlProgressRow(101, 'stage/innodb/alter table (read PK and internal sort)', 1250000, 1250000, 100, 48.2, 'done', 418844, 901),
+      mysqlProgressRow(102, 'stage/innodb/alter table (merge sort)', 1250000, 1250000, 100, 31.7, 'done', 418844, 901),
+      mysqlProgressRow(103, 'stage/innodb/alter table (insert)', 802500, 1250000, 64.2, 56.8, 'running', 418844, 901),
+    ]),
+    workers: queryResult(MYSQL_PROGRESS_COLUMNS, [
+      mysqlProgressRow(104, 'stage/innodb/alter table (log apply index)', 18400, 92000, 20, 12.4, 'running', null, 902),
+    ]),
+  };
+}
+
+export function pgWorkloadFixture() {
+  const columns = [
+    'queryid', 'query', 'calls', 'total_exec_time', 'mean_exec_time',
+    'rows', 'shared_blks_hit', 'shared_blks_read',
+  ];
+  return {
+    detect: queryResult(['installed', 'available'], [['1.11', '1.11']]),
+    version: queryResult(['current_setting'], [[170004]]),
+    before: queryResult(columns, [
+      ['81001', 'SELECT * FROM orders WHERE created_at > now() - interval \'1 day\'', 1200, 48000, 40, 24000, 90000, 1200],
+      ['81002', 'UPDATE inventory SET qty = qty - 1 WHERE sku = $1', 400, 12000, 30, 400, 8000, 80],
+    ]),
+    after: queryResult(columns, [
+      ['81001', 'SELECT * FROM orders WHERE created_at > now() - interval \'1 day\'', 1800, 156000, 86.7, 36000, 92000, 28000],
+      ['81002', 'UPDATE inventory SET qty = qty - 1 WHERE sku = $1', 900, 27000, 30, 900, 15000, 240],
+      ['81003', 'SELECT customer_id, sum(total) FROM orders GROUP BY customer_id', 80, 9600, 120, 8000, 4000, 16000],
+    ]),
+  };
+}
+
 export const TUNER_REPORT = {
   generated_at: '2026-08-28T14:20:11Z',
   server: {
@@ -670,10 +720,14 @@ export function mockFor(engine) {
     // Privileges are probed through panel_query with a `privileges-*` token
     // (store/sessionPrivileges.ts). Without an answer the panels grey out with
     // "your account cannot use this" — correct behaviour, wrong screenshot.
-    __GRANTS__: queryResult(['Grants for doc@%'], [
-      ["GRANT ALL PRIVILEGES ON *.* TO `doc`@`%` WITH GRANT OPTION"],
-      ['GRANT PROCESS, RELOAD, REPLICATION CLIENT, SUPER ON *.* TO `doc`@`%`'],
-    ]),
+    __GRANTS__: engine === 'postgres'
+      ? queryResult(['is_super', 'is_monitor', 'read_all_stats', 'signal_backend', 'has_pgss'], [
+        [true, true, true, true, true],
+      ])
+      : queryResult(['Grants for doc@%'], [
+        ["GRANT ALL PRIVILEGES ON *.* TO `doc`@`%` WITH GRANT OPTION"],
+        ['GRANT PROCESS, RELOAD, REPLICATION CLIENT, SUPER ON *.* TO `doc`@`%`'],
+      ]),
     server_info: queryResult(['Variable_name', 'Value'], [
       ['version', '8.4.3'], ['innodb_buffer_pool_size', '2147483648'],
       ['max_connections', '512'], ['slow_query_log', 'OFF'],
@@ -714,9 +768,27 @@ export function installMock(payload) {
     columns: rows[0]?.map((_, i) => ({ name: `c${i}`, type_name: 'varchar', nullable: true })) ?? [],
     rows, rows_affected: null, execution_ms: 1.8, fetch_ms: 0.3, warnings: [],
   });
+  let pgWorkloadCaptures = 0;
+  const routeMonitor = args => {
+    const sql = String((args && args.sql) ?? '');
+    const progress = payload.__MYSQL_PROGRESS__;
+    if (progress && sql.includes('information_schema.PROCESSLIST')) return progress.thread;
+    if (progress && sql.includes('FROM performance_schema.events_stages_current s')) {
+      return progress.workers;
+    }
+    const workload = payload.__PG_WORKLOAD__;
+    if (workload && sql.includes('pg_available_extensions')) return workload.detect;
+    if (workload && sql.includes("current_setting('server_version_num')")) return workload.version;
+    if (workload && sql.includes('FROM pg_stat_statements')) {
+      pgWorkloadCaptures += 1;
+      return pgWorkloadCaptures % 2 === 1 ? workload.before : workload.after;
+    }
+    return payload.monitor_query;
+  };
   window.__MOCK__ = {
     ...payload,
     list_schema: args => tree[(args && args.context) || '__root'] ?? [],
+    monitor_query: routeMonitor,
     // One command, two jobs: the privilege probe rides panel_query under a
     // `privileges-*` token, and answering it with ordinary result rows makes
     // every DBA panel grey itself out.
@@ -741,7 +813,7 @@ export function installMock(payload) {
         if (sql.includes('@@session.wsrep_sync_wait')) return galPlain([[0, 'OFF']]);
         if (sql.includes('SYSTEM_VARIABLES')) return galPlain([['YES']]);
         if (sql.includes('WSREP_MEMBERSHIP')) return galPlain([]);
-        return payload.monitor_query;
+        return routeMonitor(args);
       },
       // The ❖ Galera cluster panel (GaleraClusterPanel.tsx): one `node` event
       // per selected connection on the Channel handed over in the invoke args,

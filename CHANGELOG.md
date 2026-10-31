@@ -3,6 +3,20 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **Branch-aware self-updates** — automatic patch/minor updates stay inside the current major branch, while a newer major remains available through an explicit **Upgrade to X.Y.Z** button. Update notices remain visible alongside branch downloads, and the download indicator keeps a stable width as percentages change.
+- **Accessible documentation navigation and media** — every heading has a direct URL, every screenshot opens full-size in a new tab with a left click or the right-click menu, and the help theme switch selects matching Ayu Dark or Ayu Light captures. The website and help now use the TxUI penguin `.ico` favicon.
+
+### Fixed
+
+- **Updates install only the selected target** — the backend checks the requested version/channel manifest and rejects a different offer instead of allowing a second latest-release check to install an unselected major. Automatic-major preference now takes precedence when enabled; otherwise branch updates proceed without hiding the major offer.
+- **Complete, readable help coverage** — all 37 tool panels render with concise summaries and key actions, all eight guides use structured workflows, and all screenshots have both Ayu variants. The screenshot suite now includes populated MySQL DDL progress and PostgreSQL Workload examples.
+- **Quoted system-table lint and spellcheck suppression** — `contenteditable` editors now receive explicit spellcheck/autocorrect suppression, and quoted qualified identifiers keep their names during diagnostics. `SELECT * FROM \`mysql\`.\`innodb_table_stats\` LIMIT 100` no longer marks the first backtick as an unknown table; useful full-scan/LIMIT hints remain intact.
+- **Every script result opens as it completes** — each row-producing statement now opens its own grid instead of only selecting Result 1 at the end. Earlier results stay available, the newest result remains selected, and the existing 5,000-row-per-statement cap and virtualized grid bound rendering cost.
+
 ## [1.5.0] - 2026-10-31
 
 ### Added

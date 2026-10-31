@@ -92,7 +92,7 @@ export function createdTables(doc: string): Set<string> {
 }
 
 /** Strip quoting so a name can be compared with catalog data. */
-const plain = (s: string) => s.replace(/[`"]/g, '').toLowerCase();
+const plain = (s: string) => s.replace(/[`"]/g, '').replace(/\s+/g, '').toLowerCase();
 
 /**
  * All diagnostics for a document, statement by statement.
@@ -235,7 +235,7 @@ function diagnoseStatement(
 
   // ── unknown tables ────────────────────────────────────────────────────────
   if (ctx.objects.size > 0) {
-    for (const ref of tableRefs(b)) {
+    for (const ref of tableRefs(b, text)) {
       const name = plain(ref.name);
       const parts = name.split('.');
       const bare = parts.pop() ?? name;
@@ -303,7 +303,7 @@ function diagnoseStatement(
     }
   }
   if (!ctx.hasDefaultDb && ['insert', 'update', 'delete', 'replace', 'truncate'].includes(kind)) {
-    for (const ref of tableRefs(b)) {
+    for (const ref of tableRefs(b, text)) {
       if (ref.name.includes('.')) continue;
       push(ref.from, ref.to, 'warning', 'unqualified-write',
         `No default database is selected — “${ref.name}” may resolve somewhere you do not expect. Qualify it, or pick a database.`);
@@ -435,16 +435,18 @@ const RESERVED_WORDS = new Set([
 
 export interface TableRef { name: string; from: number; to: number }
 
-/** Table references of a (blanked) statement: FROM/JOIN/UPDATE/INTO targets. */
-export function tableRefs(b: string): TableRef[] {
+/** Table references of a (blanked) statement, with names read from the raw text. */
+export function tableRefs(b: string, raw = b): TableRef[] {
   const out: TableRef[] = [];
-  const re = /\b(from|join|update|into|truncate\s+table|truncate)\s+([`"\w$.]+)/gi;
+  const id = '(?:`[^`]*`|"[^"]*"|[\\w$]+)';
+  const re = new RegExp(`\\b(from|join|update|into|truncate\\s+table|truncate)\\s+(${id}(?:\\s*\\.\\s*${id}){0,2})`, 'gi');
   let m: RegExpExecArray | null;
   while ((m = re.exec(b))) {
-    const name = m[2];
-    if (!name || name === '(') continue;
+    const matched = m[2];
+    if (!matched || matched === '(') continue;
+    const from = m.index + m[0].length - matched.length;
+    const name = raw.slice(from, from + matched.length);
     if (/^\d/.test(name)) continue;
-    const from = m.index + m[0].length - name.length;
     out.push({ name, from, to: from + name.length });
   }
   return out;

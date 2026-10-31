@@ -40,6 +40,14 @@ describe('generated docs inventory', () => {
     }
   });
 
+  test('every inventoried panel renders as a tool-panel card', () => {
+    const html = readFileSync('docs/index.html', 'utf8');
+    for (const p of inv.panels) {
+      assert.ok(html.includes(`<div class="panel-doc" id="panel-${p.id}">`),
+        `${p.id} is in the inventory but missing from the Tool panels section — ${REBUILD}`);
+    }
+  });
+
   test('DBA view count matches dbaViews.ts', () => {
     const total = Object.values(DBA_VIEWS).reduce((n, v) => n + v.length, 0);
     assert.equal(inv.counts.dbaViews, total,

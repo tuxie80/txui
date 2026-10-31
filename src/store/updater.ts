@@ -1,24 +1,13 @@
 /**
- * Self-updater state machine — the I/O half of the updater
- * (utils/updatePolicy.ts decides what a version delta means; this store runs
- * the check/download cycle and holds what the status bar renders).
- *
- * States: idle → available{action} → downloading{pct} → ready, with failed
- * for the silent path — a failed check renders NOTHING and retries on the
- * next scheduled run; the low-interruption promise is that the updater never
- * opens a dialog.
- *
- * One design note worth keeping: the download is not abortable mid-flight
- * (Tauri's Channel has no JS→Rust close, and a third command just for abort
- * was not worth it — see src-tauri/src/commands/update.rs). "Cancel" on the
- * chip means "stop telling me": the store forgets the run, the backend still
- * finishes and installs, and the new version applies on the next natural
- * restart instead of via the relaunch chip.
+ * Self-updater state machine. The backend returns the newest release overall
+ * and the newest release in the current major branch. The branch candidate
+ * follows the minor/patch preference; a major remains a separate explicit
+ * Upgrade button unless its own preference allows automatic download.
  */
 import { useSyncExternalStore } from 'react';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
-import { classifyUpdate, updateAction } from '../utils/updatePolicy';
+import { classifyUpdate, selectUpdateCandidates, updateAction } from '../utils/updatePolicy';
 import { getPref, PREFS } from './preferences';
 import { toAppError } from '../utils/appError';
 
@@ -28,14 +17,25 @@ export interface UpdateInfo {
   body: string | null;
 }
 
+export interface UpdateCandidates {
+  latest: UpdateInfo | null;
+  branch: UpdateInfo | null;
+}
+
+export type UpdateChannel = 'latest' | 'branch';
+
 export type UpdaterState =
   | { kind: 'idle' }
-  | { kind: 'available'; info: UpdateInfo; action: 'auto' | 'notify' }
+  | { kind: 'available'; info: UpdateInfo; action: 'auto' | 'notify'; notUpdatable?: boolean }
   | { kind: 'downloading'; version: string; pct: number | null }
   | { kind: 'ready'; version: string }
   | { kind: 'failed'; message: string };
 
-/** Progress events from update_download_and_install (tag = "event"). */
+export interface UpdaterView {
+  state: UpdaterState;
+  majorCandidate: UpdateInfo | null;
+}
+
 interface UpdateProgress {
   event: 'started' | 'progress' | 'finished';
   contentLength?: number | null;
@@ -49,57 +49,60 @@ export function releaseTagUrl(version: string): string {
 }
 
 let state: UpdaterState = { kind: 'idle' };
+let majorCandidate: UpdateInfo | null = null;
+let view: UpdaterView = { state, majorCandidate };
 const listeners = new Set<() => void>();
-/** Bumped on cancel so a finishing download's resolve is ignored. */
 let generation = 0;
 let downloadInFlight = false;
 
-function emit() { listeners.forEach(fn => fn()); }
+function emit() {
+  view = { state, majorCandidate };
+  listeners.forEach(fn => fn());
+}
 function set(s: UpdaterState) { state = s; emit(); }
+function setMajor(info: UpdateInfo | null) { majorCandidate = info; }
 
 export function getUpdaterState(): UpdaterState { return state; }
-export function useUpdater(): UpdaterState {
+export function useUpdater(): UpdaterView {
   return useSyncExternalStore(
     cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
-    () => state,
+    () => view,
   );
 }
 
 export type CheckOutcome =
   | { status: 'current'; version: string }
-  | { status: 'update'; version: string }
+  | { status: 'update'; version: string; majorVersion?: string }
   | { status: 'error'; message: string };
 
-/**
- * One check cycle: ask the backend, classify the delta, and act per the
- * Settings → Updates prefs — 'auto' starts the download right away, 'notify'
- * leaves the passive chip. Scheduled 10 s after launch and every 6 h from
- * App.tsx, and run on demand by "Check now" (Settings → Updates).
- */
 export async function runUpdateCheck(): Promise<CheckOutcome> {
   try {
     const current = await getVersion();
-    const latest = await invoke<UpdateInfo | null>('update_check');
-    if (!latest) {
+    const candidates = await invoke<UpdateCandidates>('update_check', { currentVersion: current });
+    const selection = selectUpdateCandidates(current, candidates.latest, candidates.branch);
+    setMajor(selection.major);
+    const allowMajor = getPref(PREFS.autoUpdateMajor);
+    const info = allowMajor && selection.major ? selection.major : selection.update;
+    if (!info) {
       if (state.kind === 'available' || state.kind === 'failed') set({ kind: 'idle' });
       return { status: 'current', version: current };
     }
-    const action = updateAction(classifyUpdate(current, latest.version), {
+    const cls = classifyUpdate(current, info.version);
+    const action = updateAction(cls, {
       minor: getPref(PREFS.autoUpdateMinor),
-      major: getPref(PREFS.autoUpdateMajor),
+      major: allowMajor,
     });
     if (action === 'ignore') {
       if (state.kind === 'available' || state.kind === 'failed') set({ kind: 'idle' });
       return { status: 'current', version: current };
     }
-    // A download/install for THIS version already in flight (or done) is not
-    // to be stomped by a re-check.
-    if ((state.kind === 'downloading' || state.kind === 'ready') && state.version === latest.version) {
-      return { status: 'update', version: latest.version };
+    if ((state.kind === 'downloading' || state.kind === 'ready') && state.version === info.version) {
+      return { status: 'update', version: info.version, majorVersion: selection.major?.version };
     }
-    set({ kind: 'available', info: latest, action });
-    if (action === 'auto') void startDownload(latest);
-    return { status: 'update', version: latest.version };
+    const channel: UpdateChannel = selection.major === info ? 'latest' : 'branch';
+    set({ kind: 'available', info, action });
+    if (action === 'auto') void startDownload(info, channel);
+    return { status: 'update', version: info.version, majorVersion: selection.major?.version };
   } catch (e) {
     const err = toAppError(e);
     console.warn('[updater] check failed:', err.message);
@@ -108,8 +111,8 @@ export async function runUpdateCheck(): Promise<CheckOutcome> {
   }
 }
 
-/** Download + install in the background; resolves when the bundle is swapped. */
-export async function startDownload(info: UpdateInfo): Promise<void> {
+/** Download exactly the version and channel selected by the check or button. */
+export async function startDownload(info: UpdateInfo, channel: UpdateChannel): Promise<void> {
   if (downloadInFlight) return;
   downloadInFlight = true;
   const gen = generation;
@@ -123,8 +126,6 @@ export async function startDownload(info: UpdateInfo): Promise<void> {
     } else if (ev.event === 'progress') {
       if (ev.total) total = ev.total;
       const downloaded = ev.downloaded ?? 0;
-      // 99 is the cap until "finished" — the install step follows the last
-      // byte and 100 % would otherwise sit there lying about being done.
       const pct = total ? Math.min(99, Math.round((downloaded / total) * 100)) : null;
       set({ kind: 'downloading', version: info.version, pct });
     } else {
@@ -132,15 +133,18 @@ export async function startDownload(info: UpdateInfo): Promise<void> {
     }
   };
   try {
-    await invoke('update_download_and_install', { onEvent: chan });
+    await invoke('update_download_and_install', {
+      onEvent: chan,
+      targetVersion: info.version,
+      channel,
+    });
     if (gen === generation) set({ kind: 'ready', version: info.version });
   } catch (e) {
     if (gen !== generation) return;
     const err = toAppError(e);
     if (err.code === 'not_updatable') {
-      // deb/rpm install — the package manager owns the file. Fall back to
-      // the passive chip (the honest "not for you here"), never a failure.
-      set({ kind: 'available', info, action: 'notify' });
+      if (channel === 'latest') setMajor(null);
+      set({ kind: 'available', info, action: 'notify', notUpdatable: true });
     } else {
       console.warn('[updater] download/install failed:', err.message);
       set({ kind: 'failed', message: err.message });
@@ -150,8 +154,11 @@ export async function startDownload(info: UpdateInfo): Promise<void> {
   }
 }
 
-/** "Stop telling me" — see the module comment for why the backend runs on. */
+/** Stop showing this download; the selected bundle may finish in the backend. */
 export function cancelDownload(): void {
+  if (state.kind === 'downloading' && majorCandidate?.version === state.version) {
+    setMajor(null);
+  }
   generation += 1;
   downloadInFlight = false;
   set({ kind: 'idle' });

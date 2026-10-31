@@ -62,3 +62,23 @@ export function updateAction(cls: UpdateClass, prefs: UpdatePrefs): UpdateAction
       return prefs.minor ? 'auto' : 'notify';
   }
 }
+
+export interface UpdateCandidateSelection<T> {
+  update: T | null;
+  major: T | null;
+}
+
+/** Choose the branch update to act on while retaining a separate major offer. */
+export function selectUpdateCandidates<T extends { version: string }>(
+  current: string,
+  latest: T | null,
+  branch: T | null,
+): UpdateCandidateSelection<T> {
+  const major = latest && classifyUpdate(current, latest.version) === 'major' ? latest : null;
+  const branchCandidate = branch
+    ?? (latest && classifyUpdate(current, latest.version) !== 'major' ? latest : null);
+  const update = branchCandidate && classifyUpdate(current, branchCandidate.version) !== 'none'
+    ? branchCandidate
+    : major;
+  return { update, major };
+}

@@ -2,12 +2,15 @@
 // Chromium via the Tauri mock) with sample data, on a retina (2x) macOS-style
 // viewport, and writes annotated PNGs to docs/shots/. Red = unified highlight.
 import { chromium } from 'playwright';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { mockFor, installMock } from './doc-fixtures.mjs';
 
 const EXE = '/Users/j/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
 const BASE = 'http://localhost:5273/';
-const OUT = 'docs/shots';
+const THEME = process.env.TXUI_DOC_THEME ?? 'ayu-dark';
+if (!['ayu-dark', 'ayu-light'].includes(THEME)) throw new Error(`Unsupported documentation theme: ${THEME}`);
+const OUT = process.env.TXUI_DOC_OUT ?? `docs/shots/${THEME === 'ayu-light' ? 'light' : 'dark'}`;
+mkdirSync(OUT, { recursive: true });
 
 // Sample backend responses come from dev/doc-fixtures.mjs — the same fixtures
 // the user-guide capture uses. They used to be a second, thinner copy here,
@@ -56,6 +59,7 @@ async function newPage(browser, engine = 'mysql', w = 1600, h = 1000) {
   // installMock runs in the page: the payload crosses as JSON, so anything that
   // must vary by invoke argument is rebuilt on the other side.
   await page.addInitScript(installMock, mockFor(engine));
+  await page.addInitScript(theme => localStorage.setItem('dbgui:theme', theme), THEME);
   const errs = [];
   page.on('pageerror', e => errs.push(e.message));
   page._errs = errs;

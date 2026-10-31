@@ -45,6 +45,21 @@ describe('documentation image links', () => {
       + 'with dev/shoot_userguide.mjs (see docs/user-guide/SCREENSHOTS.md).');
   });
 
+  test('every HTML screenshot opens full-size and has both Ayu theme variants', () => {
+    const html = readFileSync('docs/index.html', 'utf8');
+    const images = [...html.matchAll(/<a class="shot-link"[^>]*><img ([^>]+)><\/a>/g)];
+    assert.ok(images.length >= 60, 'expected clickable screenshots throughout the help page');
+    for (const match of images) {
+      const attrs = match[1];
+      const dark = /data-dark-src="([^"]+)"/.exec(attrs)?.[1];
+      const light = /data-light-src="([^"]+)"/.exec(attrs)?.[1];
+      assert.ok(dark && light, `screenshot lacks theme variants: ${match[0]}`);
+      assert.ok(existsSync(`docs/${dark}`), `missing Ayu Dark image: docs/${dark}`);
+      assert.ok(existsSync(`docs/${light}`), `missing Ayu Light image: docs/${light}`);
+      assert.ok(match[0].includes('target="_blank"'), `screenshot does not open a new tab: ${match[0]}`);
+    }
+  });
+
   test('no referenced screenshot is a zero-byte placeholder', () => {
     const empty = readdirSync('docs/user-guide/screenshots')
       .filter(f => f.endsWith('.png'))

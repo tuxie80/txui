@@ -56,6 +56,9 @@ h1{font-size:30px;font-weight:800;letter-spacing:-.02em;margin:0 0 8px}
 h2{font-size:21px;font-weight:700;margin:36px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--brd)}
 h2.group-h{color:var(--accent)}
 h3{font-size:17px;font-weight:700;margin:0}
+h1[id],h2[id],h3[id],h4[id]{scroll-margin-top:70px}
+h1[id]::after,h2[id]::after,h3[id]::after,h4[id]::after{content:' #';color:var(--tx-mute);opacity:0;font-size:.75em}
+h1[id]:hover::after,h2[id]:hover::after,h3[id]:hover::after,h4[id]:hover::after{opacity:.8}
 .ver{font-size:16px;color:var(--tx-mute);font-weight:600}
 .lede{font-size:16px;color:var(--tx-dim);max-width:70ch}
 .note{font-size:13px;color:var(--tx-mute);margin-top:10px}
@@ -72,6 +75,7 @@ h3{font-size:17px;font-weight:700;margin:0}
 /* figures */
 figure{margin:20px 0;background:var(--bg2);border:1px solid var(--brd);border-radius:var(--radius);padding:10px;overflow:hidden}
 figure img{width:100%;height:auto;border-radius:6px;display:block;border:1px solid var(--brd)}
+.shot-link{display:block;cursor:zoom-in}
 figcaption{font-size:13px;color:var(--tx-dim);padding:10px 4px 2px}
 .cap-mac{color:var(--tx-mute)}
 

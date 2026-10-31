@@ -133,6 +133,13 @@ test('catalog schemas are never "unknown tables"', () => {
   }
 });
 
+test('backtick-qualified catalog tables keep their names and stay quiet', () => {
+  const sql = 'SELECT * FROM `mysql`.`innodb_table_stats` LIMIT 100;';
+  assert.equal(find(sql, 'unknown-table'), undefined);
+  assert.ok(!codes(sql).includes('full-scan'), 'LIMIT 100 is not an unbounded scan');
+  assert.equal(find('SELECT * FROM `shop`.`orders` LIMIT 100', 'unknown-table'), undefined);
+});
+
 test('tables the script itself creates are known for the rest of the script', () => {
   const sql = 'CREATE TEMPORARY TABLE tmp_fix (id int);\n'
     + 'INSERT INTO tmp_fix SELECT id FROM orders;\nSELECT * FROM tmp_fix';

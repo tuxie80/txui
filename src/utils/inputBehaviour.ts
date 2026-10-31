@@ -48,6 +48,7 @@ function stamp(el: TextField): void {
   // first letter — both are catastrophic in a case-sensitive identifier.
   el.setAttribute('autocorrect', 'off');
   el.setAttribute('autocapitalize', 'off');
+  el.setAttribute('spellcheck', 'false');
   el.spellcheck = false;
   // Password managers ignore `autocomplete` and inject their own overlay;
   // each of these is that vendor's documented opt-out.
@@ -59,14 +60,24 @@ function stamp(el: TextField): void {
 
 function scan(root: ParentNode): void {
   if (root instanceof Element) {
-    if (isTextField(root)) { stamp(root); return; }
+    if (isTextField(root)) stamp(root);
+    if (root.hasAttribute('contenteditable') && root.getAttribute('contenteditable') !== 'false') {
+      root.setAttribute('spellcheck', 'false');
+      root.setAttribute('autocorrect', 'off');
+      root.setAttribute('autocapitalize', 'off');
+    }
     // Leaf element — nothing can be nested inside it. Worth the check: the SQL
     // editor rewrites its line elements on every keystroke, and each one would
     // otherwise cost a querySelectorAll that can only ever return nothing.
     if (!root.firstElementChild) return;
   }
-  for (const el of root.querySelectorAll('input, textarea')) {
+  for (const el of root.querySelectorAll('input, textarea, [contenteditable]')) {
     if (isTextField(el)) stamp(el);
+    if (el.getAttribute('contenteditable') !== 'false') {
+      el.setAttribute('spellcheck', 'false');
+      el.setAttribute('autocorrect', 'off');
+      el.setAttribute('autocapitalize', 'off');
+    }
   }
   // A <form> lets the browser autofill a whole group at once.
   for (const f of root.querySelectorAll('form')) f.setAttribute('autocomplete', 'off');
@@ -125,6 +136,7 @@ export function installInputBehaviour(doc: Document = document): () => void {
 /** Exported for tests: the attributes a field of this type must end up with. */
 export function suppressionAttrs(): Record<string, string> {
   return {
+    spellcheck: 'false',
     autocomplete: 'off',
     autocorrect: 'off',
     autocapitalize: 'off',

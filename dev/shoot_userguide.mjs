@@ -21,13 +21,19 @@
 //   node dev/shoot_userguide.mjs                                          # shell 2
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { mockFor, installMock, galeraFixture, GALERA_CONNECTIONS } from './doc-fixtures.mjs';
+import {
+  mockFor, installMock, galeraFixture, GALERA_CONNECTIONS,
+  mysqlProgressFixture, pgWorkloadFixture,
+} from './doc-fixtures.mjs';
 
 const EXE = process.env.TXUI_CHROMIUM
   ?? '/Users/j/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/'
      + 'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
 const BASE = 'http://localhost:5273/';
-const OUT = 'docs/user-guide/screenshots';
+const THEME = process.env.TXUI_DOC_THEME ?? 'ayu-dark';
+if (!['ayu-dark', 'ayu-light'].includes(THEME)) throw new Error(`Unsupported documentation theme: ${THEME}`);
+const OUT = process.env.TXUI_DOC_OUT
+  ?? `docs/user-guide/screenshots/${THEME === 'ayu-light' ? 'light' : 'dark'}`;
 const W = 1600, H = 1000;
 
 mkdirSync(OUT, { recursive: true });
@@ -195,8 +201,14 @@ async function cropUnion(page, name, sels, note, { pad = 12, marks } = {}) {
   if (marks) await unmark(page);
 }
 
+async function themedPage(browser, options) {
+  const page = await browser.newPage(options);
+  await page.addInitScript(theme => localStorage.setItem('dbgui:theme', theme), THEME);
+  return page;
+}
+
 async function newPage(browser, engine) {
-  const page = await browser.newPage({
+  const page = await themedPage(browser, {
     viewport: { width: W, height: H }, deviceScaleFactor: 2,
   });
   // installMock runs in the page: the payload crosses as JSON, and the
@@ -321,7 +333,7 @@ try {
   // which always has six rows — so this shot injects an empty list, which the
   // mock now lets win over SAMPLE for exactly this case.
   await section('00-first-run', async () => {
-    const page = await browser.newPage({
+    const page = await themedPage(browser, {
       viewport: { width: W, height: H }, deviceScaleFactor: 2,
     });
     await page.addInitScript(installMock, { ...mockFor('mysql'), list_connections: [] });
@@ -498,6 +510,35 @@ try {
     await page.close();
   }
 
+  // ══ 14 — MySQL thread progress: real ALTER phases from performance_schema ═
+  await section('14-mysql-progress', async () => {
+    const page = await themedPage(browser, {
+      viewport: { width: W, height: H }, deviceScaleFactor: 2,
+    });
+    await page.addInitScript(installMock, {
+      ...mockFor('mysql'), __MYSQL_PROGRESS__: mysqlProgressFixture(),
+    });
+    page.on('pageerror', e => console.log(`    [pageerror] ${e.message}`));
+    await connect(page, 'prod-orders');
+    if (!(await openPanel(page, 'Activity', 'Processes'))) {
+      throw new Error('Activity → Processes not found');
+    }
+    await page.getByRole('button', { name: /⏱ Progress/ }).click();
+    await page.locator('.tpd-picker input').fill('418844');
+    await page.locator('.tpd-picker button', { hasText: 'Watch' }).click();
+    await page.waitForSelector('.tpd-phase-table .tpd-phase-running', { timeout: 8000 });
+    await page.waitForTimeout(500);
+    await crop(page, '14-mysql-progress', '.tpd-modal',
+      'Thread progress: ALTER TABLE / CREATE INDEX phases, completion and timing', {
+        pad: 18,
+        marks: [
+          { sel: '.tpd-summary', label: 'Statement + timing', pad: 4 },
+          { sel: '.tpd-phase-table', label: 'Seven InnoDB phases', pad: 4 },
+        ],
+      });
+    await page.close();
+  });
+
   // ══ 07 — data browser ════════════════════════════════════════════════════
   {
     const page = await newPage(browser, 'mysql');
@@ -530,6 +571,32 @@ try {
     }
     await page.close();
   }
+
+  // ══ 22 — PostgreSQL Workload: baseline/after with ranked statement deltas ═
+  await section('22-pg-workload', async () => {
+    const page = await themedPage(browser, {
+      viewport: { width: W, height: H }, deviceScaleFactor: 2,
+    });
+    await page.addInitScript(installMock, {
+      ...mockFor('postgres'), __PG_WORKLOAD__: pgWorkloadFixture(), incident_timeline: [],
+    });
+    page.on('pageerror', e => console.log(`    [pageerror] ${e.message}`));
+    await connect(page, 'analytics');
+    if (!(await openPanel(page, 'Insights', 'PostgreSQL Workload'))) {
+      throw new Error('Insights → PostgreSQL Workload not found');
+    }
+    await page.locator('button', { hasText: '1. Capture baseline' }).click();
+    await page.locator('button', { hasText: '1. Capture new baseline' }).waitFor({ timeout: 8000 });
+    await page.locator('button', { hasText: '2. Capture after' }).click();
+    await page.waitForSelector('.cp-table tbody tr', { timeout: 8000 });
+    await page.waitForTimeout(500);
+    await cropTo(page, '22-pg-workload', '.proc-panel', '.cp-table',
+      'PostgreSQL Workload: baseline/after window with ranked statement deltas', {
+        pad: 4,
+        marks: [{ sel: '.cp-table', label: 'Ranked statement deltas', pad: 4 }],
+      });
+    await page.close();
+  });
 
   // ══ Redis — 30 ═══════════════════════════════════════════════════════════
   await section('30-redis-browser', async () => {
@@ -595,7 +662,7 @@ try {
   // to diff against, so every shot waits past the second tick before
   // capturing. The sidebar holds only the 3-node txui-galera cluster.
   const galeraPage = async (fixture) => {
-    const page = await browser.newPage({
+    const page = await themedPage(browser, {
       viewport: { width: W, height: H }, deviceScaleFactor: 2,
     });
     await page.addInitScript(installMock, {

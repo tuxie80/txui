@@ -38,6 +38,7 @@ test('the suppression set covers the browser AND the password managers', () => {
   const a = suppressionAttrs();
   // Browser / WebKit side. autocorrect and autocapitalize are the two that
   // actually rewrite characters — a capitalised identifier is a broken one.
+  assert.equal(a.spellcheck, 'false');
   assert.equal(a.autocomplete, 'off');
   assert.equal(a.autocorrect, 'off');
   assert.equal(a.autocapitalize, 'off');

@@ -56,6 +56,16 @@ describe('user guides in the generated help site', () => {
     }
   });
 
+  test('every heading has a direct URL, including MySQL DDL progress', () => {
+    const headings = [...html.matchAll(/<h[1-4](?:\s[^>]*)?>/g)].map(m => m[0]);
+    assert.ok(headings.length > 100, 'expected the full reference headings');
+    for (const heading of headings) {
+      assert.ok(/\bid="[^"]+"/.test(heading), `heading has no direct URL: ${heading}`);
+    }
+    assert.ok(html.includes('id="progress-watch-alter-table-or-create-index"'),
+      'the ALTER TABLE / CREATE INDEX guide topic is not directly linkable');
+  });
+
   test('cross-guide links became in-page anchors whose targets exist', () => {
     const anchors = [...section.matchAll(/href="#(guide-[^"]+)"/g)].map(m => m[1]);
     assert.ok(anchors.length > 0, 'no cross-guide links found — first-steps links to every engine guide');
