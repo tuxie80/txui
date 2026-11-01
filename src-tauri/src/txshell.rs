@@ -72,6 +72,7 @@ pub const VERBS: &[VerbSpec] = &[
 /// The reason is the point of the list. Without it the conformance test could
 /// be silenced by adding a name, which would make it worthless.
 pub const UNSUPPORTED: &[(&str, &str)] = &[
+    ("diff", "compares against a captured result in the GUI transcript; headless runs have no transcript"),
     ("chart", "draws into the GUI's chart view; a cron job has no canvas"),
     ("grid", "shows the GUI's result grid; headless output goes to --out or stdout"),
     (

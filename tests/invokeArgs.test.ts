@@ -193,13 +193,7 @@ function registeredCommands(): string[] {
  * is correct. Adding an entry here is the review conversation — a command
  * nobody calls is dead weight or a feature that never got wired.
  */
-const NO_CALLER_EXEMPTIONS: Record<string, string> = {
-  // Dispatched through a union-typed variable: QueryTabs' endTx(cmd) runs
-  // `invoke(cmd, …)` with cmd: 'commit_transaction' | 'rollback_transaction'
-  // (also re-exported via useQueryRunner and DataBrowser's onEndTx).
-  commit_transaction: 'invoked via the endTx(cmd) variable in QueryTabs/useQueryRunner',
-  rollback_transaction: 'invoked via the endTx(cmd) variable in QueryTabs/useQueryRunner',
-};
+const NO_CALLER_EXEMPTIONS: Record<string, string> = {};
 
 test('every registered command has at least one caller in src/', () => {
   const registered = registeredCommands();

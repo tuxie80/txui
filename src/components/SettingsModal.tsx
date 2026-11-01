@@ -8,7 +8,8 @@
  */
 import { errorDisplay } from '../utils/appError';
 import { useCallback, useEffect, useState } from 'react';
-import { aiHasKey, aiSetKey } from '../utils/aiClient';
+import { aiHasKey, aiSetKey, aiTestConnection } from '../utils/aiClient';
+import { AI_PROVIDER_PRESETS, detectAiPreset } from '../utils/aiProviders';
 import { PREFS, usePreference } from '../store/preferences';
 import { THEMES, applyTheme } from '../utils/themes';
 import { MONO_FONTS, applyMonoFont } from '../utils/fontFamily';
@@ -82,7 +83,21 @@ export function SettingsModal({ onClose }: Props) {
   const [aiModel, setAiModel] = usePreference(PREFS.aiModel);
   const [aiKey, setAiKey] = useState('');
   const [aiKeySet, setAiKeySet] = useState(false);
+  const [aiTesting, setAiTesting] = useState(false);
+  const [aiTestMessage, setAiTestMessage] = useState('');
+  const aiPreset = detectAiPreset(aiProvider, aiBaseUrl)?.id ?? 'custom';
   useEffect(() => { aiHasKey().then(setAiKeySet).catch(() => {}); }, []);
+  const testAiConnection = async () => {
+    setAiTesting(true); setAiTestMessage('');
+    try {
+      await aiTestConnection().promise;
+      setAiTestMessage('Connection succeeded — the provider returned a completion.');
+    } catch (e) {
+      setAiTestMessage(errorDisplay(e));
+    } finally {
+      setAiTesting(false);
+    }
+  };
   const [profiles, setProfiles] = useState<FormatProfile[]>(() => loadProfiles(localStorage));
   const [profileId, setProfileId] = useState(() => activeProfile(localStorage).id);
   const profile = profiles.find(p => p.id === profileId) ?? profiles[0];
@@ -554,12 +569,26 @@ export function SettingsModal({ onClose }: Props) {
           <section className="settings-section">
             <h3>AI assistant</h3>
             <p className="settings-hint">
-              Powers the editor’s generate-SQL, explain, and “Fix with AI” actions. Bring your own endpoint and key.
-              The key is stored in the encrypted vault, never in plain settings, and is sent only to
-              the endpoint below.
+              Powers schema-grounded SQL generation, explanation, error fixes and plan commentary.
+              Keys stay in the active secret store (machine-obfuscated by default, encrypted Safe Vault
+              when enabled), never in plain settings, and are sent only to the endpoint below.
+              OpenAI-compatible local servers may leave the key empty.
             </p>
             <label className="settings-row">
-              <span>Provider</span>
+              <span>Provider preset</span>
+              <select value={aiPreset} onChange={e => {
+                const preset = AI_PROVIDER_PRESETS.find(p => p.id === e.target.value);
+                if (preset) {
+                  setAiProvider(preset.provider); setAiBaseUrl(preset.baseUrl); setAiModel(preset.model);
+                  setAiTestMessage('');
+                }
+              }}>
+                <option value="custom">Custom endpoint</option>
+                {AI_PROVIDER_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+            </label>
+            <label className="settings-row">
+              <span>Protocol</span>
               <select value={aiProvider} onChange={e => setAiProvider(e.target.value as typeof aiProvider)}>
                 <option value="anthropic">Anthropic (Messages API)</option>
                 <option value="openai">OpenAI-compatible (/chat/completions)</option>
@@ -586,11 +615,16 @@ export function SettingsModal({ onClose }: Props) {
                   Clear key
                 </button>
               )}
+              <button className="toolbar-btn" disabled={aiTesting || !aiBaseUrl.trim() || !aiModel.trim()}
+                onClick={() => void testAiConnection()}>
+                {aiTesting ? 'Testing…' : 'Test connection'}
+              </button>
               <button className="primary" disabled={!aiKey.trim()}
                 onClick={() => { void aiSetKey(aiKey.trim()).then(() => { setAiKeySet(true); setAiKey(''); }); }}>
                 Save key
               </button>
             </div>
+            {aiTestMessage && <p className="settings-hint" role="status">{aiTestMessage}</p>}
           </section>
           )}
 

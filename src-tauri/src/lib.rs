@@ -777,6 +777,7 @@ pub fn run() {
             // schema
             list_schema,
             ai_complete,
+            ai_cancel,
             ai_set_key,
             ai_has_key,
             list_columns,

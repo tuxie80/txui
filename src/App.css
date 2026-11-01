@@ -7298,7 +7298,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
 /* Bounded: a 1000-row result must not push the prompt off the screen. */
 .txsh-grid {
   height: min(340px, 42vh); border: 1px solid var(--border); border-radius: 4px;
-  overflow: hidden;
+  overflow: hidden; display: flex; flex-direction: column; min-height: 0;
 }
 
 .txsh-prompt {
@@ -7875,6 +7875,8 @@ tr.cmp-same td { opacity: .62; }
 .ai-source { background: rgba(255,255,255,0.04); color: var(--text2); }
 .ai-result { background: rgba(77,168,255,0.08); }
 .ai-result-sql { border: 1px solid rgba(77,168,255,0.25); }
+.ai-context { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); }
+.ai-context pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-family: var(--mono, monospace); }
 .ai-loading { color: var(--text2); font-style: italic; }
 /* Error bar with a Fix-with-AI action */
 .query-error { display: flex; align-items: center; gap: 8px; }

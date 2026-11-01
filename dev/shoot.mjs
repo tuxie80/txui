@@ -82,7 +82,15 @@ async function openWorkspace(page, connName = 'prod-orders') {
   await header.scrollIntoViewIfNeeded();
   await header.dblclick();
   await page.waitForTimeout(1500);
-  await page.waitForSelector('.pmenu-title', { timeout: 8000 });
+  await page.waitForSelector('.pmenu-title', { timeout: 8000 }).catch(async () => {
+    // First discovery of a lazy editor chunk can make Vite re-optimize and
+    // answer 504. The optimized chunk is ready on a full reload.
+    await page.reload({ waitUntil: 'networkidle' });
+    if (await page.locator('.pmenu-title').first().isVisible().catch(() => false)) return;
+    await page.waitForSelector('.conn-item', { timeout: 12000 });
+    await header.dblclick();
+    await page.waitForSelector('.pmenu-title', { timeout: 12000 });
+  });
 }
 
 const browser = await chromium.launch({ executablePath: EXE });

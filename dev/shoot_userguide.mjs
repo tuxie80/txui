@@ -239,7 +239,13 @@ async function connect(page, connName) {
   await header.scrollIntoViewIfNeeded();
   await header.dblclick();
   await page.waitForSelector('.pmenu-title, .schema-tree, .rb-root, .workspace',
-    { timeout: 15000 });
+    { timeout: 15000 }).catch(async () => {
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForSelector('.conn-item', { timeout: 12000 });
+    await header.dblclick();
+    await page.waitForSelector('.pmenu-title, .schema-tree, .rb-root, .workspace',
+      { timeout: 15000 });
+  });
   await page.waitForTimeout(2000);
 }
 
@@ -514,6 +520,63 @@ try {
     await full(page, '12-mysql-explain', 'EXPLAIN visualization of a join');
     await page.close();
   }
+
+  await section('ai-assistant-guide', async () => {
+    const page = await newPage(browser, 'mysql');
+    await boot(page);
+    await page.evaluate(() => {
+      const g = window;
+      g.__MOCK__.ai_has_key = true;
+      g.__MOCK__.ai_complete = () => 'SELECT c.name, SUM(o.total) AS revenue\n'
+        + 'FROM customers c JOIN orders o ON o.customer_id = c.id\n'
+        + 'GROUP BY c.name ORDER BY revenue DESC LIMIT 10;';
+      const previous = g.__MOCK__.monitor_query;
+      const result = rows => ({
+        columns: [], rows, rows_affected: null, execution_ms: 1, fetch_ms: 0, warnings: [],
+      });
+      g.__MOCK__.monitor_query = args => {
+        const sql = String(args?.sql ?? '').toLowerCase();
+        if (sql.includes('select database()')) return result([['shop']]);
+        if (sql.includes('information_schema.schemata')) return result([['shop']]);
+        if (sql.includes('information_schema.tables')) {
+          return result([['shop', 'customers', 'BASE TABLE'], ['shop', 'orders', 'BASE TABLE']]);
+        }
+        if (sql.includes('information_schema.statistics')) return result([['id'], ['customer_id']]);
+        if (sql.includes('information_schema.key_column_usage')) return result([]);
+        if (sql.includes('information_schema.routines')
+          || sql.includes('information_schema.triggers')
+          || sql.includes('information_schema.events')) return result([]);
+        return previous(args);
+      };
+    });
+    await page.locator('.conn-item-header', {
+      has: page.locator('.conn-name', { hasText: 'prod-orders' }),
+    }).dblclick();
+    await page.waitForSelector('.cm-content');
+    await page.waitForTimeout(2000);
+    await page.locator('.cm-content').first().click();
+    await page.keyboard.press('Meta+i');
+    await page.locator('.ai-input').fill('Top 10 customers by revenue using customers and orders');
+    await page.locator('.ai-actions .primary').click();
+    await page.waitForSelector('.ai-result-sql');
+    await page.locator('.ai-context summary').click();
+    await crop(page, 'ai-assistant', '.ai-modal',
+      'AI SQL generation with reviewable SQL and schema metadata context', { pad: 18 });
+    await page.close();
+  });
+
+  await section('txshell-guide', async () => {
+    const page = await newPage(browser, 'mysql');
+    await connect(page, 'prod-orders');
+    if (!(await openPanel(page, 'SQL', 'TxShell'))) throw new Error('SQL → TxShell not found');
+    await page.locator('.txsh-input').fill('SELECT * FROM orders');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.txsh-grid')?.textContent?.includes('Aisha Rahman'),
+      null, { timeout: 15000 });
+    await page.waitForTimeout(1000);
+    await full(page, 'txshell', 'TxShell with a SQL result and typed command prompt');
+    await page.close();
+  });
 
   // ══ 14 — MySQL thread progress: real ALTER phases from performance_schema ═
   await section('14-mysql-progress', async () => {

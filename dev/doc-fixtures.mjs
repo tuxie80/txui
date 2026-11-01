@@ -702,6 +702,13 @@ export function mockFor(engine) {
     browse_table: ORDERS_RESULT,
     get_table_meta: { columns: ORDERS_RESULT.columns, row_count: 184_223, primary_key: ['id'] },
     list_processes: engine === 'postgres' ? PG_ACTIVITY_RESULT : PROCESSLIST_RESULT,
+    kill_candidates: PROCESSLIST_RESULT.rows.map(row => ({
+      id: row[0], user: row[1], host: row[2], db: row[3] ?? '', command: row[4],
+      time: row[5], state: row[6] ?? '', info: row[7] ?? '', trxAge: -1,
+      rowsLocked: 0, trxState: '', blocking: [], blockedBy: [],
+      isSelf: row[1] === 'txui', isSystem: String(row[4]).startsWith('Binlog'), queryId: null,
+    })),
+    kill_processes: [{ id: 418823, ok: true, error: null, statement: 'KILL 418823', queryId: null }],
     explain_query: EXPLAIN_JSON,
     tuner_analyze: TUNER_REPORT,
     redis_scan: { cursor: 0, keys: REDIS_KEYS },

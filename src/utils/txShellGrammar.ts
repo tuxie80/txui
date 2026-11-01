@@ -107,10 +107,11 @@ export const VERBS: VerbSpec[] = [
   { name: 'insert', kind: 'sink', minArgs: 2, maxArgs: 3,
     usage: 'insert into <table> [@connection]',
     summary: 'Write the rows into a table, on this session or another one.',
-    detail: 'Generates INSERT statements from the columns as named and runs them in a '
-      + 'transaction, so a failure part-way leaves nothing behind. With a @connection '
-      + 'the rows go to a DIFFERENT server than the one that produced them — read from '
-      + 'prod, write to dev, with the values typed the whole way rather than round-'
+    detail: 'Generates INSERT statements from the columns as named. MySQL, PostgreSQL and '
+      + 'SQL Server run them on one pinned connection in a transaction, so a failure part-way '
+      + 'leaves nothing behind; other engines report that earlier statements may remain applied. '
+      + 'With a @connection the rows go to a DIFFERENT server than the one that produced them — '
+      + 'read from prod, write to dev, with the values typed the whole way rather than round-'
       + 'tripped through a dump file.' },
   { name: 'chart', kind: 'sink', minArgs: 0, maxArgs: 2,
     usage: 'chart [type]', summary: 'Hand the rows to the chart view.' },
@@ -170,9 +171,10 @@ export const METAS: MetaSpec[] = [
   { name: 'explain', alias: ['e'], usage: '\\explain <sql>',
     summary: 'Run EXPLAIN and open the plan graph.' },
   { name: 'watch', usage: '\\watch <seconds> <command>',
-    summary: 'Re-run a command on an interval until stopped.',
-    detail: 'The shell keeps the latest result in place rather than scrolling, so a '
-      + 'counter or a queue depth can be watched without flooding the transcript.' },
+    summary: 'Re-run a read-only query or file pipeline until another command stops it.',
+    detail: 'The interval is 0.2–3600 seconds. The shell keeps the latest result in place '
+      + 'rather than scrolling, skips a tick when the previous one is still running, and stops '
+      + 'on an error. Writes and output sinks are refused.' },
   { name: 'ps', alias: ['top'], usage: '\\ps',
     summary: 'Server processes — the same view as the ⚡ panel.' },
   { name: 'kill', usage: '\\kill <id>',

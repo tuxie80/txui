@@ -70,6 +70,16 @@
     "note": "EXPLAIN visualization of a join"
   },
   {
+    "name": "ai-assistant",
+    "ok": true,
+    "note": "AI SQL generation with reviewable SQL and schema metadata context"
+  },
+  {
+    "name": "txshell",
+    "ok": true,
+    "note": "TxShell with a SQL result and typed command prompt"
+  },
+  {
     "name": "15-mysql-progress-full",
     "ok": true,
     "note": "full-window thread progress over the processlist: statement metadata and seven InnoDB phases"

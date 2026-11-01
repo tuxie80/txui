@@ -1,22 +1,28 @@
-//! AI assistant — a small, provider-agnostic completion call.
+//! AI assistant — bounded, provider-agnostic completion calls.
 //!
-//! Configurable endpoint: either the Anthropic Messages API or any
-//! OpenAI-compatible `/chat/completions` server. The non-secret config
-//! (provider, base URL, model) travels from the frontend prefs on each call;
-//! the API key lives only in the encrypted secret vault and is never exposed to
-//! the frontend or logged. One-shot (non-streaming) — enough for NL→SQL,
-//! explain and fix, and trivially verifiable.
+//! Anthropic Messages and OpenAI-compatible chat completions share one path.
+//! Non-secret configuration comes from preferences; the optional key stays in
+//! the active secret store. Every request has an id so the UI can cancel it.
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tauri::State;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::apperror::AppError;
 use crate::state::AppState;
 
-/// Vault key under which the AI API key is stored.
 const AI_KEY: &str = "ai.apiKey";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+type AiCancelMap = Mutex<HashMap<String, oneshot::Sender<()>>>;
+static AI_CANCELS: OnceLock<AiCancelMap> = OnceLock::new();
 
-/// Store (or clear, when empty) the AI API key in the encrypted vault.
+fn cancels() -> &'static AiCancelMap {
+    AI_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[tauri::command]
 pub async fn ai_set_key(key: String, state: State<'_, AppState>) -> Result<(), AppError> {
     if key.is_empty() {
@@ -28,15 +34,121 @@ pub async fn ai_set_key(key: String, state: State<'_, AppState>) -> Result<(), A
     }
 }
 
-/// Whether an AI key is set — so the UI can prompt for one without reading it.
 #[tauri::command]
 pub async fn ai_has_key(state: State<'_, AppState>) -> Result<bool, AppError> {
     Ok(crate::secretstore::get(&state.data_dir, AI_KEY).is_some_and(|s| !s.is_empty()))
 }
 
-/// Run one completion against the configured endpoint and return the text.
+fn request_parts(
+    provider: &str,
+    base_url: &str,
+    model: &str,
+    system: Option<&str>,
+    prompt: &str,
+) -> Result<(bool, String, Value), AppError> {
+    let base = base_url.trim().trim_end_matches('/');
+    if !(base.starts_with("https://") || base.starts_with("http://")) {
+        return Err(AppError::from("AI endpoint must be an http:// or https:// URL."));
+    }
+    if model.trim().is_empty() {
+        return Err(AppError::from("No AI model is set — add one in Settings → AI."));
+    }
+    let anthropic = match provider {
+        "anthropic" => true,
+        "openai" => false,
+        other => return Err(AppError::from(format!("Unsupported AI provider: {other}"))),
+    };
+    if anthropic {
+        let mut body = json!({
+            "model": model.trim(),
+            "max_tokens": 2048,
+            "messages": [{ "role": "user", "content": prompt }],
+        });
+        if let Some(s) = system.filter(|s| !s.is_empty()) {
+            body["system"] = json!(s);
+        }
+        Ok((true, format!("{base}/v1/messages"), body))
+    } else {
+        let mut messages = Vec::new();
+        if let Some(s) = system.filter(|s| !s.is_empty()) {
+            messages.push(json!({ "role": "system", "content": s }));
+        }
+        messages.push(json!({ "role": "user", "content": prompt }));
+        Ok((false, format!("{base}/chat/completions"), json!({
+            "model": model.trim(), "messages": messages,
+        })))
+    }
+}
+
+fn completion_text(anthropic: bool, value: &Value) -> Option<String> {
+    if anthropic {
+        return value["content"].as_array()?.iter()
+            .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
+            .find_map(|part| part["text"].as_str())
+            .map(str::to_owned);
+    }
+    let content = &value["choices"][0]["message"]["content"];
+    if let Some(text) = content.as_str() {
+        return Some(text.to_owned());
+    }
+    content.as_array()?.iter()
+        .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
+        .find_map(|part| part["text"].as_str())
+        .map(str::to_owned)
+}
+
+async fn complete_with_key(
+    provider: &str,
+    base_url: &str,
+    model: &str,
+    system: Option<&str>,
+    prompt: &str,
+    key: Option<&str>,
+    timeout: Duration,
+    mut cancelled: oneshot::Receiver<()>,
+) -> Result<String, AppError> {
+    let (anthropic, url, body) = request_parts(provider, base_url, model, system, prompt)?;
+    let client = reqwest::Client::builder().timeout(timeout).build()
+        .map_err(|e| AppError::from(format!("could not build HTTP client: {e}")))?;
+    let mut request = client.post(&url).json(&body);
+    if anthropic {
+        let key = key.filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::from("No AI API key is set — add one in Settings → AI."))?;
+        request = request.header("x-api-key", key).header("anthropic-version", "2023-06-01");
+    } else if let Some(key) = key.filter(|s| !s.is_empty()) {
+        request = request.header("authorization", format!("Bearer {key}"));
+    }
+
+    let work = async {
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                AppError::from(format!("AI request timed out after {} seconds.", timeout.as_secs()))
+            } else {
+                AppError::from(format!("AI request failed: {e}"))
+            }
+        })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let snippet: String = text.chars().take(400).collect();
+            return Err(AppError::from(format!("AI endpoint returned {status}: {snippet}")));
+        }
+        let value: Value = response.json().await
+            .map_err(|e| AppError::from(format!("AI response was not JSON: {e}")))?;
+        let text = completion_text(anthropic, &value)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| AppError::from("AI endpoint returned an empty completion."))?;
+        Ok(text)
+    };
+    tokio::select! {
+        _ = &mut cancelled => Err(AppError::cancelled()),
+        result = work => result,
+    }
+}
+
 #[tauri::command]
 pub async fn ai_complete(
+    request_id: String,
     provider: String,
     base_url: String,
     model: String,
@@ -44,63 +156,109 @@ pub async fn ai_complete(
     prompt: String,
     state: State<'_, AppState>,
 ) -> Result<String, AppError> {
-    let key = crate::secretstore::get(&state.data_dir, AI_KEY)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::from("No AI API key is set — add one in Settings → AI."))?;
-
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err(AppError::from("No AI endpoint URL is set — add one in Settings → AI."));
+    if request_id.trim().is_empty() {
+        return Err(AppError::from("AI request id is missing."));
     }
-    let anthropic = provider == "anthropic";
+    let key = crate::secretstore::get(&state.data_dir, AI_KEY);
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut active = cancels().lock().await;
+        if active.contains_key(&request_id) {
+            return Err(AppError::from("That AI request is already running."));
+        }
+        active.insert(request_id.clone(), tx);
+    }
+    let result = complete_with_key(
+        &provider, &base_url, &model, system.as_deref(), &prompt,
+        key.as_deref(), REQUEST_TIMEOUT, rx,
+    ).await;
+    cancels().lock().await.remove(&request_id);
+    result
+}
 
-    let (url, body) = if anthropic {
-        let mut b = json!({
-            "model": model,
-            "max_tokens": 2048,
-            "messages": [{ "role": "user", "content": prompt }],
+#[tauri::command]
+pub async fn ai_cancel(request_id: String) -> Result<bool, AppError> {
+    let sender = cancels().lock().await.remove(&request_id);
+    Ok(sender.is_some_and(|tx| tx.send(()).is_ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_request_has_the_messages_shape() {
+        let (anthropic, url, body) = request_parts(
+            "anthropic", "https://api.anthropic.com/", "model", Some("rules"), "request",
+        ).unwrap();
+        assert!(anthropic);
+        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+        assert_eq!(body["system"], "rules");
+        assert_eq!(body["messages"][0]["content"], "request");
+        assert_eq!(body["max_tokens"], 2048);
+    }
+
+    #[test]
+    fn openai_request_has_system_and_user_messages() {
+        let (anthropic, url, body) = request_parts(
+            "openai", "http://localhost:1234/v1", "kimi", Some("rules"), "request",
+        ).unwrap();
+        assert!(!anthropic);
+        assert_eq!(url, "http://localhost:1234/v1/chat/completions");
+        assert_eq!(body["model"], "kimi");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "request");
+    }
+
+    #[test]
+    fn response_parsers_accept_text_and_content_parts() {
+        let anthropic = json!({"content": [{"type": "thinking", "text": "ignore"},
+            {"type": "text", "text": "SELECT 1"}]});
+        assert_eq!(completion_text(true, &anthropic).as_deref(), Some("SELECT 1"));
+        let openai = json!({"choices": [{"message": {"content": [
+            {"type": "text", "text": "SELECT 2"},
+        ]}}]});
+        assert_eq!(completion_text(false, &openai).as_deref(), Some("SELECT 2"));
+    }
+
+    #[test]
+    fn invalid_configuration_is_rejected_before_network_io() {
+        assert!(request_parts("openai", "file:///tmp/x", "m", None, "p").is_err());
+        assert!(request_parts("openai", "http://localhost", "", None, "p").is_err());
+        assert!(request_parts("other", "http://localhost", "m", None, "p").is_err());
+    }
+
+    async fn stalled_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
         });
-        if let Some(s) = system.as_deref().filter(|s| !s.is_empty()) {
-            b["system"] = json!(s);
-        }
-        (format!("{base}/v1/messages"), b)
-    } else {
-        let mut messages: Vec<Value> = Vec::new();
-        if let Some(s) = system.as_deref().filter(|s| !s.is_empty()) {
-            messages.push(json!({ "role": "system", "content": s }));
-        }
-        messages.push(json!({ "role": "user", "content": prompt }));
-        (format!("{base}/chat/completions"), json!({ "model": model, "messages": messages }))
-    };
-
-    let client = reqwest::Client::builder().build()
-        .map_err(|e| AppError::from(format!("could not build HTTP client: {e}")))?;
-    let mut req = client.post(&url).json(&body);
-    req = if anthropic {
-        req.header("x-api-key", key).header("anthropic-version", "2023-06-01")
-    } else {
-        req.header("authorization", format!("Bearer {key}"))
-    };
-
-    let resp = req.send().await
-        .map_err(|e| AppError::from(format!("AI request failed: {e}")))?;
-    if !resp.status().is_success() {
-        let code = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        // Trim provider error bodies so a giant HTML page doesn't fill the toast.
-        let snippet: String = text.chars().take(400).collect();
-        return Err(AppError::from(format!("AI endpoint returned {code}: {snippet}")));
+        format!("http://{address}/v1")
     }
-    let v: Value = resp.json().await
-        .map_err(|e| AppError::from(format!("AI response was not JSON: {e}")))?;
 
-    let text = if anthropic {
-        v["content"].get(0).and_then(|c| c["text"].as_str()).unwrap_or("").to_string()
-    } else {
-        v["choices"].get(0).and_then(|c| c["message"]["content"].as_str()).unwrap_or("").to_string()
-    };
-    if text.is_empty() {
-        return Err(AppError::from("AI endpoint returned an empty completion."));
+    #[tokio::test]
+    async fn cancellation_stops_the_http_request() {
+        let base = stalled_server().await;
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = tx.send(());
+        });
+        let error = complete_with_key(
+            "openai", &base, "m", None, "p", None, Duration::from_secs(5), rx,
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
     }
-    Ok(text)
+
+    #[tokio::test]
+    async fn timeout_is_a_clear_error() {
+        let base = stalled_server().await;
+        let (_tx, rx) = oneshot::channel();
+        let error = complete_with_key(
+            "openai", &base, "m", None, "p", None, Duration::from_millis(20), rx,
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+    }
 }

@@ -74,12 +74,13 @@
     "Run SQL directly; pipe rows with |> to stages and sinks (grid, chart, to <format>, save/append <file>, insert into <table> [@dest])",
     "diff #42 [key id ...] compares the pipeline input with an explicitly selected captured result, aligning columns by name and emitting typed change rows",
     "$(...) executes a nested TxShell command or file pipeline (never the OS shell): one cell becomes a scalar, larger results deterministic TSV",
-    "Meta commands: \\help, \\clear, \\vars, \\unset, \\history, \\timing, \\l, \\dt, \\dv, \\df, \\d, \\source <file>, \\edit, plus psql catalog metas",
+    "Meta commands: \\help, \\c, \\explain, \\watch, \\ps, \\kill, \\tx, catalog commands, \\source, \\generate, variables, history and \\edit",
     "$name = value variables; !line runs your OS shell; @pattern SQL fans out read-only across matching connections",
-    "from <file> loads a CSV/TSV/JSON file as a result set; Tab-complete, up/down history, Shift-Enter for newline, Clear"
+    "from <file> loads a CSV/TSV/JSON file as a result set; Tab-complete, up/down history, Shift-Enter for newline, Clear",
+    "\\watch 2 SELECT ... replaces the latest read-only result without flooding the transcript; another command stops it"
    ],
    "engines": "All SQL engines (the sql capability: MySQL, PostgreSQL, ClickHouse, SQLite, Parquet). Not Redis.",
-   "caveats": "Statements are audited with redaction. Fan-out is read-only and confirms wide/prod matches. Cross-server insert needs an open destination. Substitution and result diffs have explicit limits and shape checks."
+   "caveats": "Statements are audited with redaction. Fan-out and watch are read-only. Kill uses the shared guarded path. Inserts use pinned transactions on MySQL/PostgreSQL/SQL Server and honestly report non-atomic scope elsewhere. Cross-server insert needs an open destination. Catalog metas are MySQL/PostgreSQL-specific. See the TxShell user guide for the complete command reference."
   },
   "find": {
    "summary": "Three search scopes in one panel: Usages finds database references, In database searches table values, and In files searches local SQL scripts. Use it before destructive refactors, during incidents, or to find migration code.",

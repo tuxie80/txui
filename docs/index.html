@@ -230,7 +230,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </header>
 <div class="layout">
   <nav class="sidenav">
-    <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
+    <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-ai-assistant">AI assistant</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li><li><a href="#guide-txshell">TxShell</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
     <div class="nav-foot">Generated from source<br>at v1.5.0 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
@@ -243,7 +243,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     <div class="card"><div class="big">37</div><div>tool panels</div></div>
     <div class="card"><div class="big">70</div><div>editor commands</div></div>
     <div class="card"><div class="big">234</div><div>DBA views</div></div>
-    <div class="card"><div class="big">44</div><div>settings</div></div>
+    <div class="card"><div class="big">45</div><div>settings</div></div>
   </div>
   <div class="callout">
     <p><strong>Every shortcut works on every platform.</strong> TxUI binds commands to <code>Mod</code>, which is <b>⌘ Command</b> on macOS and <b>Ctrl</b> on Windows/Linux. Use the <b>macOS / Windows·Linux</b> switch in the top bar to render every shortcut in your notation.</p>
@@ -588,17 +588,19 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   <h1 id="guides-2">Guides</h1>
   <p class="lede">Task-oriented walkthroughs from <code>docs/user-guide/</code>. New to TxUI? Start with <a href="#guide-first-steps">First steps (101)</a> — five minutes from the start screen to your first query result — then pick the guide for your engine.</p>
   <div class="guide-index"><a class="guide-card" href="#guide-first-steps">First steps (101)</a>
+<a class="guide-card" href="#guide-ai-assistant">AI assistant</a>
 <a class="guide-card" href="#guide-clickhouse">ClickHouse</a>
 <a class="guide-card" href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a>
 <a class="guide-card" href="#guide-mysql">MySQL / MariaDB / Percona</a>
 <a class="guide-card" href="#guide-platforms">Platform notes — macOS, Linux, Windows</a>
 <a class="guide-card" href="#guide-postgresql">PostgreSQL</a>
 <a class="guide-card" href="#guide-redis">Redis</a>
-<a class="guide-card" href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></div>
+<a class="guide-card" href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a>
+<a class="guide-card" href="#guide-txshell">TxShell</a></div>
   <div class="guide-doc" id="guide-first-steps">
 <h2 id="first-steps-101">First steps (101)</h2>
 <p>Just installed TxUI? This is the short path from the start screen to your first query result. Five minutes, no manual — the details live in the <a href="#overview">main guide</a> and the per-engine guides linked at the bottom.</p>
-<p>TxUI is a desktop database GUI: one window for connections to <b>MySQL / MariaDB / Percona</b>, <b>PostgreSQL</b>, <b>Redis</b>, <b>ClickHouse</b>, <b>SQLite</b>, <b>DuckDB</b>, <b>Parquet</b> files, <b>MongoDB</b> and <b>SQL Server</b>. It runs entirely on your machine — there is no server component and nothing leaves it.</p>
+<p>TxUI is a desktop database GUI: one window for connections to <b>MySQL / MariaDB / Percona</b>, <b>PostgreSQL</b>, <b>Redis</b>, <b>ClickHouse</b>, <b>SQLite</b>, <b>DuckDB</b>, <b>Parquet</b> files, <b>MongoDB</b> and <b>SQL Server</b>. There is no server component. Database traffic uses your configured connections; optional, user-initiated AI requests go only to the AI provider you configure, with the exact SQL/schema/plan context shown before use.</p>
 <p>One notation note: <b><code>Mod</code></b> means <b>⌘ Command</b> on macOS and <b>Ctrl</b> on Windows/Linux. Every shortcut in the app is defined that way, so <code>Mod+Enter</code> below is <code>⌘Enter</code> or <code>Ctrl+Enter</code> depending on your OS.</p>
 <h3 id="1-the-start-screen">1. The start screen</h3>
 <p>Launch TxUI. With no connections saved yet, the window is a <b>sidebar</b> on the left and a welcome prompt that lists the same five steps this guide walks through. The <b>Output pane</b> at the bottom logs every connect/test attempt — if something fails, the error lands there, copyable.</p>
@@ -627,6 +629,36 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <figure><a class="shot-link" href="user-guide/screenshots/dark/09-settings.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/09-settings.png" data-dark-src="user-guide/screenshots/dark/09-settings.png" data-light-src="user-guide/screenshots/light/09-settings.png" alt="The Settings dialog" loading="lazy"></a><figcaption>The Settings dialog</figcaption></figure>
 <h3 id="where-to-go-next">Where to go next</h3>
 <ul><li><a href="#overview">Main user guide</a> — the full tour: sidebar, tabs, grid features, safety model, complete shortcut list.</li><li>Per engine: <a href="#guide-mysql">MySQL / MariaDB / Percona</a> · <a href="#guide-postgresql">PostgreSQL</a> · <a href="#guide-redis">Redis</a> · <a href="#guide-clickhouse">ClickHouse</a> · <a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet</a>.</li><li><a href="#guide-platforms">Platform notes</a> — the few macOS / Linux / Windows differences.</li><li>In the app: <b>Help → Keyboard Shortcuts</b> (<code>Mod+/</code>) lists every binding, and the command palette (<code>Mod+K</code>) finds any command or tool by name.</li></ul>
+</div>
+<div class="guide-doc" id="guide-ai-assistant">
+<h2 id="ai-assistant">AI assistant</h2>
+<p>TxUI&#39;s AI assistant is an <b>opt-in, bring-your-own-endpoint</b> helper for SQL and execution plans. It can use Anthropic, Kimi, OpenAI, a local Ollama or LM Studio server, or another compatible endpoint. It is not an autonomous database agent: it never runs a query or changes a database by itself.</p>
+<h3 id="1-choose-and-test-a-provider">1. Choose and test a provider</h3>
+<p>Open <b>Settings → AI</b>:</p>
+<ol><li>Choose a <b>Provider preset</b>. Presets fill the protocol, endpoint and model; every field remains editable.</li><li>Paste an API key when the provider requires one. Ollama, LM Studio and custom OpenAI-compatible local servers may leave it empty.</li><li>Click <b>Save key</b>, then <b>Test connection</b>. The test makes one small completion request and reports the provider&#39;s real response or error.</li></ol>
+<div class="scroll-x"><table class="ref"><thead><tr><th>Preset</th><th>Protocol</th><th>Key</th></tr></thead><tbody><tr><td>Anthropic</td><td>Anthropic Messages API</td><td>Required</td></tr><tr><td>Kimi (Moonshot AI)</td><td>OpenAI-compatible Chat Completions</td><td>Required</td></tr><tr><td>OpenAI</td><td>OpenAI-compatible Chat Completions</td><td>Required</td></tr><tr><td>Ollama</td><td>OpenAI-compatible local server</td><td>Usually not required</td></tr><tr><td>LM Studio</td><td>OpenAI-compatible local server</td><td>Usually not required</td></tr><tr><td>Custom endpoint</td><td>Either supported protocol</td><td>Depends on the server</td></tr></tbody></table></div>
+<p>Keys remain in the <b>active secret store</b>: machine-obfuscated plain storage by default, or the encrypted Safe Vault when enabled. They are never written to ordinary preferences and are sent only to the configured endpoint. Requests time out after 60 seconds and can be cancelled by closing the assistant.</p>
+<h3 id="2-generate-sql-from-a-description">2. Generate SQL from a description</h3>
+<p>Focus the SQL editor and press <b><code>Mod+I</code></b> (macOS <code>⌘I</code>, Windows/Linux <code>Ctrl+I</code>), or run <b>AI: generate SQL…</b> from Find Action.</p>
+<p>Describe the result you want and name the relevant tables, for example:</p>
+<pre><code>Top 10 customers by total order value in 2025, using customers and orders. Include customer name and order count.</code></pre>
+<p>Review the generated SQL, then choose <b>Insert into editor</b>. The statement is not executed for you: normal review, write confirmation, read-only enforcement and production limits still apply when you choose Run.</p>
+<figure><a class="shot-link" href="user-guide/screenshots/dark/ai-assistant.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/ai-assistant.png" data-dark-src="user-guide/screenshots/dark/ai-assistant.png" data-light-src="user-guide/screenshots/light/ai-assistant.png" alt="AI SQL generation with schema metadata available for review" loading="lazy"></a><figcaption>AI SQL generation with schema metadata available for review</figcaption></figure>
+<h3 id="3-see-exactly-what-grounds-the-answer">3. See exactly what grounds the answer</h3>
+<p>For referenced tables and views, TxUI supplies the current database/schema plus:</p>
+<ul><li>table and view names;</li><li>column names, data types and primary keys;</li><li>leading indexed columns;</li><li>foreign-key relationships.</li></ul>
+<p>The modal&#39;s <b>Schema metadata sent to the provider</b> section shows the exact context. <b>No row values are included.</b> Up to eight referenced relations and 24,000 characters of schema context are sent; the preview says when context is truncated. If no relation is detected, only available relation names are supplied, so naming the table in your request gives a better answer.</p>
+<h3 id="4-explain-sql-or-fix-an-error">4. Explain SQL or fix an error</h3>
+<ul><li><b>AI: explain statement</b> explains the current statement and performance caveats using its SQL and relevant schema metadata.</li><li><b>Fix with AI</b> appears beside a failed statement. It sends the statement, the real database error and relevant schema metadata. The proposed correction is inserted only after you approve it.</li></ul>
+<p>Both actions are available from Find Action; the fix action is also in the error bar.</p>
+<h3 id="5-interpret-an-execution-plan">5. Interpret an execution plan</h3>
+<p>Run <b><code>Mod+E</code></b> or open a plan, then click <b>✦ Explain plan</b> in the plan toolbar.</p>
+<p>The assistant receives:</p>
+<ul><li>the statement and raw plan, marked as <b>estimated EXPLAIN</b> or <b>measured EXPLAIN ANALYZE</b>;</li><li>TxUI&#39;s deterministic plan findings, including observed evidence and suggested actions;</li><li>relevant schema metadata.</li></ul>
+<p>It summarizes bottlenecks and tuning steps without inventing indexes, statistics or measurements. This is commentary on evidence already collected—not a replacement for the graphical plan, deterministic findings, or testing a change on a representative workload.</p>
+<h3 id="privacy-and-limitations">Privacy and limitations</h3>
+<p>A completion request contains only the content for the action you chose: your natural-language request, SQL, database error or plan evidence, plus the schema metadata shown in the modal. It is sent to the configured provider only when you run that action. No background AI service or autonomous query loop exists.</p>
+<p>AI output can still be wrong. Review table names, join conditions, write scope and tuning suggestions before using them, especially on production. TxUI does not send generated SQL to the database automatically and does not relax any database safety guard for AI output.</p>
 </div>
 <div class="guide-doc" id="guide-clickhouse">
 <h2 id="clickhouse">ClickHouse</h2>
@@ -1087,6 +1119,46 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <ul><li><b>Data generator</b> — not offered on file sessions; its writers use MySQL/PostgreSQL protocols.</li><li><b>CSV import</b> — available on SQLite as batched INSERTs in one transaction.</li><li><b>DuckDB</b> — import in SQL with <code>COPY … FROM</code> or <code>read_csv()</code>; the wizard is not offered.</li><li><b>Parquet</b> — immutable, so nothing imports into it.</li></ul>
 <p><b>SQL Quality:</b> SQLite and DuckDB run static lint. Server-side EXPLAIN checks remain MySQL/PostgreSQL-only.</p>
 <p><b>Data browser:</b> read-only for every file engine, as it is everywhere in TxUI.</p>
+</div>
+<div class="guide-doc" id="guide-txshell">
+<h2 id="txshell">TxShell</h2>
+<p>TxShell is a keyboard-driven SQL console with real result grids, typed pipelines, files, connection fan-out and scripts. Open it from <b>SQL → TxShell</b> on a SQL session.</p>
+<p>A bare line is SQL and runs on <b>Enter</b>. Use <b>Shift+Enter</b> for another line, <b>Tab</b> for command completion, and <b>↑/↓</b> for history. <code>\help</code> lists commands; <code>\help &lt;name&gt;</code> explains one.</p>
+<figure><a class="shot-link" href="user-guide/screenshots/dark/txshell.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/txshell.png" data-dark-src="user-guide/screenshots/dark/txshell.png" data-light-src="user-guide/screenshots/light/txshell.png" alt="TxShell with a SQL result and typed pipeline" loading="lazy"></a><figcaption>TxShell with a SQL result and typed pipeline</figcaption></figure>
+<h3 id="queries-and-pipelines">Queries and pipelines</h3>
+<p>The pipe operator is <b><code>|&gt;</code></b>, not <code>|</code>. A bare <code>|</code> remains SQL bitwise-or; <code>&gt;</code> and <code>&lt;</code> always remain comparisons. Pipelines carry typed rows, not rendered text, so numeric filters compare as numbers.</p>
+<pre><code>SELECT * FROM orders
+|&gt; where total &gt; 100
+|&gt; sort total desc
+|&gt; head 20</code></pre>
+<h4 id="row-stages">Row stages</h4>
+<div class="scroll-x"><table class="ref"><thead><tr><th>Stage</th><th>Purpose</th><th>Example</th></tr></thead><tbody><tr><td><code>where</code></td><td>One typed comparison</td><td><code>where total &gt;= 100</code></td></tr><tr><td><code>select</code></td><td>Keep and reorder columns</td><td><code>select id total customer</code></td></tr><tr><td><code>sort</code></td><td>Sort ascending or descending</td><td><code>sort total desc</code></td></tr><tr><td><code>head</code> / <code>tail</code></td><td>Keep the first/last N rows</td><td><code>head 20</code></td></tr><tr><td><code>count</code></td><td>Replace rows with their count</td><td><code>count</code></td></tr><tr><td><code>stats</code></td><td>Count, nulls, sum, average, min and max</td><td><code>stats total</code></td></tr><tr><td><code>distinct</code></td><td>Remove duplicate rows or column combinations</td><td><code>distinct customer_id</code></td></tr><tr><td><code>diff</code></td><td>Compare with a captured result shown as <code>#id</code></td><td><code>diff #42 key id</code></td></tr></tbody></table></div>
+<p><code>where</code> supports <code>= != &lt; &lt;= &gt; &gt;= like ilike in is</code>. Complex AND/OR conditions belong in the SQL <code>WHERE</code> clause, where the database can use an index.</p>
+<h4 id="inputs">Inputs</h4>
+<pre><code>from &quot;orders.csv&quot; |&gt; where total &gt; 100
+from &quot;events.tsv&quot; |&gt; count
+from &quot;rows.json&quot; |&gt; select id status</code></pre>
+<p>CSV and TSV support quoted separators and newlines. Numeric columns are inferred only when every non-empty value is numeric. JSON input accepts one object or an array of objects.</p>
+<h4 id="outputs">Outputs</h4>
+<div class="scroll-x"><table class="ref"><thead><tr><th>Sink</th><th>Behavior</th></tr></thead><tbody><tr><td><code>grid</code></td><td>Show the normal result grid (the default).</td></tr><tr><td><code>chart</code></td><td>Send rows to the chart view.</td></tr><tr><td><code>to &lt;format&gt;</code></td><td>Render <code>csv</code>, <code>tsv</code>, <code>json</code>, <code>md</code>, <code>ascii</code>, <code>inserts</code>, <code>html</code>, <code>xml</code> or <code>latex</code> in the transcript.</td></tr><tr><td><code>save &lt;file&gt;</code></td><td>Overwrite a file; the extension selects <code>csv</code>, <code>tsv</code>, <code>json</code>, <code>md</code>, <code>sql</code>, <code>xlsx</code>, <code>html</code>, <code>xml</code> or <code>tex</code>.</td></tr><tr><td><code>append &lt;file&gt;</code></td><td>Append a text format; XLSX cannot be appended.</td></tr><tr><td><code>insert into &lt;table&gt; [@connection]</code></td><td>Insert rows into the current or one named open session.</td></tr></tbody></table></div>
+<p>MySQL, PostgreSQL and SQL Server inserts run on one pinned destination connection in a real transaction. An existing manual transaction is joined without being committed for you. Other engines retain insert capability but warn that earlier statements may remain after a failure. Cross-server writes use the destination&#39;s dialect, connection identity and audit attribution.</p>
+<h3 id="variables-and-command-substitution">Variables and command substitution</h3>
+<pre><code>$cutoff = 2026-01-01
+SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
+<p><code>${cutoff}</code> is equivalent. An unset variable stops the command instead of being blanked. <code>\vars</code> lists variables; <code>\unset cutoff</code> removes one.</p>
+<p><code>$(…)</code> executes a nested TxShell query or file pipeline, never an OS command:</p>
+<pre><code>SELECT * FROM customers WHERE id = $(SELECT customer_id FROM orders ORDER BY total DESC |&gt; head 1);</code></pre>
+<p>One cell becomes a scalar; larger results become deterministic, headerless TSV. Nesting is limited to four levels and combined output to 64K characters. Writes and output-producing side effects are refused inside substitution.</p>
+<h3 id="connection-fan-out">Connection fan-out</h3>
+<pre><code>@prod-* SELECT COUNT(*) FROM orders;</code></pre>
+<p>Matching is glob-based and case-insensitive. Fan-out is read-only, returns one merged result with a <code>connection</code> column, and asks before wide or production matches. Use <code>\c</code> to list open sessions and <code>\c &lt;name&gt;</code> to switch to exactly one.</p>
+<h3 id="watching-a-result">Watching a result</h3>
+<pre><code>\watch 2 SELECT COUNT(*) FROM job_queue;
+\watch 5 from &quot;queue.csv&quot; |&gt; count</code></pre>
+<p>The interval is <b>0.2–3600 seconds</b>. TxShell replaces the latest grid instead of flooding the transcript, skips a tick when the previous run is still active, and stops on an error or when you run another command. Writes and output sinks are not allowed.</p>
+<h3 id="command-reference">Command reference</h3>
+<div class="scroll-x"><table class="ref"><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td><code>\help [name]</code></td><td>List commands or explain one.</td></tr><tr><td><code>\c [session]</code></td><td>List open sessions or switch to one exact match.</td></tr><tr><td><code>\d [object]</code></td><td>Describe an object; without a name, list relations.</td></tr><tr><td><code>\l</code>, <code>\dt</code>, <code>\dv</code>, <code>\df</code>, <code>\di</code>, <code>\dn</code>, <code>\dp</code>, <code>\du</code></td><td>List databases/schemas, tables, views, routines, indexes, schemas, privileges and roles. Catalog commands are implemented for MySQL and PostgreSQL.</td></tr><tr><td><code>\x [on/off]</code></td><td>Toggle expanded record display.</td></tr><tr><td><code>\explain &lt;sql&gt;</code></td><td>Open the statement in the graphical plan view.</td></tr><tr><td><code>\watch &lt;seconds&gt; &lt;command&gt;</code></td><td>Repeat a read-only query or file pipeline.</td></tr><tr><td><code>\ps</code></td><td>Show server processes using the shared process inspection path.</td></tr><tr><td><code>\kill &lt;id&gt;</code></td><td>Kill a process through the shared guarded and audited kill path; production asks first.</td></tr><tr><td><code>\tx begin/commit/rollback</code></td><td>Control a manual transaction where the engine supports it.</td></tr><tr><td><code>\timing [on/off]</code></td><td>Toggle statement timings.</td></tr><tr><td><code>\vars</code>, <code>\unset &lt;name&gt;</code></td><td>Inspect or remove variables.</td></tr><tr><td><code>\history [n]</code></td><td>Show recent command lines.</td></tr><tr><td><code>\source &lt;file&gt;</code></td><td>Run a script and stop at its first error.</td></tr><tr><td><code>\generate &lt;spec.json&gt;</code></td><td>Run the data generator with a JSON spec; the seed defaults to 1.</td></tr><tr><td><code>\edit</code></td><td>Send the last statement to the SQL editor.</td></tr><tr><td><code>\clear</code></td><td>Clear the transcript.</td></tr><tr><td><code>!command</code></td><td>Run the operating system shell with a 120-second limit and capped output.</td></tr></tbody></table></div>
+<p>The <code>!</code> prefix is arbitrary local command execution by design. SQL statements, fan-out, generation, inserts and kills continue through their normal audit and safety paths.</p>
 </div>
 </section>
     
@@ -1945,14 +2017,14 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </div><h2 id="sql" class="group-h">SQL</h2>
 <div class="panel-doc" id="panel-txshell">
   <div class="panel-head">
-    <h3 id="txshell">TxShell</h3>
+    <h3 id="txshell-2">TxShell</h3>
     <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
   </div>
   <p>A keyboard-driven SQL console with real result grids, pipelines, variables, file sources, fan-out, command substitution and typed result diffs. Use it to query, compare, export and script without leaving the app.</p>
   <p class="how"><b>Open:</b> SQL menu -&gt; TxShell (also on the native Tools menu)</p>
-  <div class="acts"><b>Key actions</b><ul><li>Run SQL directly; pipe rows with |&gt; to stages and sinks (grid, chart, to &lt;format&gt;, save/append &lt;file&gt;, insert into &lt;table&gt; [@dest])</li><li>diff #42 [key id ...] compares the pipeline input with an explicitly selected captured result, aligning columns by name and emitting typed change rows</li><li>$(...) executes a nested TxShell command or file pipeline (never the OS shell): one cell becomes a scalar, larger results deterministic TSV</li><li>Meta commands: \help, \clear, \vars, \unset, \history, \timing, \l, \dt, \dv, \df, \d, \source &lt;file&gt;, \edit, plus psql catalog metas</li><li>$name = value variables; !line runs your OS shell; @pattern SQL fans out read-only across matching connections</li><li>from &lt;file&gt; loads a CSV/TSV/JSON file as a result set; Tab-complete, up/down history, Shift-Enter for newline, Clear</li></ul></div>
+  <div class="acts"><b>Key actions</b><ul><li>Run SQL directly; pipe rows with |&gt; to stages and sinks (grid, chart, to &lt;format&gt;, save/append &lt;file&gt;, insert into &lt;table&gt; [@dest])</li><li>diff #42 [key id ...] compares the pipeline input with an explicitly selected captured result, aligning columns by name and emitting typed change rows</li><li>$(...) executes a nested TxShell command or file pipeline (never the OS shell): one cell becomes a scalar, larger results deterministic TSV</li><li>Meta commands: \help, \c, \explain, \watch, \ps, \kill, \tx, catalog commands, \source, \generate, variables, history and \edit</li><li>$name = value variables; !line runs your OS shell; @pattern SQL fans out read-only across matching connections</li><li>from &lt;file&gt; loads a CSV/TSV/JSON file as a result set; Tab-complete, up/down history, Shift-Enter for newline, Clear</li><li>\watch 2 SELECT ... replaces the latest read-only result without flooding the transcript; another command stops it</li></ul></div>
   <p class="dim"><b>Engines:</b> All SQL engines (the sql capability: MySQL, PostgreSQL, ClickHouse, SQLite, Parquet). Not Redis.</p>
-  <p class="caveat"><b>Note:</b> Statements are audited with redaction. Fan-out is read-only and confirms wide/prod matches. Cross-server insert needs an open destination. Substitution and result diffs have explicit limits and shape checks.</p>
+  <p class="caveat"><b>Note:</b> Statements are audited with redaction. Fan-out and watch are read-only. Kill uses the shared guarded path. Inserts use pinned transactions on MySQL/PostgreSQL/SQL Server and honestly report non-atomic scope elsewhere. Cross-server insert needs an open destination. Catalog metas are MySQL/PostgreSQL-specific. See the TxShell user guide for the complete command reference.</p>
   <figure><a class="shot-link" href="shots/dark/panel-txshell.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="shots/dark/panel-txshell.png" data-dark-src="shots/dark/panel-txshell.png" data-light-src="shots/light/panel-txshell.png" alt="TxShell panel" loading="lazy"></a><figcaption>TxShell <span class="cap-mac">— captured on macOS</span></figcaption></figure>
 </div>
 <div class="panel-doc" id="panel-quality">
@@ -2233,7 +2305,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="settings" class="doc-section">
   <h1 id="settings-reference">Settings reference</h1>
-  <p class="lede">All 44 preferences, grouped by the tab they appear on in <span class="kbd"><span class="os os-mac">⌘,</span><span class="os os-win">Ctrl+,</span></span> Settings. Six advanced prefs are not surfaced in the Settings UI (they are controlled from the relevant view or command) and are grouped last.</p>
+  <p class="lede">All 45 preferences, grouped by the tab they appear on in <span class="kbd"><span class="os os-mac">⌘,</span><span class="os os-win">Ctrl+,</span></span> Settings. Six advanced prefs are not surfaced in the Settings UI (they are controlled from the relevant view or command) and are grouped last.</p>
   <div class="toolbar"><input id="setFilter" class="filter" placeholder="Filter settings…" oninput="filterAllTables('setFilter','setWrap')"></div>
   <div id="setWrap"><h2 id="appearance" class="group-h">Appearance</h2><table class="ref"><thead><tr><th>Setting</th><th>What it does</th><th>Values</th><th>Default</th></tr></thead><tbody><tr data-search="font size (app-wide; the grid has its own aa popover) appfontsize app-wide base font size in pixels; the result grid has its own separate font controls in its aa popover.">
       <td>Font size (app-wide; the grid has its own Aa popover)</td>

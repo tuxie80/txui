@@ -676,8 +676,17 @@ export default function App() {
       const d = (e as CustomEvent<{ connectionId: string }>).detail;
       if (d?.connectionId) disconnectConnection(d.connectionId);
     };
+    const onSwitchSession = (e: Event) => {
+      const d = (e as CustomEvent<{ sessionId: string }>).detail;
+      const target = sessions.find(s => s.sessionId === d?.sessionId);
+      if (target) handleTabClick(target);
+    };
     window.addEventListener('dbgui:close-session', onCloseSession);
-    return () => window.removeEventListener('dbgui:close-session', onCloseSession);
+    window.addEventListener('dbgui:switch-session', onSwitchSession);
+    return () => {
+      window.removeEventListener('dbgui:close-session', onCloseSession);
+      window.removeEventListener('dbgui:switch-session', onSwitchSession);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, activeSessionId]);
 

@@ -5,20 +5,24 @@
  * Generate waits for a prompt. Result is always reviewable before it lands in
  * the editor — nothing is auto-run.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorDisplay } from '../utils/appError';
 import { shortcuts } from '../utils/platform';
-import { aiGenerateSql, aiExplainSql, aiFixSql, unfenceSql, aiHasKey } from '../utils/aiClient';
+import { getPref, PREFS } from '../store/preferences';
+import { aiGenerateSql, aiExplainSql, aiExplainPlan, aiFixSql, unfenceSql, aiHasKey, aiCancel } from '../utils/aiClient';
+import type { AiSchemaContext } from '../utils/aiSchema';
+import { aiKeyRequired } from '../utils/aiProviders';
 
-export type AiMode = 'generate' | 'explain' | 'fix';
+export type AiMode = 'generate' | 'explain' | 'fix' | 'plan';
 
 interface Props {
   engine: string;
   mode: AiMode;
-  /** The statement, for explain/fix. */
+  /** The statement, for explain/fix, or plan evidence for plan mode. */
   sql?: string;
   /** The error text, for fix. */
   error?: string;
+  getSchemaContext: (text: string) => Promise<AiSchemaContext>;
   onInsert: (sql: string) => void;
   onClose: () => void;
 }
@@ -27,57 +31,98 @@ const TITLE: Record<AiMode, string> = {
   generate: '✦ Generate SQL',
   explain: '✦ Explain statement',
   fix: '✦ Fix statement',
+  plan: '✦ Explain execution plan',
 };
 
-export function AiAssistModal({ engine, mode, sql, error, onInsert, onClose }: Props) {
+export function AiAssistModal({ engine, mode, sql, error, getSchemaContext, onInsert, onClose }: Props) {
   const [request, setRequest] = useState('');
   const [result, setResult] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [noKey, setNoKey] = useState(false);
+  const [schemaPreview, setSchemaPreview] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const activeRequest = useRef<string | null>(null);
+  const runSeq = useRef(0);
+  const previewSeq = useRef(0);
 
-  const isSqlResult = mode !== 'explain'; // generate/fix return SQL; explain returns prose
+  const isSqlResult = mode === 'generate' || mode === 'fix';
+
+  const cancelActive = useCallback(() => {
+    runSeq.current++;
+    if (activeRequest.current) void aiCancel(activeRequest.current);
+    activeRequest.current = null;
+  }, []);
+  const close = useCallback(() => {
+    cancelActive();
+    onClose();
+  }, [cancelActive, onClose]);
 
   const run = async (prompt?: string) => {
     setBusy(true); setErr(null);
+    const seq = ++runSeq.current;
+    const sourceText = mode === 'generate' ? prompt ?? request : sql ?? '';
+    const schema = await getSchemaContext(sourceText);
+    if (seq !== runSeq.current) return;
+    setSchemaPreview(schema.text);
+    const aiRequest = mode === 'generate' ? aiGenerateSql(sourceText, engine, schema.text)
+      : mode === 'explain' ? aiExplainSql(sourceText, engine, schema.text)
+        : mode === 'plan' ? aiExplainPlan(sourceText, engine, schema.text)
+          : aiFixSql(sourceText, error ?? '', engine, schema.text);
+    activeRequest.current = aiRequest.requestId;
     try {
-      let out: string;
-      if (mode === 'generate') out = unfenceSql(await aiGenerateSql(prompt ?? request, engine));
-      else if (mode === 'explain') out = await aiExplainSql(sql ?? '', engine);
-      else out = unfenceSql(await aiFixSql(sql ?? '', error ?? '', engine));
-      setResult(out);
+      const raw = await aiRequest.promise;
+      if (activeRequest.current === aiRequest.requestId) {
+        setResult(isSqlResult ? unfenceSql(raw) : raw);
+      }
     } catch (e) {
-      setErr(errorDisplay(e));
+      if (activeRequest.current === aiRequest.requestId) setErr(errorDisplay(e));
     } finally {
-      setBusy(false);
+      if (activeRequest.current === aiRequest.requestId) {
+        activeRequest.current = null;
+        setBusy(false);
+      }
     }
   };
 
-  // Check the key once; explain/fix run immediately, generate waits for input.
+  // Hosted presets need a key; OpenAI-compatible local servers may not.
   useEffect(() => {
     aiHasKey().then(has => {
-      if (!has) { setNoKey(true); return; }
+      if (!has && aiKeyRequired(getPref(PREFS.aiProvider), getPref(PREFS.aiBaseUrl))) {
+        setNoKey(true); return;
+      }
       if (mode !== 'generate') void run();
       else inputRef.current?.focus();
     }).catch(() => setNoKey(true));
+    return () => cancelActive();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    if (mode !== 'generate' || !request.trim()) { setSchemaPreview(''); return; }
+    const seq = ++previewSeq.current;
+    const timer = setTimeout(() => {
+      void getSchemaContext(request).then(context => {
+        if (seq === previewSeq.current) setSchemaPreview(context.text);
+      }).catch(() => {});
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [request, mode, getSchemaContext]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [close]);
 
   return (
-    <div className="modal-overlay" onMouseDown={onClose}>
+    <div className="modal-overlay" onMouseDown={close}>
       <div className="modal ai-modal" onMouseDown={e => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">{TITLE[mode]}</span>
           <span className="dv-desc">{engine}</span>
           <div style={{ flex: 1 }} />
-          <button className="icon-btn" onClick={onClose} title="Close">×</button>
+          <button className="icon-btn" onClick={close} title="Close">×</button>
         </div>
 
         {noKey ? (
@@ -103,10 +148,16 @@ export function AiAssistModal({ engine, mode, sql, error, onInsert, onClose }: P
               </>
             )}
 
-            {(mode === 'explain' || mode === 'fix') && sql && (
+            {mode !== 'generate' && sql && (
               <pre className="ai-source">{sql}</pre>
             )}
 
+            {schemaPreview && (
+              <details className="ai-context">
+                <summary>Schema metadata sent to the provider — no row values</summary>
+                <pre>{schemaPreview}</pre>
+              </details>
+            )}
             {busy && mode !== 'generate' && <div className="ai-loading">Thinking…</div>}
             {err && <div className="proc-error-bar">{err}</div>}
 
@@ -116,7 +167,7 @@ export function AiAssistModal({ engine, mode, sql, error, onInsert, onClose }: P
                 <div className="ai-actions">
                   <button className="toolbar-btn" onClick={() => navigator.clipboard.writeText(result)}>Copy</button>
                   {isSqlResult && (
-                    <button className="primary" onClick={() => { onInsert(result); onClose(); }}>
+                    <button className="primary" onClick={() => { onInsert(result); close(); }}>
                       Insert into editor
                     </button>
                   )}

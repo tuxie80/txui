@@ -1610,6 +1610,11 @@
       "default": "destructive"
     },
     {
+      "name": "monoFontFamily",
+      "key": "dbgui.monoFontFamily",
+      "default": "txui-mono"
+    },
+    {
       "name": "appFontSize",
       "key": "dbgui.appFontSize",
       "default": 13
@@ -2944,7 +2949,7 @@
     "commands": 70,
     "engines": 9,
     "capabilities": 33,
-    "prefs": 44,
+    "prefs": 45,
     "dbaViews": 234
   }
 }

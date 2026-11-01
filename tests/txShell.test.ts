@@ -9,12 +9,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   parseLine, dispatchHead, splitPipeline, splitArgs, unquote,
   substituteVars, substituteCommands, resultToCommandText,
   isComplete, quotesClosed, pushHistory, HISTORY_CAP, completions,
 } from '../src/utils/txShell.ts';
-import { parseWhere, findVerb, findMeta, suggest, PIPE } from '../src/utils/txShellGrammar.ts';
+import { parseWhere, findVerb, findMeta, suggest, PIPE, METAS } from '../src/utils/txShellGrammar.ts';
 
 // ── dispatch: nothing is guessed ────────────────────────────────────────────
 
@@ -491,4 +492,13 @@ test('\\generate is a registered meta and keeps a quoted JSON spec as one argume
   });
   const f = dispatchHead('\\generate spec.json');
   assert.deepEqual(f, { kind: 'meta', name: 'generate', args: ['spec.json'] });
+});
+
+test('every advertised meta command has a panel implementation', () => {
+  const panel = readFileSync(new URL('../src/components/TxShellPanel.tsx', import.meta.url), 'utf8');
+  for (const meta of METAS) {
+    if (meta.name === 'x') continue; // psqlMeta handles this client-side toggle on every engine.
+    assert.ok(panel.includes(`case '${meta.name}':`), `missing implementation for \\${meta.name}`);
+  }
+  assert.ok(!panel.includes('recognised but not wired up yet'));
 });

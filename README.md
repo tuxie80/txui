@@ -70,7 +70,8 @@ brew install --cask tuxie80/tap/txui
 - **FastGrid** — one grid, virtualized both axes; 60 fps at 1M rows; precise selection, filtering, aggregates and charts; copy/export in 6+ formats including real `.xlsx` and GeoParquet.
 - **Real SQL editor** — CodeMirror 6 with schema-aware completion, quoting, hover, signature help, live diagnostics, formatter profiles, minimap, split editing and a configurable caret.
 - **Reliable statement execution** — statement-at-caret and run-to-cursor, exact per-statement wall times in results and gutter markers, timing proofs that survive unrelated edits, and drafts that survive restarts.
-- **TxShell** — typed pipelines, connection fan-out, file input/output, captured-result diffs with typed keys, and bounded `$(…)` command substitution.
+- **TxShell** — typed pipelines, connection fan-out, file input/output, captured-result diffs, bounded `$(…)` substitution, session switching, graphical EXPLAIN, read-only watch, process inspection/kill and manual transactions.
+- **Schema-grounded AI** — optional Anthropic, Kimi, OpenAI, Ollama, LM Studio and custom providers; generate/explain/fix SQL and interpret execution plans using disclosed metadata and deterministic findings, with cancellable requests and no automatic execution.
 - **SQL Quality and plans** — static lint, type audits, schema review, graphical EXPLAIN and guarded EXPLAIN ANALYZE; **Change review** checks MySQL/MariaDB/PostgreSQL migrations for type, nullability, index/FK, cascade and lock/rebuild risks.
 - **DBA layer** — processlist + kill, on-demand thread progress, lock chains, deadlock graphs, replication, variables/status, monitor with sparklines and 230+ curated DBA views.
 - **Workload analysis** — PostgreSQL baseline/after investigations combine statement deltas, optional wait samples and retained incidents without an always-on collector.

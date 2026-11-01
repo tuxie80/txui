@@ -80,6 +80,7 @@ import type { AiMode } from './AiAssistModal';
 const ExplainView = lazy(() => import('./ExplainView').then(m => ({ default: m.ExplainView })));
 import type { ExplainData } from './ExplainView';
 import { useSchemaCompletions } from '../hooks/useSchemaCompletions';
+import { buildAiSchemaContext } from '../utils/aiSchema';
 import { useResizable } from '../hooks/useResizable';
 import { fmtDuration } from '../utils/fmtDuration';
 import { resultKind, resultSummary, resultWallMs, resultOverheadMs } from '../utils/resultKind';
@@ -560,6 +561,7 @@ interface PanelCtx {
   currentEditorSql: () => string;
   focusSqlTab: () => number;
   insertIntoEditor: (sql: string, tabId?: number) => void;
+  onExplain: (sql: string) => void;
   routineTarget: { schema: string; name: string; kind: string; table?: string } | null;
   clearRoutineTarget: () => void;
   designTarget: { schema: string; table: string | null } | null;
@@ -636,7 +638,8 @@ const PANEL_META: Record<string, {
   txshell: {
     label: 'TxShell',
     render: (c, close) =>
-      <TxShellPanel session={c.session} openSessions={c.openSessions ?? [c.session]} onClose={close} />,
+      <TxShellPanel session={c.session} openSessions={c.openSessions ?? [c.session]}
+        onExplain={c.onExplain} onClose={close} />,
   },
   find: {
     label: 'Find',
@@ -1520,6 +1523,9 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     completions, getColumns, getFks, getSchemaTables,
     getServerVariables, getIndexedColumns, getRoutineSignature,
   } = useSchemaCompletions(session, currentDb);
+  const getAiSchemaContext = useCallback((text: string) => buildAiSchemaContext({
+    text, currentDb, relations: completions, getColumns, getIndexedColumns, getFks,
+  }), [currentDb, completions, getColumns, getIndexedColumns, getFks]);
   // ── Editor / result vertical split ───────────────────────────────────────
   // The user is the master: either pane may be dragged to near-total
   // dominance. The only reserve is SPLIT_MIN px so the collapsed pane's strip
@@ -2468,8 +2474,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     if (prompt) executeSql(substituteVariables(prompt.sql, values, session.engine), prompt.tabId, prompt.from, prompt.noResults);
   }, [varPrompt, executeSql, session.engine]);
 
-  const runExplain = useCallback(async (sql: string, analyze = false, mode?: string) => {
-    const tabId = activeTab?.id;
+  const runExplain = useCallback(async (sql: string, analyze = false, mode?: string, targetTabId?: number) => {
+    const tabId = targetTabId ?? activeTab?.id;
     if (!sql.trim() || !can(session.engine, 'sql') || tabId === undefined) return;
     // Refuse here rather than letting the server complain about a statement
     // the user did not write: `EXPLAIN CREATE TABLE …` comes back as a syntax
@@ -2731,6 +2737,11 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     const c: PanelCtx = {
       session, openSessions, currentDb, dbList, changeDb, tabs, tabsRef, activeIdRef, liveSql,
       handleHistorySelect, currentEditorSql, focusSqlTab, insertIntoEditor,
+      onExplain: (sql: string) => {
+        const id = focusSqlTab();
+        insertIntoEditor(sql, id);
+        void runExplain(sql, false, undefined, id);
+      },
       routineTarget, clearRoutineTarget, designTarget,
       sequenceTarget, clearSequenceTarget, typeTarget, clearTypeTarget,
       viewTarget, clearViewTarget, dictionaryTarget, clearDictionaryTarget,
@@ -2937,6 +2948,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
             mode={aiModal.mode}
             sql={aiModal.sql}
             error={aiModal.error}
+            getSchemaContext={getAiSchemaContext}
             onInsert={sql => insertIntoEditor(sql, focusSqlTab())}
             onClose={() => setAiModal(null)}
           />
@@ -3362,6 +3374,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                     // against another session's runs was never meaningful.
                     runs={tab.planRuns}
                     onRecordRuns={runs => patchTab(tab.id, { planRuns: runs })}
+                    onAiExplain={evidence => setAiModal({ mode: 'plan', sql: evidence })}
                     onAnalyze={async () => {
                       if (await confirmDialog('EXPLAIN ANALYZE executes the statement. Continue?')) {
                         runExplain(tab.explain!.sql, true);

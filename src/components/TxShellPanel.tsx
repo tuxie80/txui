@@ -14,6 +14,7 @@
 import { errorDisplay } from '../utils/appError';
 import { confirmDialog } from '../utils/appDialog';
 import { quoteIdent } from '../utils/sqlIdent';
+import { isWriteStatement } from '../utils/sqlGuard';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { audited } from '../utils/panelAudit';
@@ -51,6 +52,15 @@ interface OsOutput {
   truncated: boolean; timed_out: boolean; ms: number;
 }
 
+interface ShellProcess {
+  id: number; user: string; host: string; db: string; command: string;
+  time: number; state: string; info: string; trxAge: number;
+  blocking: number[]; blockedBy: number[]; isSelf: boolean; isSystem: boolean;
+  queryId: string | null;
+}
+
+interface KillOutcome { id: number; ok: boolean; error: string | null; statement: string }
+
 type ExecEvent =
   | { event: 'started'; data: { connection_id: string; name: string } }
   | { event: 'finished'; data: {
@@ -78,6 +88,7 @@ interface Props {
   session: Session;
   /** Every open session, so `insert into t @other` can find its destination. */
   openSessions: Session[];
+  onExplain: (sql: string) => void;
   onClose: () => void;
 }
 
@@ -86,10 +97,11 @@ type Entry =
   | { id: number; kind: 'text'; text: string; tone?: 'err' | 'muted' | 'ok' }
   | { id: number; kind: 'result'; result: QueryResult; sql: string; ms: number }
   | { id: number; kind: 'help'; topic?: string };
+type NewEntry = Entry extends unknown ? Omit<Entry, 'id'> : never;
 
 let nextId = 1;
 
-export function TxShellPanel({ session, openSessions, onClose }: Props) {
+export function TxShellPanel({ session, openSessions, onExplain, onClose }: Props) {
   const [entries, setEntries] = useState<Entry[]>([
     { id: nextId++, kind: 'text', tone: 'muted',
       text: `TxShell — ${session.connectionName}. A bare line is SQL and runs. `
@@ -107,12 +119,13 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
 
   // `\source` runs lines through `execute`, which is defined after the meta
   // handler that calls it. A ref breaks the cycle without reordering the file.
-  const executeRef = useRef<((line: string) => Promise<void>) | null>(null);
+  const executeRef = useRef<((line: string, replaceId?: number) => Promise<void>) | null>(null);
   const commandRef = useRef<((line: string, depth: number) => Promise<string>) | null>(null);
+  const watchRef = useRef<{ timer: ReturnType<typeof setInterval>; running: boolean; entryId: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const push = useCallback((e: Omit<Entry, 'id'>): number => {
+  const push = useCallback((e: NewEntry): number => {
     // Capped transcript (WP-14 14.6, same bound the panel's log slice uses):
     // `entries` grew without cap and result entries retained their full row
     // sets forever — a long session leaked every result ever printed.
@@ -131,6 +144,17 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
     if (tone === 'err') errorCount.current++;
     push({ kind: 'text', text, tone } as Entry);
   }, [push]);
+  const stopWatch = useCallback((announce = false) => {
+    const current = watchRef.current;
+    if (!current) return;
+    clearInterval(current.timer);
+    watchRef.current = null;
+    if (announce) say('Watch stopped.', 'muted');
+  }, [say]);
+  useEffect(() => () => {
+    if (watchRef.current) clearInterval(watchRef.current.timer);
+    watchRef.current = null;
+  }, []);
 
   // Follow the tail as output arrives.
   useEffect(() => {
@@ -176,15 +200,23 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
     }
   }, [session.sessionId, session.connectionId, session.engine, say]);
 
-  const runSql = useCallback(async (sql: string) => {
+  const runSql = useCallback(async (sql: string, replaceId?: number) => {
     const t0 = performance.now();
     const result = await queryRows(sql);
     if (!result) return;
-    push({ kind: 'result', result, sql, ms: Math.round(performance.now() - t0) } as Entry);
+    const entry = { kind: 'result', result, sql, ms: Math.round(performance.now() - t0) } as const;
+    if (replaceId !== undefined) {
+      setEntries(prev => prev.map(e => e.id === replaceId ? { ...entry, id: replaceId } : e));
+    } else {
+      push(entry as Entry);
+    }
     for (const w of result.warnings ?? []) say(w, 'muted');
   }, [queryRows, push, say]);
 
   const runMeta = useCallback(async (name: string, args: string[]) => {
+    if (session.engine !== 'mysql' && ['l', 'd', 'dt', 'df', 'dv', 'di', 'dn', 'dp', 'du'].includes(name)) {
+      return say(`\`\\${name}\` catalog commands are available on MySQL and PostgreSQL sessions.`, 'err');
+    }
     switch (name) {
       case 'help':
         push({ kind: 'help', topic: args[0] } as Entry);
@@ -211,11 +243,128 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         setTiming(t => (args[0] ? args[0].toLowerCase() === 'on' : !t));
         say(`Timing ${args[0] ? args[0] : !timing ? 'on' : 'off'}`, 'muted');
         return;
-      case 'c':
-        // Switching sessions belongs to the host; phase 1 reports where it is.
-        say(`Current session: ${session.connectionName} (${session.engine})`
-          + (session.environment ? ` · ${session.environment}` : ''), 'muted');
+      case 'c': {
+        if (!args[0]) {
+          say(openSessions.map(s => `${s.sessionId === session.sessionId ? '→' : ' '} ${s.connectionName} (${s.engine})`).join('\n'), 'muted');
+          return;
+        }
+        const hits = openSessions.filter(s => matchesPattern(s.connectionName, args[0]));
+        if (hits.length !== 1) {
+          return say(hits.length
+            ? `\`${args[0]}\` matches ${hits.length} sessions — name one exactly.`
+            : `No open session matches \`${args[0]}\`.`, 'err');
+        }
+        window.dispatchEvent(new CustomEvent('dbgui:switch-session', { detail: { sessionId: hits[0].sessionId } }));
         return;
+      }
+      case 'explain': {
+        const sql = args.join(' ').trim();
+        if (!sql) return say('`\\explain` needs a statement.', 'err');
+        onExplain(sql);
+        return;
+      }
+      case 'tx': {
+        const action = args[0]?.toLowerCase();
+        const command = action === 'begin' ? 'begin_transaction'
+          : action === 'commit' ? 'commit_transaction'
+            : action === 'rollback' ? 'rollback_transaction' : null;
+        if (!command) return say('Usage: `\\tx begin|commit|rollback`', 'err');
+        try {
+          await invoke(command, { sessionId: session.sessionId });
+          say(`${action.toUpperCase()} completed.`, 'ok');
+        } catch (e) {
+          say(errorDisplay(e), 'err');
+        }
+        return;
+      }
+      case 'ps': {
+        try {
+          const procs = await invoke<ShellProcess[]>('kill_candidates', {
+            sessionId: session.sessionId, includeIdle: true,
+          });
+          push({ kind: 'result', sql: '\\ps', ms: 0, result: {
+            columns: [
+              { name: 'id', type_name: 'bigint', nullable: false },
+              { name: 'user', type_name: 'text', nullable: false },
+              { name: 'host', type_name: 'text', nullable: false },
+              { name: 'db', type_name: 'text', nullable: true },
+              { name: 'command', type_name: 'text', nullable: false },
+              { name: 'time_s', type_name: 'bigint', nullable: false },
+              { name: 'state', type_name: 'text', nullable: true },
+              { name: 'trx_age_s', type_name: 'bigint', nullable: false },
+              { name: 'blocking', type_name: 'text', nullable: true },
+              { name: 'blocked_by', type_name: 'text', nullable: true },
+              { name: 'statement', type_name: 'text', nullable: true },
+            ],
+            rows: procs.map(p => [p.id, p.user, p.host, p.db, p.command, p.time, p.state,
+              p.trxAge, p.blocking.join(','), p.blockedBy.join(','), p.info]),
+            rows_affected: null, execution_ms: 0, fetch_ms: 0, warnings: [],
+          } } as NewEntry);
+        } catch (e) {
+          say(errorDisplay(e), 'err');
+        }
+        return;
+      }
+      case 'kill': {
+        const requested = args[0];
+        if (!requested) return say('Usage: `\\kill <id>` — find ids with `\\ps`.', 'err');
+        try {
+          const procs = await invoke<ShellProcess[]>('kill_candidates', {
+            sessionId: session.sessionId, includeIdle: true,
+          });
+          const hit = procs.find(p => p.queryId === requested)
+            ?? procs.find(p => String(p.id) === requested);
+          if (!hit) return say(`No running process matches \`${requested}\`.`, 'err');
+          if (hit.isSelf || hit.isSystem) return say('TxUI-owned and server-system threads cannot be killed here.', 'err');
+          if (session.environment === 'prod' && !await confirmDialog(
+            `Kill process ${hit.id} on PRODUCTION ${session.connectionName}?\n\n${hit.info}`,
+            { danger: true },
+          )) return say('Cancelled.', 'muted');
+          const outcomes = await invoke<KillOutcome[]>('kill_processes', {
+            sessionId: session.sessionId, ids: [hit.id], mode: 'connection',
+            queryIds: hit.queryId ? [hit.queryId] : null,
+          });
+          for (const outcome of outcomes) {
+            say(outcome.ok ? `✓ ${outcome.statement}` : `${outcome.statement}: ${outcome.error ?? 'failed'}`,
+              outcome.ok ? 'ok' : 'err');
+          }
+        } catch (e) {
+          say(errorDisplay(e), 'err');
+        }
+        return;
+      }
+      case 'watch': {
+        const seconds = Number(args[0]);
+        const command = args.slice(1).join(' ').trim();
+        if (!Number.isFinite(seconds) || seconds < 0.2 || seconds > 3600 || !command) {
+          return say('Usage: `\\watch <0.2–3600 seconds> <SQL or pipeline>`', 'err');
+        }
+        const parsed = parseLine(command);
+        if (parsed.head.kind === 'error' || parsed.error
+          || !['sql', 'fanout', 'source'].includes(parsed.head.kind)) {
+          return say('`\\watch` accepts SQL, @fan-out or `from`, optionally piped.', 'err');
+        }
+        if ((parsed.head.kind === 'sql' && isWriteStatement(parsed.head.sql, session.engine))
+          || parsed.stages.some(s => ['save', 'append', 'insert', 'chart', 'to'].includes(s.name))) {
+          return say('`\\watch` is read-only and cannot repeat writes or output sinks.', 'err');
+        }
+        stopWatch();
+        const entryId = push({ kind: 'text', tone: 'muted',
+          text: `Watching every ${seconds}s — run another command to stop.` } as Entry);
+        const tick = async () => {
+          const current = watchRef.current;
+          if (!current || current.entryId !== entryId || current.running) return;
+          current.running = true;
+          const before = errorCount.current;
+          await executeRef.current?.(command, entryId);
+          if (errorCount.current > before) stopWatch();
+          if (watchRef.current?.entryId === entryId) watchRef.current.running = false;
+        };
+        const timer = setInterval(() => { void tick(); }, seconds * 1000);
+        watchRef.current = { timer, running: false, entryId };
+        await tick();
+        return;
+      }
       // PostgreSQL catalog listings are handled ahead of `runMeta` by `psqlMeta`;
       // these branches are the MySQL/other-engine equivalents.
       case 'l':
@@ -230,6 +379,20 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
       case 'df':
         await runSql('SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE '
           + 'FROM information_schema.ROUTINES ORDER BY 1,2');
+        return;
+      case 'di':
+        await runSql('SELECT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME, NON_UNIQUE '
+          + 'FROM information_schema.STATISTICS ORDER BY 1,2,3,4');
+        return;
+      case 'dn':
+        await runSql('SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY 1');
+        return;
+      case 'dp':
+        await runSql('SELECT TABLE_SCHEMA, TABLE_NAME, GRANTEE, PRIVILEGE_TYPE '
+          + 'FROM information_schema.TABLE_PRIVILEGES ORDER BY 1,2,3,4');
+        return;
+      case 'du':
+        await runSql('SELECT USER, HOST FROM mysql.user ORDER BY 1,2');
         return;
       case 'd': {
         const obj = args[0];
@@ -392,9 +555,9 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         return;
       }
       default:
-        say(`\`\\${name}\` is recognised but not wired up yet.`, 'muted');
+        say(`\`\\${name}\` is not available on this session.`, 'err');
     }
-  }, [vars, history, timing, session, say, push, runSql]);
+  }, [vars, history, timing, session, say, push, runSql, openSessions, onExplain, stopWatch]);
 
   const runOs = useCallback(async (command: string) => {
     try {
@@ -418,12 +581,18 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
    */
   const performSink = useCallback(async (
     result: QueryResult, sink: SinkAction | undefined, sql: string, ms: number,
+    replaceId?: number,
   ) => {
     const cells = result.rows;
     const names = result.columns.map(c => c.name);
 
     if (!sink || sink.kind === 'grid') {
-      push({ kind: 'result', result, sql, ms } as Entry);
+      if (replaceId !== undefined) {
+        setEntries(prev => prev.map(e => e.id === replaceId
+          ? { id: replaceId, kind: 'result', result, sql, ms } : e));
+      } else {
+        push({ kind: 'result', result, sql, ms } as Entry);
+      }
       return;
     }
     if (sink.kind === 'chart') {
@@ -446,6 +615,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
       // produced them. That server needs an open session — TxShell writes
       // through a live connection rather than opening one behind your back.
       let target = session.sessionId;
+      let targetConnectionId = session.connectionId;
       let where = 'this session';
       let targetEngine = session.engine;
       if (sink.destination) {
@@ -469,49 +639,68 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
           if (!okGo) return say('Cancelled.', 'muted');
         }
         target = hit[0].sessionId;
+        targetConnectionId = hit[0].connectionId;
         where = hit[0].connectionName;
         targetEngine = hit[0].engine;
       }
 
-      // The INSERTs run on the TARGET session — its dialect decides quoting.
       const sqlText = toInserts(table, names, cells, targetEngine);
-      // One transaction: a failure part-way must leave nothing behind, which is
-      // the whole difference between this and pasting generated INSERTs.
-      const statements = ['BEGIN', ...sqlText.split(/;\s*\n/).filter(x => x.trim()), 'COMMIT'];
+      const statements = sqlText.split(/;\s*\n/).filter(x => x.trim());
+      const transactional = ['mysql', 'postgres', 'sqlserver'].includes(targetEngine);
+      let transactionOpen = false;
+      let joinedTransaction = false;
       try {
+        if (transactional) {
+          const status = await invoke<{ held: boolean }>('tx_status', { sessionId: target });
+          joinedTransaction = status.held;
+          if (!joinedTransaction) {
+            await invoke('begin_transaction', { sessionId: target });
+            transactionOpen = true;
+          }
+        }
         for (const st of statements) {
           const stmt = st.replace(/;\s*$/, '');
-          // Audited against the TARGET session, not this one: the rows land
-          // there, so that is the connection whose record must show it.
           await audited({
-            sessionId: target, engine: session.engine,
+            sessionId: target, engine: targetEngine,
             tab: '❯ TxShell', source: 'shell', statement: stmt,
             run: () => invoke('execute_query', {
               sessionId: target,
-              connectionId: session.connectionId,
-              engine: session.engine,
+              connectionId: targetConnectionId,
+              engine: targetEngine,
               sql: stmt,
               tabId: 0, includeWarnings: false,
             }),
           });
         }
+        if (transactionOpen) {
+          transactionOpen = false;
+          await invoke('commit_transaction', { sessionId: target });
+        }
         say(`${cells.length} row${cells.length === 1 ? '' : 's'} inserted into `
-          + `${table} on ${where}`, 'ok');
+          + `${table} on ${where}${joinedTransaction ? ' (left in your open transaction)'
+            : transactional ? '' : ' (non-transactional engine)'}`, 'ok');
       } catch (e) {
+        if (!transactional) {
+          say(`Insert failed: ${errorDisplay(e)}. This engine cannot run the batch in one `
+            + `TxShell transaction; earlier statements may have been applied. Check ${table} `
+            + `on ${where} before retrying.`, 'err');
+          return;
+        }
+        if (joinedTransaction) {
+          say(`Insert failed inside your open transaction: ${errorDisplay(e)}. `
+            + 'Nothing was committed; review or roll back that transaction before retrying.', 'err');
+          return;
+        }
+        if (!transactionOpen) {
+          say(`Insert did not complete: ${errorDisplay(e)}. The transaction was closed; `
+            + `check ${table} on ${where} before retrying.`, 'err');
+          return;
+        }
         try {
-          // The rollback is audited too: "the insert failed and was undone" is
-          // a different fact from "the insert failed", and only one of them
-          // means the target table is untouched.
           await audited({
-            sessionId: target, engine: session.engine,
+            sessionId: target, engine: targetEngine,
             tab: '❯ TxShell', source: 'shell', statement: 'ROLLBACK',
-            run: () => invoke('execute_query', {
-              sessionId: target,
-              connectionId: session.connectionId,
-              engine: session.engine,
-              sql: 'ROLLBACK',
-              tabId: 0, includeWarnings: false,
-            }),
+            run: () => invoke('rollback_transaction', { sessionId: target }),
           });
           say(`Insert failed and was rolled back: ${errorDisplay(e)}`, 'err');
         } catch {
@@ -721,7 +910,8 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
 
   useEffect(() => { commandRef.current = runCaptured; }, [runCaptured]);
 
-  const execute = useCallback(async (line: string) => {
+  const execute = useCallback(async (line: string, replaceId?: number) => {
+    if (replaceId === undefined || watchRef.current?.entryId !== replaceId) stopWatch();
     const parsed: ParsedLine = parseLine(line);
     const head = parsed.head;
 
@@ -748,7 +938,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
             return say(`Expanded display ${args[0] ? args[0] : !expanded ? 'on' : 'off'}`, 'muted');
           }
           if (mapped.note) return say(mapped.note, 'muted');
-          if (mapped.sql) return void await runSql(mapped.sql);
+          if (mapped.sql) return void await runSql(mapped.sql, replaceId);
         }
         return await runMeta(head.name, args);
       }
@@ -777,7 +967,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
           const sql = await subst(head.sql);
           label = sql;
           // With no pipeline this is the plain path, warnings and all.
-          if (stages.length === 0) return void await runSql(sql);
+          if (stages.length === 0) return void await runSql(sql, replaceId);
           rows = await queryRows(sql);
         } else if (head.kind === 'fanout') {
           const sql = await subst(head.sql);
@@ -794,7 +984,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
         const out = runPipeline(rows, stages, { resolveResult: resolveCaptured });
         if ('error' in out) return say(out.error, 'err');
         for (const notice of out.notices ?? []) say(notice, 'muted');
-        await performSink(out.result, out.sink, label, ms);
+        await performSink(out.result, out.sink, label, ms, replaceId);
       } finally {
         setBusy(false);
       }
@@ -802,7 +992,7 @@ export function TxShellPanel({ session, openSessions, onClose }: Props) {
       say(errorDisplay(e), 'err');
     }
   }, [say, runSql, queryRows, runMeta, runOs, runFanout, runSource, performSink,
-    expandCommands, expandStages, subst, resolveCaptured, session.engine, timing, expanded]);
+    expandCommands, expandStages, subst, resolveCaptured, session.engine, timing, expanded, stopWatch]);
 
   useEffect(() => { executeRef.current = execute; }, [execute]);
 
