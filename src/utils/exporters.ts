@@ -130,7 +130,7 @@ export function toMarkdown(columns: string[], rows: Cells): string {
  * and literal escaping: exporting a PG result with MySQL backslash-doubled
  * strings was silent data corruption (PG treats `\` as literal by default).
  */
-export function toInserts(table: string, columns: string[], rows: Cells, engine: IdentEngine = 'mysql'): string {
+export function toInsertStatements(table: string, columns: string[], rows: Cells, engine: IdentEngine = 'mysql'): string[] {
   const ident = (s: string) => quoteIdent(s, engine);
   const lit = (v: unknown): string => {
     if (v === null || v === undefined) return 'NULL';
@@ -139,9 +139,11 @@ export function toInserts(table: string, columns: string[], rows: Cells, engine:
     return sqlLiteral(s, engine);
   };
   const cols = columns.map(ident).join(', ');
-  return rows
-    .map(r => `INSERT INTO ${ident(table)} (${cols}) VALUES (${r.map(lit).join(', ')});`)
-    .join('\n') + '\n';
+  return rows.map(r => `INSERT INTO ${ident(table)} (${cols}) VALUES (${r.map(lit).join(', ')})`);
+}
+
+export function toInserts(table: string, columns: string[], rows: Cells, engine: IdentEngine = 'mysql'): string {
+  return toInsertStatements(table, columns, rows, engine).map(statement => `${statement};`).join('\n') + '\n';
 }
 
 

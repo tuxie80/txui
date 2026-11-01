@@ -96,9 +96,11 @@ test('a regex metacharacter in a like pattern is literal', () => {
   assert.deepEqual(r.rows.map(x => x[0]), ['a.c']);
 });
 
-test('in matches any of a comma list', () => {
-  const r = ok(applyStage(ORDERS, stage('where id in 1,3')));
-  assert.deepEqual(r.rows.map(x => x[0]), [1, 3]);
+test('in matches any of a comma list, with optional SQL-style parentheses', () => {
+  for (const raw of ['where id in 1,3', 'where id in (1,3)', 'where id in ( 1, 3 )']) {
+    const r = ok(applyStage(ORDERS, stage(raw)));
+    assert.deepEqual(r.rows.map(x => x[0]), [1, 3], raw);
+  }
 });
 
 test('coerce resolves against the data before the declared type', () => {
@@ -147,6 +149,13 @@ test('head and tail slice, and 0 means none', () => {
   assert.equal(ok(applyStage(ORDERS, stage('head 2'))).rows.length, 2);
   assert.deepEqual(ok(applyStage(ORDERS, stage('tail 1'))).rows.map(r => r[0]), [4]);
   assert.equal(ok(applyStage(ORDERS, stage('head 0'))).rows.length, 0);
+});
+
+test('head and tail reject fractional row counts', () => {
+  for (const raw of ['head 1.5', 'tail 1.5', 'head NaN', 'tail Infinity']) {
+    const out = applyStage(ORDERS, stage(raw));
+    assert.ok('error' in out && /whole number/.test(out.error), raw);
+  }
 });
 
 test('count replaces the rows with their number', () => {

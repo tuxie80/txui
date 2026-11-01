@@ -35,7 +35,7 @@ import {
   runPipeline, delimitedToResult, matchesPattern, unionResults,
 } from '../utils/txShellPipeline';
 import type { SinkAction } from '../utils/txShellPipeline';
-import { serialize, toInserts } from '../utils/exporters';
+import { serialize, toInsertStatements } from '../utils/exporters';
 import type { ExportFormat as ExporterFormat } from '../utils/exporters';
 import { toXlsx } from '../utils/xlsx';
 import { bytesToBase64 } from '../utils/base64';
@@ -644,8 +644,7 @@ export function TxShellPanel({ session, openSessions, onExplain, onClose }: Prop
         targetEngine = hit[0].engine;
       }
 
-      const sqlText = toInserts(table, names, cells, targetEngine);
-      const statements = sqlText.split(/;\s*\n/).filter(x => x.trim());
+      const statements = toInsertStatements(table, names, cells, targetEngine);
       const transactional = ['mysql', 'postgres', 'sqlserver'].includes(targetEngine);
       let transactionOpen = false;
       let joinedTransaction = false;
@@ -658,8 +657,7 @@ export function TxShellPanel({ session, openSessions, onExplain, onClose }: Prop
             transactionOpen = true;
           }
         }
-        for (const st of statements) {
-          const stmt = st.replace(/;\s*$/, '');
+        for (const stmt of statements) {
           await audited({
             sessionId: target, engine: targetEngine,
             tab: '❯ TxShell', source: 'shell', statement: stmt,
@@ -673,8 +671,8 @@ export function TxShellPanel({ session, openSessions, onExplain, onClose }: Prop
           });
         }
         if (transactionOpen) {
-          transactionOpen = false;
           await invoke('commit_transaction', { sessionId: target });
+          transactionOpen = false;
         }
         say(`${cells.length} row${cells.length === 1 ? '' : 's'} inserted into `
           + `${table} on ${where}${joinedTransaction ? ' (left in your open transaction)'

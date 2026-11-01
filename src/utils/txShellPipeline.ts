@@ -152,7 +152,9 @@ export function matches(value: unknown, op: WhereOp, target: unknown): boolean {
       return re.test(String(value));
     }
     case 'in': {
-      const list = String(target).split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
+      const raw = String(target).trim();
+      const values = raw.startsWith('(') && raw.endsWith(')') ? raw.slice(1, -1) : raw;
+      const list = values.split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
       return list.some(x => String(value) === x);
     }
     default: return false;
@@ -245,7 +247,7 @@ export function applyStage(
     case 'head':
     case 'tail': {
       const n = Number(args[0]);
-      if (!Number.isFinite(n) || n < 0) {
+      if (!Number.isInteger(n) || n < 0) {
         return { error: `\`${name}\` needs a whole number — got \`${args[0]}\`` };
       }
       const rows = name === 'head' ? result.rows.slice(0, n) : result.rows.slice(-n || undefined);

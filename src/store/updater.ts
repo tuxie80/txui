@@ -54,6 +54,7 @@ let view: UpdaterView = { state, majorCandidate };
 const listeners = new Set<() => void>();
 let generation = 0;
 let downloadInFlight = false;
+let activeRequestId: string | null = null;
 
 function emit() {
   view = { state, majorCandidate };
@@ -115,6 +116,8 @@ export async function runUpdateCheck(): Promise<CheckOutcome> {
 export async function startDownload(info: UpdateInfo, channel: UpdateChannel): Promise<void> {
   if (downloadInFlight) return;
   downloadInFlight = true;
+  const requestId = crypto.randomUUID();
+  activeRequestId = requestId;
   const gen = generation;
   let total: number | null = null;
   const chan = new Channel<UpdateProgress>();
@@ -135,6 +138,7 @@ export async function startDownload(info: UpdateInfo, channel: UpdateChannel): P
   try {
     await invoke('update_download_and_install', {
       onEvent: chan,
+      requestId,
       targetVersion: info.version,
       channel,
     });
@@ -142,7 +146,9 @@ export async function startDownload(info: UpdateInfo, channel: UpdateChannel): P
   } catch (e) {
     if (gen !== generation) return;
     const err = toAppError(e);
-    if (err.code === 'not_updatable') {
+    if (err.code === 'cancelled') {
+      set({ kind: 'idle' });
+    } else if (err.code === 'not_updatable') {
       if (channel === 'latest') setMajor(null);
       set({ kind: 'available', info, action: 'notify', notUpdatable: true });
     } else {
@@ -150,16 +156,27 @@ export async function startDownload(info: UpdateInfo, channel: UpdateChannel): P
       set({ kind: 'failed', message: err.message });
     }
   } finally {
+    if (activeRequestId === requestId) activeRequestId = null;
     if (gen === generation) downloadInFlight = false;
   }
 }
 
-/** Stop showing this download; the selected bundle may finish in the backend. */
-export function cancelDownload(): void {
+/** Cancel the backend download; installation has not started while this succeeds. */
+export async function cancelDownload(): Promise<boolean> {
+  const requestId = activeRequestId;
+  if (!requestId) return false;
+  let cancelled = false;
+  try {
+    cancelled = await invoke<boolean>('update_cancel', { requestId });
+  } catch {
+    return false;
+  }
+  if (!cancelled) return false;
   if (state.kind === 'downloading' && majorCandidate?.version === state.version) {
     setMajor(null);
   }
   generation += 1;
   downloadInFlight = false;
   set({ kind: 'idle' });
+  return true;
 }

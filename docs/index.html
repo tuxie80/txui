@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxUI Help · v1.5.0</title>
+<title>TxUI Help · v1.5.1</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>/* TxUI Help — dark-first, light-aware, red accent. */
 :root{
@@ -218,7 +218,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </head>
 <body class="show-mac">
 <header class="topbar">
-  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.5.0</span></div>
+  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.5.1</span></div>
   <div class="top-actions">
     <input id="globalSearch" class="global-search" placeholder="Search the docs…" oninput="globalSearch(this.value)" autocomplete="off">
     <div class="seg" id="osToggle">
@@ -231,13 +231,13 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="layout">
   <nav class="sidenav">
     <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-ai-assistant">AI assistant</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li><li><a href="#guide-txshell">TxShell</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
-    <div class="nav-foot">Generated from source<br>at v1.5.0 · macOS screenshots</div>
+    <div class="nav-foot">Generated from source<br>at v1.5.1 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
     
 <section id="overview" class="doc-section">
-  <h1 id="txui-v1-5-0">TxUI <span class="ver">v1.5.0</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 37 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.0.</p>
+  <h1 id="txui-v1-5-1">TxUI <span class="ver">v1.5.1</span></h1>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 37 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.1.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
     <div class="card"><div class="big">37</div><div>tool panels</div></div>
@@ -255,7 +255,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="engines" class="doc-section">
   <h1 id="engine-support-matrix">Engine support matrix</h1>
-  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.5.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
+  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.5.1). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
   <div class="toolbar">
     <input id="engFilter" class="filter" placeholder="Filter capabilities…" oninput="filterTable('engFilter','engTable')">
   </div>
@@ -637,7 +637,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <p>Open <b>Settings → AI</b>:</p>
 <ol><li>Choose a <b>Provider preset</b>. Presets fill the protocol, endpoint and model; every field remains editable.</li><li>Paste an API key when the provider requires one. Ollama, LM Studio and custom OpenAI-compatible local servers may leave it empty.</li><li>Click <b>Save key</b>, then <b>Test connection</b>. The test makes one small completion request and reports the provider&#39;s real response or error.</li></ol>
 <div class="scroll-x"><table class="ref"><thead><tr><th>Preset</th><th>Protocol</th><th>Key</th></tr></thead><tbody><tr><td>Anthropic</td><td>Anthropic Messages API</td><td>Required</td></tr><tr><td>Kimi (Moonshot AI)</td><td>OpenAI-compatible Chat Completions</td><td>Required</td></tr><tr><td>OpenAI</td><td>OpenAI-compatible Chat Completions</td><td>Required</td></tr><tr><td>Ollama</td><td>OpenAI-compatible local server</td><td>Usually not required</td></tr><tr><td>LM Studio</td><td>OpenAI-compatible local server</td><td>Usually not required</td></tr><tr><td>Custom endpoint</td><td>Either supported protocol</td><td>Depends on the server</td></tr></tbody></table></div>
-<p>Keys remain in the <b>active secret store</b>: machine-obfuscated plain storage by default, or the encrypted Safe Vault when enabled. They are never written to ordinary preferences and are sent only to the configured endpoint. Requests time out after 60 seconds and can be cancelled by closing the assistant.</p>
+<p>Keys remain in the <b>active secret store</b>: machine-obfuscated plain storage by default, or the encrypted Safe Vault when enabled. They are never written to ordinary preferences and are sent only to the configured endpoint. Save/Clear confirms only after storage succeeds; otherwise the error remains visible. Requests time out after 60 seconds and can be cancelled by closing the assistant.</p>
 <h3 id="2-generate-sql-from-a-description">2. Generate SQL from a description</h3>
 <p>Focus the SQL editor and press <b><code>Mod+I</code></b> (macOS <code>⌘I</code>, Windows/Linux <code>Ctrl+I</code>), or run <b>AI: generate SQL…</b> from Find Action.</p>
 <p>Describe the result you want and name the relevant tables, for example:</p>
@@ -658,7 +658,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <p>It summarizes bottlenecks and tuning steps without inventing indexes, statistics or measurements. This is commentary on evidence already collected—not a replacement for the graphical plan, deterministic findings, or testing a change on a representative workload.</p>
 <h3 id="privacy-and-limitations">Privacy and limitations</h3>
 <p>A completion request contains only the content for the action you chose: your natural-language request, SQL, database error or plan evidence, plus the schema metadata shown in the modal. It is sent to the configured provider only when you run that action. No background AI service or autonomous query loop exists.</p>
-<p>AI output can still be wrong. Review table names, join conditions, write scope and tuning suggestions before using them, especially on production. TxUI does not send generated SQL to the database automatically and does not relax any database safety guard for AI output.</p>
+<p>AI output can still be wrong. Review table names, join conditions, write scope and tuning suggestions before using them, especially on production. Multi-part responses are assembled in full; if the provider hits its output limit, TxUI reports truncation instead of presenting partial SQL as complete. TxUI does not send generated SQL to the database automatically and does not relax any database safety guard for AI output.</p>
 </div>
 <div class="guide-doc" id="guide-clickhouse">
 <h2 id="clickhouse">ClickHouse</h2>
@@ -1133,7 +1133,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 |&gt; head 20</code></pre>
 <h4 id="row-stages">Row stages</h4>
 <div class="scroll-x"><table class="ref"><thead><tr><th>Stage</th><th>Purpose</th><th>Example</th></tr></thead><tbody><tr><td><code>where</code></td><td>One typed comparison</td><td><code>where total &gt;= 100</code></td></tr><tr><td><code>select</code></td><td>Keep and reorder columns</td><td><code>select id total customer</code></td></tr><tr><td><code>sort</code></td><td>Sort ascending or descending</td><td><code>sort total desc</code></td></tr><tr><td><code>head</code> / <code>tail</code></td><td>Keep the first/last N rows</td><td><code>head 20</code></td></tr><tr><td><code>count</code></td><td>Replace rows with their count</td><td><code>count</code></td></tr><tr><td><code>stats</code></td><td>Count, nulls, sum, average, min and max</td><td><code>stats total</code></td></tr><tr><td><code>distinct</code></td><td>Remove duplicate rows or column combinations</td><td><code>distinct customer_id</code></td></tr><tr><td><code>diff</code></td><td>Compare with a captured result shown as <code>#id</code></td><td><code>diff #42 key id</code></td></tr></tbody></table></div>
-<p><code>where</code> supports <code>= != &lt; &lt;= &gt; &gt;= like ilike in is</code>. Complex AND/OR conditions belong in the SQL <code>WHERE</code> clause, where the database can use an index.</p>
+<p><code>where</code> supports <code>= != &lt; &lt;= &gt; &gt;= like ilike in is</code>, including both <code>where id in 1,3</code> and <code>where id in (1,3)</code>. Complex AND/OR conditions belong in the SQL <code>WHERE</code> clause, where the database can use an index. <code>head</code> and <code>tail</code> require a non-negative whole number.</p>
 <h4 id="inputs">Inputs</h4>
 <pre><code>from &quot;orders.csv&quot; |&gt; where total &gt; 100
 from &quot;events.tsv&quot; |&gt; count
@@ -1141,7 +1141,7 @@ from &quot;rows.json&quot; |&gt; select id status</code></pre>
 <p>CSV and TSV support quoted separators and newlines. Numeric columns are inferred only when every non-empty value is numeric. JSON input accepts one object or an array of objects.</p>
 <h4 id="outputs">Outputs</h4>
 <div class="scroll-x"><table class="ref"><thead><tr><th>Sink</th><th>Behavior</th></tr></thead><tbody><tr><td><code>grid</code></td><td>Show the normal result grid (the default).</td></tr><tr><td><code>chart</code></td><td>Send rows to the chart view.</td></tr><tr><td><code>to &lt;format&gt;</code></td><td>Render <code>csv</code>, <code>tsv</code>, <code>json</code>, <code>md</code>, <code>ascii</code>, <code>inserts</code>, <code>html</code>, <code>xml</code> or <code>latex</code> in the transcript.</td></tr><tr><td><code>save &lt;file&gt;</code></td><td>Overwrite a file; the extension selects <code>csv</code>, <code>tsv</code>, <code>json</code>, <code>md</code>, <code>sql</code>, <code>xlsx</code>, <code>html</code>, <code>xml</code> or <code>tex</code>.</td></tr><tr><td><code>append &lt;file&gt;</code></td><td>Append a text format; XLSX cannot be appended.</td></tr><tr><td><code>insert into &lt;table&gt; [@connection]</code></td><td>Insert rows into the current or one named open session.</td></tr></tbody></table></div>
-<p>MySQL, PostgreSQL and SQL Server inserts run on one pinned destination connection in a real transaction. An existing manual transaction is joined without being committed for you. Other engines retain insert capability but warn that earlier statements may remain after a failure. Cross-server writes use the destination&#39;s dialect, connection identity and audit attribution.</p>
+<p>MySQL, PostgreSQL and SQL Server inserts run on one pinned destination connection in a real transaction. An existing manual transaction is joined without being committed for you. Other engines retain insert capability but warn that earlier statements may remain after a failure. Cross-server writes use the destination&#39;s dialect, connection identity and audit attribution. Statements are generated row by row, so text containing a semicolon followed by a newline remains a value—not SQL syntax. A failed COMMIT goes through rollback handling rather than being misreported as a closed transaction.</p>
 <h3 id="variables-and-command-substitution">Variables and command substitution</h3>
 <pre><code>$cutoff = 2026-01-01
 SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
@@ -1179,7 +1179,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="shortcuts" class="doc-section">
   <h1 id="keyboard-shortcuts">Keyboard shortcuts</h1>
-  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.5.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
+  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.5.1). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
   <div class="toolbar"><input id="scFilter" class="filter" placeholder="Filter shortcuts by action or key…" oninput="filterTable('scFilter','scTable')"></div>
   <table class="ref" id="scTable">
     <thead><tr><th>Command</th><th>Category</th><th>Shortcut</th><th>What it does</th></tr></thead>
@@ -2463,7 +2463,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.5.0 · 37 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.5.1 · 37 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

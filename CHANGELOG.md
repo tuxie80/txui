@@ -3,7 +3,7 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
-## [Unreleased]
+## [1.5.1] - 2026-11-01
 
 ### Added
 
@@ -21,6 +21,9 @@ this project follows semantic versioning.
 - **Complete, readable help coverage** — all 37 tool panels render with concise summaries and key actions, every guide uses structured workflows, and all screenshots have both Ayu variants. The screenshot suite now includes populated MySQL DDL progress and PostgreSQL Workload examples.
 - **Quoted system-table lint and spellcheck suppression** — `contenteditable` editors now receive explicit spellcheck/autocorrect suppression, and quoted qualified identifiers keep their names during diagnostics. `SELECT * FROM \`mysql\`.\`innodb_table_stats\` LIMIT 100` no longer marks the first backtick as an unknown table; useful full-scan/LIMIT hints remain intact.
 - **Every script result opens as it completes** — each row-producing statement now opens its own grid instead of only selecting Result 1 at the end. Earlier results stay available, the newest result remains selected, and the existing 5,000-row-per-statement cap and virtualized grid bound rendering cost.
+- **Updater cancellation is real** — Cancel now stops the backend download before installation instead of merely hiding progress. The 100% state changes to “installing,” when interruption is no longer offered, and another update cannot silently start while one is active.
+- **AI completion and key-store failures stay visible** — multi-part provider responses are joined completely, output-limit truncation is rejected instead of returning partial SQL, and API keys are reported saved or cleared only after the active secret store confirms the change.
+- **TxShell preserves values and transaction state** — INSERT execution no longer splits SQL on semicolon-newline text inside quoted values, and failed COMMITs retain open-transaction handling for rollback or an honest unknown-state warning. Parenthesized `IN (…)` filters work, and `head`/`tail` reject fractional row counts.
 
 ## [1.5.0] - 2026-10-31
 

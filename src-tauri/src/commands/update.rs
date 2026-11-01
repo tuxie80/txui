@@ -13,10 +13,30 @@
 //! a local HTTP loop therefore needs a debug build.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 use tauri::ipc::Channel;
 use tauri_plugin_updater::{Updater, UpdaterExt};
+use tokio::sync::{oneshot, Mutex};
 
 use crate::apperror::{AppError, ErrorCode};
+
+type UpdateCancelMap = Mutex<HashMap<String, oneshot::Sender<()>>>;
+static UPDATE_CANCELS: OnceLock<UpdateCancelMap> = OnceLock::new();
+
+fn cancels() -> &'static UpdateCancelMap {
+    UPDATE_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn cancellable_download<T>(
+    work: impl std::future::Future<Output = Result<T, AppError>>,
+    cancelled: &mut oneshot::Receiver<()>,
+) -> Result<T, AppError> {
+    tokio::select! {
+        _ = cancelled => Err(AppError::cancelled()),
+        result = work => result,
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,24 +221,37 @@ pub async fn update_check(
 pub async fn update_download_and_install(
     app: tauri::AppHandle,
     on_event: Channel<UpdateProgress>,
+    request_id: String,
     target_version: String,
     channel: Option<String>,
 ) -> Result<(), AppError> {
-    let updater = build_version_updater(&app, &target_version, channel.as_deref())?;
-    let update = updater.check().await.map_err(map_updater_err("check"))?.ok_or_else(|| {
-        AppError::new(ErrorCode::NotFound, "the update is no longer available")
-    })?;
-    if update.version != target_version {
-        return Err(AppError::new(ErrorCode::BadRequest, format!(
-            "update target changed: requested {target_version}, manifest offers {}",
-            update.version)));
+    if request_id.trim().is_empty() {
+        return Err(AppError::new(ErrorCode::BadRequest, "update request id is missing"));
+    }
+    let (tx, mut rx) = oneshot::channel();
+    {
+        let mut active = cancels().lock().await;
+        if active.contains_key(&request_id) {
+            return Err(AppError::new(ErrorCode::BadRequest, "that update is already running"));
+        }
+        active.insert(request_id.clone(), tx);
     }
 
-    let mut downloaded: u64 = 0;
-    let mut started = false;
-    let ev = &on_event;
-    update
-        .download_and_install(
+    let work = async {
+        let updater = build_version_updater(&app, &target_version, channel.as_deref())?;
+        let update = updater.check().await.map_err(map_updater_err("check"))?.ok_or_else(|| {
+            AppError::new(ErrorCode::NotFound, "the update is no longer available")
+        })?;
+        if update.version != target_version {
+            return Err(AppError::new(ErrorCode::BadRequest, format!(
+                "update target changed: requested {target_version}, manifest offers {}",
+                update.version)));
+        }
+
+        let mut downloaded: u64 = 0;
+        let mut started = false;
+        let ev = &on_event;
+        let bytes = update.download(
             move |chunk_len, content_length| {
                 if !started {
                     started = true;
@@ -233,10 +266,23 @@ pub async fn update_download_and_install(
             || {
                 let _ = on_event.send(UpdateProgress::Finished);
             },
-        )
-        .await
-        .map_err(map_updater_err("download/install"))?;
+        ).await.map_err(map_updater_err("download"))?;
+        Ok((update, bytes))
+    };
+    let downloaded = cancellable_download(work, &mut rx).await;
+    cancels().lock().await.remove(&request_id);
+
+    // Cancellation is accepted only while downloading. Installation is a short,
+    // synchronous bundle swap and is never interrupted half-way through.
+    let (update, bytes) = downloaded?;
+    update.install(&bytes).map_err(map_updater_err("install"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn update_cancel(request_id: String) -> Result<bool, AppError> {
+    let sender = cancels().lock().await.remove(&request_id);
+    Ok(sender.is_some_and(|tx| tx.send(()).is_ok()))
 }
 
 #[cfg(test)]
@@ -277,5 +323,16 @@ mod tests {
             .map(|tag_name| ReleaseRow { tag_name: tag_name.to_string() });
         assert_eq!(select_branch_version(&rows, "1.3.1"), None);
         assert_eq!(select_branch_version(&rows, "not-a-version"), None);
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_the_download_before_installation() {
+        let (tx, mut rx) = oneshot::channel();
+        tx.send(()).unwrap();
+        let result = cancellable_download(
+            std::future::pending::<Result<Vec<u8>, AppError>>(),
+            &mut rx,
+        ).await;
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
     }
 }

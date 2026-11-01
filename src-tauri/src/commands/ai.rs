@@ -80,21 +80,39 @@ fn request_parts(
     }
 }
 
-fn completion_text(anthropic: bool, value: &Value) -> Option<String> {
-    if anthropic {
-        return value["content"].as_array()?.iter()
-            .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
-            .find_map(|part| part["text"].as_str())
-            .map(str::to_owned);
+fn completion_text(anthropic: bool, value: &Value) -> Result<String, AppError> {
+    let truncated = if anthropic {
+        value["stop_reason"].as_str() == Some("max_tokens")
+    } else {
+        value["choices"][0]["finish_reason"].as_str() == Some("length")
+    };
+    if truncated {
+        return Err(AppError::from(
+            "AI response was truncated by the provider's output limit. Try a shorter request; nothing was inserted.",
+        ));
     }
-    let content = &value["choices"][0]["message"]["content"];
-    if let Some(text) = content.as_str() {
-        return Some(text.to_owned());
-    }
-    content.as_array()?.iter()
-        .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
-        .find_map(|part| part["text"].as_str())
-        .map(str::to_owned)
+    let text = if anthropic {
+        value["content"].as_array().and_then(|parts| {
+            let text = parts.iter()
+                .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
+                .filter_map(|part| part["text"].as_str())
+                .collect::<String>();
+            (!text.is_empty()).then_some(text)
+        })
+    } else {
+        let content = &value["choices"][0]["message"]["content"];
+        content.as_str().map(str::to_owned).or_else(|| {
+            content.as_array().and_then(|parts| {
+                let text = parts.iter()
+                    .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<String>();
+                (!text.is_empty()).then_some(text)
+            })
+        })
+    };
+    text.filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| AppError::from("AI endpoint returned an empty completion."))
 }
 
 async fn complete_with_key(
@@ -135,9 +153,7 @@ async fn complete_with_key(
         }
         let value: Value = response.json().await
             .map_err(|e| AppError::from(format!("AI response was not JSON: {e}")))?;
-        let text = completion_text(anthropic, &value)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| AppError::from("AI endpoint returned an empty completion."))?;
+        let text = completion_text(anthropic, &value)?;
         Ok(text)
     };
     tokio::select! {
@@ -211,14 +227,24 @@ mod tests {
     }
 
     #[test]
-    fn response_parsers_accept_text_and_content_parts() {
+    fn response_parsers_accept_text_and_join_every_content_part() {
         let anthropic = json!({"content": [{"type": "thinking", "text": "ignore"},
-            {"type": "text", "text": "SELECT 1"}]});
-        assert_eq!(completion_text(true, &anthropic).as_deref(), Some("SELECT 1"));
+            {"type": "text", "text": "SELECT "}, {"type": "text", "text": "1"}]});
+        assert_eq!(completion_text(true, &anthropic).unwrap(), "SELECT 1");
         let openai = json!({"choices": [{"message": {"content": [
-            {"type": "text", "text": "SELECT 2"},
+            {"type": "text", "text": "SELECT "}, {"type": "text", "text": "2"},
         ]}}]});
-        assert_eq!(completion_text(false, &openai).as_deref(), Some("SELECT 2"));
+        assert_eq!(completion_text(false, &openai).unwrap(), "SELECT 2");
+    }
+
+    #[test]
+    fn output_limit_truncation_is_an_error_not_a_completion() {
+        let anthropic = json!({"stop_reason": "max_tokens", "content": [
+            {"type": "text", "text": "SELECT * FROM"}]});
+        assert!(completion_text(true, &anthropic).unwrap_err().to_string().contains("truncated"));
+        let openai = json!({"choices": [{"finish_reason": "length",
+            "message": {"content": "SELECT * FROM"}}]});
+        assert!(completion_text(false, &openai).unwrap_err().to_string().contains("truncated"));
     }
 
     #[test]

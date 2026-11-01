@@ -84,6 +84,7 @@ export function SettingsModal({ onClose }: Props) {
   const [aiKey, setAiKey] = useState('');
   const [aiKeySet, setAiKeySet] = useState(false);
   const [aiTesting, setAiTesting] = useState(false);
+  const [aiKeyBusy, setAiKeyBusy] = useState(false);
   const [aiTestMessage, setAiTestMessage] = useState('');
   const aiPreset = detectAiPreset(aiProvider, aiBaseUrl)?.id ?? 'custom';
   useEffect(() => { aiHasKey().then(setAiKeySet).catch(() => {}); }, []);
@@ -96,6 +97,19 @@ export function SettingsModal({ onClose }: Props) {
       setAiTestMessage(errorDisplay(e));
     } finally {
       setAiTesting(false);
+    }
+  };
+  const storeAiKey = async (key: string) => {
+    setAiKeyBusy(true); setAiTestMessage('');
+    try {
+      await aiSetKey(key);
+      setAiKeySet(Boolean(key));
+      setAiKey('');
+      setAiTestMessage(key ? 'API key saved.' : 'API key cleared.');
+    } catch (e) {
+      setAiTestMessage(errorDisplay(e));
+    } finally {
+      setAiKeyBusy(false);
     }
   };
   const [profiles, setProfiles] = useState<FormatProfile[]>(() => loadProfiles(localStorage));
@@ -611,17 +625,17 @@ export function SettingsModal({ onClose }: Props) {
             </label>
             <div className="settings-row" style={{ justifyContent: 'flex-end', gap: 8 }}>
               {aiKeySet && (
-                <button className="toolbar-btn" onClick={() => { void aiSetKey(''); setAiKeySet(false); setAiKey(''); }}>
-                  Clear key
+                <button className="toolbar-btn" disabled={aiKeyBusy} onClick={() => void storeAiKey('')}>
+                  {aiKeyBusy && !aiKey.trim() ? 'Clearing…' : 'Clear key'}
                 </button>
               )}
-              <button className="toolbar-btn" disabled={aiTesting || !aiBaseUrl.trim() || !aiModel.trim()}
+              <button className="toolbar-btn" disabled={aiTesting || aiKeyBusy || !aiBaseUrl.trim() || !aiModel.trim()}
                 onClick={() => void testAiConnection()}>
                 {aiTesting ? 'Testing…' : 'Test connection'}
               </button>
-              <button className="primary" disabled={!aiKey.trim()}
-                onClick={() => { void aiSetKey(aiKey.trim()).then(() => { setAiKeySet(true); setAiKey(''); }); }}>
-                Save key
+              <button className="primary" disabled={aiKeyBusy || !aiKey.trim()}
+                onClick={() => void storeAiKey(aiKey.trim())}>
+                {aiKeyBusy && aiKey.trim() ? 'Saving…' : 'Save key'}
               </button>
             </div>
             {aiTestMessage && <p className="settings-hint" role="status">{aiTestMessage}</p>}

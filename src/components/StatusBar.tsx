@@ -34,6 +34,9 @@ export function StatusBar({ sessions }: Props) {
   const activeVersion = update.kind === 'downloading' || update.kind === 'ready'
     ? update.version
     : update.kind === 'available' ? update.info.version : null;
+  const updateBusy = update.kind === 'downloading'
+    || (update.kind === 'available' && update.action === 'auto');
+  const installing = update.kind === 'downloading' && update.pct === 100;
 
   usePoll(async () => {
     setNowMs(Date.now());
@@ -80,7 +83,10 @@ export function StatusBar({ sessions }: Props) {
       {majorCandidate && activeVersion !== majorCandidate.version && (
         <button
           className="sb-tasks-btn sb-update-available"
-          title={`TxUI ${majorCandidate.version} is available. New releases usually include bug fixes, improvements and new features. Click only when you want to leave your current major branch and install this version.`}
+          disabled={updateBusy}
+          title={updateBusy
+            ? 'Another update is already downloading. Wait for it to finish or cancel it first.'
+            : `TxUI ${majorCandidate.version} is available. New releases usually include bug fixes, improvements and new features. Click only when you want to leave your current major branch and install this version.`}
           onClick={() => { void startDownload(majorCandidate, 'latest'); }}
         >⬆ Upgrade to {majorCandidate.version}</button>
       )}
@@ -104,32 +110,39 @@ export function StatusBar({ sessions }: Props) {
         <>
           <button
             className="sb-tasks-btn sb-update-download"
-            title="Downloading the update in the background — click for details"
+            title={installing
+              ? 'The update is installing — click for details'
+              : 'Downloading the update in the background — click for details'}
             onClick={() => setUpdateOpen(o => !o)}
-          ><span aria-hidden="true">↓</span><span>downloading</span><span className="sb-update-pct">{update.kind === 'downloading' && update.pct !== null ? `${update.pct} %` : '…'}</span></button>
+          ><span aria-hidden="true">↓</span><span>{installing ? 'installing' : 'downloading'}</span><span className="sb-update-pct">{update.kind === 'downloading' && update.pct !== null ? `${update.pct} %` : '…'}</span></button>
           {updateOpen && (
             <>
               <div className="sb-tasks-backdrop" onClick={() => setUpdateOpen(false)} />
               <div className="sb-tasks-pop">
                 <div className="sb-tasks-head">
                   <span>
-                    Downloading TxUI {update.kind === 'available' ? update.info.version : update.version} in the background
+                    {installing ? 'Installing' : 'Downloading'} TxUI {update.kind === 'available' ? update.info.version : update.version}
                   </span>
                 </div>
                 <div className="sb-task">
                   <div className="sb-task-main">
                     <div className="sb-task-detail">
-                      Nothing to wait on — keep working. When it is done this turns
-                      into a restart button.
+                      {installing
+                        ? 'The download is complete. Installation cannot be cancelled; the restart button appears next.'
+                        : 'Nothing to wait on — keep working. When it is done this turns into a restart button.'}
                     </div>
                   </div>
                   <button className="toolbar-btn sb-task-stop"
                     onClick={() => { void open(releaseTagUrl(
                       update.kind === 'available' ? update.info.version : update.version)).catch(() => {}); }}>
                     Notes</button>
-                  <button className="toolbar-btn sb-task-stop"
-                    onClick={() => { setUpdateOpen(false); cancelDownload(); }}>
-                    Cancel</button>
+                  {!installing && (
+                    <button className="toolbar-btn sb-task-stop"
+                      onClick={() => { void cancelDownload().then(cancelled => {
+                        if (cancelled) setUpdateOpen(false);
+                      }); }}>
+                      Cancel</button>
+                  )}
                 </div>
               </div>
             </>

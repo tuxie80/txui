@@ -929,6 +929,7 @@ pub fn run() {
             // plugin's own command)
             update_check,
             update_download_and_install,
+            update_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -33,6 +33,15 @@ test('toInserts quotes identifiers and escapes literals per engine', async () =>
   assert.match(ms, /'C:\\path ''quoted'''/);
 });
 
+test('insert statements preserve semicolon-newline text without SQL splitting', async () => {
+  const { toInsertStatements, toInserts } = await import('../src/utils/exporters.ts');
+  const rows = [[1, 'before;\nafter'], [2, 'ordinary']];
+  const statements = toInsertStatements('t', ['id', 'note'], rows, 'mysql');
+  assert.equal(statements.length, 2);
+  assert.equal(statements[0], "INSERT INTO `t` (`id`, `note`) VALUES (1, 'before;\nafter')");
+  assert.equal(toInserts('t', ['id', 'note'], rows, 'mysql'), `${statements.join(';\n')};\n`);
+});
+
 test('serialize threads the engine through the insert format', async () => {
   const { serialize } = await import('../src/utils/exporters.ts');
   const out = serialize('insert', ['a'], [['x']], 't', 'postgres');
