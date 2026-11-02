@@ -415,14 +415,14 @@ export const DBA_VIEWS: Record<string, DbaView[]> = {
     { id: 'idx-redundant', label: 'Redundant indexes', category: 'Indexes & schema',
       sql: 'SELECT * FROM sys.schema_redundant_indexes LIMIT 200',
       description: 'Indexes made redundant by another index' },
-    { id: 'tbl-sizes', label: 'Table sizes', category: 'Indexes & schema',
-      sql: "SELECT table_schema, table_name, engine, table_rows, \
+    { id: 'tbl-sizes', label: 'Table sizes & compression', category: 'Indexes & schema',
+      sql: "SELECT table_schema, table_name, engine, table_rows, row_format, create_options, \
 ROUND((data_length+index_length)/1024/1024, 1) AS total_mb, \
 ROUND(data_length/1024/1024, 1) AS data_mb, ROUND(index_length/1024/1024, 1) AS index_mb, \
-ROUND(data_free/1024/1024, 1) AS free_mb \
+ROUND(data_free/1024/1024, 1) AS allocated_free_mb \
 FROM information_schema.tables WHERE table_schema NOT IN ('mysql','sys','performance_schema','information_schema') \
 ORDER BY data_length + index_length DESC LIMIT 100",
-      description: 'Largest tables with index size and free (fragmented) space',
+      description: 'Largest tables with row format and compression options. ROW_FORMAT=COMPRESSED is InnoDB row compression; MariaDB PAGE_COMPRESSED and MySQL/Percona COMPRESSION options appear in create_options. DATA_FREE is allocated free space, not a general fragmentation percentage: shared tablespaces and compressed/sparse files can make it misleading. OPTIMIZE/ALTER … ENGINE rebuild progress must be watched separately.',
       demanding: 'heavy on many tables — full information_schema scan' },
     { id: 'auto-inc', label: 'Auto-increment usage', category: 'Indexes & schema',
       sql: 'SELECT * FROM sys.schema_auto_increment_columns ORDER BY auto_increment_ratio DESC LIMIT 50',

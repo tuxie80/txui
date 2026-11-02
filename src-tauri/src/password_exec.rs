@@ -191,8 +191,6 @@ pub async fn resolve(config: &ConnectionConfig) -> Result<Option<String>, String
 /// Run the substituted command line in the platform shell and return its
 /// trimmed stdout. Never logs anything about the command or its output.
 async fn run(substituted: &str) -> Result<String, String> {
-    use tokio::io::AsyncReadExt;
-
     let (shell, flag) = crate::commands::shell::user_shell();
     let mut child = tokio::process::Command::new(&shell)
         .arg(flag)
@@ -200,6 +198,7 @@ async fn run(substituted: &str) -> Result<String, String> {
         .stdin(std::process::Stdio::null()) // never interactive — a prompt would hang
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("password command could not be started ({shell}): {e}"))?;
 
@@ -213,10 +212,18 @@ async fn run(substituted: &str) -> Result<String, String> {
             // first deadlocks as soon as the other fills its pipe buffer
             // (same lesson as run_os_command).
             let a = async {
-                if let Some(s) = stdout.as_mut() { let _ = s.read_to_end(&mut out_buf).await; }
+                if let Some(s) = stdout.as_mut() {
+                    if let Ok((buf, _)) = crate::commands::shell::read_bounded(s, MAX_STDOUT).await {
+                        out_buf = buf;
+                    }
+                }
             };
             let b = async {
-                if let Some(s) = stderr.as_mut() { let _ = s.read_to_end(&mut err_buf).await; }
+                if let Some(s) = stderr.as_mut() {
+                    if let Ok((buf, _)) = crate::commands::shell::read_bounded(s, MAX_ERR_SNIPPET).await {
+                        err_buf = buf;
+                    }
+                }
             };
             tokio::join!(a, b);
             child.wait().await

@@ -336,19 +336,24 @@ pub struct ImportSummary {
     pub connections: usize,
     pub secrets: usize,
     pub folders: usize,
+    /// Connections whose executable or automatic behavior was stripped.
+    pub sanitized: usize,
 }
 
 /// Merge another vault file into this one.
 ///
 /// Connections are re-identified, so importing onto a machine that already has
 /// connections adds to them rather than replacing them, and an entry can never
-/// collide with — or steal the stored password of — one already here.
+/// collide with — or steal the stored password of — one already here. Imported
+/// files are data, not authority to execute code on this machine: credential
+/// commands, auto-connect and server-log paths never survive the boundary.
 pub fn import_file(dir: &Path, source: &Path, password: &str) -> Result<ImportSummary> {
     let incoming = vaultfile::read(source, password)?;
-    let mut summary = ImportSummary { connections: 0, secrets: 0, folders: 0 };
+    let mut summary = ImportSummary { connections: 0, secrets: 0, folders: 0, sanitized: 0 };
 
     with_open(dir, |c| {
         for mut conn in incoming.connections {
+            if conn.sanitize_import() { summary.sanitized += 1; }
             let old = conn.id;
             conn.id = Uuid::new_v4();
             for (from, to) in [
@@ -566,7 +571,12 @@ mod tests {
         // A vault to import FROM.
         let src_dir = dir("import-src");
         create(&src_dir, PW).unwrap();
-        let a = conn("from-laptop");
+        let mut a = conn("from-laptop");
+        a.password_exec = Some("echo imported-code".into());
+        a.password_exec_ttl_secs = Some(30);
+        a.auto_connect = true;
+        a.log_dir = Some("/attacker-controlled/log".into());
+        a.ssh_accept_new_host = true;
         save_connections(&src_dir, &[(a.id, a.clone())].into_iter().collect()).unwrap();
         set(&src_dir, &format!("dbgui:{}", a.id), "laptop-pw").unwrap();
         save_folders(&src_dir, &serde_json::json!({ "laptop": { "note": "mine" } })).unwrap();
@@ -586,6 +596,7 @@ mod tests {
         assert_eq!(s.connections, 1);
         assert_eq!(s.secrets, 1);
         assert_eq!(s.folders, 1);
+        assert_eq!(s.sanitized, 1);
 
         let all = connections(&d).unwrap();
         assert_eq!(all.len(), 2, "the existing connection must survive");
@@ -596,6 +607,11 @@ mod tests {
         // than pointing at the existing one's.
         let imported = all.values().find(|c| c.name == "from-laptop").unwrap();
         assert_ne!(imported.id, a.id);
+        assert_eq!(imported.password_exec, None);
+        assert_eq!(imported.password_exec_ttl_secs, None);
+        assert!(!imported.auto_connect);
+        assert_eq!(imported.log_dir, None);
+        assert!(!imported.ssh_accept_new_host);
         assert_eq!(get(&d, &format!("dbgui:{}", imported.id)).as_deref(), Some("laptop-pw"));
         assert_eq!(get(&d, &format!("dbgui:{}", b.id)).as_deref(), Some("existing-pw"));
         assert_eq!(folders(&d)["laptop"]["note"], "mine");

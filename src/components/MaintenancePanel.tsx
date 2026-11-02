@@ -24,7 +24,8 @@ import { isoNow, logAudit, newRunId } from '../utils/audit';
 import {
   opsFor, findOp, maintenanceSql, invalidProbes, describeInvalid, invalidSummary,
   opSummary, opWarning, parseSamplePages, readOnlyProbeSql, readOnlyReason,
-  statementSubject,
+  sqlServerResumableIndexReason, sqlServerResumableIndexSql, sqlServerResumableServerReason,
+  statementSubject, SQLSERVER_RESUMABLE_SERVER_SQL,
 } from '../utils/tableMaintenance';
 import type { AnalyzeOpts, MaintenanceOp, InvalidObject, TableRef } from '../utils/tableMaintenance';
 import {
@@ -100,6 +101,8 @@ export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props
   const [analyzeLocal, setAnalyzeLocal] = useState(true);
   const [samplePages, setSamplePages] = useState('');
   const [fullscan, setFullscan] = useState(false);
+  const [resumableOnline, setResumableOnline] = useState(false);
+  const [resumableServerReason, setResumableServerReason] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const cancelledRef = useRef(false);
   const tokenRef = useRef(0);
@@ -140,6 +143,20 @@ export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props
       })
       .catch(() => {});
   }, [session.engine, session.sessionId, schemaProp]);
+
+  useEffect(() => {
+    if (session.engine !== 'sqlserver') return;
+    let active = true;
+    invoke<QueryResult>('monitor_query', {
+      sessionId: session.sessionId, sql: SQLSERVER_RESUMABLE_SERVER_SQL,
+    }).then(result => {
+      if (active) setResumableServerReason(sqlServerResumableServerReason(result.rows[0]));
+    }).catch(() => {
+      if (active) setResumableServerReason('SQL Server version/edition could not be checked; resumable rebuild is unavailable.');
+    });
+    return () => { active = false; };
+  }, [session.engine, session.sessionId]);
+
   const schema = schemaProp ?? (pickedSchema || null);
 
   // A destructive operation on prod is exactly the case this panel exists to
@@ -255,6 +272,9 @@ export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props
    * here — the run validates separately and refuses with the field named.
    */
   const analyzeOpts = useMemo<AnalyzeOpts | undefined>(() => {
+    if (op === 'optimize' && session.engine === 'sqlserver' && resumableOnline) {
+      return { resumableOnline: true };
+    }
     if (op !== 'analyze') return undefined;
     const pages = parseSamplePages(samplePages);
     return {
@@ -262,7 +282,7 @@ export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props
       samplePages: pages === 'invalid' ? undefined : pages,
       fullscan,
     };
-  }, [op, analyzeLocal, samplePages, fullscan]);
+  }, [op, session.engine, resumableOnline, analyzeLocal, samplePages, fullscan]);
 
   // Every maintenance statement is shown before it runs — the same review-first
   // rule the bulk editor follows. For prewarm this is the whole feature: the
@@ -293,6 +313,30 @@ export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props
     const refs: TableRef[] = [...picked].map(name => ({ schema, name }));
     const statements = maintenanceSql(op, refs, session.engine, analyzeOpts);
     if (statements.length === 0) return;
+
+    if (op === 'optimize' && resumableOnline) {
+      let reason = resumableServerReason;
+      try {
+        if (!reason) {
+          const server = await invoke<QueryResult>('monitor_query', {
+            sessionId: session.sessionId, sql: SQLSERVER_RESUMABLE_SERVER_SQL,
+          });
+          reason = sqlServerResumableServerReason(server.rows[0]);
+        }
+        if (!reason) {
+          const indexes = await invoke<QueryResult>('monitor_query', {
+            sessionId: session.sessionId, sql: sqlServerResumableIndexSql(refs),
+          });
+          reason = sqlServerResumableIndexReason(indexes.rows);
+        }
+      } catch (e) {
+        reason = `Resumable eligibility could not be checked: ${errorDisplay(e)}`;
+      }
+      if (reason) {
+        setResults([{ table: '—', status: 'blocked', ok: false, message: reason }]);
+        return;
+      }
+    }
 
     setRunning(true);
     setResults([]);
@@ -360,7 +404,8 @@ export function MaintenancePanel({ session, schema: schemaProp, onClose }: Props
     setProgress(null);
     setRunning(false);
     setConfirmText('');
-  }, [schema, picked, op, session, armed, auditedRun, analyzeOpts, samplePages]);
+  }, [schema, picked, op, session, armed, auditedRun, analyzeOpts, samplePages,
+    resumableOnline, resumableServerReason]);
 
   /** Abort the in-flight statement (KILL QUERY / pg_cancel_backend) and stop the queue. */
   const cancel = useCallback(() => {
@@ -685,6 +730,23 @@ WHERE s.name = '${sch}' AND o.name = '${nm}'`,
                        onChange={e => setFullscan(e.target.checked)} disabled={running} />
                 FULLSCAN
               </label>
+            </div>
+          )}
+
+          {op === 'optimize' && session.engine === 'sqlserver' && (
+            <div className="mnt-opts">
+              <span className={resumableServerReason ? 'unavail' : undefined}
+                    data-tip={resumableServerReason ?? undefined}>
+                <label className="gsp-check"
+                       title="Run eligible rebuilds WITH (ONLINE = ON, RESUMABLE = ON), enabling sys.index_resumable_operations progress. Eligibility is checked before every run.">
+                  <input type="checkbox" checked={resumableOnline}
+                         aria-disabled={resumableServerReason ? true : undefined}
+                         onChange={e => { if (!resumableServerReason) setResumableOnline(e.target.checked); }}
+                         disabled={running} />
+                  Resumable online
+                </label>
+              </span>
+              {resumableServerReason && <span className="mnt-muted">{resumableServerReason}</span>}
             </div>
           )}
 

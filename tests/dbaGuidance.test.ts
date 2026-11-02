@@ -132,6 +132,11 @@ test('information_schema size scans are flagged demanding', () => {
   for (const id of ['tbl-sizes', 'auto-inc']) {
     assert.ok(DBA_VIEWS.mysql.find(x => x.id === id)!.demanding, `${id} missing demanding`);
   }
+  const storage = DBA_VIEWS.mysql.find(x => x.id === 'tbl-sizes')!;
+  assert.match(storage.sql, /row_format, create_options/);
+  assert.match(storage.sql, /allocated_free_mb/);
+  assert.match(storage.description, /not a general fragmentation percentage/);
+  assert.doesNotMatch(storage.description, /free \(fragmented\) space/);
 });
 
 // Connections without a selected database record digests with SCHEMA_NAME

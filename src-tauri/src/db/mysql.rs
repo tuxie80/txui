@@ -348,6 +348,7 @@ where
     // column list differs from the current set's starts a new set.
     let mut sets: Vec<(Vec<ColumnInfo>, Vec<MySqlTypeClass>, Vec<Row>)> = Vec::new();
     let mut total_rows = 0usize;
+    let mut total_bytes = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.try_next().await? {
         match item {
@@ -377,10 +378,17 @@ where
                     truncated = true;
                     break;
                 }
-                let (_, classes, rows) = sets.last_mut().expect("a row always has a set");
-                rows.push(classes.iter().enumerate().map(|(i, &class)| {
+                let (_, classes, _) = sets.last().expect("a row always has a set");
+                let decoded: Row = classes.iter().enumerate().map(|(i, &class)| {
                     json_value_from_mysql_row(&row, i, class)
-                }).collect());
+                }).collect();
+                total_bytes += crate::db::types::row_bytes(&decoded);
+                if total_bytes > crate::db::types::MAX_RESULT_BYTES {
+                    truncated = true;
+                    break;
+                }
+                let (_, _, rows) = sets.last_mut().expect("a row always has a set");
+                rows.push(decoded);
                 total_rows += 1;
             }
         }

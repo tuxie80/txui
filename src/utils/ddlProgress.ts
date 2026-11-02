@@ -2,10 +2,11 @@
  * Where a long-running DDL statement reports its progress.
  *
  * "Is it stuck?" is the only question anyone asks about a nine-minute
- * `ALTER TABLE`, and both engines answer it — in completely different places,
- * neither of which is the process list:
+ * `ALTER TABLE`, and each engine family answers it in a different catalog:
  *
- * - **MySQL** publishes stages through `performance_schema.events_stages_current`,
+ * - **MariaDB** publishes stage number, stage count and current-stage percentage
+ *   directly through `information_schema.PROCESSLIST`, without Performance Schema.
+ * - **MySQL and Percona** publish stages through `performance_schema.events_stages_current`,
  *   with `WORK_COMPLETED` / `WORK_ESTIMATED`. For online DDL that is a real
  *   percentage of a real phase ("copy to tmp table", "rebuild index"). It is
  *   **off by default**: the `stage/innodb/alter table%` instruments and the
@@ -25,7 +26,7 @@
  * Pure and dependency-free — driven by `node --test`.
  */
 
-export type DdlKind = 'create-index' | 'alter-table' | 'vacuum-cluster' | 'other';
+export type DdlKind = 'create-index' | 'alter-table' | 'vacuum-cluster' | 'maintenance' | 'other';
 
 /**
  * What kind of long operation this is.
@@ -33,21 +34,34 @@ export type DdlKind = 'create-index' | 'alter-table' | 'vacuum-cluster' | 'other
  * Only the distinctions that change *where progress lives* are made — a
  * finer taxonomy would be a taxonomy nobody consumes.
  */
-export function ddlKind(sql: string): DdlKind {
-  const s = sql
+function normalizedDdl(sql: string): string {
+  return sql
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/--[^\n]*/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
 
-  if (/^create\s+(unique\s+)?index\b/.test(s)) return 'create-index';
+export function ddlKind(sql: string): DdlKind {
+  const s = normalizedDdl(sql);
+
+  if (/^create\s+(?:or\s+replace\s+)?(?:unique\s+)?(?:(?:clustered|nonclustered|columnstore|fulltext|spatial|vector|primary\s+xml|xml|json)\s+)*index\b/.test(s)) {
+    return 'create-index';
+  }
   if (/^reindex\b/.test(s)) return 'create-index';
+  if (/^alter\s+index\b.*\brebuild(?:\s*\(|\s+with\b|\s*;|$)/.test(s)) return 'create-index';
   if (/^(vacuum\s+full|cluster)\b/.test(s)) return 'vacuum-cluster';
+  if (/^(?:(?:optimize|repair|check|analyze)\s+(?:local\s+)?table|load\s+data)\b/.test(s)) {
+    return 'maintenance';
+  }
   if (/^alter\s+table\b/.test(s)) {
-    // An ALTER that only adds an index is an index build as far as progress
-    // reporting is concerned — PostgreSQL reports it through the same view.
-    return /\badd\s+(unique\s+)?(index|key)\b/.test(s) ? 'create-index' : 'alter-table';
+    // PostgreSQL reports indexes created by table constraints through the same
+    // progress view as CREATE INDEX. MySQL-family index forms build too.
+    const add = '\\badd\\s+(?:constraint\\s+(?:"[^"]*"|`[^`]*`|\\[[^\\]]*\\]|\\S+)\\s+)?';
+    const index = new RegExp(add + '(?:(?:unique|fulltext|spatial|vector)\\s+)?(?:index|key)\\b');
+    const constraint = new RegExp(add + '(?:primary\\s+key|unique)\\b');
+    return index.test(s) || constraint.test(s) ? 'create-index' : 'alter-table';
   }
   return 'other';
 }
@@ -92,6 +106,13 @@ export interface MysqlStatementStats {
   errors: number | null;
 }
 
+export interface MariaDbNativeProgress {
+  stage: number;
+  maxStage: number;
+  stagePct: number | null;
+  totalPct: number | null;
+}
+
 export interface MysqlThreadSnapshot {
   threadId: number;
   statementThreadId: number | null;
@@ -105,6 +126,7 @@ export interface MysqlThreadSnapshot {
   command: string;
   stats: MysqlStatementStats;
   stages: MysqlStage[];
+  native?: MariaDbNativeProgress;
 }
 
 export interface MysqlProgressStats {
@@ -187,6 +209,9 @@ export function mysqlThreadSnapshot(rows: readonly (readonly unknown[])[]): Mysq
   const source = stages.length > 0
     ? rows.find(row => row[4] !== null && row[4] !== undefined && row[4] !== '') ?? first
     : first;
+  const nativeStage = optionalNumber(source[23]);
+  const nativeMaxStage = optionalNumber(source[24]);
+  const hasNativeProgress = nativeStage !== null && nativeMaxStage !== null;
   return {
     threadId: Number(first[0]),
     statementThreadId: optionalNumber(source[22]),
@@ -207,6 +232,12 @@ export function mysqlThreadSnapshot(rows: readonly (readonly unknown[])[]): Mysq
       errors: optionalNumber(source[21]),
     },
     stages,
+    native: hasNativeProgress ? {
+      stage: nativeStage,
+      maxStage: nativeMaxStage,
+      stagePct: nativeMaxStage > 0 ? optionalNumber(source[25]) : null,
+      totalPct: nativeMaxStage > 0 ? optionalNumber(source[26]) : null,
+    } : undefined,
   };
 }
 
@@ -214,7 +245,9 @@ export function mergeMysqlThreadSnapshots(
   previous: MysqlThreadSnapshot | null,
   next: MysqlThreadSnapshot,
 ): MysqlThreadSnapshot {
-  if (!previous || previous.statementEventId !== next.statementEventId || previous.query !== next.query) {
+  if (!previous || previous.query !== next.query
+    || (previous.statementEventId !== null && next.statementEventId !== null
+      && previous.statementEventId !== next.statementEventId)) {
     return next;
   }
   const stages = new Map(previous.stages.map(stage => [mysqlStageKey(stage), stage]));
@@ -313,8 +346,13 @@ export function mysqlCompletionLine(snapshot: MysqlThreadSnapshot): string {
   const longest = stats.longestPhase
     ? ` · longest ${stats.longestPhase} ${stats.longestPhaseSecs?.toFixed(1) ?? '?'} s`
     : '';
+  const native = snapshot.native && snapshot.native.maxStage > 0
+    ? ` · last MariaDB stage ${snapshot.native.stage}/${snapshot.native.maxStage}`
+      + ` ${snapshot.native.stagePct?.toFixed(1) ?? '—'}%`
+      + ` (overall ${snapshot.native.totalPct?.toFixed(1) ?? '—'}%)`
+    : '';
   return `thread ${snapshot.threadId} finished after ${snapshot.querySecs.toFixed(1)} s · `
-    + `${snapshot.stages.filter(stage => stage.eventId > 0).length} phases observed (${stats.done} done)${longest} · `
+    + `${snapshot.stages.filter(stage => stage.eventId > 0).length} phases observed (${stats.done} done)${longest}${native} · `
     + `rows affected/examined/sent ${snapshot.stats.rowsAffected ?? '—'}/`
     + `${snapshot.stats.rowsExamined ?? '—'}/${snapshot.stats.rowsSent ?? '—'} · `
     + `warnings ${snapshot.stats.warnings ?? '—'} · errors ${snapshot.stats.errors ?? '—'}`;
@@ -346,7 +384,10 @@ FROM pg_stat_activity WHERE pid = ${id}`;
     return `SELECT r.session_id, COALESCE(t.text, ''),
        r.total_elapsed_time / 1000.0, COALESCE(r.status, ''), COALESCE(r.command, ''),
        CASE WHEN r.percent_complete > 0 THEN r.percent_complete END,
-       NULLIF(r.estimated_completion_time, 0)
+       NULLIF(r.estimated_completion_time, 0),
+       NULLIF(r.blocking_session_id, 0), r.wait_type, r.wait_time / 1000.0,
+       r.cpu_time / 1000.0, r.reads, r.writes, r.logical_reads, r.dop,
+       r.granted_query_memory, r.start_time, r.is_resumable
 FROM sys.dm_exec_requests r
 JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
 OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t
@@ -355,11 +396,176 @@ WHERE r.session_id = ${id} AND s.is_user_process = 1`;
   return null;
 }
 
+export interface SqlServerProgress {
+  phase: string;
+  pct: number | null;
+  detail: string;
+}
+
+export const SQLSERVER_RESUMABLE_PROGRESS_SQL = `SELECT object_id, index_id, name, sql_text,
+       state_desc, total_execution_time, percent_complete, page_count, partition_number
+FROM sys.index_resumable_operations`;
+
+export const SQLSERVER_ONLINE_INDEX_EVENTS_SQL = `SELECT s.name,
+       e.event_xml.value('(@timestamp)[1]', 'datetime2'),
+       CAST(e.event_xml.query('.') AS nvarchar(max))
+FROM sys.dm_xe_sessions s
+JOIN sys.dm_xe_session_targets t ON t.event_session_address = s.address
+JOIN sys.dm_xe_session_events ev ON ev.event_session_address = s.address
+CROSS APPLY (SELECT CAST(t.target_data AS xml) AS target_xml) x
+CROSS APPLY x.target_xml.nodes('/RingBufferTarget/event[@name="progress_report_online_index_operation"]') e(event_xml)
+WHERE t.target_name = 'ring_buffer'
+  AND ev.event_name = 'progress_report_online_index_operation'
+ORDER BY 2`;
+
+export function sqlServerOperatorProgressSql(pid: number): string | null {
+  const id = Math.trunc(Number(pid));
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return `SELECT node_id, physical_operator_name,
+       SUM(row_count), SUM(estimate_row_count),
+       SUM(elapsed_time_ms), SUM(cpu_time_ms)
+FROM sys.dm_exec_query_profiles
+WHERE session_id = ${id}
+GROUP BY node_id, physical_operator_name
+ORDER BY node_id`;
+}
+
+function normalizedStatement(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim().replace(/;$/, '').toLowerCase();
+}
+
+export function sqlServerResumableProgress(
+  rows: readonly (readonly unknown[])[], query: string,
+): SqlServerProgress | null {
+  const wanted = normalizedStatement(query);
+  const matches = rows.filter(row => {
+    const candidate = normalizedStatement(String(row[3] ?? ''));
+    return candidate.length > 0 && (wanted === candidate || wanted.includes(candidate));
+  });
+  if (matches.length !== 1) return null;
+  const row = matches[0];
+  const state = String(row[4] ?? 'running').toLowerCase();
+  const minutes = optionalNumber(row[5]);
+  const pages = optionalNumber(row[7]);
+  const partition = optionalNumber(row[8]);
+  return {
+    phase: `resumable index operation · ${state}`,
+    pct: optionalNumber(row[6]),
+    detail: `sys.index_resumable_operations · ${minutes ?? '—'} min · ${pages?.toLocaleString() ?? '—'} pages`
+      + (partition === null ? '' : ` · partition ${partition}`),
+  };
+}
+
+function xmlField(xml: string, names: readonly string[]): string | null {
+  for (const name of names) {
+    const match = xml.match(new RegExp(`<(?:action|data)\\b[^>]*\\bname="${name}"[^>]*>[\\s\\S]*?<value>([\\s\\S]*?)</value>`, 'i'));
+    if (match) return match[1].trim();
+  }
+  return null;
+}
+
+const ONLINE_INDEX_STAGES: Record<string, string> = {
+  '1': 'start', '2': 'stage 1 · base object build', '3': 'stage 1 complete',
+  '4': 'stage 2 · nonclustered indexes', '5': 'stage 2 complete',
+  '6': 'inserting rows', '7': 'done',
+};
+
+export function sqlServerOnlineIndexProgress(
+  rows: readonly (readonly unknown[])[], pid: number, since?: unknown,
+): SqlServerProgress | null {
+  const started = since === null || since === undefined ? null : Date.parse(String(since));
+  const events = rows.map(row => ({ row, xml: String(row[2] ?? '') }))
+    .filter(event => Number(xmlField(event.xml, ['session_id', 'spid'])) === pid)
+    .filter(event => {
+      if (started === null || !Number.isFinite(started)) return true;
+      const timestamp = Date.parse(String(event.row[1] ?? ''));
+      return Number.isFinite(timestamp) && timestamp >= started;
+    });
+  if (events.length === 0) return null;
+  let phase = 'online index operation';
+  let inserted: number | null = null;
+  let partition: number | null = null;
+  for (const event of events) {
+    const stage = xmlField(event.xml, ['event_subclass', 'progress_stage', 'subclass']);
+    if (stage !== null && stage !== '6') phase = ONLINE_INDEX_STAGES[stage] ?? stage;
+    const rows = optionalNumber(xmlField(event.xml, ['bigint_data1', 'rows_inserted', 'row_count']));
+    if (rows !== null) inserted = rows;
+    partition = optionalNumber(xmlField(event.xml, ['partition_number'])) ?? partition;
+  }
+  return {
+    phase,
+    pct: null,
+    detail: `online index Extended Events · ${inserted === null ? 'no row count yet' : `${inserted.toLocaleString()} rows inserted`}`
+      + (partition === null ? '' : ` · partition ${partition}`),
+  };
+}
+
+export function sqlServerOperatorProgress(
+  rows: readonly (readonly unknown[])[],
+): SqlServerProgress | null {
+  const candidates = rows.map(row => ({
+    name: String(row[1] ?? 'operator'),
+    rows: optionalNumber(row[2]), estimate: optionalNumber(row[3]),
+  })).filter(row => row.rows !== null || row.estimate !== null);
+  if (candidates.length === 0) return null;
+  const scan = candidates.find(row => /scan/i.test(row.name) && (row.estimate ?? 0) > 0);
+  const selected = scan ?? candidates.reduce((best, row) =>
+    (row.estimate ?? -1) > (best.estimate ?? -1) ? row : best);
+  const pct = selected.rows !== null && selected.estimate !== null && selected.estimate > 0
+    ? 100 * selected.rows / selected.estimate : null;
+  return {
+    phase: `${selected.name} · estimated operator progress`,
+    pct,
+    detail: `${selected.rows?.toLocaleString() ?? '—'} / ${selected.estimate?.toLocaleString() ?? '—'} rows · query profiles; not total DDL completion`,
+  };
+}
+
+export function sqlServerActivityDiagnostics(row: readonly unknown[]): string[] {
+  const diagnostics: string[] = [];
+  const blocker = optionalNumber(row[7]);
+  if (blocker !== null && blocker > 0) diagnostics.push(`blocked by session ${blocker}`);
+  const wait = String(row[8] ?? '');
+  if (wait) diagnostics.push(`wait ${wait} ${optionalNumber(row[9])?.toFixed(1) ?? '0.0'} s`);
+  const cpu = optionalNumber(row[10]);
+  if (cpu !== null) diagnostics.push(`CPU ${cpu.toFixed(1)} s`);
+  const reads = optionalNumber(row[11]);
+  const writes = optionalNumber(row[12]);
+  const logical = optionalNumber(row[13]);
+  if (reads !== null || writes !== null || logical !== null) {
+    diagnostics.push(`reads ${logical ?? '—'} logical / ${reads ?? '—'} physical · writes ${writes ?? '—'}`);
+  }
+  const dop = optionalNumber(row[14]);
+  if (dop !== null && dop > 0) diagnostics.push(`DOP ${dop}`);
+  const memory = optionalNumber(row[15]);
+  if (memory !== null) diagnostics.push(`granted memory ${(memory * 8 / 1024).toFixed(1)} MiB`);
+  return diagnostics;
+}
+
+export interface ActivityCompletionSnapshot {
+  querySecs: number;
+  phase: string;
+  pct: number | null;
+  detail: string;
+  diagnostics: string[];
+}
+
+export function activityCompletionLine(
+  engine: string, threadId: number, snapshot: ActivityCompletionSnapshot,
+): string {
+  const source = engine === 'postgres' ? 'backend' : 'session';
+  const phase = snapshot.phase || 'not reported';
+  const pct = snapshot.pct === null ? 'no server estimate' : `${snapshot.pct.toFixed(1)}%`;
+  const detail = snapshot.detail ? ` · ${snapshot.detail}` : '';
+  const diagnostics = snapshot.diagnostics.length > 0 ? ` · ${snapshot.diagnostics.join(' · ')}` : '';
+  return `${source} ${threadId} finished after ${snapshot.querySecs.toFixed(1)} s · `
+    + `final observed phase ${phase} · last observed progress ${pct}${detail}${diagnostics}`;
+}
+
 /**
  * The progress query for a watched backend, per engine and statement kind.
  * Numeric IDs are validated/coerced here because monitor_query has no binds.
  */
-export function progressProbe(engine: string, kind: DdlKind, pid: number): ProgressProbe {
+export function progressProbe(engine: string, kind: DdlKind, pid: number, flavor?: 'mysql' | 'mariadb' | 'percona'): ProgressProbe {
   const id = Math.trunc(Number(pid));
   if (!Number.isFinite(id) || id <= 0) return { sql: null, note: 'no backend to watch yet' };
 
@@ -400,9 +606,37 @@ FROM pg_stat_progress_cluster WHERE pid = ${id}`,
   if (engine === 'sqlserver') {
     return {
       sql: threadActivityProbe(engine, id),
-      note: 'SQL Server reports percent_complete for BACKUP, RESTORE, DBCC CHECK*/SHRINK*, '
+      note: 'sys.dm_exec_requests reports percent_complete for BACKUP, RESTORE, DBCC CHECK*/SHRINK*, '
         + 'ALTER INDEX REORGANIZE, ROLLBACK and recovery only — NOT for CREATE INDEX or '
-        + 'ALTER INDEX REBUILD.',
+        + 'ALTER INDEX REBUILD in the ordinary non-resumable case. Resumable, online-event and '
+        + 'query-profile metadata are probed separately.',
+    };
+  }
+
+  if (engine !== 'mysql') {
+    return {
+      sql: null,
+      note: `${engine} does not expose a supported cross-session DDL progress catalog.`,
+    };
+  }
+
+  if (flavor === 'mariadb') {
+    return {
+      sql: `SELECT p.ID AS conn_id, IFNULL(p.INFO, '') AS query,
+       ROUND(p.TIME_MS / 1000, 1) AS query_secs, IFNULL(p.STATE, '') AS state,
+       NULL AS phase, NULL AS work_completed, NULL AS work_estimated,
+       NULL AS pct, NULL AS phase_secs, 'running' AS phase_status,
+       NULL AS event_id, NULL AS statement_event_id,
+       IFNULL(p.USER, ''), IFNULL(p.HOST, ''), IFNULL(p.DB, ''), IFNULL(p.COMMAND, ''),
+       NULL AS lock_secs, NULL AS rows_affected, p.EXAMINED_ROWS,
+       NULL AS rows_sent, NULL AS warnings, NULL AS errors, NULL AS statement_thread_id,
+       p.STAGE, p.MAX_STAGE, p.PROGRESS,
+       CASE WHEN p.MAX_STAGE < 2 THEN p.PROGRESS
+            ELSE (p.STAGE - 1) / p.MAX_STAGE * 100 + p.PROGRESS / p.MAX_STAGE END AS total_pct
+FROM information_schema.PROCESSLIST p
+WHERE p.ID = ${id}`,
+      note: 'MariaDB native processlist progress does not require performance_schema. '
+        + 'PROGRESS is within the current stage; total_pct follows MariaDB’s documented overall formula.',
     };
   }
 
@@ -492,9 +726,53 @@ export const MYSQL_STAGE_STATUS_SQL = `SELECT
   (SELECT COUNT(*) FROM performance_schema.setup_consumers
     WHERE NAME LIKE 'events_stages_%')`;
 
+export function mysqlOperationNotes(
+  sql: string, flavor: 'mysql' | 'mariadb' | 'percona' = 'mysql',
+): string[] {
+  const s = normalizedDdl(sql);
+  const notes: string[] = [];
+  if (flavor === 'mariadb' && /^alter\s+table\b.*\b(?:add|drop)\s+system\s+versioning\b/.test(s)) {
+    notes.push(/\bdrop\s+system\s+versioning\b/.test(s)
+      ? 'Dropping system versioning deletes all retained history and rebuilds the table.'
+      : 'Adding system versioning rebuilds the table; existing rows become part of the versioned history.');
+  }
+  if (/\bconvert\s+to\s+character\s+set\b|\b(?:default\s+)?collate\s*=?/.test(s)) {
+    notes.push('Character-set or collation changes can rebuild the table and affected indexes; verify sort order and replica compatibility.');
+  }
+  if (flavor === 'mariadb' && /uca1400[\w]*/.test(s)) {
+    notes.push('UCA 14.0 collations require MariaDB 11.6 or later on every replica; older replicas do not understand them.');
+  }
+  if (/\brow_format\s*=\s*compressed\b/.test(s)) {
+    notes.push(flavor === 'mariadb'
+      ? 'ROW_FORMAT=COMPRESSED rebuilds the table using InnoDB’s compressed row format; it is separate from MariaDB PAGE_COMPRESSED.'
+      : 'ROW_FORMAT=COMPRESSED rebuilds the table using InnoDB compressed rows; compression savings are workload-dependent.');
+  }
+  if (flavor === 'mariadb' && /\bpage_compressed\s*=\s*(?:1|on)\b/.test(s)) {
+    notes.push('PAGE_COMPRESSED rebuilds the table. Filesystem space savings depend on sparse-file and hole-punching support; DATA_FREE does not measure compression ratio.');
+  }
+  if (flavor !== 'mariadb' && /\bcompression\s*=\s*['"]?(?:zlib|lz4)/.test(s)) {
+    notes.push('Transparent InnoDB page compression rebuilds the table. Actual filesystem savings depend on the filesystem and workload.');
+  }
+  if (/^optimize\s+(?:local\s+)?table\b/.test(s)
+    || /^alter\s+table\b.*\bengine\s*=\s*innodb\b/.test(s)) {
+    notes.push('This rebuild can compact data and indexes, but space returns to the filesystem only when the engine and tablespace permit it. DATA_FREE alone is not a general fragmentation measure.');
+  }
+  if (/^repair\s+(?:local\s+)?table\b/.test(s)) {
+    notes.push(flavor === 'mariadb'
+      ? 'REPAIR is storage-engine-specific. MariaDB can report native progress for Aria repair; InnoDB does not support REPAIR TABLE.'
+      : 'REPAIR is storage-engine-specific and does not repair InnoDB tables.');
+  }
+  return notes;
+}
+
 /** Does this statement do enough work to be worth watching for phases? */
 export function reportsPhases(engine: string, sql: string): boolean {
+  if (engine !== 'mysql' && engine !== 'postgres' && engine !== 'sqlserver') return false;
   const kind = ddlKind(sql);
-  if (kind === 'other') return engine !== 'postgres' && engine !== 'sqlserver';
-  return true;
+  if (kind === 'maintenance') return engine === 'mysql';
+  if (kind !== 'other') return true;
+  if (engine === 'sqlserver') {
+    return /^alter\s+index\b.*\breorganize(?:\s*\(|\s+with\b|\s*;|$)/.test(normalizedDdl(sql));
+  }
+  return engine !== 'postgres';
 }

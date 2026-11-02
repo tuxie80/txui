@@ -28,7 +28,7 @@ test('nulls become the form’s empty values, flags are real booleans', () => {
     ssl_ca_path: '', ssl_cert_path: '', ssl_key_path: '',
     trust_server_cert: false, has_custom_certs: false,
     use_ssh: false, ssh_host: '', ssh_port: 22, ssh_user: '',
-    ssh_key_path: '', ssh_jump: '', use_ssh_password: false,
+    ssh_key_path: '', ssh_accept_new_host: false, ssh_jump: '', use_ssh_password: false,
   });
 });
 
@@ -38,7 +38,7 @@ test('a full bastion + mTLS setup copies whole, minus secrets', () => {
     ssl_ca_path: '/ca.pem', ssl_cert_path: '/cert.pem', ssl_key_path: '/key.pem',
     use_ssh: true, ssh_host: 'bastion.example.com', ssh_port: 2222,
     ssh_user: 'deploy', ssh_key_path: '/keys/id_ed25519', ssh_jump: 'ops@jump:22',
-    use_ssh_password: true,
+    ssh_accept_new_host: true, use_ssh_password: true,
   }));
   assert.equal(c.ssl_mode, 'verify_full');
   assert.equal(c.has_custom_certs, true);
@@ -48,6 +48,7 @@ test('a full bastion + mTLS setup copies whole, minus secrets', () => {
   );
   // The AUTH CHOICE copies; the password itself is not in the shape at all.
   assert.equal(c.use_ssh_password, true);
+  assert.equal(c.ssh_accept_new_host, true);
   assert.ok(!('password' in c) && !('ssh_password' in c));
 });
 

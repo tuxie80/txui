@@ -236,6 +236,20 @@ fn suppress_console_window(cmd: &mut tokio::process::Command) {
     let _ = cmd;
 }
 
+fn host_key_policy(accept_new: bool) -> &'static str {
+    if accept_new { "StrictHostKeyChecking=accept-new" } else { "StrictHostKeyChecking=yes" }
+}
+
+fn host_key_result(result: Result<()>, accept_new: bool) -> Result<()> {
+    match result {
+        Err(e) if !accept_new && e.to_string().to_lowercase().contains("host key verification failed") =>
+            Err(anyhow::anyhow!(
+                "{e:#}. If this is a new host, verify its SSH fingerprint with your system ssh client; then enable 'Trust new host keys (TOFU)' on the connection"
+            )),
+        other => other,
+    }
+}
+
 /// OpenSSH's stderr line when `StrictHostKeyChecking=accept-new` records a
 /// previously unknown host key:
 /// "Warning: Permanently added 'host' (ED25519) to the list of known hosts."
@@ -328,10 +342,11 @@ impl SshTunnel {
         db_port:      u16,
         ssh_jump:     Option<&str>,
         ssh_password: Option<&str>,
+        ssh_accept_new_host: bool,
         connect_timeout_secs: Option<u32>,
     ) -> Result<Self> {
         match Self::open_once(ssh_host, ssh_port, ssh_user, ssh_key_path, db_host, db_port,
-                              ssh_jump, ssh_password, connect_timeout_secs).await {
+                              ssh_jump, ssh_password, ssh_accept_new_host, connect_timeout_secs).await {
             // The local port is chosen by bind:0 and then RELEASED before ssh
             // binds it — another process can claim it in that window, and ssh
             // exits at once under ExitOnForwardFailure. "Address already in
@@ -341,7 +356,7 @@ impl SshTunnel {
             // mitigation, not a guarantee.
             Err(e) if e.to_string().contains("Address already in use") =>
                 Self::open_once(ssh_host, ssh_port, ssh_user, ssh_key_path, db_host, db_port,
-                                ssh_jump, ssh_password, connect_timeout_secs).await,
+                                ssh_jump, ssh_password, ssh_accept_new_host, connect_timeout_secs).await,
             r => r,
         }
     }
@@ -356,6 +371,7 @@ impl SshTunnel {
         db_port:      u16,
         ssh_jump:     Option<&str>,
         ssh_password: Option<&str>,
+        ssh_accept_new_host: bool,
         connect_timeout_secs: Option<u32>,
     ) -> Result<Self> {
         validate_endpoint(ssh_user, ssh_host)?;
@@ -390,7 +406,7 @@ impl SshTunnel {
             "-N",
             "-L", &forward_spec,
             "-p", &ssh_port.to_string(),
-            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", host_key_policy(ssh_accept_new_host),
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
@@ -492,7 +508,7 @@ impl SshTunnel {
 
         // ssh has settled (or failed) — the askpass helper is no longer needed.
         cleanup_askpass(&askpass);
-        result?;
+        host_key_result(result, ssh_accept_new_host)?;
 
         log::info!(
             "SSH tunnel ready: localhost:{} → {}:{}  (via {}@{}:{})",
@@ -617,6 +633,7 @@ pub async fn spawn_ssh_exec(
     ssh_key_path:   Option<&str>,
     ssh_jump:       Option<&str>,
     ssh_password:   Option<&str>,
+    ssh_accept_new_host: bool,
     remote_command: &str,
 ) -> Result<tokio::process::Child> {
     validate_endpoint(ssh_user, ssh_host)?;
@@ -641,7 +658,7 @@ pub async fn spawn_ssh_exec(
     cmd.args([
         "-T",
         "-p", &ssh_port.to_string(),
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", host_key_policy(ssh_accept_new_host),
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=3",
         "-o", "ConnectTimeout=10",
@@ -721,13 +738,25 @@ pub async fn spawn_ssh_exec(
 
     // ssh has settled (or failed) — the askpass helper is no longer needed.
     cleanup_askpass(&askpass);
-    result?;
+    host_key_result(result, ssh_accept_new_host)?;
     Ok(child)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_host_trust_is_strict_by_default_and_opt_in_with_guidance() {
+        assert_eq!(host_key_policy(false), "StrictHostKeyChecking=yes");
+        assert_eq!(host_key_policy(true), "StrictHostKeyChecking=accept-new");
+        let err = host_key_result(Err(anyhow::anyhow!("Host key verification failed")), false)
+            .unwrap_err().to_string();
+        assert!(err.contains("verify its SSH fingerprint"));
+        let opted_in = host_key_result(Err(anyhow::anyhow!("Host key verification failed")), true)
+            .unwrap_err().to_string();
+        assert!(!opted_in.contains("verify its SSH fingerprint"));
+    }
 
     #[test]
     fn jump_validation_accepts_normal_specs() {

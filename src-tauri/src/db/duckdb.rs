@@ -1469,6 +1469,45 @@ mod tests {
         assert_eq!(r.rows_affected, None);
     }
 
+    /// Opt-in live interoperability check: `dbctl tmp duckdb@2 -- cargo test
+    /// --lib dbctl_duckdb_2_file -- --ignored --nocapture` from src-tauri.
+    /// dbctl owns and destroys the tiny file; the test writes no fixture home.
+    #[tokio::test]
+    #[ignore = "requires dbctl's DUCKDB_DATABASE live fixture"]
+    async fn dbctl_duckdb_2_file_supports_ddl_without_a_progress_catalog() {
+        let path = std::env::var("DUCKDB_DATABASE").expect("run through dbctl tmp duckdb@2");
+        let mut c = ConnectionConfig::new(Engine::Duckdb, "dbctl-duckdb-2");
+        c.file_path = Some(path);
+        let s = open(&c).await.unwrap();
+        let p = ping(&s).await;
+        assert!(p.ok, "{:?}", p.error);
+        assert_eq!(p.server_version.as_deref(), Some("DuckDB v2.0.0"));
+
+        execute(&s, "CREATE TABLE watch_test(id INTEGER, value VARCHAR);
+                     INSERT INTO watch_test VALUES (1, 'a'), (2, 'b'), (3, 'c');
+                     CREATE INDEX watch_value_idx ON watch_test(value);
+                     ALTER TABLE watch_test ADD COLUMN note VARCHAR").await.unwrap();
+        let rows = execute(&s, "SELECT COUNT(*), COUNT(DISTINCT value) FROM watch_test")
+            .await.unwrap();
+        assert_eq!(rows.rows[0][0], serde_json::json!(3));
+        assert_eq!(rows.rows[0][1], serde_json::json!(3));
+        let indexes = execute(&s,
+            "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = 'watch_test'")
+            .await.unwrap();
+        assert_eq!(indexes.rows.len(), 1);
+        assert_eq!(indexes.rows[0][0], serde_json::json!("watch_value_idx"));
+
+        let progress = execute(&s,
+            "SELECT function_name FROM duckdb_functions() WHERE function_name = 'query_progress'")
+            .await.unwrap();
+        assert!(progress.rows.is_empty(), "DuckDB gained query_progress(); implement its watcher");
+        let settings = execute(&s,
+            "SELECT name, description FROM duckdb_settings() WHERE name = 'enable_progress_bar'")
+            .await.unwrap();
+        assert_eq!(settings.rows.len(), 1);
+        assert!(settings.rows[0][1].as_str().unwrap().contains("prints progress to the terminal"));
+    }
+
     #[tokio::test]
     async fn multi_statement_runs_each_once_and_concatenates() {
         let s = mem().await;

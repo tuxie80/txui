@@ -823,7 +823,7 @@ pub async fn panel_query(
     // mid-statement would poison the whole transaction, which is why the
     // pinned path deliberately skips the cancel token, exactly as
     // `execute_query` does.
-    if let Some(r) = state.try_on_tx_conn(&session_id, &sql).await {
+    if let Some(r) = state.try_on_tx_conn_capped(&session_id, &sql, Some(DEFAULT_MAX_ROWS)).await {
         return r;
     }
 
@@ -839,6 +839,31 @@ pub async fn panel_query(
         _ = rx => Err(crate::apperror::AppError::cancelled()),
     };
 
+    state.cancels.write().await.remove(&cancel_key);
+    state.kills.write().await.remove(&cancel_key);
+    state.ch_kills.write().await.remove(&cancel_key);
+    result
+}
+
+pub(crate) async fn bounded_monitor_query(
+    session_id: Uuid,
+    sql: &str,
+    state: &State<'_, AppState>,
+) -> Result<QueryResult, crate::apperror::AppError> {
+    state.guard_statement(&session_id, sql).await?;
+    if let Some(r) = state.try_on_tx_conn_capped(&session_id, sql, Some(DEFAULT_MAX_ROWS)).await {
+        return r;
+    }
+
+    let cancel_key = format!("panel-{session_id}-monitor-{}", Uuid::new_v4());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    state.cancels.write().await.insert(cancel_key.clone(), tx);
+    let deadline = state.query_deadline(&session_id).await;
+    let panel_db = state.session_dbs.read().await.get(&session_id).cloned();
+    let result = race_query(
+        session_id, sql, &state.sessions, &state.kills, &state.ch_kills, &cancel_key,
+        false, panel_db.as_deref(), rx, deadline, Some(DEFAULT_MAX_ROWS),
+    ).await;
     state.cancels.write().await.remove(&cancel_key);
     state.kills.write().await.remove(&cancel_key);
     state.ch_kills.write().await.remove(&cancel_key);

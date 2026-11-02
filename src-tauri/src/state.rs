@@ -401,13 +401,22 @@ impl AppState {
         session_id: &Uuid,
         sql: &str,
     ) -> Option<Result<crate::db::types::QueryResult, crate::apperror::AppError>> {
+        self.try_on_tx_conn_capped(session_id, sql, None).await
+    }
+
+    pub async fn try_on_tx_conn_capped(
+        &self,
+        session_id: &Uuid,
+        sql: &str,
+        max_rows: Option<usize>,
+    ) -> Option<Result<crate::db::types::QueryResult, crate::apperror::AppError>> {
         let txc = self.tx_conns.read().await.get(session_id).cloned()?;
         let mut guard = txc.lock().await;
         Some(match &mut *guard {
-            TxConn::My(conn) => crate::db::mysql::execute(&mut **conn, sql)
+            TxConn::My(conn) => crate::db::mysql::execute_capped(&mut **conn, sql, max_rows)
                 .await
                 .map_err(crate::apperror::AppError::from),
-            TxConn::Pg(conn) => crate::db::postgres::execute(&mut **conn, sql)
+            TxConn::Pg(conn) => crate::db::postgres::execute_capped(&mut **conn, sql, max_rows)
                 .await
                 .map_err(crate::apperror::AppError::from),
         })

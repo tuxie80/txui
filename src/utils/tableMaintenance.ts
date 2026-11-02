@@ -182,6 +182,48 @@ export interface AnalyzeOpts {
   samplePages?: number | null;
   /** SQL Server: `UPDATE STATISTICS … WITH FULLSCAN` — read every row instead of sampling. */
   fullscan?: boolean;
+  /** SQL Server: eligible `ALTER INDEX … REBUILD` runs online and resumably. */
+  resumableOnline?: boolean;
+}
+
+export const SQLSERVER_RESUMABLE_SERVER_SQL = `SELECT
+  TRY_CONVERT(int, SERVERPROPERTY('ProductMajorVersion')),
+  TRY_CONVERT(int, SERVERPROPERTY('EngineEdition'))`;
+
+export function sqlServerResumableServerReason(row: readonly unknown[] | undefined): string | null {
+  if (!row) return 'SQL Server version/edition could not be determined; resumable rebuild was not attempted.';
+  const major = Number(row[0]);
+  const edition = Number(row[1]);
+  if (!Number.isFinite(major) || major < 14) return 'Resumable index rebuild requires SQL Server 2017 (14.x) or later.';
+  if (![3, 5, 8].includes(edition)) {
+    return 'Online/resumable index rebuild requires an edition with online index operations (Enterprise/Developer, Azure SQL Database, or Managed Instance).';
+  }
+  return null;
+}
+
+export function sqlServerResumableIndexSql(tables: readonly TableRef[]): string {
+  const selected = tables.map(t => `(s.name = ${sqlLiteral(t.schema, 'sqlserver')} AND t.name = ${sqlLiteral(t.name, 'sqlserver')})`).join(' OR ');
+  return `SELECT s.name, t.name, i.name, i.type, i.is_disabled, i.has_filter,
+       CASE WHEN i.type = 1 AND EXISTS (
+         SELECT 1 FROM sys.columns c JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+         WHERE c.object_id = i.object_id AND ty.name IN ('text', 'ntext', 'image')
+       ) THEN 1 ELSE 0 END AS legacy_lob
+FROM sys.indexes i
+JOIN sys.tables t ON t.object_id = i.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE i.type > 0 AND (${selected})
+ORDER BY s.name, t.name, i.index_id`;
+}
+
+export function sqlServerResumableIndexReason(rows: readonly (readonly unknown[])[]): string | null {
+  for (const row of rows) {
+    const object = `${String(row[0])}.${String(row[1])}.${String(row[2])}`;
+    if (Number(row[3]) === 4) return `${object} is an XML index; resumable online rebuild is not supported for it.`;
+    if (Number(row[4]) === 1) return `${object} is disabled; resumable rebuild does not support disabled indexes.`;
+    if (Number(row[5]) === 1) return `${object} is filtered; resumable rebuild does not support filtered indexes.`;
+    if (Number(row[6]) === 1) return `${object} is clustered on a table with text/ntext/image data; it must be rebuilt offline.`;
+  }
+  return null;
 }
 
 /**
@@ -238,7 +280,8 @@ export function maintenanceSql(
         return qualified.map(t =>
           `DBCC CHECKTABLE (${sqlLiteral(t, engine)}) WITH NO_INFOMSGS, TABLERESULTS`);
       case 'optimize':
-        return qualified.map(t => `ALTER INDEX ALL ON ${t} REBUILD`);
+        return qualified.map(t => `ALTER INDEX ALL ON ${t} REBUILD`
+          + (opts?.resumableOnline ? ' WITH (ONLINE = ON, RESUMABLE = ON)' : ''));
       case 'reorganize':
         return qualified.map(t => `ALTER INDEX ALL ON ${t} REORGANIZE`);
       default:

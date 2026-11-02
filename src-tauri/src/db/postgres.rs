@@ -237,6 +237,7 @@ where
     // columns. A row whose column list differs starts a new set.
     let mut sets: Vec<(Vec<ColumnInfo>, Vec<Row>)> = Vec::new();
     let mut total_rows = 0usize;
+    let mut total_bytes = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.try_next().await? {
         match item {
@@ -260,10 +261,17 @@ where
                     truncated = true;
                     break;
                 }
-                let (columns, rows) = sets.last_mut().expect("a row always has a set");
-                rows.push(columns.iter().enumerate().map(|(i, col)| {
+                let (columns, _) = sets.last().expect("a row always has a set");
+                let decoded: Row = columns.iter().enumerate().map(|(i, col)| {
                     json_from_pg_row(&row, i, &col.type_name)
-                }).collect());
+                }).collect();
+                total_bytes += crate::db::types::row_bytes(&decoded);
+                if total_bytes > crate::db::types::MAX_RESULT_BYTES {
+                    truncated = true;
+                    break;
+                }
+                let (_, rows) = sets.last_mut().expect("a row always has a set");
+                rows.push(decoded);
                 total_rows += 1;
             }
         }

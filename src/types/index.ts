@@ -43,6 +43,8 @@ export interface ConnectionConfig {
   ssh_port:     number | null;
   ssh_user:     string | null;
   ssh_key_path: string | null;
+  /** Trust a previously unseen SSH host key. Default false; enable only after verifying its fingerprint. */
+  ssh_accept_new_host?: boolean;
   // SSL certificates
   /** MySQL session time zone. null/blank = UTC (TxUI default); 'SYSTEM' =
    *  the server's own zone; or an offset / named zone. */

@@ -124,6 +124,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [sshPort,    setSshPort]    = useState(initial?.ssh_port ?? 22);
   const [sshUser,    setSshUser]    = useState(initial?.ssh_user ?? '');
   const [sshKeyPath, setSshKeyPath] = useState(initial?.ssh_key_path ?? '');
+  const [sshAcceptNewHost, setSshAcceptNewHost] = useState(initial?.ssh_accept_new_host ?? false);
   const [sshJump,    setSshJump]    = useState(initial?.ssh_jump ?? '');
   const [useSshPassword, setUseSshPassword] = useState(initial?.use_ssh_password ?? false);
   // ssh-agent status, so the key field can say whether leaving it blank works.
@@ -230,6 +231,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     setSshPort(c.ssh_port);
     setSshUser(c.ssh_user);
     setSshKeyPath(c.ssh_key_path);
+    setSshAcceptNewHost(c.ssh_accept_new_host ?? false);
     setSshJump(c.ssh_jump);
     setUseSshPassword(c.use_ssh_password);
     setSshPassword(''); // the auth CHOICE copies; the secret does not
@@ -412,6 +414,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       ssh_port:     useSsh ? (sshPort || 22) : null,
       ssh_user:     useSsh ? (sshUser || null) : null,
       ssh_key_path: useSsh ? (sshKeyPath || null) : null,
+      ssh_accept_new_host: useSsh && sshAcceptNewHost,
       ssh_jump:         useSsh ? (sshJump.trim() || null) : null,
       use_ssh_password: useSsh && useSshPassword,
       // SSL certs
@@ -1095,6 +1098,15 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
                          placeholder="SSH password — blank keeps the saved one" />
                 )}
               </div>
+              <label className="form-check">
+                <input type="checkbox" checked={sshAcceptNewHost}
+                       onChange={e => setSshAcceptNewHost(e.target.checked)} />
+                Trust new host keys (TOFU)
+              </label>
+              <p className="form-hint">
+                Off refuses unknown hosts. Enable only after verifying the SSH fingerprint;
+                a changed key for a known host is always rejected.
+              </p>
             </div>
           )}
         </div>

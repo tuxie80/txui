@@ -68,6 +68,40 @@ describe('analyzeMariaJson (MariaDB ANALYZE FORMAT=JSON)', () => {
       `t1 was falsely flagged: ${JSON.stringify(out.findings.map(f => f.title))}`);
   });
 
+  test('a measured MariaDB vector plan proves which index avoided the filesort', () => {
+    const vectorPlan = JSON.stringify({
+      query_optimization: { r_total_time_ms: 0.02 },
+      query_block: { select_id: 1, cost: 0.01, r_loops: 1, r_total_time_ms: 0.04,
+        nested_loop: [{ table: {
+          table_name: 'items', access_type: 'index', key: 'embedding_idx', key_length: '10',
+          used_key_parts: ['embedding'], loops: 1, r_loops: 1, rows: 2, r_rows: 1,
+          cost: 0.01, r_total_time_ms: 0.01, filtered: 100, r_filtered: 100,
+        } }] },
+    });
+    const out = analyzeMariaJson(vectorPlan,
+      "SELECT id FROM items ORDER BY VEC_DISTANCE_COSINE(embedding, VEC_FromText('[0.1,0.2]')) LIMIT 1");
+    const finding = out.findings.find(f => /Vector search uses index/.test(f.title));
+    assert.ok(finding);
+    assert.equal(finding.severity, 'info');
+    assert.match(finding.detail, /without a filesort/);
+  });
+
+  test('a vector predicate without usable nearest-neighbour ordering gets a corrective finding', () => {
+    const scan = JSON.stringify({
+      query_block: { select_id: 1, cost: 1, r_loops: 1, r_total_time_ms: 2,
+        using_filesort: true, table: {
+          table_name: 'items', access_type: 'ALL', loops: 1, r_loops: 1,
+          rows: 100, r_rows: 100, cost: 1, r_total_time_ms: 2,
+          filtered: 100, r_filtered: 100,
+        } },
+    });
+    const out = analyzeMariaJson(scan,
+      "SELECT id FROM items ORDER BY VEC_DISTANCE_EUCLIDEAN(embedding, VEC_FromText('[0.1,0.2]')) LIMIT 1");
+    const finding = out.findings.find(f => /not using a vector index/.test(f.title));
+    assert.ok(finding);
+    assert.match(finding.detail, /matching distance metric/);
+  });
+
   test('a non-JSON document throws, so the caller can fall back', () => {
     assert.throws(() => analyzeMariaJson('-> Table scan on t'));
   });

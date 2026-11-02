@@ -1160,6 +1160,7 @@ async fn run_sst_tail(
         config.ssh_key_path.as_deref(),
         config.ssh_jump.as_deref(),
         ssh_password.as_deref(),
+        config.ssh_accept_new_host,
         &remote,
     ).await.map_err(|e| AppError::new(crate::apperror::ErrorCode::ConnectFailed, e.to_string()))?;
 

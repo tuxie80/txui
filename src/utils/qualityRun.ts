@@ -797,7 +797,7 @@ ${lines.join('\n')}`,
         const wall = performance.now() - t0;
         const asJson = input.isMariaDb || text.trimStart().startsWith('{');
         // systematic interpretation: est/actual ratios, loops, bottleneck
-        const insights = asJson ? analyzeMariaJson(text) : analyzePlanText(text);
+        const insights = asJson ? analyzeMariaJson(text, subSql) : analyzePlanText(text);
         findings.push(...insights.findings);
         sections.push({
           title: `${label} (measured, ${(wall / 1000).toFixed(1)}s wall)`,

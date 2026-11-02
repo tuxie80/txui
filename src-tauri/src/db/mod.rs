@@ -2,6 +2,8 @@ pub mod clickhouse;
 pub mod util;
 #[cfg(test)]
 mod clickhouse_live_tests;
+#[cfg(test)]
+mod watch_live_tests;
 pub mod duckdb;
 pub mod gcp_iam;
 pub mod mongodb;

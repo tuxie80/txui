@@ -32,6 +32,7 @@ export interface SecurityCopy {
   ssh_port: number;
   ssh_user: string;
   ssh_key_path: string;
+  ssh_accept_new_host: boolean;
   ssh_jump: string;
   use_ssh_password: boolean;
 }
@@ -50,6 +51,7 @@ export function securityCopyFrom(src: ConnectionConfig): SecurityCopy {
     ssh_port: src.ssh_port ?? 22,
     ssh_user: src.ssh_user ?? '',
     ssh_key_path: src.ssh_key_path ?? '',
+    ssh_accept_new_host: !!src.ssh_accept_new_host,
     ssh_jump: src.ssh_jump ?? '',
     use_ssh_password: src.use_ssh_password,
   };

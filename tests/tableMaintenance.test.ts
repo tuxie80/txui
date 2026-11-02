@@ -13,7 +13,8 @@ import assert from 'node:assert/strict';
 import {
   OPS, findOp, opsFor, maintenanceSql, invalidProbes, describeInvalid, invalidSummary,
   opSummary, opWarning, parseSamplePages, readOnlyProbeSql, readOnlyReason,
-  statementSubject,
+  sqlServerResumableIndexReason, sqlServerResumableIndexSql, sqlServerResumableServerReason,
+  statementSubject, SQLSERVER_RESUMABLE_SERVER_SQL,
 } from '../src/utils/tableMaintenance.ts';
 import type { InvalidObject } from '../src/utils/tableMaintenance.ts';
 
@@ -138,6 +139,48 @@ test('FULLSCAN is opt-in on SQL Server, and absent by default', () => {
     'UPDATE STATISTICS [shop].[orders]',
     'UPDATE STATISTICS [shop].[customers]',
   ]);
+});
+
+test('SQL Server resumable online rebuild is opt-in and does not change the default', () => {
+  assert.deepEqual(maintenanceSql('optimize', TABLES, 'sqlserver'), [
+    'ALTER INDEX ALL ON [shop].[orders] REBUILD',
+    'ALTER INDEX ALL ON [shop].[customers] REBUILD',
+  ]);
+  assert.deepEqual(maintenanceSql('optimize', TABLES, 'sqlserver', { resumableOnline: true }), [
+    'ALTER INDEX ALL ON [shop].[orders] REBUILD WITH (ONLINE = ON, RESUMABLE = ON)',
+    'ALTER INDEX ALL ON [shop].[customers] REBUILD WITH (ONLINE = ON, RESUMABLE = ON)',
+  ]);
+});
+
+test('resumable server checks require a supported version and online edition', () => {
+  assert.match(SQLSERVER_RESUMABLE_SERVER_SQL, /ProductMajorVersion/);
+  assert.match(SQLSERVER_RESUMABLE_SERVER_SQL, /EngineEdition/);
+  assert.equal(sqlServerResumableServerReason([14, 3]), null);
+  assert.equal(sqlServerResumableServerReason([15, 5]), null);
+  assert.equal(sqlServerResumableServerReason([16, 8]), null);
+  assert.match(sqlServerResumableServerReason([13, 3])!, /2017/);
+  assert.match(sqlServerResumableServerReason([16, 2])!, /edition/);
+  assert.match(sqlServerResumableServerReason(undefined)!, /not attempted/);
+});
+
+test('resumable index probes are scoped and quote every selected identifier', () => {
+  const sql = sqlServerResumableIndexSql([{ schema: "o'brien", name: 'orders' }]);
+  assert.match(sql, /s\.name = 'o''brien'/);
+  assert.match(sql, /t\.name = 'orders'/);
+  assert.match(sql, /i\.type > 0/);
+  assert.match(sql, /text', 'ntext', 'image/);
+});
+
+test('every documented ineligible index shape is blocked before ALTER INDEX ALL', () => {
+  const base = ['shop', 'orders', 'ix', 2, 0, 0, 0];
+  assert.equal(sqlServerResumableIndexReason([base]), null);
+  for (const [column, value, reason] of [
+    [3, 4, /XML index/], [4, 1, /disabled/], [5, 1, /filtered/], [6, 1, /offline/],
+  ] as const) {
+    const row = [...base];
+    row[column] = value;
+    assert.match(sqlServerResumableIndexReason([row])!, reason);
+  }
 });
 
 test('the sample-pages field accepts a positive integer and nothing else', () => {

@@ -313,42 +313,7 @@ pub async fn monitor_query(
     sql: String,
     state: State<'_, AppState>,
 ) -> Result<QueryResult, crate::apperror::AppError> {
-    // Same server-side write guard as execute_query/panel_query — this path
-    // is reachable from several panels, so a read-only session must refuse
-    // writes here too, not only in the UI.
-    // Engine-aware: SQL goes through sqlguard, Redis through redisguard.
-    // Choosing a guard per call site is how every Redis write slipped past.
-    state.guard_statement(&session_id, &sql).await?;
-    // A pinned connection wins: a panel reading during an open transaction must
-    // see the session's uncommitted work, not a pooled connection's older view.
-    if let Some(r) = state.try_on_tx_conn(&session_id, &sql).await {
-        return r;
-    }
-    let session = get_session_pub(session_id, &state.sessions)
-        .await
-        ?;
-    match session.as_ref() {
-        LiveSession::Mysql(pool)    => mysql::execute(pool, &sql).await.map_err(Into::into),
-        LiveSession::Postgres(pool) => postgres::execute(pool, &sql).await.map_err(Into::into),
-        LiveSession::Redis(mgr, _)  => crate::db::redis::execute(mgr.clone(), &sql).await.map_err(Into::into),
-        LiveSession::Clickhouse(ch) => clickhouse::execute(ch, &sql).await.map_err(Into::into),
-        LiveSession::Sqlite(pool)   => crate::db::sqlite::execute(pool, &sql).await.map_err(Into::into),
-        LiveSession::Parquet(f)     => {
-            // CPU-bound decode — off the async runtime (mirrors export.rs).
-            let f = f.clone();
-            let sql = sql.clone();
-            tokio::task::spawn_blocking(move || crate::db::parquet::execute(&f, &sql))
-                .await
-                .map_err(|e| crate::apperror::AppError::from(format!("parquet task failed: {e}")))?
-                .map_err(Into::into)
-        }
-        LiveSession::Duckdb(s)      => crate::db::duckdb::execute(s, &sql).await.map_err(Into::into),
-        // Not SQL: the find editor's `mongo_find` command is the query path.
-        LiveSession::MongoDb(_)     => Err("MongoDB does not speak SQL — use the find editor".into()),
-        // Arbitrary DMV SQL from the DBA views runs through the driver like
-        // any user statement (the write guard already ran above).
-        LiveSession::SqlServer(s)   => crate::db::sqlserver::execute(s, &sql).await.map_err(Into::into),
-    }
+    crate::commands::query::bounded_monitor_query(session_id, &sql, &state).await
 }
 
 // ── Replication ───────────────────────────────────────────────────────────────

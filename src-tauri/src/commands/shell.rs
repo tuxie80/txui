@@ -40,6 +40,15 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// transcript that lives in the renderer's memory.
 const MAX_BYTES: usize = 256 * 1024;
 
+pub(crate) async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R, max: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::new();
+    reader.take(max as u64 + 1).read_to_end(&mut buf).await?;
+    let truncated = buf.len() > max;
+    Ok((buf, truncated))
+}
+
 fn clamp(mut s: Vec<u8>) -> (String, bool) {
     let truncated = s.len() > MAX_BYTES;
     if truncated {
@@ -82,6 +91,12 @@ pub(crate) fn user_shell() -> (String, &'static str) {
 /// command that hangs cannot wedge the shell for the rest of the session.
 #[tauri::command]
 pub async fn run_os_command(command: String, cwd: Option<String>) -> Result<OsOutput, crate::apperror::AppError> {
+    run_os_command_with_timeout(command, cwd, TIMEOUT).await
+}
+
+async fn run_os_command_with_timeout(
+    command: String, cwd: Option<String>, timeout: Duration,
+) -> Result<OsOutput, crate::apperror::AppError> {
     let line = command.trim().to_string();
     if line.is_empty() {
         return Err("nothing to run".into());
@@ -95,7 +110,8 @@ pub async fn run_os_command(command: String, cwd: Option<String>) -> Result<OsOu
         .arg(&line)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
         cmd.current_dir(dir);
     }
@@ -111,16 +127,20 @@ pub async fn run_os_command(command: String, cwd: Option<String>) -> Result<OsOu
         // first deadlocks as soon as the other fills its pipe buffer — which a
         // command writing a lot to stderr does immediately.
         let a = async {
-            if let Some(s) = stdout.as_mut() { let _ = s.read_to_end(&mut out_buf).await; }
+            if let Some(s) = stdout.as_mut() {
+                if let Ok((buf, _)) = read_bounded(s, MAX_BYTES).await { out_buf = buf; }
+            }
         };
         let b = async {
-            if let Some(s) = stderr.as_mut() { let _ = s.read_to_end(&mut err_buf).await; }
+            if let Some(s) = stderr.as_mut() {
+                if let Ok((buf, _)) = read_bounded(s, MAX_BYTES).await { err_buf = buf; }
+            }
         };
         tokio::join!(a, b);
         child.wait().await
     };
 
-    let (status, timed_out) = match tokio::time::timeout(TIMEOUT, collect).await {
+    let (status, timed_out) = match tokio::time::timeout(timeout, collect).await {
         Ok(res) => (res.ok().and_then(|s| s.code()), false),
         Err(_) => (None, true),
     };
@@ -141,6 +161,18 @@ pub async fn run_os_command(command: String, cwd: Option<String>) -> Result<OsOu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_read_stops_at_limit_plus_one() {
+        let mut input = &b"abcdefgh"[..];
+        let (buf, truncated) = read_bounded(&mut input, 4).await.unwrap();
+        assert_eq!(buf, b"abcde");
+        assert!(truncated);
+        let mut short = &b"abc"[..];
+        let (buf, truncated) = read_bounded(&mut short, 4).await.unwrap();
+        assert_eq!(buf, b"abc");
+        assert!(!truncated);
+    }
 
     #[test]
     fn output_is_capped_and_says_so() {
@@ -169,6 +201,18 @@ mod tests {
             assert_eq!(flag, "-c");
             assert!(shell.starts_with('/'), "expected an absolute path, got {shell}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_returns_promptly_and_drops_the_child() {
+        let started = std::time::Instant::now();
+        let out = run_os_command_with_timeout(
+            "sleep 30".into(), None, Duration::from_millis(25),
+        ).await.unwrap();
+        assert!(out.timed_out);
+        assert_eq!(out.code, None);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

@@ -19,7 +19,7 @@ interface Status {
   connections: number;
   secrets: number;
 }
-interface ImportSummary { connections: number; secrets: number; folders: number }
+interface ImportSummary { connections: number; secrets: number; folders: number; sanitized: number }
 
 /** Matches what the vault format enforces. */
 const MIN_PASSWORD = 8;
@@ -258,7 +258,8 @@ export function SecurityPanel() {
               });
               window.dispatchEvent(new CustomEvent('dbgui:connections-changed'));
               return `Imported ${r.connections} connection(s), ${r.secrets} secret(s), `
-                + `${r.folders} folder(s).`;
+                + `${r.folders} folder(s).`
+                + (r.sanitized ? ` ${r.sanitized} connection(s) had password commands disabled and auto-connect, log paths and imported SSH trust cleared; review them before connecting.` : '');
             })}
           />
         )}

@@ -587,6 +587,7 @@ async fn collect_stream(
     let mut sets: Vec<(Vec<ColumnInfo>, Vec<Row>)> = Vec::new();
     let mut first_row_ms: Option<u64> = None;
     let mut total_rows = 0usize;
+    let mut total_bytes = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.next().await {
         match item.map_err(ms_error)? {
@@ -611,6 +612,11 @@ async fn collect_stream(
                 let cells: Row = row.cells()
                     .map(|(c, d)| cell_to_json(c.column_type() == ColumnType::Udt, d))
                     .collect();
+                total_bytes += crate::db::types::row_bytes(&cells);
+                if total_bytes > crate::db::types::MAX_RESULT_BYTES {
+                    truncated = true;
+                    break;
+                }
                 if let Some(last) = sets.last_mut() {
                     last.1.push(cells);
                 }

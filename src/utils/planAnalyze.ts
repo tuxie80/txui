@@ -252,7 +252,7 @@ export function analyzePlanText(text: string): AnalyzeInsights {
  * (`misestimateOf` handles the per-loop vs totalled-actuals trap), the node
  * holding most of the measured time, and full scans that actually read a lot.
  */
-export function analyzeMariaJson(text: string): AnalyzeInsights {
+export function analyzeMariaJson(text: string, sql = ''): AnalyzeInsights {
   const plan = parseMysqlPlan(text);
   const findings: Finding[] = [];
   let n = 1;
@@ -269,6 +269,25 @@ export function analyzeMariaJson(text: string): AnalyzeInsights {
 
   const label = (node: JsonPlanNode) =>
     `${node.op}${node.detail ? ` — ${node.detail}` : ''}`;
+
+  const normalizedSql = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ')
+    .replace(/\s+/g, ' ').trim().toLowerCase();
+  if (/\bvec_distance(?:_cosine|_euclidean)?\s*\(/.test(normalizedSql)) {
+    const bareDistanceOrder = /\border\s+by\s+vec_distance(?:_cosine|_euclidean)?\s*\(/.test(normalizedSql);
+    const hasLimit = /\blimit\b/.test(normalizedSql);
+    const indexed = rows.find(row => row.node.stats.index && row.node.kind === 'scan-index');
+    const filesort = /"using_filesort"\s*:\s*true/.test(text);
+    if (bareDistanceOrder && hasLimit && indexed && !filesort) {
+      push('info', `Vector search uses index ${indexed.node.stats.index}`,
+        `MariaDB’s measured plan selected ${indexed.node.stats.index} without a filesort. `
+          + `It returned ${Math.round(indexed.node.stats.rowsActual ?? indexed.node.stats.rowsEst ?? 0).toLocaleString()} rows.`);
+    } else {
+      push('yellow', 'Vector search is not using a vector index for nearest-neighbour ordering',
+        'MariaDB needs ORDER BY on a bare VEC_DISTANCE/VEC_DISTANCE_COSINE/VEC_DISTANCE_EUCLIDEAN call, '
+          + 'a LIMIT, and a vector index built with the matching distance metric. Check the measured key and filesort; '
+          + 'an index used only for a WHERE predicate does not accelerate the distance ordering.');
+    }
+  }
 
   // ── estimation errors (worst first) ──
   const offenders = rows

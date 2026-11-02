@@ -225,6 +225,10 @@ pub struct ConnectionConfig {
     /// Path to private key file; if None, ssh-agent / default keys used
     #[serde(default)]
     pub ssh_key_path: Option<String>,
+    /// Trust a previously unseen host key (TOFU). Off by default: first-contact
+    /// trust is an explicit decision because password authentication follows it.
+    #[serde(default)]
+    pub ssh_accept_new_host: bool,
 
     // ── SSL certificates ────────────────────────────────────────
     /// Path to PEM CA certificate for SSL verification
@@ -396,6 +400,19 @@ pub struct ConnectionConfig {
 }
 
 impl ConnectionConfig {
+    /// Strip behavior an imported file must not acquire on a new machine.
+    /// Returns true when anything was removed.
+    pub fn sanitize_import(&mut self) -> bool {
+        let sanitized = self.password_exec.is_some() || self.auto_connect
+            || self.log_dir.is_some() || self.ssh_accept_new_host;
+        self.password_exec = None;
+        self.password_exec_ttl_secs = None;
+        self.auto_connect = false;
+        self.log_dir = None;
+        self.ssh_accept_new_host = false;
+        sanitized
+    }
+
     #[allow(dead_code)] // constructor for upcoming programmatic connection creation
     pub fn new(engine: Engine, name: impl Into<String>) -> Self {
         let port = engine.default_port();
@@ -423,6 +440,7 @@ impl ConnectionConfig {
             ssh_port:     None,
             ssh_user:     None,
             ssh_key_path: None,
+            ssh_accept_new_host: false,
             ssl_ca_path:   None,
             ssl_cert_path: None,
             ssl_key_path:  None,
@@ -488,6 +506,28 @@ pub struct PingResult {
 
 /// A row in the result set — each value is JSON-safe
 pub type Row = Vec<serde_json::Value>;
+
+/// Maximum decoded result size, independent of the row count. Large LOBs make
+/// a row-only cap meaningless; the row that crosses the budget is not retained.
+pub const MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn json_value_bytes(value: &serde_json::Value) -> usize {
+    use serde_json::Value as V;
+    match value {
+        V::Null => 4,
+        V::Bool(v) => if *v { 4 } else { 5 },
+        V::Number(v) => v.to_string().len(),
+        V::String(v) => v.len() + 2,
+        V::Array(values) => 2 + values.iter().map(json_value_bytes).sum::<usize>(),
+        V::Object(values) => 2 + values.iter()
+            .map(|(key, value)| key.len() + 3 + json_value_bytes(value))
+            .sum::<usize>(),
+    }
+}
+
+pub fn row_bytes(row: &Row) -> usize {
+    2 + row.iter().map(json_value_bytes).sum::<usize>()
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QueryResult {
@@ -826,6 +866,20 @@ pub fn filter_database_listing(
 #[cfg(test)]
 mod tests {
     use super::Engine;
+
+    #[test]
+    fn result_budget_counts_nested_values_and_large_lob_bytes() {
+        let row = vec![
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("x".repeat(1024)),
+            serde_json::json!({"nested": [1, 2, 3]}),
+        ];
+        let size = super::row_bytes(&row);
+        assert!(size >= 1024);
+        assert!(size > super::json_value_bytes(&serde_json::json!(null)));
+        assert_eq!(super::MAX_RESULT_BYTES, 64 * 1024 * 1024);
+    }
 
     /// `spatial` is Postgres/PostGIS-only; every other engine — and every
     /// payload serialized before the field existed — must round-trip without

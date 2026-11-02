@@ -321,6 +321,20 @@ fn ch_session_settings(config: &ConnectionConfig) -> Result<Vec<(&'static str, S
     Ok(out)
 }
 
+async fn response_text_bounded(mut resp: reqwest::Response) -> Result<String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > super::types::MAX_RESULT_BYTES {
+            anyhow::bail!(
+                "ClickHouse response exceeds the {} MiB safety limit; narrow the query",
+                super::types::MAX_RESULT_BYTES / 1024 / 1024
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|e| anyhow::anyhow!("ClickHouse response is not UTF-8: {e}"))
+}
+
 impl ChSession {
     /// The same session pointed at another database. HTTP is stateless and
     /// `reqwest::Client` is internally reference-counted, so this is the
@@ -412,10 +426,10 @@ impl ChSession {
         let mut params = self.settings();
         params.push(("default_format", format.to_string()));
         // Pairs with `result_overflow_mode=break` in settings(): without this
-        // ceiling the break mode is inert and an unbounded SELECT buffers its
-        // whole body. `readonly=1` refuses setting changes, so on read-only
-        // sessions the cap is enforced client-side after parse instead (see
-        // execute_capped_with_id).
+        // row ceiling the server can return far more rows than the caller needs.
+        // `readonly=1` refuses setting changes, so on read-only sessions the row
+        // cap is enforced client-side after parse; the transport byte ceiling
+        // applies before parsing in either mode (see execute_capped_with_id).
         if let Some(cap) = max_result_rows {
             if !self.read_only {
                 params.push(("max_result_rows", cap.to_string()));
@@ -470,9 +484,9 @@ impl ChSession {
         // A truncated or reset transfer must NOT become an empty body: an
         // empty body decodes below as a successful empty result — silently
         // wrong in the worst direction.
-        let body = resp.text().await
+        let body = response_text_bounded(resp).await
             .map_err(|e| anyhow::anyhow!(
-                "failed to read the ClickHouse response body (transfer interrupted): {e}"))?;
+                "failed to read the ClickHouse response body safely: {e}"))?;
         if !status.is_success() {
             // ClickHouse puts a readable "Code: NN. DB::Exception: …" in the
             // body; the HTTP status alone says nothing useful.
@@ -1066,8 +1080,8 @@ pub async fn execute_with_id(
 /// `cap + 1` rows (`max_result_rows` + the `result_overflow_mode=break` the
 /// session always sends), and the client truncates to `cap` — receiving the
 /// extra row is what distinguishes "truncated" from "exactly cap rows". On
-/// read-only sessions the server refuses setting changes, so the body is
-/// unbounded there and only the client-side cut applies.
+/// read-only sessions the server refuses setting changes, so the client-side
+/// row cut and the transport's 64 MiB byte ceiling provide the bounds.
 pub async fn execute_capped_with_id(
     session: &ChSession, sql: &str, query_id: &str, max_rows: Option<usize>,
 ) -> Result<QueryResult> {

@@ -5,16 +5,21 @@ import { errorDisplay } from '../utils/appError';
 import { confirmDialog } from '../utils/appDialog';
 import { audited } from '../utils/panelAudit';
 import {
-  appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
-  mysqlCompletionLine, mysqlCurrentAlterStagesSql, mysqlPhaseTiming, mysqlProgressStats,
+  activityCompletionLine, appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
+  mysqlCompletionLine, mysqlCurrentAlterStagesSql, mysqlOperationNotes, mysqlPhaseTiming, mysqlProgressStats,
   mysqlStageSetup, mysqlThreadSnapshot, parseThreadId, progressProbe, threadActivityProbe,
-  withMysqlAlterLifecycle, MYSQL_STAGE_SETUP, MYSQL_STAGE_STATUS_SQL,
+  sqlServerActivityDiagnostics, sqlServerOnlineIndexProgress, sqlServerOperatorProgress,
+  sqlServerOperatorProgressSql, sqlServerResumableProgress, withMysqlAlterLifecycle,
+  MYSQL_STAGE_SETUP, MYSQL_STAGE_STATUS_SQL, SQLSERVER_ONLINE_INDEX_EVENTS_SQL,
+  SQLSERVER_RESUMABLE_PROGRESS_SQL,
 } from '../utils/ddlProgress';
 import type { MysqlStageSetup, MysqlThreadSnapshot } from '../utils/ddlProgress';
 import { usePoll } from '../hooks/usePoll';
 import { useSessionPrivileges } from '../store/sessionPrivileges';
 import { denied, privilegeTip } from '../utils/privileges';
+import { useServerFlavor } from '../store/serverFlavors';
 import { addLog } from '../store/logStore';
+import { notifyLongQuery } from '../store/notify';
 
 interface Props {
   session: Session;
@@ -29,6 +34,7 @@ interface OtherSnapshot {
   phase: string;
   pct: number | null;
   detail: string;
+  diagnostics: string[];
 }
 
 interface EnableResult {
@@ -60,13 +66,17 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
   const [setupError, setSetupError] = useState('');
   const [enabling, setEnabling] = useState(false);
   const [completionLine, setCompletionLine] = useState('');
+  const [copied, setCopied] = useState(false);
   const epoch = useRef(0);
   const setupChecked = useRef(false);
   const threadIdRef = useRef<number | null>(initial ? Number(initial) : null);
   const snapshotRef = useRef<MysqlThreadSnapshot | null>(null);
+  const otherRef = useRef<OtherSnapshot | null>(null);
   const completionLoggedFor = useRef<string | null>(null);
   const privs = useSessionPrivileges(session.sessionId, session.engine);
+  const serverFlavor = useServerFlavor(session.sessionId, session.engine);
   const isMysql = session.engine === 'mysql';
+  const isMariaDb = isMysql && serverFlavor.flavor === 'mariadb';
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -88,6 +98,7 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
     epoch.current += 1;
     setupChecked.current = false;
     snapshotRef.current = null;
+    otherRef.current = null;
     completionLoggedFor.current = null;
     threadIdRef.current = id;
     setThreadId(id);
@@ -105,7 +116,7 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
   };
 
   const recordCompletion = useCallback((previous: MysqlThreadSnapshot, showSummary: boolean) => {
-    const finished = finishMysqlThreadSnapshot(previous);
+    const finished = finishMysqlThreadSnapshot(withMysqlAlterLifecycle(previous));
     const key = `${finished.threadId}:${finished.statementEventId ?? 'unknown'}:${finished.query}`;
     if (completionLoggedFor.current !== key) {
       const line = mysqlCompletionLine(finished);
@@ -114,9 +125,22 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
       addLog(session.sessionId, {
         level: 'ok', action: 'WATCH', detail: line, line,
       });
+      void notifyLongQuery(Date.now() - finished.querySecs * 1000, true, { statements: 1 });
     }
     return finished;
   }, [session.sessionId]);
+
+  const recordOtherCompletion = useCallback((previous: OtherSnapshot, showSummary: boolean) => {
+    const id = threadIdRef.current;
+    if (id === null) return;
+    const key = `other:${session.engine}:${id}:${previous.query}:${previous.querySecs}`;
+    if (completionLoggedFor.current === key) return;
+    const line = activityCompletionLine(session.engine, id, previous);
+    completionLoggedFor.current = key;
+    if (showSummary) setCompletionLine(line);
+    addLog(session.sessionId, { level: 'ok', action: 'WATCH', detail: line, line });
+    void notifyLongQuery(Date.now() - previous.querySecs * 1000, true, { statements: 1 });
+  }, [session.engine, session.sessionId]);
 
   const poll = useCallback(async () => {
     const watchedId = threadIdRef.current;
@@ -124,12 +148,12 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
     const mine = epoch.current;
     try {
       if (isMysql) {
-        const probe = progressProbe('mysql', 'other', watchedId).sql!;
+        const probe = progressProbe('mysql', 'other', watchedId, serverFlavor.flavor).sql!;
         const result = await invoke<QueryResult>('monitor_query', {
           sessionId: session.sessionId, sql: probe,
         });
         if (mine !== epoch.current) return;
-        const parsed = mysqlThreadSnapshot(result.rows);
+        let parsed = mysqlThreadSnapshot(result.rows);
         if (!parsed) {
           const previous = snapshotRef.current;
           if (previous) {
@@ -142,8 +166,25 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
           setLastUpdated(new Date());
           return;
         }
+        let detailFailed = false;
+        if (isMariaDb) {
+          try {
+            const detailedResult = await invoke<QueryResult>('monitor_query', {
+              sessionId: session.sessionId, sql: progressProbe('mysql', 'other', watchedId).sql!,
+            });
+            if (mine !== epoch.current) return;
+            const detailed = mysqlThreadSnapshot(detailedResult.rows);
+            if (detailed && detailed.query === parsed.query) {
+              parsed = { ...detailed, native: parsed.native };
+            }
+          } catch (e) {
+            detailFailed = true;
+            if (mine === epoch.current) setSetupError(errorDisplay(e));
+          }
+        }
         const previous = snapshotRef.current;
-        if (previous && (previous.statementEventId !== parsed.statementEventId || previous.query !== parsed.query)) {
+        if (previous && (previous.query !== parsed.query
+          || (!isMariaDb && previous.statementEventId !== parsed.statementEventId))) {
           recordCompletion(previous, false);
           setCompletionLine('');
         }
@@ -152,9 +193,11 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
           sessionId: session.sessionId, sql: workersSql,
         }) : null;
         if (mine !== epoch.current) return;
-        const next = mergeMysqlThreadSnapshots(
-          previous, appendMysqlWorkerStages(parsed, workers?.rows ?? []),
-        );
+        const next = detailFailed && previous && previous.query === parsed.query
+          ? { ...previous, native: parsed.native, querySecs: parsed.querySecs, state: parsed.state }
+          : mergeMysqlThreadSnapshots(
+            previous, appendMysqlWorkerStages(parsed, workers?.rows ?? []),
+          );
         snapshotRef.current = next;
         setSnapshot(withMysqlAlterLifecycle(next));
         setOther(null);
@@ -189,8 +232,10 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
       if (mine !== epoch.current) return;
       const row = activity.rows[0];
       if (!row) {
+        if (otherRef.current) recordOtherCompletion(otherRef.current, true);
         setDone(true);
         setError('');
+        setLastUpdated(new Date());
         return;
       }
       let phase = session.engine === 'sqlserver' ? String(row[4] ?? '') : '';
@@ -198,8 +243,14 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
       let detail = session.engine === 'sqlserver' && number(row[6]) !== null
         ? `server ETA ${seconds((number(row[6]) ?? 0) / 1000)}`
         : '';
+      const query = String(row[1] ?? '');
+      const previous = otherRef.current;
+      if (previous && previous.query !== query) {
+        recordOtherCompletion(previous, false);
+        setCompletionLine('');
+      }
       if (session.engine === 'postgres') {
-        const probe = progressProbe('postgres', ddlKind(String(row[1] ?? '')), watchedId);
+        const probe = progressProbe('postgres', ddlKind(query), watchedId);
         if (probe.sql) {
           const progress = await invoke<QueryResult>('monitor_query', {
             sessionId: session.sessionId, sql: probe.sql,
@@ -215,10 +266,47 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
           detail = probe.note ?? '';
         }
       }
-      setOther({
-        query: String(row[1] ?? ''), querySecs: number(row[2]) ?? 0,
+      if (session.engine === 'sqlserver' && ddlKind(query) === 'create-index') {
+        let failed = 0;
+        const optional = async (sql: string) => {
+          try {
+            return await invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql });
+          } catch {
+            failed += 1;
+            return null;
+          }
+        };
+        const resumableRows = await optional(SQLSERVER_RESUMABLE_PROGRESS_SQL);
+        if (mine !== epoch.current) return;
+        const resumable = sqlServerResumableProgress(resumableRows?.rows ?? [], query);
+        if (resumable) {
+          ({ phase, pct, detail } = resumable);
+        } else {
+          const eventRows = await optional(SQLSERVER_ONLINE_INDEX_EVENTS_SQL);
+          if (mine !== epoch.current) return;
+          const online = sqlServerOnlineIndexProgress(eventRows?.rows ?? [], watchedId, row[16]);
+          if (online) {
+            ({ phase, pct, detail } = online);
+          } else {
+            const operatorSql = sqlServerOperatorProgressSql(watchedId)!;
+            const operatorRows = await optional(operatorSql);
+            if (mine !== epoch.current) return;
+            const operator = sqlServerOperatorProgress(operatorRows?.rows ?? []);
+            if (operator) ({ phase, pct, detail } = operator);
+          }
+        }
+        if (pct === null && !detail) {
+          detail = 'No completion percentage is exposed by the available SQL Server metadata.';
+        }
+        if (failed > 0) detail += `${detail ? ' · ' : ''}${failed} optional metadata source${failed === 1 ? '' : 's'} unavailable`;
+      }
+      const next = {
+        query, querySecs: number(row[2]) ?? 0,
         state: String(row[3] ?? ''), phase, pct, detail,
-      });
+        diagnostics: session.engine === 'sqlserver' ? sqlServerActivityDiagnostics(row) : [],
+      };
+      otherRef.current = next;
+      setOther(next);
       setSnapshot(null);
       setDone(false);
       setError('');
@@ -226,7 +314,7 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
     } catch (e) {
       if (mine === epoch.current) setError(errorDisplay(e));
     }
-  }, [isMysql, session.sessionId, session.engine, recordCompletion]);
+  }, [isMysql, isMariaDb, serverFlavor.flavor, session.sessionId, session.engine, recordCompletion, recordOtherCompletion]);
 
   const refresh = usePoll(poll, intervalSec, {
     immediate: false,
@@ -280,7 +368,39 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
   const phaseCount = isMysql ? snapshot?.stages.filter(stage => stage.eventId > 0).length ?? 0 : other?.phase ? 1 : 0;
   const stalledCount = snapshot?.stages.filter(stage => stage.status === 'running' && stage.stalledForSecs >= 30).length ?? 0;
   const progressStats = snapshot ? mysqlProgressStats(snapshot) : null;
+  const operationNotes = snapshot ? mysqlOperationNotes(snapshot.query, serverFlavor.flavor) : [];
   const estimate = (value: number | null) => value === null ? 'indeterminate' : seconds(value);
+  const copyDiagnostics = () => {
+    const lines = [
+      `Thread ${threadId ?? '—'} on ${session.connectionName}`,
+      `State: ${done ? 'not running / no longer visible' : state || 'unknown'}`,
+      `Elapsed: ${seconds(querySecs)}`,
+      `Statement: ${query || '(unavailable)'}`,
+      ...operationNotes.map(note => `Note: ${note}`),
+    ];
+    if (other) {
+      lines.push(`${done ? 'Final observed' : 'Current'} phase: ${other.phase || 'not reported'}`);
+      lines.push(`${done ? 'Last observed' : 'Current'} progress: ${other.pct === null ? 'no server estimate' : `${other.pct.toFixed(1)}%`}`);
+      if (other.detail) lines.push(other.detail);
+      lines.push(...other.diagnostics);
+    }
+    if (snapshot) {
+      if (done) lines.push(mysqlCompletionLine(snapshot));
+      if (snapshot.native && snapshot.native.maxStage > 0) {
+        lines.push(`MariaDB native stage ${snapshot.native.stage}/${snapshot.native.maxStage} · `
+          + `${snapshot.native.stagePct?.toFixed(1) ?? '—'}% of stage · `
+          + `${snapshot.native.totalPct?.toFixed(1) ?? '—'}% overall`);
+      }
+      for (const stage of snapshot.stages.filter(item => item.eventId > 0)) {
+        lines.push(`${stage.phase} · ${stage.status} · ${stage.pct === null ? '—' : `${stage.pct.toFixed(1)}%`}`);
+      }
+    }
+    if (completionLine) lines.push(completionLine);
+    void navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    });
+  };
 
   return (
     <div className="modal-overlay tpd-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -362,10 +482,16 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
               )}
               <div className="tpd-query-head">
                 <span>Full statement</span>
+                <button className="toolbar-btn" onClick={copyDiagnostics}>{copied ? 'Copied!' : 'Copy diagnostics'}</button>
                 <button className="toolbar-btn" disabled={!query}
                   onClick={() => void navigator.clipboard.writeText(query)}>Copy</button>
               </div>
               <pre className="tpd-query">{query || '(statement text is unavailable to this account)'}</pre>
+              {operationNotes.length > 0 && (
+                <div className="tpd-note">
+                  {operationNotes.map(note => <div key={note}>{note}</div>)}
+                </div>
+              )}
               {completionLine && (
                 <div className="tpd-completion" role="status">
                   <strong>Completed — final observed statistics</strong>
@@ -376,11 +502,32 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
             </>
           )}
 
+          {snapshot?.native && snapshot.native.maxStage > 0 && (
+            <div className="tpd-stage">
+              <div className="tpd-stage-head">
+                <strong>MariaDB native stage {snapshot.native.stage} of {snapshot.native.maxStage}</strong>
+              </div>
+              <div className="tpd-track">
+                <div className={`tpd-fill${snapshot.native.totalPct === null ? ' tpd-indeterminate' : ''}`}
+                  style={snapshot.native.totalPct === null ? undefined
+                    : { width: `${Math.max(0, Math.min(100, snapshot.native.totalPct))}%` }} />
+              </div>
+              <div className="tpd-stage-numbers">
+                <span>{snapshot.native.totalPct === null ? 'no server estimate'
+                  : `${snapshot.native.totalPct.toFixed(1)}% overall`}</span>
+                <span>{snapshot.native.stagePct === null ? 'no stage estimate'
+                  : `${snapshot.native.stagePct.toFixed(1)}% of current stage`} · information_schema.PROCESSLIST</span>
+              </div>
+              {setupError && <div className="tpd-note">Optional Performance Schema detail unavailable: {setupError}</div>}
+            </div>
+          )}
+
           {snapshot && snapshot.stages.length > 0 && (
             <div className="tpd-table-wrap">
               <div className="tpd-operation">
                 {ddlKind(snapshot.query) === 'create-index' ? 'CREATE INDEX'
-                  : ddlKind(snapshot.query) === 'alter-table' ? 'ALTER TABLE' : 'Statement'} — InnoDB stages
+                  : ddlKind(snapshot.query) === 'alter-table' ? 'ALTER TABLE'
+                    : ddlKind(snapshot.query) === 'maintenance' ? 'Table maintenance' : 'Statement'} — Performance Schema stages
               </div>
               <table className="tpd-phase-table">
                 <thead>
@@ -431,20 +578,28 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
           )}
 
           {other && (
-            <div className="tpd-stage">
-              <div className="tpd-stage-head"><strong>{other.phase || 'running'}</strong></div>
-              <div className="tpd-track">
-                <div className={`tpd-fill${other.pct === null ? ' tpd-indeterminate' : ''}`}
-                  style={other.pct === null ? undefined : { width: `${Math.max(0, Math.min(100, other.pct))}%` }} />
+            <>
+              <div className="tpd-stage">
+                <div className="tpd-stage-head"><strong>{other.phase || 'running'}</strong></div>
+                <div className="tpd-track">
+                  <div className={`tpd-fill${other.pct === null ? ' tpd-indeterminate' : ''}`}
+                    style={other.pct === null ? undefined : { width: `${Math.max(0, Math.min(100, other.pct))}%` }} />
+                </div>
+                <div className="tpd-stage-numbers">
+                  <span>{other.pct === null ? 'no server estimate' : `${other.pct.toFixed(1)}%`}</span>
+                  <span>{other.detail}</span>
+                </div>
               </div>
-              <div className="tpd-stage-numbers">
-                <span>{other.pct === null ? 'no server estimate' : `${other.pct.toFixed(1)}%`}</span>
-                <span>{other.detail}</span>
-              </div>
-            </div>
+              {other.diagnostics.length > 0 && (
+                <div className="tpd-metadata">
+                  {other.diagnostics.map(item => <span key={item}>{item}</span>)}
+                </div>
+              )}
+            </>
           )}
 
-          {isMysql && snapshot && snapshot.stages.length === 0 && (
+          {isMysql && snapshot && !snapshot.stages.some(stage => stage.eventId > 0)
+            && !(snapshot.native && snapshot.native.maxStage > 0) && (
             <div className="tpd-setup">
               <strong>No ALTER/copy stage is currently reported.</strong>
               {setup?.ready && <p>Progress tracking is enabled. This statement may be between supported phases, or it may not publish work estimates.</p>}

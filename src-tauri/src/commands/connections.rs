@@ -250,6 +250,7 @@ pub(crate) async fn open_tunnel(
         db_host, db_port,
         config.ssh_jump.as_deref(),
         ssh_password,
+        config.ssh_accept_new_host,
         config.connect_timeout_secs,
     ).await
     .map_err(|e| format!("SSH tunnel to {ssh_user}@{ssh_host}:{ssh_port} failed:\n{e:#}"))
@@ -1032,6 +1033,7 @@ pub async fn import_connections(json: String, state: State<'_, AppState>) -> Res
     let mut configs = state.configs.write().await;
     let mut imported = 0u32;
     for mut config in envelope.connections {
+        config.sanitize_import();
         config.id = Uuid::new_v4();
         configs.insert(config.id, config);
         imported += 1;
@@ -1118,6 +1120,7 @@ pub(crate) async fn import_connections_encrypted_body(
     let mut configs = state.configs.write().await;
     let mut imported = 0u32;
     for mut config in opened.connections {
+        config.sanitize_import();
         let old_id = config.id;
         config.id = Uuid::new_v4();
         // Re-key the secrets to the fresh id before anything persists them.
@@ -1713,6 +1716,11 @@ mod tests {
         let mut seed = std::collections::HashMap::new();
         let mut c = ConnectionConfig::new(Engine::Postgres, "prod-eu");
         c.user = Some("app".into());
+        c.password_exec = Some("echo imported-code".into());
+        c.password_exec_ttl_secs = Some(30);
+        c.auto_connect = true;
+        c.log_dir = Some("/attacker-controlled/log".into());
+        c.ssh_accept_new_host = true;
         seed.insert(c.id, c.clone());
         let state = AppState::new(history, dir.clone(), seed);
         crate::secretstore::set(&dir, &c.keychain_key(), "the-password").unwrap();
@@ -1732,6 +1740,11 @@ mod tests {
         assert_eq!(all.len(), 2);
         let imported = all.values().find(|x| x.id != c.id).expect("the fresh-id import");
         assert_eq!(imported.name, "prod-eu");
+        assert_eq!(imported.password_exec, None);
+        assert_eq!(imported.password_exec_ttl_secs, None);
+        assert!(!imported.auto_connect);
+        assert_eq!(imported.log_dir, None);
+        assert!(!imported.ssh_accept_new_host);
         // Secrets re-keyed to the fresh id and readable from the active store.
         assert_eq!(crate::secretstore::get(&dir, &imported.keychain_key()).as_deref(), Some("the-password"));
         assert_eq!(crate::secretstore::get(&dir, &imported.ssh_keychain_key()).as_deref(), Some("the-ssh-password"));
