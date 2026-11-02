@@ -1407,7 +1407,7 @@ mod tests {
     use super::*;
 
     fn result(rows: Vec<Row>) -> QueryResult {
-        QueryResult {
+        QueryResult { result_sets: vec![],
             columns: vec![],
             rows,
             rows_affected: None,
@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn pack_rows_strings_keeps_column_names_and_nulls_become_empty() {
-        let r = QueryResult {
+        let r = QueryResult { result_sets: vec![],
             columns: vec![
                 crate::db::types::ColumnInfo { name: "Id".into(), type_name: "LONG".into(), nullable: false },
                 crate::db::types::ColumnInfo { name: "User".into(), type_name: "VAR_STRING".into(), nullable: false },

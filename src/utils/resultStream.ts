@@ -17,7 +17,7 @@ import type { QueryResult } from '../types/index.ts';
 /** Wire shape of one Channel message — mirrors the Rust enum verbatim. */
 export type ResultStreamEvent =
   | { type: 'header'; result: QueryResult; total_rows: number }
-  | { type: 'page'; rows: unknown[][] };
+  | { type: 'page'; set_index?: number; rows: unknown[][] };
 
 export interface StreamAccum {
   /** True once a header arrived: rows come as pages, and the invoke's return
@@ -29,10 +29,12 @@ export interface StreamAccum {
   totalRows: number;
   /** Every row so far, flat, in arrival order. */
   rows: unknown[][];
+  /** Rows for result sets after the first, keyed by their zero-based set index. */
+  setRows: Record<number, unknown[][]>;
 }
 
 export function newStreamAccum(): StreamAccum {
-  return { streamed: false, header: null, totalRows: 0, rows: [] };
+  return { streamed: false, header: null, totalRows: 0, rows: [], setRows: {} };
 }
 
 /**
@@ -48,7 +50,9 @@ export function applyStreamEvent(acc: StreamAccum, ev: ResultStreamEvent): void 
     acc.header = ev.result;
     acc.totalRows = ev.total_rows;
   } else {
-    acc.rows.push(...ev.rows);
+    const setIndex = ev.set_index ?? 0;
+    if (setIndex === 0) acc.rows.push(...ev.rows);
+    else (acc.setRows[setIndex] ??= []).push(...ev.rows);
   }
 }
 
@@ -58,14 +62,24 @@ export function applyStreamEvent(acc: StreamAccum, ev: ResultStreamEvent): void 
  * identity. Null before the header (there is nothing displayable without
  * columns).
  */
+function setsFromAccum(acc: StreamAccum, returned: QueryResult): QueryResult['result_sets'] {
+  return returned.result_sets?.map((set, index) => ({
+    ...set, result_sets: [], rows: [...(acc.setRows[index + 1] ?? [])],
+  }));
+}
+
 export function partialResult(acc: StreamAccum): QueryResult | null {
   if (!acc.header) return null;
-  return { ...acc.header, rows: [...acc.rows] };
+  return { ...acc.header, rows: [...acc.rows], result_sets: setsFromAccum(acc, acc.header) };
+}
+
+export function streamArrivedCount(acc: StreamAccum): number {
+  return acc.rows.length + Object.values(acc.setRows).reduce((sum, rows) => sum + rows.length, 0);
 }
 
 /** All promised rows arrived (or nothing was streamed at all). */
 export function streamComplete(acc: StreamAccum): boolean {
-  return !acc.streamed || acc.rows.length === acc.totalRows;
+  return !acc.streamed || streamArrivedCount(acc) === acc.totalRows;
 }
 
 /**
@@ -74,5 +88,5 @@ export function streamComplete(acc: StreamAccum): boolean {
  */
 export function finishStream(acc: StreamAccum, returned: QueryResult): QueryResult {
   if (!acc.streamed) return returned;
-  return { ...returned, rows: acc.rows };
+  return { ...returned, rows: acc.rows, result_sets: setsFromAccum(acc, returned) };
 }

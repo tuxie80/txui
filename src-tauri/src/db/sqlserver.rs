@@ -575,9 +575,8 @@ fn column_info(c: &tiberius::Column) -> ColumnInfo {
 
 /// Drain a `QueryStream` into result sets, decoding every cell. `max_rows`
 /// caps the TOTAL rows collected across sets — past it the stream is
-/// abandoned and the third return value is true (truncated). The cap counts
-/// totals rather than per-set because only the first columned set is ever
-/// returned to the caller, and breaking early biases toward exactly that set.
+/// abandoned and the third return value is true (truncated). The first set
+/// stays at the top level for compatibility; additional sets follow.
 async fn collect_stream(
     stream: tiberius::QueryStream<'_>,
     start: &Instant,
@@ -629,48 +628,32 @@ async fn collect_stream(
 
 /// Build the QueryResult from collected sets.
 ///
-/// The FIRST set with columns wins: a T-SQL batch's `SET`/`DECLARE`/DML
-/// statements produce no column metadata, so the first columned set is the
-/// SELECT the user wrote the batch for (including `INSERT …; SELECT
-/// SCOPE_IDENTITY()`).
-///
-/// `rows_affected` is honest about a limitation: the row-stream API discards
-/// the DoneToken counts (only `Client::execute`, which discards rows, exposes
-/// them). A no-result batch therefore reports Some(0) rather than a fabricated
-/// count; wiring both rows AND counts for one statement is a registration-step
-/// decision (two API calls or a `SET NOCOUNT` policy), not something to fake.
+/// The first columned set remains the compatibility result; every set is kept
+/// in `result_sets` so multi-statement batches are not discarded.
 fn result_from_sets(
-    mut sets: Vec<(Vec<ColumnInfo>, Vec<Row>)>,
+    sets: Vec<(Vec<ColumnInfo>, Vec<Row>)>,
     start: &Instant,
     first_row_ms: Option<u64>,
     truncated: bool,
 ) -> QueryResult {
     let total_ms = start.elapsed().as_millis() as u64;
     let execution_ms = first_row_ms.unwrap_or(total_ms);
-    match sets.iter().position(|(cols, _)| !cols.is_empty()) {
-        Some(i) => {
-            let (columns, rows) = sets.swap_remove(i);
-            QueryResult {
-                columns,
-                rows,
-                rows_affected: None,
-                execution_ms,
-                fetch_ms: total_ms - execution_ms,
-                warnings: vec![],
-                truncated,
-                geo_bbox: None,
-            }
-        }
-        None => QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: Some(0),
-            execution_ms,
-            fetch_ms: total_ms - execution_ms,
-            warnings: vec![],
-            truncated: false,
-            geo_bbox: None,
-        },
+    let fetch_ms = total_ms - execution_ms;
+    let mut result_sets: Vec<QueryResult> = sets.into_iter()
+        .filter(|(cols, _)| !cols.is_empty())
+        .map(|(columns, rows)| QueryResult {
+            result_sets: vec![], columns, rows, rows_affected: None,
+            execution_ms, fetch_ms, warnings: vec![], truncated, geo_bbox: None,
+        })
+        .collect();
+    if !result_sets.is_empty() {
+        let mut first = result_sets.remove(0);
+        first.result_sets = result_sets;
+        return first;
+    }
+    QueryResult { result_sets: vec![],
+        columns: vec![], rows: vec![], rows_affected: Some(0),
+        execution_ms, fetch_ms, warnings: vec![], truncated: false, geo_bbox: None,
     }
 }
 
@@ -753,9 +736,8 @@ pub async fn execute_capped(
 ///    returns a plan and changes nothing, which reads as the server ignoring
 ///    the user. The reset therefore runs whether the statement succeeded or not.
 ///  * **`STATISTICS XML` puts the plan in a SECOND result set**, after the
-///    query's own rows. `execute` keeps only the first non-empty set, so the
-///    plan never reached the caller — measured, not deduced: the live test
-///    below failed on exactly this before the stream was read whole.
+///    query's own rows. The plan reader selects XML across every set rather
+///    than treating the query's first row set as the plan.
 pub async fn explain_xml(
     session: &SqlServerSession,
     sql: &str,
@@ -786,7 +768,7 @@ pub async fn explain_xml(
              a statement SQL Server plans"))
 }
 
-/// Every result set's rows, unlike `execute` which keeps only the first.
+/// Every result set's rows, shaped for the XML search in `explain_xml`.
 async fn plan_sets(session: &SqlServerSession, sql: &str) -> Result<Vec<Vec<Row>>> {
     let start = Instant::now();
     let mut client = session.client.lock().await;
@@ -1724,6 +1706,19 @@ pub(crate) mod live_tests {
         // And the rows really were produced — STATISTICS XML executes.
         let after = execute(&s, "SELECT 1 AS n").await.expect("still executing");
         assert_eq!(after.rows[0][0].as_i64(), Some(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TXUI_MSSQL_HOST and a live SQL Server"]
+    async fn multiple_result_sets_preserve_identical_and_different_shapes() {
+        skip_unless!(s);
+        let result = execute(&s, "SELECT 1 AS a; SELECT 2 AS a; SELECT 3 AS a, 4 AS b")
+            .await.expect("multi-set batch");
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+        assert_eq!(result.result_sets.len(), 2);
+        assert_eq!(result.result_sets[0].rows, vec![vec![serde_json::json!(2)]]);
+        assert_eq!(result.result_sets[1].rows,
+            vec![vec![serde_json::json!(3), serde_json::json!(4)]]);
     }
 
     /// The SET really is refused when it shares a batch — the reason the

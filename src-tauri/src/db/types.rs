@@ -531,6 +531,9 @@ pub fn row_bytes(row: &Row) -> usize {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QueryResult {
+    /// Additional result sets from a multi-statement batch. Empty for ordinary queries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub result_sets: Vec<QueryResult>,
     pub columns:      Vec<ColumnInfo>,
     pub rows:         Vec<Row>,
     pub rows_affected: Option<u64>,

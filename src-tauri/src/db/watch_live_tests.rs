@@ -1,6 +1,6 @@
 //! Tiny, opt-in live watcher fixtures driven by `dbctl tmp`.
 //!
-//! Run all four from the repository root: `sh dev/watch_live_test.sh`.
+//! Run the complete matrix from the repository root: `sh dev/watch_live_test.sh`.
 //! No test starts a persistent server or downloads a dataset.
 
 use rust_decimal::Decimal;
@@ -45,6 +45,14 @@ async fn dbctl_mysql_watch_lock_stages_completion_and_privileges() {
         .unwrap();
     println!("  watching {version}");
 
+    let sets = super::mysql::execute(&pool,
+        "SELECT 1 AS a; SELECT 2 AS a; SELECT 3 AS a, 4 AS b").await.unwrap();
+    assert_eq!(sets.rows, vec![vec![serde_json::json!(1)]]);
+    assert_eq!(sets.result_sets.len(), 2);
+    assert_eq!(sets.result_sets[0].rows, vec![vec![serde_json::json!(2)]]);
+    assert_eq!(sets.result_sets[1].rows,
+        vec![vec![serde_json::json!(3), serde_json::json!(4)]]);
+
     sqlx::query("CREATE TABLE watch_test(id INTEGER PRIMARY KEY, value VARCHAR(32))")
         .execute(&pool)
         .await
@@ -86,13 +94,19 @@ async fn dbctl_mysql_watch_lock_stages_completion_and_privileges() {
         .fetch_one(&ddl)
         .await
         .unwrap();
-    let ddl_thread_id: u64 = sqlx::query_scalar(
-        "SELECT THREAD_ID FROM performance_schema.threads WHERE PROCESSLIST_ID = ?",
-    )
-    .bind(ddl_id)
-    .fetch_one(&ddl)
-    .await
-    .unwrap();
+    let mut ddl_thread_id: Option<u64> = None;
+    for _ in 0..40 {
+        ddl_thread_id = sqlx::query_scalar(
+            "SELECT THREAD_ID FROM performance_schema.threads WHERE PROCESSLIST_ID = ?",
+        )
+        .bind(ddl_id)
+        .fetch_optional(&ddl)
+        .await
+        .unwrap();
+        if ddl_thread_id.is_some() { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let ddl_thread_id = ddl_thread_id.expect("performance_schema thread registration");
     let blocker = MySqlPoolOptions::new()
         .max_connections(1)
         .connect(&mysql_url())
@@ -394,6 +408,14 @@ async fn dbctl_postgres_watch_lock_completion_and_privileges() {
         .await
         .unwrap();
     println!("  watching {version}");
+    let sets = super::postgres::execute(&pool,
+        "SELECT 1 AS a; SELECT 2 AS a; SELECT 3 AS a, 4 AS b").await.unwrap();
+    assert_eq!(sets.rows, vec![vec![serde_json::json!(1)]]);
+    assert_eq!(sets.result_sets.len(), 2);
+    assert_eq!(sets.result_sets[0].rows, vec![vec![serde_json::json!(2)]]);
+    assert_eq!(sets.result_sets[1].rows,
+        vec![vec![serde_json::json!(3), serde_json::json!(4)]]);
+
     sqlx::query("CREATE TABLE watch_test(id INTEGER PRIMARY KEY, value TEXT)")
         .execute(&pool)
         .await

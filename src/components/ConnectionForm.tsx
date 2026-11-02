@@ -42,6 +42,15 @@ const ENGINE_LABELS: Record<Engine, string> = {
   sqlserver: 'SQL Server',
 };
 
+interface SshHostKey {
+  host: string;
+  port: number;
+  algorithm: string;
+  key_base64: string;
+  fingerprint: string;
+  known_hosts_line: string;
+}
+
 interface Props {
   initial?: Partial<ConnectionConfig>;
   /** prefilled folder path for a brand-new connection (sidebar folder menu) */
@@ -136,6 +145,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       .catch(() => setAgentStatus(null));
   }, [useSsh]);
   const [sshPassword,    setSshPassword]    = useState('');
+  const [hostKeyProbe, setHostKeyProbe] = useState<{ host: string; port: number; keys: SshHostKey[] } | null>(null);
+  const [selectedHostKey, setSelectedHostKey] = useState(0);
+  const [hostKeyBusy, setHostKeyBusy] = useState(false);
 
   // SSL certs
   const [showSsl,    setShowSsl]    = useState(
@@ -465,6 +477,47 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       if (s) return s;
     }
     return null;
+  }
+
+  async function inspectHostKey() {
+    const invalid = sshPortError(sshPort);
+    if (invalid || !sshHost.trim()) {
+      setError(invalid ?? 'SSH host is required before inspecting its key');
+      return;
+    }
+    setHostKeyBusy(true);
+    setHostKeyProbe(null);
+    setError(null);
+    try {
+      const host = sshHost.trim();
+      const keys = await invoke<SshHostKey[]>('ssh_host_key_probe', { host, port: sshPort });
+      setHostKeyProbe({ host, port: sshPort, keys });
+      setSelectedHostKey(0);
+    } catch (err) {
+      setError(errorDisplay(err));
+    } finally {
+      setHostKeyBusy(false);
+    }
+  }
+
+  async function trustHostKeyAndTest() {
+    const key = hostKeyProbe?.keys[selectedHostKey];
+    if (!hostKeyProbe || !key || hostKeyProbe.host !== sshHost.trim() || hostKeyProbe.port !== sshPort) {
+      setHostKeyProbe(null);
+      setError('The SSH endpoint changed; inspect its host key again');
+      return;
+    }
+    setHostKeyBusy(true);
+    setError(null);
+    try {
+      await invoke('ssh_trust_host_key', { host: hostKeyProbe.host, port: hostKeyProbe.port, key });
+      setHostKeyProbe(null);
+      await handleTest();
+    } catch (err) {
+      setError(errorDisplay(err));
+    } finally {
+      setHostKeyBusy(false);
+    }
   }
 
   async function handleTest() {
@@ -1057,13 +1110,13 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
             <div className="form-subsection cf-tight">
               <div className="form-row">
                 <input style={{ flex: 1 }} value={sshHost}
-                       onChange={e => setSshHost(e.target.value)}
+                       onChange={e => { setSshHost(e.target.value); setHostKeyProbe(null); }}
                        placeholder="SSH host — bastion.example.com" />
                 {/* A cleared box is 0 (`Number('')`), and 0 is NOT a port — it
                     stays in state as-is and save/test reject it with a message,
                     rather than silently becoming 22 in buildConfig. */}
                 <input type="number" min={1} max={65535} style={{ flex: '0 0 70px' }} value={sshPort}
-                       onChange={e => setSshPort(e.target.value === '' ? 0 : Number(e.target.value))} title="SSH port" />
+                       onChange={e => { setSshPort(e.target.value === '' ? 0 : Number(e.target.value)); setHostKeyProbe(null); }} title="SSH port" />
                 <input style={{ flex: '0 0 120px' }} value={sshUser}
                        onChange={e => setSshUser(e.target.value)} placeholder="user" />
               </div>
@@ -1084,6 +1137,33 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
                         ? `ssh-agent: ${agentStatus.key_count} key${agentStatus.key_count === 1 ? '' : 's'} loaded`
                         : 'ssh-agent: running, no keys — run ssh-add, or set a key path')
                     : 'ssh-agent: not running — set a key path or enable password auth'}
+                </div>
+              )}
+              <div className="form-row">
+                <button type="button" onClick={inspectHostKey} disabled={hostKeyBusy}>
+                  {hostKeyBusy && !hostKeyProbe ? 'Inspecting…' : 'Inspect host key'}
+                </button>
+                <span className="form-hint" style={{ margin: 0 }}>Public key only — no login credentials are sent.</span>
+              </div>
+              {hostKeyProbe && (
+                <div className="form-subsection" role="group" aria-label="Scanned SSH host keys">
+                  <strong>Compare the fingerprint with your server administrator or cloud console before trusting it.</strong>
+                  {hostKeyProbe.keys.map((key, index) => (
+                    <label key={`${key.algorithm}-${key.fingerprint}`} className="form-check" style={{ alignItems: 'flex-start' }}>
+                      <input type="radio" name="ssh-host-key" checked={selectedHostKey === index}
+                             onChange={() => setSelectedHostKey(index)} />
+                      <span style={{ minWidth: 0 }}>
+                        {key.algorithm}<br />
+                        <code style={{ userSelect: 'all', overflowWrap: 'anywhere' }}>{key.fingerprint}</code>
+                      </span>
+                    </label>
+                  ))}
+                  <p className="form-hint">
+                    This network scan alone does not verify identity. Confirming adds only the selected key to your OpenSSH known_hosts file.
+                  </p>
+                  <button type="button" className="primary" onClick={trustHostKeyAndTest} disabled={hostKeyBusy}>
+                    {hostKeyBusy ? 'Trusting…' : 'Trust displayed key & retry test'}
+                  </button>
                 </div>
               )}
               <div className="form-row">

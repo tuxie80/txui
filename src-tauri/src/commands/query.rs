@@ -36,7 +36,7 @@ const STREAM_PAGE_ROWS: usize = 5_000;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResultStreamEvent {
     Header { result: QueryResult, total_rows: usize },
-    Page   { rows: Vec<Row> },
+    Page   { set_index: usize, rows: Vec<Row> },
 }
 
 /// Whether this result is big enough to page over the channel.
@@ -73,16 +73,27 @@ async fn stream_result_pages(
     cancels:    &crate::state::CancelMap,
     cancel_key: &str,
 ) -> Result<QueryResult, crate::apperror::AppError> {
-    let pages = split_into_pages(std::mem::take(&mut result.rows), STREAM_PAGE_ROWS);
-    let total_rows = pages.iter().map(Vec::len).sum();
+    let mut pages = Vec::new();
+    let first_rows = std::mem::take(&mut result.rows);
+    for (set_index, rows) in std::iter::once(first_rows)
+        .chain(std::mem::take(&mut result.result_sets).into_iter().map(|mut set| {
+            set.result_sets = vec![];
+            std::mem::take(&mut set.rows)
+        }))
+        .enumerate()
+    {
+        pages.extend(split_into_pages(rows, STREAM_PAGE_ROWS)
+            .into_iter().map(|page| (set_index, page)));
+    }
+    let total_rows = pages.iter().map(|(_, page)| page.len()).sum();
     if on_event.send(ResultStreamEvent::Header { result: result.clone(), total_rows }).is_err() {
         return Ok(result);
     }
-    for page in pages {
+    for (set_index, rows) in pages {
         if !cancels.read().await.contains_key(cancel_key) {
             return Err(crate::apperror::AppError::cancelled());
         }
-        if on_event.send(ResultStreamEvent::Page { rows: page }).is_err() {
+        if on_event.send(ResultStreamEvent::Page { set_index, rows }).is_err() {
             break;
         }
     }
@@ -252,14 +263,17 @@ pub async fn execute_query(
     // The history row count is captured BEFORE any paging drains the rows —
     // a streamed result returns with `rows` empty, and history keeps its
     // historical meaning of "rows the server produced".
-    let history_rows = result.as_ref().ok().map_or(0, |r| r.rows.len() as i64);
+    let history_rows = result.as_ref().ok().map_or(0, |r| {
+        (r.rows.len() + r.result_sets.iter().map(|set| set.rows.len()).sum::<usize>()) as i64
+    });
 
     // A big result crosses as paged Channel events when the caller offered a
     // channel (the editor does; nobody else). Everything about the run —
     // cap, truncation flag, warnings, timings — is already final, so the
     // Header carries complete metadata and only the rows are paged.
     let result = match (result, on_event) {
-        (Ok(r), Some(chan_id)) if should_stream(r.rows.len()) => {
+        (Ok(r), Some(chan_id)) if should_stream(
+            r.rows.len() + r.result_sets.iter().map(|set| set.rows.len()).sum::<usize>()) => {
             let chan = chan_id.channel_on(webview);
             stream_result_pages(&chan, r, &state.cancels, &cancel_key).await
         }

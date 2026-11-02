@@ -23,6 +23,10 @@ import { ResultChart } from './ResultChart';
 import { ResultPivot } from './ResultPivot';
 import { matchesFilter, topValueCounts } from '../utils/columnFilter';
 import type { ColumnFilter } from '../utils/columnFilter';
+import {
+  columnLayoutReducer, layoutColumns, loadColumnLayout, saveColumnLayout,
+} from '../utils/columnLayout';
+import type { ColumnLayoutAction } from '../utils/columnLayout';
 import { viewAsGeoAction } from '../utils/mssqlUdt';
 
 interface Props {
@@ -97,6 +101,14 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
   const [showRecord, setShowRecord] = useState(false);
   const [showChart, setShowChart] = useState(false);
   const [showPivot, setShowPivot] = useState(false);
+  const resultKey = result.columns.map(c => c.name).join('|');
+  const [layoutState, setLayoutState] = useState(() => ({
+    key: resultKey, layout: loadColumnLayout(engine, result.columns.map(c => c.name)),
+  }));
+  if (layoutState.key !== resultKey) {
+    setLayoutState({ key: resultKey, layout: loadColumnLayout(engine, result.columns.map(c => c.name)) });
+  }
+  const layout = layoutState.layout;
   const [flash, setFlash] = useState<string | null>(null);
   const apiRef = useRef<FastGridApi | null>(null);
   useEffect(() => {
@@ -136,6 +148,18 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
     });
     return keyed.map(k => k.row);
   }, [result, filteredRows, sort]);
+
+  const displayColumns = useMemo(
+    () => layoutColumns(result.columns.map(c => c.name), layout), [result.columns, layout]);
+  const displayRows = useMemo(() => sortedRows.map(row =>
+    displayColumns.map(column => row[column.index])), [sortedRows, displayColumns]);
+  const onLayoutCol = useCallback((_column: string, action: ColumnLayoutAction) => {
+    setLayoutState(current => {
+      const next = columnLayoutReducer(result.columns.map(c => c.name), current.layout, action);
+      saveColumnLayout(engine, result.columns.map(c => c.name), next);
+      return { key: current.key, layout: next };
+    });
+  }, [result.columns, engine]);
 
   // Popover top-5: this column's value counts from rows narrowed by every OTHER
   // column's filter — faceted, so an existing pick on this column can be changed
@@ -181,18 +205,19 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
     setHasSel(sel !== null);
     // The aggregate scan touches up to 2M cells — run it once on the final
     // selection, not on every intermediate drag update.
-    if (!dragging) setAgg(sel ? computeAggregates(sortedRows, sel) : null);
+    if (!dragging) setAgg(sel ? computeAggregates(displayRows, sel) : null);
     if (sel) setRecordRow(Math.min(sel.r1, sel.r2));
-  }, [sortedRows]);
+  }, [displayRows]);
 
   const handleOpenCell = useCallback((r: number, c: number) => {
-    setViewer({ column: result.columns[c].name, value: sortedRows[r][c] });
-  }, [result.columns, sortedRows]);
+    const original = displayColumns[c].index;
+    setViewer({ column: result.columns[original].name, value: sortedRows[r][original] });
+  }, [result.columns, sortedRows, displayColumns]);
 
   const getData = useCallback(() => {
     return apiRef.current?.getSelectionData()
-      ?? { columns: result.columns.map(c => c.name), rows: sortedRows };
-  }, [result.columns, sortedRows]);
+      ?? { columns: displayColumns.map(c => c.name), rows: displayRows };
+  }, [displayColumns, displayRows]);
 
   // SQL Server UDT columns arrive undecodable (`<udt: N bytes>`) — "View as
   // geo" re-runs the statement as a derived query with STAsBinary() wraps,
@@ -300,12 +325,14 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
         )}
         <div style={{ flex: 1, minWidth: 0, display: showChart || showPivot ? 'none' : 'flex' }}>
           <FastGrid
-            columns={result.columns}
-            rows={sortedRows}
+            columns={displayColumns.map(column => result.columns[column.index])}
+            rows={displayRows}
             sort={sort}
             onSortCol={handleSortCol}
             onFilterCol={handleFilterCol}
             filteredCols={filteredCols}
+            pinnedCols={new Set(layout.pinned)}
+            onLayoutCol={onLayoutCol}
             onOpenCell={handleOpenCell}
             onSelectionChange={handleSelection}
             apiRef={apiRef}

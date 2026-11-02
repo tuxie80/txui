@@ -197,7 +197,7 @@ export function standardProps(fixtures) {
     initialBbox: null,
     sourceSql: null,
     // FastGrid's wider vocabulary
-    sort: [], filteredCols: new Set(), meta: [], pkColumns: [],
+    sort: [], filteredCols: new Set(), pinnedCols: new Set(), meta: [], pkColumns: [],
     pendingKeys: new Set(), apiRef: { current: null }, rowClass: undefined,
     children: null,
     onClose: NOOP, onSave: NOOP, onCancel: NOOP, onInsert: NOOP, onSelect: NOOP,

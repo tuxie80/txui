@@ -3,6 +3,21 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **Cloud SQL read-replica index watching and divergence counts** — `CALL mysql.addSecondaryIdxOnReplica(...)` is recognized as a replica-index control operation and watched through `mysql.cloudsql_replica_idx_status`, including queued, running, completed and failed jobs, retries, errors and ordinary InnoDB stages when a worker thread exists. Non-Cloud SQL instances disable the optional feed after one probe. Fleet index comparison now shows present/missing server counts alongside the existing direction: replica-only is informational for Cloud SQL, while primary-present indexes missing from a replica remain failover errors.
+- **Complete multi-result-set browsing** — MySQL/MariaDB/Percona, PostgreSQL, SQLite and SQL Server preserve additional row sets, including identical column shapes, with per-set metadata and streamed-page identity. Row and 64 MiB limits remain global across all sets.
+- **Persistent result-column layouts and actionable errors** — result headers support pin-left, hide, reorder and reset without breaking source-column mapping. Missing/ambiguous names, permissions, timeouts and syntax positions now offer deterministic next steps, object reveal, safe insertion and copyable diagnostics.
+- **Guided SSH host-key enrollment** — the connection form scans public host keys without credentials, displays SHA256 fingerprints for independent comparison, and writes only the explicitly confirmed key to OpenSSH `known_hosts`. Host/port and key data are revalidated; Unix permissions are 0700/0600 and Windows uses the per-user profile ACL. Automatic TOFU remains a separate opt-in on macOS, Windows and Linux with the OpenSSH client installed.
+- **Safe workspace restoration** — SQL buffers now restore caret/main selection, scrolling, folds and active result view alongside the existing persisted split size. Plugin tabs return inert until explicit Refresh; no result rows, SQL execution, polling or jobs are restored automatically.
+
+### Fixed
+
+- **Identical-shaped result sets no longer merge** — MySQL, PostgreSQL and SQLite use end-of-set boundaries instead of relying only on column metadata, so repeated shapes remain independent. The tiny live watcher matrix now covers MySQL, Percona, MariaDB, PostgreSQL and DuckDB 2 with auto-destroyed instances.
+- **Cross-platform checks no longer exhaust disk space** — the branch-build harness excludes `src-tauri/target` from its source copy instead of copying and then deleting it, and one combined exit trap removes both locks and temporary work trees on success or failure.
+
 ## [1.5.1] - 2026-11-01
 
 ### Added

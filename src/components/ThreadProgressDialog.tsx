@@ -5,15 +5,16 @@ import { errorDisplay } from '../utils/appError';
 import { confirmDialog } from '../utils/appDialog';
 import { audited } from '../utils/panelAudit';
 import {
-  activityCompletionLine, appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
+  activityCompletionLine, appendMysqlWorkerStages, cloudSqlReplicaIndexJobLine, cloudSqlReplicaIndexJobs,
+  ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
   mysqlCompletionLine, mysqlCurrentAlterStagesSql, mysqlOperationNotes, mysqlPhaseTiming, mysqlProgressStats,
   mysqlStageSetup, mysqlThreadSnapshot, parseThreadId, progressProbe, threadActivityProbe,
   sqlServerActivityDiagnostics, sqlServerOnlineIndexProgress, sqlServerOperatorProgress,
   sqlServerOperatorProgressSql, sqlServerResumableProgress, withMysqlAlterLifecycle,
-  MYSQL_STAGE_SETUP, MYSQL_STAGE_STATUS_SQL, SQLSERVER_ONLINE_INDEX_EVENTS_SQL,
+  CLOUDSQL_REPLICA_IDX_STATUS_SQL, MYSQL_STAGE_SETUP, MYSQL_STAGE_STATUS_SQL, SQLSERVER_ONLINE_INDEX_EVENTS_SQL,
   SQLSERVER_RESUMABLE_PROGRESS_SQL,
 } from '../utils/ddlProgress';
-import type { MysqlStageSetup, MysqlThreadSnapshot } from '../utils/ddlProgress';
+import type { CloudSqlReplicaIndexJob, MysqlStageSetup, MysqlThreadSnapshot } from '../utils/ddlProgress';
 import { usePoll } from '../hooks/usePoll';
 import { useSessionPrivileges } from '../store/sessionPrivileges';
 import { denied, privilegeTip } from '../utils/privileges';
@@ -67,6 +68,9 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
   const [enabling, setEnabling] = useState(false);
   const [completionLine, setCompletionLine] = useState('');
   const [copied, setCopied] = useState(false);
+  const [cloudJobs, setCloudJobs] = useState<CloudSqlReplicaIndexJob[] | null>(null);
+  const cloudChecked = useRef(false);
+  const cloudSupported = useRef(false);
   const epoch = useRef(0);
   const setupChecked = useRef(false);
   const threadIdRef = useRef<number | null>(initial ? Number(initial) : null);
@@ -97,6 +101,9 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
     }
     epoch.current += 1;
     setupChecked.current = false;
+    cloudChecked.current = false;
+    cloudSupported.current = false;
+    setCloudJobs(null);
     snapshotRef.current = null;
     otherRef.current = null;
     completionLoggedFor.current = null;
@@ -142,6 +149,21 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
     void notifyLongQuery(Date.now() - previous.querySecs * 1000, true, { statements: 1 });
   }, [session.engine, session.sessionId]);
 
+  const pollCloudJobs = useCallback(async (mine: number) => {
+    if (!isMysql || (cloudChecked.current && !cloudSupported.current)) return;
+    try {
+      const result = await invoke<QueryResult>('monitor_query', {
+        sessionId: session.sessionId, sql: CLOUDSQL_REPLICA_IDX_STATUS_SQL,
+      });
+      if (mine !== epoch.current) return;
+      cloudChecked.current = true;
+      cloudSupported.current = true;
+      setCloudJobs(cloudSqlReplicaIndexJobs(result.rows));
+    } catch {
+      if (mine === epoch.current) cloudChecked.current = true;
+    }
+  }, [isMysql, session.sessionId]);
+
   const poll = useCallback(async () => {
     const watchedId = threadIdRef.current;
     if (watchedId === null) return;
@@ -154,6 +176,8 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
         });
         if (mine !== epoch.current) return;
         let parsed = mysqlThreadSnapshot(result.rows);
+        await pollCloudJobs(mine);
+        if (mine !== epoch.current) return;
         if (!parsed) {
           const previous = snapshotRef.current;
           if (previous) {
@@ -314,7 +338,7 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
     } catch (e) {
       if (mine === epoch.current) setError(errorDisplay(e));
     }
-  }, [isMysql, isMariaDb, serverFlavor.flavor, session.sessionId, session.engine, recordCompletion, recordOtherCompletion]);
+  }, [isMysql, isMariaDb, serverFlavor.flavor, session.sessionId, session.engine, recordCompletion, recordOtherCompletion, pollCloudJobs]);
 
   const refresh = usePoll(poll, intervalSec, {
     immediate: false,
@@ -395,6 +419,7 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
         lines.push(`${stage.phase} · ${stage.status} · ${stage.pct === null ? '—' : `${stage.pct.toFixed(1)}%`}`);
       }
     }
+    for (const job of cloudJobs ?? []) lines.push(cloudSqlReplicaIndexJobLine(job));
     if (completionLine) lines.push(completionLine);
     void navigator.clipboard.writeText(lines.join('\n')).then(() => {
       setCopied(true);
@@ -574,6 +599,31 @@ export function ThreadProgressDialog({ session, initialThreadId, onClose }: Prop
                 Overall ETA is the longest active phase ETA, not a sum of overlapping phases.
                 Future phases and phases without a server percentage are not predictable.
               </div>
+            </div>
+          )}
+
+          {cloudJobs && (
+            <div className="tpd-table-wrap">
+              <div className="tpd-operation">Cloud SQL managed replica indexes</div>
+              {cloudJobs.length === 0 && <div className="tpd-note">No managed replica-index jobs are recorded on this instance.</div>}
+              {cloudJobs.length > 0 && (
+                <table className="tpd-phase-table">
+                  <thead><tr><th>Index</th><th>Action</th><th>Status</th><th>Thread</th><th>Retries</th><th>Started / ended</th><th>Error</th></tr></thead>
+                  <tbody>
+                    {cloudJobs.map(job => (
+                      <tr key={`${job.idxId}-${job.action}-${job.startTime}`} className={`tpd-phase-${job.status === 'RUNNING' ? 'running' : job.status === 'DONE' ? 'done' : job.status === 'FAILED' ? 'skipped' : 'pending'}`}>
+                        <td className="tpd-phase-name" title={job.createStmt}>#{job.idxId}</td>
+                        <td>{job.action}</td>
+                        <td><span className={`tpd-status tpd-status-${job.status === 'RUNNING' ? 'running' : job.status === 'DONE' ? 'done' : job.status === 'FAILED' ? 'skipped' : 'pending'}`}>{job.status}</span></td>
+                        <td>{job.threadId ?? '—'}</td>
+                        <td>{job.retryCount}</td>
+                        <td title={job.endTime ?? job.startTime}>{job.endTime ?? job.startTime}</td>
+                        <td title={job.error ?? job.commentTag}>{job.error ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
 

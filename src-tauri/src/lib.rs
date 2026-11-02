@@ -925,6 +925,8 @@ pub fn run() {
             duckdb_enable_spatial,
             duckdb_export_geoparquet,
             ssh_agent_status,
+            ssh_host_key_probe,
+            ssh_trust_host_key,
             // self-update (check / download+install; relaunch is the process
             // plugin's own command)
             update_check,

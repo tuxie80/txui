@@ -489,7 +489,7 @@ macro_rules! browse_runner {
 
             #[allow(clippy::redundant_closure_call)]
             let data: Vec<crate::db::types::Row> = ($decode)(&columns, &rows);
-            Ok(QueryResult { columns, rows: data, rows_affected: None, truncated: false,
+            Ok(QueryResult { result_sets: vec![], columns, rows: data, rows_affected: None, truncated: false,
                              geo_bbox: None,
                              execution_ms, fetch_ms, warnings: vec![] })
         }

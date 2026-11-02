@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn self_waits_are_dropped() {
-        let r = QueryResult {
+        let r = QueryResult { result_sets: vec![],
             columns: vec![], rows: vec![
                 vec![serde_json::json!(7), serde_json::json!(7)],   // self-wait: bogus
                 vec![serde_json::json!(0), serde_json::json!(9)],   // unknown waiter

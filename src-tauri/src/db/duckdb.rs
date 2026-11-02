@@ -501,7 +501,7 @@ fn run(conn: &duckdb::Connection, sql: &str, params: &[String], max_rows: Option
 
     let total_ms = start.elapsed().as_millis() as u64;
     let execution_ms = first_row_ms.unwrap_or(total_ms);
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns,
         rows,
         // A statement that produced rows is a result set, not a write — the

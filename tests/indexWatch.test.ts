@@ -129,6 +129,7 @@ async function enterThread(ctx, id) {
 function mysqlRouter(main, workers = () => result([]), setup = () => result([[7, 7, 3, 3]])) {
   return args => {
     const sql = String(args.sql);
+    if (sql.includes('mysql.cloudsql_replica_idx_status')) throw new Error('not a Cloud SQL replica');
     if (sql.includes('information_schema.PROCESSLIST')) return main(sql);
     if (sql.includes('performance_schema.events_stages_current s')) return workers(sql);
     if (sql.includes('performance_schema.setup_instruments')) return setup(sql);
@@ -158,7 +159,7 @@ const targets = [
       const phaseRows = (html.match(/<tr class="tpd-phase-/g) ?? []).length;
       if (phaseRows !== 8) return `expected 7 lifecycle phases plus one background event, got ${phaseRows}`;
       const monitoring = calls.filter(c => c.cmd === 'monitor_query' && !String(c.args?.sql).includes('SELECT VERSION()'));
-      if (monitoring.length !== 2) return 'statement and worker feeds were not both read';
+      if (monitoring.length !== 3) return 'statement, worker feeds and the one-time Cloud SQL status probe were not all read';
       if (monitoring.some(c => !/^\s*SELECT\b/i.test(String(c.args?.sql)))) return 'watcher issued a non-read monitoring statement';
       if (calls.some(c => ['kill_processes', 'execute_query'].includes(c.cmd))) return 'watching executed or killed work';
     },
@@ -170,6 +171,29 @@ const targets = [
     assert: ({ html }) => {
       if (!html.includes('ALTER TABLE — Performance Schema stages')) return 'ALTER TABLE was mislabeled';
       if (!html.includes(MERGE_PHASE)) return 'ALTER TABLE phase missing';
+    },
+  }),
+
+  target('IndexWatchCloudSqlReplicaJobs', 'mysql', args => {
+    const sql = String(args.sql);
+    if (sql.includes('mysql.cloudsql_replica_idx_status')) return result([
+      [7, "CALL mysql.addSecondaryIdxOnReplica('', 'ix', 'shop.orders', 'customer_id', '')", 'CREATE', 41, '2026-08-26 10:52:13', null, 2, null, '[SIC_7]', 'RUNNING'],
+      [8, 'CREATE INDEX iy ON shop.t(b)', 'CREATE', null, '2026-08-26 10:51:13', null, 0, null, '[SIC_8]', 'PENDING'],
+      [9, 'CREATE INDEX iz ON shop.t(c)', 'CREATE', null, '2026-08-26 10:50:13', '2026-08-26 11:00:13', 1, 'Duplicate key name', '[SIC_9]', 'FAILED'],
+      [10, 'CREATE INDEX id ON shop.t(d)', 'CREATE', null, '2026-08-26 10:49:13', '2026-08-26 10:49:30', 0, null, '[SIC_10]', 'DONE'],
+    ]);
+    if (sql.includes('performance_schema.events_stages_current s')) return result([]);
+    if (sql.includes('performance_schema.events_stages_current')) {
+      return result([mysqlRow({ query: "CALL mysql.addSecondaryIdxOnReplica('', 'ix', 'shop.orders', 'customer_id', '')" })]);
+    }
+    throw new Error(`unexpected Cloud SQL monitoring query: ${sql}`);
+  }, {
+    assert: ({ html }) => {
+      for (const text of [
+        'Cloud SQL managed replica indexes', 'RUNNING', 'PENDING', 'FAILED', 'DONE',
+        'Duplicate key name', 'CREATE INDEX — Performance Schema stages',
+      ]) if (!html.includes(text)) return `missing ${text}`;
+      if (!html.includes('>2</td>')) return 'retry count missing';
     },
   }),
 

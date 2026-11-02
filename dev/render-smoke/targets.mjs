@@ -445,6 +445,7 @@ export async function sweepFixtures(fixtures) {
         view: { x: 0, y: 0, w: 400, h: 300 }, selected: null,
       },
     },
+    ResultSetTabs: { props: { result: fixtures.ORDERS_RESULT, engine: 'mysql' } },
     ResultDiffPanel: {
       props: { results: [
         { id: 1, label: 'Result 1', result: fixtures.ORDERS_RESULT },

@@ -124,6 +124,8 @@ test('replica-only is INFO — Cloud SQL creates secondary indexes only on repli
   assert.equal(d.length, 1);
   assert.equal(d[0].kind, 'replica-only');
   assert.equal(d[0].severity, 'info');
+  assert.deepEqual(d[0].present, ['r1', 'r2']);
+  assert.deepEqual(d[0].absent, ['m']);
   assert.match(d[0].note, /Cloud SQL/);
 });
 

@@ -444,8 +444,8 @@ export function FleetPanel({ label: initialLabel, onClose }: Props) {
                 </div>
                 <div className="fl-note-sm">{d.note}</div>
                 <div className="fl-values">
-                  <span className="fl-val"><b>on</b> {d.present.map(nameOf).join(', ')}</span>
-                  <span className="fl-val fl-val-odd"><b>missing</b> {d.absent.map(nameOf).join(', ')}</span>
+                  <span className="fl-val"><b>on {d.present.length}</b> {d.present.map(nameOf).join(', ')}</span>
+                  <span className="fl-val fl-val-odd"><b>missing {d.absent.length}</b> {d.absent.map(nameOf).join(', ')}</span>
                 </div>
               </div>
             ))}

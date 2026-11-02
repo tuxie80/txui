@@ -347,6 +347,7 @@ where
     // with fabricated NULLs and silently dropped extra columns. A row whose
     // column list differs from the current set's starts a new set.
     let mut sets: Vec<(Vec<ColumnInfo>, Vec<MySqlTypeClass>, Vec<Row>)> = Vec::new();
+    let mut set_complete = false;
     let mut total_rows = 0usize;
     let mut total_bytes = 0usize;
     let mut truncated = false;
@@ -354,12 +355,14 @@ where
         match item {
             sqlx::Either::Left(done) => {
                 affected = Some(affected.unwrap_or(0) + done.rows_affected());
+                set_complete = sets.last().is_some_and(|(_, _, rows)| !rows.is_empty());
             }
             sqlx::Either::Right(row) => {
                 if first_row_ms.is_none() {
                     first_row_ms = Some(start.elapsed().as_millis() as u64);
                 }
-                if sets.last().is_none_or(|(cols, _, _)| !same_columns(cols, &row)) {
+                if set_complete || sets.last().is_none_or(|(cols, _, _)| !same_columns(cols, &row)) {
+                    set_complete = false;
                     let columns: Vec<ColumnInfo> = row.columns().iter().map(|c| ColumnInfo {
                         name:      c.name().to_string(),
                         type_name: c.type_info().name().to_string(),
@@ -371,9 +374,8 @@ where
                         .collect();
                     sets.push((columns, classes, Vec::new()));
                 }
-                // The cap counts the TOTAL across sets — only the first
-                // columned set is returned, and breaking early biases toward
-                // exactly that set (sqlserver.rs's collect_stream, same rule).
+                // The cap counts the TOTAL across sets. The first set stays at
+                // the top level for compatibility; additional sets follow.
                 if max_rows.is_some_and(|cap| total_rows >= cap) {
                     truncated = true;
                     break;
@@ -395,35 +397,23 @@ where
     }
     let execution_ms = first_row_ms.unwrap_or_else(|| start.elapsed().as_millis() as u64);
 
-    // The FIRST columned set is the answer: the frontend renders one grid, and
-    // a multi-set batch returns its SELECT(s) first. A later set with a
-    // DIFFERENT shape is dropped whole — folding it into the first set's
-    // shape was the corruption this restructure removes — while an
-    // identical-shaped later set keeps appending (no set-boundary signal
-    // exists for it, and the decode is identical, so that is harmless).
-    // sqlserver.rs's result_from_sets made the same first-set choice.
-    match sets.into_iter().find(|(cols, _, _)| !cols.is_empty()) {
-        Some((columns, _, rows)) => Ok(QueryResult {
-            columns,
-            rows,
-            rows_affected: None,
-            execution_ms,
-            fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
-            warnings: vec![],
-            truncated,
-            geo_bbox: None,
-        }),
-        None => Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: affected,
-            execution_ms,
-            fetch_ms: 0,
-            warnings: vec![],
-            truncated: false,
-            geo_bbox: None,
-        }),
+    let fetch_ms = start.elapsed().as_millis() as u64 - execution_ms;
+    let mut result_sets: Vec<QueryResult> = sets.into_iter()
+        .filter(|(cols, _, _)| !cols.is_empty())
+        .map(|(columns, _, rows)| QueryResult {
+            result_sets: vec![], columns, rows, rows_affected: None,
+            execution_ms, fetch_ms, warnings: vec![], truncated, geo_bbox: None,
+        })
+        .collect();
+    if !result_sets.is_empty() {
+        let mut first = result_sets.remove(0);
+        first.result_sets = result_sets;
+        return Ok(first);
     }
+    Ok(QueryResult { result_sets: vec![],
+        columns: vec![], rows: vec![], rows_affected: affected,
+        execution_ms, fetch_ms: 0, warnings: vec![], truncated: false, geo_bbox: None,
+    })
 }
 
 /// Same column list as the current set's capture? Compared per row: a

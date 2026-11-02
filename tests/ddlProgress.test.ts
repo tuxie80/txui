@@ -13,12 +13,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  activityCompletionLine, appendMysqlWorkerStages, ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
+  activityCompletionLine, appendMysqlWorkerStages, cloudSqlReplicaIndexJobLine, cloudSqlReplicaIndexJobs,
+  ddlKind, finishMysqlThreadSnapshot, mergeMysqlThreadSnapshots,
   mysqlCompletionLine, mysqlCurrentAlterStagesSql, mysqlOperationNotes, mysqlPhaseTiming, mysqlProgressStats,
   mysqlStageSetup, mysqlThreadSnapshot, parseThreadId, progressProbe, reportsPhases,
   sqlServerActivityDiagnostics, sqlServerOnlineIndexProgress, sqlServerOperatorProgress,
   sqlServerOperatorProgressSql, sqlServerResumableProgress, threadActivityProbe, withMysqlAlterLifecycle,
-  MYSQL_STAGE_SETUP, MYSQL_ALTER_PHASES, SQLSERVER_ONLINE_INDEX_EVENTS_SQL,
+  CLOUDSQL_REPLICA_IDX_STATUS_SQL, MYSQL_STAGE_SETUP, MYSQL_ALTER_PHASES, SQLSERVER_ONLINE_INDEX_EVENTS_SQL,
   SQLSERVER_RESUMABLE_PROGRESS_SQL,
 } from '../src/utils/ddlProgress.ts';
 
@@ -74,6 +75,28 @@ test('CREATE and ALTER INDEX dialect variants select index progress', () => {
   ]) {
     assert.equal(ddlKind(sql), 'create-index', sql);
   }
+});
+
+test('Cloud SQL self-managed index procedure is an index build, control procedures are not', () => {
+  assert.equal(ddlKind("CALL mysql.addSecondaryIdxOnReplica('', 'ix', 'shop.t', 'a', '')"), 'create-index');
+  assert.equal(ddlKind("CALL mysql.cloudsql_replica_idx_defn_create('ix', 'CREATE INDEX ix ON shop.t(a)')"), 'other');
+  assert.match(mysqlOperationNotes("CALL mysql.cloudsql_replica_idx_group_add(7, 'reports')").join('\n'),
+    /background maintenance queue/);
+});
+
+test('managed Cloud SQL replica jobs preserve queue, retry and thread metadata', () => {
+  assert.match(CLOUDSQL_REPLICA_IDX_STATUS_SQL, /mysql\.cloudsql_replica_idx_status/);
+  const jobs = cloudSqlReplicaIndexJobs([
+    [7, 'CREATE INDEX ix ON shop.t(a)', 'CREATE', 41, '2026-08-26 10:52:13', null, 2, null, '[SIC_7]', 'RUNNING'],
+    [8, 'CREATE INDEX iy ON shop.t(b)', 'CREATE', null, '2026-08-26 10:51:13', null, 0, null, '[SIC_8]', 'PENDING'],
+    [9, 'CREATE INDEX iz ON shop.t(c)', 'CREATE', null, '2026-08-26 10:50:13', '2026-08-26 11:00:13', 1, 'Duplicate key name', '[SIC_9]', 'FAILED'],
+  ]);
+  assert.equal(jobs[0].threadId, 41);
+  assert.equal(jobs[0].retryCount, 2);
+  assert.equal(jobs[1].status, 'PENDING');
+  assert.equal(jobs[2].error, 'Duplicate key name');
+  assert.equal(cloudSqlReplicaIndexJobLine(jobs[0]), 'managed index #7 CREATE · RUNNING · thread 41 · retries 2');
+  assert.match(cloudSqlReplicaIndexJobLine(jobs[1]), /no active thread/);
 });
 
 test('metadata-only and non-index ALTER statements never select the index view', () => {

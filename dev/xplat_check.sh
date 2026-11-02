@@ -17,24 +17,22 @@
 #   dev/xplat_check.sh windows    # one
 #   dev/xplat_check.sh --keep     # leave the work tree for investigation
 #
-# The work trees are ~4.4 GB per profile and are deleted on exit unless --keep
-# is given.
+# Build output is excluded from the source copy, and work trees are deleted on
+# exit unless --keep is given.
 #
 # CI builds all three for real; this is the fast local check before pushing.
 set -euo pipefail
 
-# Each profile is a full copy of the crate plus its own target dir — ~4.4 GB
-# apiece, measured. Left behind they accumulate silently in TMPDIR until
-# somebody wonders where the disk went, so they are removed on the way out
-# however the script exits. `--keep` overrides that when a failure needs
-# investigating.
+# Copying src-tauri/target first and deleting it second used to require tens of
+# GB of temporary space. The source copy now excludes target up front. Both
+# locks and work trees are removed by ONE exit trap (a second EXIT trap would
+# replace, rather than supplement, the first). --keep is for investigation.
 KEEP=0
 [ "${1:-}" = "--keep" ] && { KEEP=1; shift; }
 cleanup() {
   [ "$KEEP" = "1" ] && { echo "kept: $WORK"; return; }
   rm -rf "$WORK"
 }
-trap cleanup EXIT
 
 cd "$(dirname "$0")/.."
 SRC="src-tauri"
@@ -50,14 +48,16 @@ FAILED=0
 # syntax error in whatever the file now has at that position.
 mkdir -p "$WORK"
 cleanup_locks() { for p in $PROFILES; do rm -f "$WORK/$p.lock"; done; }
-trap cleanup_locks EXIT INT TERM
+cleanup_all() { cleanup_locks; cleanup; }
+trap cleanup_all EXIT INT TERM
 
 for profile in $PROFILES; do
   echo "── $profile ─────────────────────────────────────────────"
   rm -rf "$WORK/$profile"
-  mkdir -p "$WORK"
-  cp -R "$SRC" "$WORK/$profile"
-  rm -rf "$WORK/$profile/target"
+  mkdir -p "$WORK/$profile" "$WORK/src"
+  tar --exclude='./target' -C "$SRC" -cf - . | tar -C "$WORK/$profile" -xf -
+  # include_str!/include_bytes! resolve these frontend inputs beside the crate.
+  tar -C src -cf - data assets | tar -C "$WORK/src" -xf -
 
   python3 - "$WORK/$profile/src" "$profile" <<'PY'
 import pathlib, sys

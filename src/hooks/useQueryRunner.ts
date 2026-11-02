@@ -26,7 +26,7 @@ import { redactSecrets } from '../utils/redactSecrets';
 import { splitStatements } from '../utils/sqlSplit';
 import { statementIndexAt, foldScriptInto } from '../utils/runMarkers';
 import {
-  newStreamAccum, applyStreamEvent, partialResult, finishStream, streamComplete,
+  newStreamAccum, applyStreamEvent, partialResult, finishStream, streamComplete, streamArrivedCount,
 } from '../utils/resultStream';
 import type { ResultStreamEvent } from '../utils/resultStream';
 import {
@@ -177,7 +177,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         // Pages should all precede the invoke resolution on the one IPC
         // transport; a shortfall means rows were lost in transit, and the
         // grid + log would quietly disagree with the server. Say so.
-        console.warn(`result stream incomplete: ${acc.rows.length} of ${acc.totalRows} rows arrived`);
+        console.warn(`result stream incomplete: ${streamArrivedCount(acc)} of ${acc.totalRows} rows arrived`);
       }
       const ms = Math.round(performance.now() - t0);
       const execMs = Math.round(result.execution_ms);

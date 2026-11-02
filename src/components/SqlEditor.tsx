@@ -43,7 +43,7 @@ import { usageBoost, bumpUsageFromSql } from '../utils/usageRank';
 import { buildRedisCompletionSource } from '../utils/redisComplete';
 import type { FkEdge } from '../utils/sqlComplete';
 import { appEditorTheme } from '../utils/editorTheme';
-import { bracketMatching, indentOnInput, foldGutter, codeFolding, foldKeymap } from '@codemirror/language';
+import { bracketMatching, indentOnInput, foldGutter, codeFolding, foldKeymap, foldEffect, foldedRanges } from '@codemirror/language';
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel, gotoLine } from '@codemirror/search';
 import { selectNextOccurrence } from '@codemirror/search';
 import { selectAllOccurrences, splitSelectionIntoLines, surroundInputHandler } from '../utils/editorSelect';
@@ -67,6 +67,7 @@ import { CommandPalette } from './CommandPalette';
 import { EDITOR_COMMANDS, formatKeys } from '../utils/commandRegistry';
 import { MacroRecorder, isRecordable } from '../utils/macroRecorder';
 import type { Engine } from '../types';
+import type { StoredEditorState } from '../utils/bufferStore';
 import { getPref, PREFS, sqlDelimiter } from '../store/preferences';
 import { SqlTemplatesStore } from '../store/sqlTemplates';
 import { shortcuts, shortcut } from '../utils/platform';
@@ -805,6 +806,8 @@ interface Props {
    * so the undo stack survives closing the tab and quitting the app.
    */
   onHistoryChange?: (history: unknown) => void;
+  initialEditorState?: StoredEditorState;
+  onEditorStateChange?: (state: StoredEditorState) => void;
   /**
    * Show the code minimap. Defaults to the user's preference.
    *
@@ -933,6 +936,8 @@ export function SqlEditor({
   initialValue = '',
   initialHistory,
   onHistoryChange,
+  initialEditorState,
+  onEditorStateChange,
   minimap: minimapProp,
   schemaCompletions,
   getColumns,
@@ -1130,6 +1135,8 @@ export function SqlEditor({
   const onChangeRef   = useRef(onChange);
   const onCursorRef   = useRef(onCursor);
   const onHistoryChangeRef = useRef(onHistoryChange);
+  const onEditorStateChangeRef = useRef(onEditorStateChange);
+  const initialEditorStateRef = useRef(initialEditorState);
   // Read at mount time; a ref so a value that arrives just before the (lazy)
   // editor mounts is still seen. Never updated after mount — rehydration is a
   // one-time event.
@@ -1169,6 +1176,7 @@ export function SqlEditor({
   const symTimerRef = useRef(0);
   /** Debounce for serializing the undo history out to the host (Editor §5.2). */
   const historyTimerRef = useRef(0);
+  const editorStateTimerRef = useRef(0);
   /** Editor commands the host can invoke (context menu, palette). */
   const editorCommandsRef = useRef<Record<string, () => void>>({});
 
@@ -1201,6 +1209,7 @@ export function SqlEditor({
     onChangeRef.current   = onChange;
     onCursorRef.current   = onCursor;
     onHistoryChangeRef.current = onHistoryChange;
+    onEditorStateChangeRef.current = onEditorStateChange;
     getColumnsRef.current = getColumns;
     getFksRef.current     = getFks;
     getSchemaTablesRef.current = getSchemaTables;
@@ -1844,7 +1853,30 @@ export function SqlEditor({
       }),
     };
 
+    const captureEditorState = (): StoredEditorState => {
+      const view = viewRef.current!;
+      const folds: Array<{ from: number; to: number }> = [];
+      foldedRanges(view.state).between(0, view.state.doc.length, (from, to) => {
+        folds.push({ from, to });
+      });
+      return {
+        anchor: view.state.selection.main.anchor,
+        head: view.state.selection.main.head,
+        scrollTop: view.scrollDOM.scrollTop,
+        scrollLeft: view.scrollDOM.scrollLeft,
+        folds,
+      };
+    };
+    const reportEditorState = () => {
+      if (!onEditorStateChangeRef.current) return;
+      window.clearTimeout(editorStateTimerRef.current);
+      editorStateTimerRef.current = window.setTimeout(() => {
+        if (viewRef.current) onEditorStateChangeRef.current?.(captureEditorState());
+      }, 350);
+    };
+
     const updateListener = EditorView.updateListener.of(update => {
+      reportEditorState();
       if (update.docChanged) {
         onChangeRef.current?.(update.state.doc.toString());
         // The expand-selection trail points at ranges in the pre-edit text;
@@ -2393,6 +2425,22 @@ export function SqlEditor({
 
     const view = new EditorView({ state, parent: containerRef.current });
     viewRef.current = view;
+    const restoreEditor = initialEditorStateRef.current;
+    if (restoreEditor) {
+      const length = view.state.doc.length;
+      view.dispatch({
+        selection: {
+          anchor: Math.min(restoreEditor.anchor, length),
+          head: Math.min(restoreEditor.head, length),
+        },
+        effects: restoreEditor.folds
+          .filter(range => range.to <= length && range.from < range.to)
+          .map(range => foldEffect.of(range)),
+      });
+      view.scrollDOM.scrollTop = restoreEditor.scrollTop;
+      view.scrollDOM.scrollLeft = restoreEditor.scrollLeft;
+    }
+    view.scrollDOM.addEventListener('scroll', reportEditorState, { passive: true });
 
     // Analyse what is already in the buffer (a restored draft, a picked history
     // entry) without waiting for the first keystroke. Not when hints are off —
@@ -2406,8 +2454,13 @@ export function SqlEditor({
       window.clearTimeout(diagTimerRef.current);
       window.clearTimeout(symTimerRef.current);
       window.clearTimeout(historyTimerRef.current);
+      window.clearTimeout(editorStateTimerRef.current);
       window.clearTimeout(sigTimerRef.current);
       window.clearTimeout(killTimerRef.current);
+      view.scrollDOM.removeEventListener('scroll', reportEditorState);
+      if (onEditorStateChangeRef.current && viewRef.current) {
+        onEditorStateChangeRef.current(captureEditorState());
+      }
       // Closing a tab is exactly the moment the undo stack would be lost —
       // flush the latest history synchronously before the view is destroyed.
       if (onHistoryChangeRef.current) {

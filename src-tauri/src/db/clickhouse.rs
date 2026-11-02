@@ -1142,7 +1142,7 @@ pub async fn execute_with_params(
 fn decode_json_compact(body: String, start: Instant) -> Result<QueryResult> {
     // A statement with no result set (DDL, SET, …) returns an empty body.
     if body.trim().is_empty() {
-        return Ok(QueryResult {
+        return Ok(QueryResult { result_sets: vec![],
             columns: vec![],
             rows: vec![],
             rows_affected: Some(0),
@@ -1184,7 +1184,7 @@ fn decode_json_compact(body: String, start: Instant) -> Result<QueryResult> {
     };
     let total = start.elapsed().as_millis() as u64;
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns,
         rows,
         rows_affected: None,

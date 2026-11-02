@@ -702,7 +702,7 @@ fn execute_dataset(d: &ParquetDataset, command: &str) -> Result<QueryResult> {
         other => bail!("unknown Parquet command `{other}`. Try one of: {}", COMMANDS.join(", ")),
     };
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns,
         rows,
         rows_affected: None,
@@ -807,7 +807,7 @@ fn execute_file(file: &ParquetFile, command: &str) -> Result<QueryResult> {
         other => bail!("unknown Parquet command `{other}`. Try one of: {}", COMMANDS.join(", ")),
     };
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns,
         rows,
         rows_affected: None,
@@ -1440,7 +1440,7 @@ pub fn preview(f: &ParquetFile, limit: usize, offset: usize) -> Result<QueryResu
         }
     }
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns,
         rows: out,
         rows_affected: None,
@@ -1694,7 +1694,7 @@ pub fn preview_filtered(
         vec![format!("scan capped at {SCAN_CAP} matching rows — results may be incomplete")]
     } else { vec![] };
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns,
         rows: page,
         rows_affected: Some(total as u64),

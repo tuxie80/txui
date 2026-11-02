@@ -67,3 +67,42 @@ test('keys are namespaced per connection', () => {
   assert.equal(bufferKey('abc'), 'dbgui.buffers.abc');
   assert.notEqual(bufferKey('a'), bufferKey('b'));
 });
+
+test('view-only plugin tabs and the active SQL view survive without result data', () => {
+  const payload = encodeBuffers([
+    buf('Processes', '', { panel: 'processes', active: true }),
+    buf('query', 'SELECT 1', { view: 'log' }),
+  ]);
+  const restored = decodeBuffers(JSON.stringify(payload));
+  assert.equal(restored[0].panel, 'processes');
+  assert.equal(restored[0].sql, '');
+  assert.equal(restored[0].active, true);
+  assert.equal(restored[1].view, 'log');
+  assert.equal('rows' in restored[1], false);
+  assert.equal('running' in restored[1], false);
+});
+
+test('caret, selection, scrolling and folds round-trip', () => {
+  const editor = {
+    anchor: 7, head: 15, scrollTop: 420, scrollLeft: 12,
+    folds: [{ from: 20, to: 80 }, { from: 100, to: 160 }],
+  };
+  const restored = decodeBuffers(JSON.stringify(encodeBuffers([
+    buf('folded', 'SELECT 1', { editor }),
+  ])));
+  assert.deepEqual(restored[0].editor, editor);
+});
+
+test('invalid presentation state is dropped or clamped by allowlist', () => {
+  const restored = decodeBuffers(JSON.stringify({ v: 1, tabs: [{
+    label: 'safe', sql: 'SELECT 1', panel: 'bad panel; run', view: 'execute',
+    editor: { anchor: -1, head: 4, scrollTop: 20, folds: [{ from: 9, to: 2 }] },
+  }] }));
+  assert.equal(restored[0].panel, undefined);
+  assert.equal(restored[0].view, undefined);
+  assert.equal(restored[0].editor, undefined);
+});
+
+test('an empty SQL tab is still dropped when it is not a plugin', () => {
+  assert.equal(encodeBuffers([buf('empty', '', { view: 'grid' })]), null);
+});

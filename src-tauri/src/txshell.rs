@@ -260,7 +260,7 @@ pub fn apply_stage(r: QueryResult, stage: &str) -> Result<QueryResult, String> {
                 .iter()
                 .map(|row| idxs.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null)).collect())
                 .collect();
-            Ok(QueryResult { columns, rows, ..r })
+            Ok(QueryResult { result_sets: vec![], columns, rows, ..r })
         }
         "sort" => {
             let idx = col_index(&r, &args[0])
@@ -294,7 +294,7 @@ pub fn apply_stage(r: QueryResult, stage: &str) -> Result<QueryResult, String> {
         }
         "count" => {
             let n = r.rows.len();
-            Ok(QueryResult {
+            Ok(QueryResult { result_sets: vec![],
                 columns: vec![ColumnInfo { name: "count".into(), type_name: "bigint".into(), nullable: false }],
                 rows: vec![vec![Value::from(n)]],
                 ..r
@@ -365,7 +365,7 @@ pub fn apply_stage(r: QueryResult, stage: &str) -> Result<QueryResult, String> {
                     ]
                 })
                 .collect();
-            Ok(QueryResult { columns, rows, ..r })
+            Ok(QueryResult { result_sets: vec![], columns, rows, ..r })
         }
         other => Err(format!("`{other}` is not a stage")),
     }
@@ -475,7 +475,7 @@ pub fn read_source(path: &str) -> Result<QueryResult, String> {
 }
 
 fn empty_result(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>) -> QueryResult {
-    QueryResult {
+    QueryResult { result_sets: vec![],
         columns,
         rows,
         rows_affected: None,
@@ -596,7 +596,7 @@ mod tests {
     use super::*;
 
     fn qr(cols: &[&str], rows: Vec<Vec<Value>>) -> QueryResult {
-        QueryResult {
+        QueryResult { result_sets: vec![],
             columns: cols
                 .iter()
                 .map(|c| ColumnInfo { name: (*c).into(), type_name: "text".into(), nullable: true })

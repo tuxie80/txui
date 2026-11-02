@@ -12,6 +12,10 @@
  *   **off by default**: the `stage/innodb/alter table%` instruments and the
  *   `events_stages_current` consumer both have to be enabled, and when they
  *   are not, the panel shows nothing and looks broken rather than unconfigured.
+ * - **Cloud SQL for MySQL** queues replica-only secondary indexes through
+ *   `mysql.addSecondaryIdxOnReplica`; `mysql.cloudsql_replica_idx_status`
+ *   exposes queue state, retries, errors, timing and the worker thread when one
+ *   exists. It complements, rather than replaces, ordinary InnoDB stages.
  * - **PostgreSQL** has dedicated progress views —
  *   `pg_stat_progress_create_index` for index builds (including
  *   `CONCURRENTLY`, which has the most phases and the longest waits) and
@@ -49,6 +53,7 @@ export function ddlKind(sql: string): DdlKind {
   if (/^create\s+(?:or\s+replace\s+)?(?:unique\s+)?(?:(?:clustered|nonclustered|columnstore|fulltext|spatial|vector|primary\s+xml|xml|json)\s+)*index\b/.test(s)) {
     return 'create-index';
   }
+  if (/^call\s+mysql\.addsecondaryidxonreplica\s*\(/.test(s)) return 'create-index';
   if (/^reindex\b/.test(s)) return 'create-index';
   if (/^alter\s+index\b.*\brebuild(?:\s*\(|\s+with\b|\s*;|$)/.test(s)) return 'create-index';
   if (/^(vacuum\s+full|cluster)\b/.test(s)) return 'vacuum-cluster';
@@ -541,6 +546,47 @@ export function sqlServerActivityDiagnostics(row: readonly unknown[]): string[] 
   return diagnostics;
 }
 
+export interface CloudSqlReplicaIndexJob {
+  idxId: number;
+  createStmt: string;
+  action: string;
+  threadId: number | null;
+  startTime: string;
+  endTime: string | null;
+  retryCount: number;
+  error: string | null;
+  commentTag: string;
+  status: 'PENDING' | 'RUNNING' | 'DONE' | 'FAILED' | string;
+}
+
+export const CLOUDSQL_REPLICA_IDX_STATUS_SQL = `SELECT idx_id, create_stmt, action, thread_id,
+       start_time, end_time, retry_count, err_msg, comment_tag, status
+FROM mysql.cloudsql_replica_idx_status
+ORDER BY start_time DESC, idx_id DESC
+LIMIT 50`;
+
+export function cloudSqlReplicaIndexJobs(rows: readonly (readonly unknown[])[]): CloudSqlReplicaIndexJob[] {
+  return rows.map(row => ({
+    idxId: Number(row[0]),
+    createStmt: String(row[1] ?? ''),
+    action: String(row[2] ?? ''),
+    threadId: optionalNumber(row[3]),
+    startTime: String(row[4] ?? ''),
+    endTime: row[5] === null || row[5] === undefined ? null : String(row[5]),
+    retryCount: optionalNumber(row[6]) ?? 0,
+    error: row[7] === null || row[7] === undefined ? null : String(row[7]),
+    commentTag: String(row[8] ?? ''),
+    status: String(row[9] ?? ''),
+  }));
+}
+
+export function cloudSqlReplicaIndexJobLine(job: CloudSqlReplicaIndexJob): string {
+  const thread = job.threadId === null ? 'no active thread' : `thread ${job.threadId}`;
+  const retries = job.retryCount > 0 ? ` · retries ${job.retryCount}` : '';
+  const error = job.error ? ` · ${job.error}` : '';
+  return `managed index #${job.idxId} ${job.action} · ${job.status} · ${thread}${retries}${error}`;
+}
+
 export interface ActivityCompletionSnapshot {
   querySecs: number;
   phase: string;
@@ -731,6 +777,12 @@ export function mysqlOperationNotes(
 ): string[] {
   const s = normalizedDdl(sql);
   const notes: string[] = [];
+  if (/^call\s+mysql\.addsecondaryidxonreplica\s*\(/.test(s)) {
+    notes.push('This stored procedure performs the index build on the replica. Watch its real InnoDB stages and the managed-index status table when available.');
+  }
+  if (/^call\s+mysql\.cloudsql_replica_idx_/.test(s)) {
+    notes.push('Cloud SQL control operation only; the replica’s background maintenance queue performs the index build and reports PENDING/RUNNING/DONE/FAILED with retries.');
+  }
   if (flavor === 'mariadb' && /^alter\s+table\b.*\b(?:add|drop)\s+system\s+versioning\b/.test(s)) {
     notes.push(/\bdrop\s+system\s+versioning\b/.test(s)
       ? 'Dropping system versioning deletes all retained history and rebuilds the table.'

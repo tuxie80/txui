@@ -4,7 +4,7 @@
  */
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { QueryResult, Session } from '../types';
-import { ResultGrid } from './ResultGrid';
+import { ResultSetTabs } from './ResultSetTabs';
 import { PanelIcon } from './panelIcons';
 
 // CodeMirror (~260 kB) loads on demand, not at cold start
@@ -98,6 +98,7 @@ import { can } from '../utils/engineCaps';
 import { PLUGIN_MENU } from '../utils/pluginMenu';
 import type { PluginMenuItem } from '../utils/pluginMenu';
 import { errorDisplay } from '../utils/appError';
+import { errorGuidance } from '../utils/errorActions';
 import { alertDialog, confirmDialog } from '../utils/appDialog';
 import { findVirtualTables } from '../utils/sqlContext';
 import { findAliases } from '../utils/sqlAlias';
@@ -131,7 +132,7 @@ import {
   dirName, diskState, isDirty, parseRecent, pushRecent, RECENT_KEY, tabLabelFor,
   type Eol, type FileBinding,
 } from '../utils/sqlFile';
-import type { StoredBuffer } from '../utils/bufferStore';
+import type { StoredBuffer, StoredEditorState } from '../utils/bufferStore';
 import * as tabModel from '../utils/tabModel';
 import {
   clearSessionActivities, clearTabActivities, getActivities,
@@ -929,14 +930,30 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       .catch(() => {});
   }
 
+  const editorStatesRef = useRef(new Map<string, StoredEditorState>());
+  const restoredPanelIds = useRef(new Set<number>());
+  const [refreshedPanels, setRefreshedPanels] = useState<Set<number>>(() => new Set());
+  // One tab id per panel name, allocated on first use and reused afterwards.
+  const panelIds = useRef(new Map<string, number>());
   const [tabs, setTabs] = useState<QueryTab[]>(() => {
     const saved = restoredRef.current ?? [];
     if (saved.length === 0) return [newTab('01')];
-    // Keep the stored buffer id so the restored tab re-inherits its undo
-    // history; mint a fresh one only for buffers saved before ids existed.
-    return saved.map(b => ({
-      ...newTab(b.label), sql: b.sql, color: b.color, ...(b.bid ? { bid: b.bid } : {}),
-    }));
+    return saved.map(b => {
+      if (b.panel && PANEL_META[b.panel]) {
+        const id = nextTabId();
+        panelIds.current.set(b.panel, id);
+        restoredPanelIds.current.add(id);
+        return { ...newPanelTab(b.panel, id), label: b.label, color: b.color };
+      }
+      // Unknown historical panel ids become inert SQL tabs rather than running
+      // an arbitrary panel name supplied by localStorage.
+      const tab = {
+        ...newTab(b.label), sql: b.sql, color: b.color, view: b.view ?? 'grid' as const,
+        ...(b.bid ? { bid: b.bid } : {}),
+      };
+      if (b.editor) editorStatesRef.current.set(tab.bid, b.editor);
+      return tab;
+    });
   });
   const tabsRef = useRef(tabs);
   useEffect(() => { tabsRef.current = tabs; }, [tabs]);
@@ -948,8 +965,6 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   });
   const activeIdRef = useRef(activeId);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
-  // One tab id per panel name, allocated on first use and reused afterwards.
-  const panelIds = useRef(new Map<string, number>());
   const idForPanel = useCallback((panel: string) => {
     let id = panelIds.current.get(panel);
     if (id === undefined) { id = nextTabId(); panelIds.current.set(panel, id); }
@@ -1073,6 +1088,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const [peekDdl, setPeekDdl] = useState<{ title: string; sql: string } | null>(null);
   // AI assistant modal (⌘I generate / explain / fix).
   const [aiModal, setAiModal] = useState<{ mode: AiMode; sql?: string; error?: string } | null>(null);
+  const [columnCandidates, setColumnCandidates] = useState<string[]>([]);
   // MySQL optimizer-trace viewer (pretty-printed JSON).
   const [traceJson, setTraceJson] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
@@ -1727,6 +1743,20 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
 
   const activeTab = tabs.find(t => t.id === activeId) ?? tabs[0];
 
+  useEffect(() => {
+    if (!activeTab?.error) { setColumnCandidates([]); return; }
+    let cancelled = false;
+    const virtualColumns = [...findVirtualTables(activeTab.sql).values()].flatMap(v => v.columns);
+    Promise.all(completions.slice(0, 6).map(relation =>
+      getColumns(relation.label).catch(() => [] as typeof completions),
+    )).then(groups => {
+      if (cancelled) return;
+      const names = groups.flatMap(group => group.map(column => column.label));
+      setColumnCandidates([...new Set([...virtualColumns, ...names])]);
+    });
+    return () => { cancelled = true; };
+  }, [activeTab?.error, activeTab?.sql, completions, getColumns]);
+
   /**
    * Live ClickHouse read progress, per tab. Fed by the backend's
    * `dbgui:ch-progress` event (rows/bytes/percent from `X-ClickHouse-Progress`
@@ -1791,21 +1821,31 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   // garbage keyed to a dead id. Scratch means nothing persists, by definition.
   const persistBuffers = useCallback(() => {
     if (session.scratch) return;
-    saveBuffers(session.connectionId, tabsRef.current
-      .filter(t => !t.panel)
-      .map(t => ({
-        label: t.label,
-        color: t.color,
-        sql: sqlRefs.current.get(t.id) ?? t.sql,
-        active: t.id === activeIdRef.current,
-        bid: t.bid,
-      })));
+    saveBuffers(session.connectionId, tabsRef.current.map(t => ({
+      label: t.label,
+      color: t.color,
+      sql: t.panel ? '' : sqlRefs.current.get(t.id) ?? t.sql,
+      panel: t.panel,
+      view: t.view,
+      editor: t.panel ? undefined : editorStatesRef.current.get(t.bid),
+      active: t.id === activeIdRef.current,
+      bid: t.bid,
+    })));
   }, [session.connectionId, session.scratch]);
+  const editorStateTimer = useRef(0);
+  const rememberEditorState = useCallback((bid: string, state: StoredEditorState) => {
+    editorStatesRef.current.set(bid, state);
+    window.clearTimeout(editorStateTimer.current);
+    editorStateTimer.current = window.setTimeout(persistBuffers, 500);
+  }, [persistBuffers]);
   useEffect(() => {
     const t = window.setTimeout(persistBuffers, 700);
     return () => window.clearTimeout(t);
   }, [tabs, activeId, persistBuffers]);
-  useEffect(() => () => persistBuffers(), [persistBuffers]);
+  useEffect(() => () => {
+    window.clearTimeout(editorStateTimer.current);
+    persistBuffers();
+  }, [persistBuffers]);
 
   // Persist the undo history alongside the buffers (Editor §5.2). Serialized
   // pruned to the tabs still open, and the in-memory copy is pruned to match so
@@ -2985,13 +3025,21 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
             className="qtab-panel-wrap"
             style={{ display: tab.id === activeId ? 'flex' : 'none' }}
           >
-            {/* Mounted for its whole life (state survives switching), but a
-                hidden panel must not poll the server — see store/tabVisibility. */}
-            <TabVisibleProvider value={tab.id === activeId}>
-              {/* Panels are React.lazy: the chunk fetches on first open, then
-                  the module is cached — mounted-state behavior is unchanged. */}
-              <Suspense fallback={null}>{panelFor(tab)}</Suspense>
-            </TabVisibleProvider>
+            {restoredPanelIds.current.has(tab.id) && !refreshedPanels.has(tab.id) ? (
+              <div className="mx-empty" role="status">
+                <strong>{tab.label}</strong>
+                <p>Restored without loading data or starting background activity.</p>
+                <button type="button" className="primary" onClick={() => {
+                  setRefreshedPanels(current => new Set(current).add(tab.id));
+                }}>Refresh</button>
+              </div>
+            ) : (
+              /* Once refreshed, a panel stays mounted for its whole life. The
+                 visibility context stops polling whenever its tab is hidden. */
+              <TabVisibleProvider value={tab.id === activeId}>
+                <Suspense fallback={null}>{panelFor(tab)}</Suspense>
+              </TabVisibleProvider>
+            )}
           </div>
         ) : (
           <div
@@ -3181,6 +3229,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                 initialValue={tab.sql}
                 initialHistory={getStoredHistory(undoHistRef.current, tab.bid)}
                 onHistoryChange={h => rememberHistory(tab.bid, h)}
+                initialEditorState={editorStatesRef.current.get(tab.bid)}
+                onEditorStateChange={state => rememberEditorState(tab.bid, state)}
                 schemaCompletions={completions}
                 getColumns={getColumns}
                 getFks={getFks}
@@ -3265,16 +3315,55 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
             </div>
             <div className="v-resizer" onMouseDown={dragEditor} title="Drag to resize editor" />
 
-            {tab.error && (
-              <div className="query-error">
-                <span className="query-error-msg">{tab.error}</span>
-                <button className="toolbar-btn query-error-fix"
-                  title="Ask the AI assistant for a corrected statement"
-                  onClick={() => setAiModal({ mode: 'fix', sql: currentEditorSql(), error: tab.error ?? '' })}>
-                  ✦ Fix with AI
-                </button>
-              </div>
-            )}
+            {tab.error && (() => {
+              const guide = errorGuidance(tab.error, {
+                sql: tab.sql,
+                tables: completions.map(relation => relation.label),
+                columns: columnCandidates,
+              });
+              return (
+                <div className="query-error">
+                  <span className="query-error-msg">{tab.error}</span>
+                  <button className="toolbar-btn query-error-fix"
+                    title="Ask the AI assistant for a corrected statement"
+                    onClick={() => setAiModal({ mode: 'fix', sql: currentEditorSql(), error: tab.error ?? '' })}>
+                    ✦ Fix with AI
+                  </button>
+                  {guide && (
+                    <div className="query-error-guidance">
+                      <strong>{guide.title}</strong>
+                      <span>{guide.detail}</span>
+                      {guide.goto && (
+                        <button className="toolbar-btn"
+                          onClick={() => window.dispatchEvent(new CustomEvent('dbgui:goto-range', { detail: guide.goto }))}>
+                          Go to error
+                        </button>
+                      )}
+                      {guide.insertSql && (
+                        <button className="toolbar-btn"
+                          onClick={() => window.dispatchEvent(new CustomEvent('dbgui:insert-sql', {
+                            detail: { sql: guide.insertSql, tabId: tab.id },
+                          }))}>
+                          Insert {guide.insertSql}
+                        </button>
+                      )}
+                      {guide.schemaObject && (
+                        <button className="toolbar-btn"
+                          onClick={() => window.dispatchEvent(new CustomEvent('dbgui:reveal-object', {
+                            detail: { name: guide.schemaObject },
+                          }))}>
+                          Open object
+                        </button>
+                      )}
+                      <button className="toolbar-btn" onClick={() => {
+                        const text = `${tab.error}\n${guide.title}\n${guide.detail}\n\n${tab.sql}`;
+                        void navigator.clipboard.writeText(text);
+                      }}>Copy diagnostics</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {(tab.result || tab.scriptResults || tab.explain || tab.browsers.length > 0 || sessionLogNonEmpty) && (
               <div className="result-area">
@@ -3298,7 +3387,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                           {result.rows.length < (line.rows ?? result.rows.length)
                             && ` · first ${result.rows.length.toLocaleString()} shown`}
                         </div>
-                        <ResultGrid result={result} engine={session.engine} apiOutRef={gridApiRef}
+                        <ResultSetTabs result={result} engine={session.engine} apiOutRef={gridApiRef}
                           sessionId={session.sessionId} sourceSql={line.text}
                           onRunDerived={runDerivedQuery} />
                       </div>
@@ -3331,7 +3420,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                     {/* A write/SET/DDL has no result set — say so out loud instead
                         of rendering an empty area (the "ran but nothing showed" bug). */}
                     {resultKind(tab.result, tab.resultSql ?? '') === 'rows'
-                      ? <ResultGrid result={tab.result} engine={session.engine} apiOutRef={gridApiRef}
+                      ? <ResultSetTabs result={tab.result} engine={session.engine} apiOutRef={gridApiRef}
                           sessionId={session.sessionId} sourceSql={tab.resultSql ?? undefined}
                           onRunDerived={runDerivedQuery} />
                       : (

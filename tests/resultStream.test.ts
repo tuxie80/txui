@@ -94,3 +94,17 @@ test('a page before its header is kept, not dropped', () => {
   assert.equal(streamComplete(acc), true);
   assert.equal(finishStream(acc, meta()).rows.length, 2);
 });
+
+test('multi-result pages keep their set identity and complete the total', () => {
+  const acc = newStreamAccum();
+  const returned = meta({ result_sets: [meta({ columns: [{ name: 'b', type_name: 'TEXT', nullable: true }] })] });
+  applyStreamEvent(acc, { type: 'header', result: returned, total_rows: 5 });
+  applyStreamEvent(acc, page(0, 2));
+  applyStreamEvent(acc, { type: 'page', set_index: 1, rows: [[10], [11], [12]] });
+  assert.equal(streamComplete(acc), true);
+  const result = finishStream(acc, returned);
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.result_sets.length, 1);
+  assert.deepEqual(result.result_sets[0].rows, [[10], [11], [12]]);
+  assert.deepEqual(result.result_sets[0].result_sets, []);
+});

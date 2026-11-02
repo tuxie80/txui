@@ -481,7 +481,7 @@ pub async fn find(
     let fetch_ms = start.elapsed().as_millis() as u64 - execution_ms;
 
     let (columns, rows) = shape_docs(&docs);
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns, rows, rows_affected: None, execution_ms, fetch_ms, warnings: vec![],
         truncated: false,
         geo_bbox: None,
@@ -650,7 +650,7 @@ pub async fn aggregate(
     let fetch_ms = start.elapsed().as_millis() as u64 - execution_ms;
 
     let (columns, rows) = shape_docs(&docs);
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns, rows, rows_affected: None, execution_ms, fetch_ms, warnings: vec![],
         truncated: false,
         geo_bbox: None,
@@ -694,7 +694,7 @@ pub async fn coll_stats(client: &mongodb::Client, db: &str, coll: &str) -> Resul
     rows.truncate(2000);
 
     let ms = start.elapsed().as_millis() as u64;
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns: vec![
             ColumnInfo { name: "section".into(), type_name: "string".into(), nullable: false },
             ColumnInfo { name: "name".into(),    type_name: "string".into(), nullable: false },
@@ -739,7 +739,7 @@ pub async fn current_ops(client: &mongodb::Client) -> Result<QueryResult> {
     // Longest-running first, the panel's contract on every engine.
     rows.sort_by_key(|r| std::cmp::Reverse(r[4].as_i64().unwrap_or(0)));
     let ms = start.elapsed().as_millis() as u64;
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns, rows, rows_affected: None,
         execution_ms: ms, fetch_ms: 0, warnings: vec![],
         truncated: false,
@@ -797,7 +797,7 @@ pub async fn server_info(client: &mongodb::Client, kind: &str) -> Result<QueryRe
     // cannot ship ten thousand rows to the webview.
     rows.truncate(2000);
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns: vec![
             ColumnInfo { name: "section".into(), type_name: "string".into(), nullable: false },
             ColumnInfo { name: "name".into(),    type_name: "string".into(), nullable: false },

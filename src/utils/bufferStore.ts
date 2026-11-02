@@ -7,18 +7,34 @@
  * since session ids are new on every connect — and restored when you reconnect.
  *
  * Rules, all enforced here so they are testable:
- *   - only SQL tabs are stored (a plugin tab is one click to reopen, and
- *     restoring one would silently start its polling);
- *   - empty buffers are not worth a localStorage entry;
+ *   - SQL text and view-only presentation are stored, never query results,
+ *     running state, credentials or server data;
+ *   - plugin tabs are restorable, but the host mounts them only after an
+ *     explicit Refresh so restoration cannot restart polling or jobs;
+ *   - empty SQL buffers are not worth a localStorage entry;
  *   - hard size caps, because localStorage throws when the quota is hit and a
  *     failed write must never break the editor;
  *   - unknown/older payload shapes are ignored rather than half-read.
  */
 
+export interface StoredEditorState {
+  anchor: number;
+  head: number;
+  scrollTop: number;
+  scrollLeft: number;
+  folds: Array<{ from: number; to: number }>;
+}
+
+export type StoredResultView = 'grid' | 'plan' | 'browser' | 'log' | 'map';
+
 export interface StoredBuffer {
   label: string;
   color?: string;
   sql: string;
+  /** A view-only plugin tab. It is not mounted until the user clicks Refresh. */
+  panel?: string;
+  view?: StoredResultView;
+  editor?: StoredEditorState;
   /** was this the tab in front */
   active?: boolean;
   /**
@@ -46,24 +62,62 @@ export const MAX_BUFFERS = 40;
 
 export const bufferKey = (connectionId: string) => `dbgui.buffers.${connectionId}`;
 
+const RESULT_VIEWS = new Set<StoredResultView>(['grid', 'plan', 'browser', 'log', 'map']);
+
+function cleanPanel(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(value) ? value : undefined;
+}
+
+function offset(value: unknown, max = MAX_BUFFER_CHARS): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= max
+    ? value : undefined;
+}
+
+function cleanEditor(value: unknown): StoredEditorState | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const v = value as Partial<StoredEditorState>;
+  const anchor = offset(v.anchor);
+  const head = offset(v.head);
+  if (anchor === undefined || head === undefined) return undefined;
+  const folds = Array.isArray(v.folds) ? v.folds.slice(0, 2_000).flatMap(range => {
+    if (!range || typeof range !== 'object') return [];
+    const from = offset(range.from);
+    const to = offset(range.to);
+    return from !== undefined && to !== undefined && to > from ? [{ from, to }] : [];
+  }) : [];
+  return {
+    anchor, head, folds,
+    scrollTop: offset(v.scrollTop, 100_000_000) ?? 0,
+    scrollLeft: offset(v.scrollLeft, 100_000_000) ?? 0,
+  };
+}
+
+function presentation(t: StoredBuffer): Pick<StoredBuffer, 'panel' | 'view' | 'editor'> {
+  const panel = cleanPanel(t.panel);
+  const editor = cleanEditor(t.editor);
+  return {
+    ...(panel ? { panel } : {}),
+    ...(RESULT_VIEWS.has(t.view as StoredResultView) ? { view: t.view } : {}),
+    ...(editor ? { editor } : {}),
+  };
+}
+
 /**
- * Trim a tab list down to what may be stored: SQL tabs with text, newest kept
- * when the caps bite (the tail of the list is the most recently opened).
+ * Trim a tab list down to what may be stored: SQL tabs with text and plugin
+ * tabs, newest kept when the caps bite (the tail is most recently opened).
  */
 export function encodeBuffers(tabs: StoredBuffer[]): Payload | null {
   const kept: StoredBuffer[] = [];
   let total = 0;
-  // Walk from the end so that, when a cap trims, the newest tabs survive.
   for (let i = tabs.length - 1; i >= 0 && kept.length < MAX_BUFFERS; i--) {
     const t = tabs[i];
     const sql = (t.sql ?? '').slice(0, MAX_BUFFER_CHARS);
-    if (!sql.trim()) continue;
+    if (!sql.trim() && !cleanPanel(t.panel)) continue;
     if (total + sql.length > MAX_TOTAL_CHARS) continue;
     total += sql.length;
     kept.unshift({
       label: t.label, color: t.color, sql, active: t.active,
-      // Only carried when present, so the stored shape is unchanged for
-      // buffers that predate the id.
+      ...presentation(t),
       ...(t.bid ? { bid: t.bid } : {}),
     });
   }
@@ -79,12 +133,14 @@ export function decodeBuffers(raw: string | null): StoredBuffer[] {
     if (!p || p.v !== 1 || !Array.isArray(p.tabs)) return [];
     return p.tabs
       .filter((t): t is StoredBuffer =>
-        !!t && typeof t.label === 'string' && typeof t.sql === 'string' && t.sql.trim() !== '')
+        !!t && typeof t.label === 'string' && typeof t.sql === 'string'
+        && (t.sql.trim() !== '' || cleanPanel(t.panel) !== undefined))
       .slice(0, MAX_BUFFERS)
       .map(t => ({
         label: t.label.slice(0, 60),
         color: typeof t.color === 'string' ? t.color : undefined,
         sql: t.sql.slice(0, MAX_BUFFER_CHARS),
+        ...presentation(t),
         active: t.active === true,
         ...(typeof t.bid === 'string' && t.bid ? { bid: t.bid } : {}),
       }));

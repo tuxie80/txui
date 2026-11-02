@@ -225,7 +225,7 @@ fn setsid_available() -> bool {
 /// stay on the line directly above it. Both spawn sites share this helper so
 /// the marker — the project's count of manually-read Windows branches —
 /// stays at one.
-fn suppress_console_window(cmd: &mut tokio::process::Command) {
+pub(crate) fn suppress_console_window(cmd: &mut tokio::process::Command) {
     // xplat-skip
     #[cfg(windows)]
     {

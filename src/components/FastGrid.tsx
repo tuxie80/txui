@@ -37,6 +37,7 @@ import { confirmDialog } from '../utils/appDialog';
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import { geometryBadge, geometryBadgeLabel } from '../utils/geometryBadge';
 import type { GeometryBadgeInfo } from '../utils/geometryBadge';
+import type { ColumnLayoutAction } from '../utils/columnLayout';
 import { copyToClipboard } from '../utils/exportersIo';
 import { getPref, PREFS } from '../store/preferences';
 import { readFontScale } from '../utils/fontScale';
@@ -74,6 +75,8 @@ interface Props {
   /** Header funnel icon — parent owns the filter popover + row filtering */
   onFilterCol?: (col: string, anchor: { x: number; y: number }) => void;
   filteredCols?: Set<string>;
+  pinnedCols?: Set<string>;
+  onLayoutCol?: (column: string, action: ColumnLayoutAction) => void;
   /** Browser mode: enables editing + pk/fk decorations */
   meta?: TableColumn[];
   pkColumns?: string[];
@@ -233,8 +236,8 @@ const GridRow = memo(function GridRow(p: RowProps) {
 interface EditingCell { r: number; c: number; value: string }
 
 export function FastGrid({
-  columns, rows, sort, onSortCol, onFilterCol, filteredCols, meta, pkColumns, pendingKeys,
-  onEdit, onFkClick, onOpenCell, onSelectionChange, onNearBottom, apiRef, rowClass,
+  columns, rows, sort, onSortCol, onFilterCol, filteredCols, pinnedCols, onLayoutCol,
+  meta, pkColumns, pendingKeys, onEdit, onFkClick, onOpenCell, onSelectionChange, onNearBottom, apiRef, rowClass,
 }: Props) {
   const { settings } = useGridSettings();
   // stable ref so the rAF scroll handler always sees the latest callback
@@ -278,6 +281,7 @@ export function FastGrid({
   const [active, setActive] = useState<{ r: number; c: number } | null>(null);
   const [editing, setEditing] = useState<EditingCell | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [headerMenu, setHeaderMenu] = useState<{ x: number; y: number; column: string } | null>(null);
   const draggingRef = useRef(false);
   const editInputRef = useRef<HTMLInputElement>(null);
   // Find-in-results (⌘F) — jumps the selection to matching cells (read-only).
@@ -942,7 +946,11 @@ export function FastGrid({
         key={c}
         className={`fg-hcell ${isPk ? 'fg-hpk' : ''}`}
         style={{ width: widths[c] }}
-        title={`${col.name} · ${col.type_name}${isPk ? ' · PRIMARY KEY' : ''}${fk ? ` · FK → ${fk.fk_table}` : ''}`}
+        title={`${col.name} · ${col.type_name}${isPk ? ' · PRIMARY KEY' : ''}${fk ? ` · FK → ${fk.fk_table}` : ''}${pinnedCols?.has(col.name) ? ' · pinned left' : ''}${onLayoutCol ? ' · right-click for layout' : ''}`}
+        onContextMenu={onLayoutCol ? e => {
+          e.preventDefault();
+          setHeaderMenu({ x: e.clientX, y: e.clientY, column: col.name });
+        } : undefined}
         onClick={onSortCol ? () => {
           if (suppressSortRef.current) { suppressSortRef.current = false; return; }
           onSortCol(col.name);
@@ -1108,6 +1116,20 @@ export function FastGrid({
       {nRows === 0 && <div className="fg-empty">No rows.</div>}
     </div>
     </div>
+    {headerMenu && onLayoutCol && (
+      <ContextMenu x={headerMenu.x} y={headerMenu.y} onClose={() => setHeaderMenu(null)}>
+        <ContextMenuItem label={pinnedCols?.has(headerMenu.column) ? 'Unpin column' : 'Pin column left'}
+          onClick={() => { onLayoutCol(headerMenu.column, { kind: 'pin', column: headerMenu.column }); setHeaderMenu(null); }} />
+        <ContextMenuItem label="Move left"
+          onClick={() => { onLayoutCol(headerMenu.column, { kind: 'move', column: headerMenu.column, direction: -1 }); setHeaderMenu(null); }} />
+        <ContextMenuItem label="Move right"
+          onClick={() => { onLayoutCol(headerMenu.column, { kind: 'move', column: headerMenu.column, direction: 1 }); setHeaderMenu(null); }} />
+        <ContextMenuItem label="Hide column"
+          onClick={() => { onLayoutCol(headerMenu.column, { kind: 'hide', column: headerMenu.column }); setHeaderMenu(null); }} />
+        <ContextMenuItem label="Reset layout"
+          onClick={() => { onLayoutCol(headerMenu.column, { kind: 'reset' }); setHeaderMenu(null); }} />
+      </ContextMenu>
+    )}
     {contextMenu && (
       <ContextMenu x={contextMenu.x} y={contextMenu.y} onClose={() => setContextMenu(null)}>
         <ContextMenuItem

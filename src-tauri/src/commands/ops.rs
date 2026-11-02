@@ -256,7 +256,7 @@ async fn redis_config(mgr: crate::db::redis::RedisConnection) -> Result<QueryRes
         .collect();
     rows.sort_by(|a, b| a[0].as_str().unwrap_or("").cmp(b[0].as_str().unwrap_or("")));
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns: vec![
             ColumnInfo { name: "name".into(),  type_name: "string".into(), nullable: false },
             ColumnInfo { name: "value".into(), type_name: "string".into(), nullable: true },
@@ -293,7 +293,7 @@ async fn redis_info(mgr: crate::db::redis::RedisConnection) -> Result<QueryResul
         }
     }
 
-    Ok(QueryResult {
+    Ok(QueryResult { result_sets: vec![],
         columns: vec![
             ColumnInfo { name: "section".into(), type_name: "string".into(), nullable: false },
             ColumnInfo { name: "name".into(),    type_name: "string".into(), nullable: false },

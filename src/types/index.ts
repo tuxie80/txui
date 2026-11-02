@@ -141,6 +141,8 @@ export interface SpatialColumn {
 }
 
 export interface QueryResult {
+  /** Additional result sets from a multi-statement batch; absent for ordinary queries. */
+  result_sets?: QueryResult[];
   columns: ColumnInfo[];
   rows: unknown[][];
   rows_affected: number | null;

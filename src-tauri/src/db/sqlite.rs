@@ -155,18 +155,21 @@ where
     // set against the FIRST set's capture padded short rows with fabricated
     // NULLs and silently dropped extra columns.
     let mut sets: Vec<(Vec<ColumnInfo>, Vec<Row>)> = Vec::new();
+    let mut set_complete = false;
     let mut total_rows = 0usize;
     let mut truncated = false;
     while let Some(item) = stream.try_next().await? {
         match item {
             sqlx::Either::Left(done) => {
                 affected = Some(affected.unwrap_or(0) + done.rows_affected());
+                set_complete = sets.last().is_some_and(|(_, rows)| !rows.is_empty());
             }
             sqlx::Either::Right(row) => {
                 if first_row_ms.is_none() {
                     first_row_ms = Some(start.elapsed().as_millis() as u64);
                 }
-                if sets.last().is_none_or(|(cols, _)| !same_columns(cols, &row)) {
+                if set_complete || sets.last().is_none_or(|(cols, _)| !same_columns(cols, &row)) {
+                    set_complete = false;
                     sets.push((row
                         .columns()
                         .iter()
@@ -177,8 +180,8 @@ where
                         })
                         .collect(), Vec::new()));
                 }
-                // The cap counts the TOTAL across sets — only the first
-                // columned set is returned (sqlserver.rs, same rule).
+                // The cap counts the TOTAL across sets. The first set stays at
+                // the top level for compatibility; additional sets follow.
                 if max_rows.is_some_and(|cap| total_rows >= cap) {
                     truncated = true;
                     break;
@@ -191,34 +194,23 @@ where
     }
     let execution_ms = first_row_ms.unwrap_or_else(|| start.elapsed().as_millis() as u64);
 
-    // The FIRST columned set is the answer — the frontend renders one grid. A
-    // later set with a DIFFERENT shape is dropped whole rather than folded
-    // into the first set's shape; an identical-shaped later set keeps
-    // appending, harmlessly (no set-boundary signal exists for it and the
-    // decode is identical). sqlserver.rs's result_from_sets made the same
-    // first-set choice.
-    match sets.into_iter().find(|(cols, _)| !cols.is_empty()) {
-        Some((columns, rows)) => Ok(QueryResult {
-            columns,
-            rows,
-            rows_affected: None,
-            execution_ms,
-            fetch_ms: start.elapsed().as_millis() as u64 - execution_ms,
-            warnings: vec![],
-            truncated,
-            geo_bbox: None,
-        }),
-        None => Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: affected,
-            execution_ms,
-            fetch_ms: 0,
-            warnings: vec![],
-            truncated: false,
-            geo_bbox: None,
-        }),
+    let fetch_ms = start.elapsed().as_millis() as u64 - execution_ms;
+    let mut result_sets: Vec<QueryResult> = sets.into_iter()
+        .filter(|(cols, _)| !cols.is_empty())
+        .map(|(columns, rows)| QueryResult {
+            result_sets: vec![], columns, rows, rows_affected: None,
+            execution_ms, fetch_ms, warnings: vec![], truncated, geo_bbox: None,
+        })
+        .collect();
+    if !result_sets.is_empty() {
+        let mut first = result_sets.remove(0);
+        first.result_sets = result_sets;
+        return Ok(first);
     }
+    Ok(QueryResult { result_sets: vec![],
+        columns: vec![], rows: vec![], rows_affected: affected,
+        execution_ms, fetch_ms: 0, warnings: vec![], truncated: false, geo_bbox: None,
+    })
 }
 
 /// Same column list as the current set's capture? Compared per row: a
@@ -541,23 +533,28 @@ mod tests {
     async fn multi_statement_sets_never_share_column_metadata() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
 
-        // Second set has MORE columns — they must not bleed into the first.
+        // Second set has MORE columns — they must not bleed into the first, and
+        // both sets remain available instead of the second being discarded.
         let r = execute(&pool, "SELECT 1 AS a; SELECT 1 AS a, 2 AS b").await.unwrap();
         assert_eq!(r.columns.len(), 1);
         assert_eq!(r.columns[0].name, "a");
         assert_eq!(r.rows, vec![vec![serde_json::json!(1)]]);
+        assert_eq!(r.result_sets.len(), 1);
+        assert_eq!(r.result_sets[0].columns.len(), 2);
+        assert_eq!(r.result_sets[0].rows, vec![vec![serde_json::json!(1), serde_json::json!(2)]]);
 
         // Second set has FEWER — no fabricated NULL padding onto its rows.
         let r = execute(&pool, "SELECT 1 AS a, 2 AS b; SELECT 3 AS a").await.unwrap();
         assert_eq!(r.columns.len(), 2);
         assert_eq!(r.rows, vec![vec![serde_json::json!(1), serde_json::json!(2)]]);
+        assert_eq!(r.result_sets[0].rows, vec![vec![serde_json::json!(3)]]);
 
-        // Identical shapes carry no trustworthy set-boundary signal — sqlx
-        // reports none and the column lists compare equal — so such sets keep
-        // appending, the historical behavior, which is harmless precisely
-        // because the metadata (and therefore the decode) is the same.
+        // The end-of-set marker separates sets even when their column lists
+        // are identical; comparing metadata alone would merge them.
         let r = execute(&pool, "SELECT 1 AS a; SELECT 2 AS a").await.unwrap();
-        assert_eq!(r.rows, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]);
+        assert_eq!(r.rows, vec![vec![serde_json::json!(1)]]);
+        assert_eq!(r.result_sets.len(), 1);
+        assert_eq!(r.result_sets[0].rows, vec![vec![serde_json::json!(2)]]);
 
         // DML before the SELECT: the write summaries stay out of the grid and
         // the SELECT's set is still the answer.
