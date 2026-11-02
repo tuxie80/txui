@@ -6,7 +6,7 @@
 #   TXUI_DEPLOY_PASSWORD=… sh dev/deploy_dev_docs.sh     (or it prompts, hidden)
 #
 # The dev copy is the freshly generated docs/index.html + screenshots with a
-# red banner injected naming the build date and the unreleased status. The
+# red banner injected naming the build date and whether main matches the release. The
 # mirror is additive and scoped to www/txui/dev/ only — nothing else on the
 # hosting is read or written. Password handling follows deploy_site.sh
 # (0600 temp script, trap-deleted, never argv).
@@ -30,15 +30,22 @@ mkdir -p "$STAGE/docs/user-guide"
 cp -R docs/user-guide/screenshots "$STAGE/docs/user-guide/screenshots"
 
 STAMP=$(date '+%Y-%m-%d %H:%M')
-STAGE_DIR="$STAGE" STAMP="$STAMP" python3 - <<'PY'
+VERSION=$(node -p "require('./package.json').version")
+if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null \
+  && [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/v$VERSION^{commit}")" ]; then
+  BANNER_STATUS="matches release v$VERSION"
+else
+  BANNER_STATUS="includes unreleased changes after v$VERSION"
+fi
+STAGE_DIR="$STAGE" STAMP="$STAMP" BANNER_STATUS="$BANNER_STATUS" python3 - <<'PY'
 import os, re
 p = os.path.join(os.environ['STAGE_DIR'], 'docs', 'index.html')
 html = open(p).read()
 banner = (
     '<div style="position:sticky;top:0;z-index:9999;background:#ff2d2d;color:#fff;'
     'font:13px ui-monospace,Menlo,monospace;padding:.45rem .9rem;text-align:center">'
-    f"DEVELOPMENT DOCS — built from main on {os.environ['STAMP']}; describes "
-    'unreleased features. <a href="../docs/" style="color:#fff;text-decoration:underline">'
+    f"DEVELOPMENT DOCS — built from main on {os.environ['STAMP']}; "
+    f"{os.environ['BANNER_STATUS']}. <a href=\"../docs/\" style=\"color:#fff;text-decoration:underline\">"
     'Stable docs</a> · <a href="../docs-archive/" style="color:#fff;text-decoration:underline">'
     'Archive</a></div>')
 assert '</body>' not in banner

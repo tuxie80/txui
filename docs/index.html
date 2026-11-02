@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxUI Help · v1.5.1</title>
+<title>TxUI Help · v1.5.2</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>/* TxUI Help — dark-first, light-aware, red accent. */
 :root{
@@ -218,7 +218,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </head>
 <body class="show-mac">
 <header class="topbar">
-  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.5.1</span></div>
+  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.5.2</span></div>
   <div class="top-actions">
     <input id="globalSearch" class="global-search" placeholder="Search the docs…" oninput="globalSearch(this.value)" autocomplete="off">
     <div class="seg" id="osToggle">
@@ -231,13 +231,13 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="layout">
   <nav class="sidenav">
     <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-ai-assistant">AI assistant</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li><li><a href="#guide-txshell">TxShell</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
-    <div class="nav-foot">Generated from source<br>at v1.5.1 · macOS screenshots</div>
+    <div class="nav-foot">Generated from source<br>at v1.5.2 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
     
 <section id="overview" class="doc-section">
-  <h1 id="txui-v1-5-1">TxUI <span class="ver">v1.5.1</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 37 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.1.</p>
+  <h1 id="txui-v1-5-2">TxUI <span class="ver">v1.5.2</span></h1>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 37 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.2.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
     <div class="card"><div class="big">37</div><div>tool panels</div></div>
@@ -255,7 +255,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="engines" class="doc-section">
   <h1 id="engine-support-matrix">Engine support matrix</h1>
-  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.5.1). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
+  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.5.2). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
   <div class="toolbar">
     <input id="engFilter" class="filter" placeholder="Filter capabilities…" oninput="filterTable('engFilter','engTable')">
   </div>
@@ -611,6 +611,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <ol><li><b>Right-click empty space in the sidebar → New connection…</b> — or click the <b>+</b> button at the top of the sidebar, or press <code>Mod+Shift+N</code>.</li><li><b>Choose the engine</b> and fill in <b>host, port, user and password</b>. Empty fields use the engine default — defaults show as greyed placeholders, never prefilled text. Pasting a connection URL (<code>postgres://…</code>, <code>mysql://…</code>) fills the form in one step.</li><li>Click <b>Test</b> to check the config without saving…</li><li>…then <b>Save</b>. Your password goes into the per-machine secrets store, never into the readable config file.</li><li><b>Double-click the connection</b> in the sidebar to open it.</li></ol>
 <figure><a class="shot-link" href="user-guide/screenshots/dark/02-add-connection.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/02-add-connection.png" data-dark-src="user-guide/screenshots/dark/02-add-connection.png" data-light-src="user-guide/screenshots/light/02-add-connection.png" alt="The New connection form" loading="lazy"></a><figcaption>The New connection form</figcaption></figure>
 <p>Two optional fields are worth knowing from day one: <b>Environment</b> (tag a connection <code>prod</code> and TxUI adds confirmation prompts and hard limits around writes) and <b>Read-only</b> (blocks all writes, enforced before anything reaches the server).</p>
+<p>For SSH, unknown hosts are refused by default. Click <b>Inspect host key</b> to scan public keys without sending login credentials, compare the displayed SHA256 fingerprint with your administrator or cloud console, then explicitly trust only the selected key. Automatic TOFU is a separate opt-in. Imported password commands, auto-connect, log paths and imported SSH trust are stripped for safety.</p>
 <p>File engines are simpler: pick <b>SQLite</b>, <b>DuckDB</b> or <b>Parquet</b> and the form collapses to a file picker — no host, port, user or SSH.</p>
 <h3 id="3-the-workspace">3. The workspace</h3>
 <p>Connecting opens a <b>session</b>:</p>
@@ -620,6 +621,9 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <p>Type a statement in the editor — <code>SELECT * FROM …</code> — and press <b><code>Mod+Enter</code></b> to run the statement at the cursor (or the selected text). The result lands in the grid below: sortable, filterable, and fast even at a million rows.</p>
 <figure><a class="shot-link" href="user-guide/screenshots/dark/06-result-grid.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/06-result-grid.png" data-dark-src="user-guide/screenshots/dark/06-result-grid.png" data-light-src="user-guide/screenshots/light/06-result-grid.png" alt="A query result in the grid" loading="lazy"></a><figcaption>A query result in the grid</figcaption></figure>
 <p><code>Mod+Shift+Enter</code> runs the whole buffer. <code>Mod+E</code> shows the execution plan of the statement at the cursor.</p>
+<p><b>Every result set stays available.</b> MySQL/MariaDB/Percona, PostgreSQL, SQLite and SQL Server batches or procedures that return several row sets show <b>▦ Result 1…N</b> tabs, even when two sets have identical columns. Right-click a column header to pin it left, hide it or reorder it; <b>Reset layout</b> restores the default. These layouts persist per engine and result shape without changing which source values filters, viewers and exports use.</p>
+<p><b>Errors offer a next step.</b> Missing names can include schema-based suggestions, ambiguous columns explain aliases, and syntax positions offer <b>Go to error</b>. <b>Copy diagnostics</b> includes the statement, server error and deterministic guidance; AI fixing is optional.</p>
+<p><b>Your workspace returns safely.</b> SQL text, the caret/main selection, scrolling, folds, active result view and editor/result split are restored on reconnect. Plugin tabs return as inert placeholders and load only after you click <b>Refresh</b>. No result rows, SQL execution, polling or running jobs are restored automatically. Scratch sessions remain deliberately non-persistent.</p>
 <h3 id="5-browse-a-table">5. Browse a table</h3>
 <p><b>Double-click a table or view</b> in the object explorer to open the <b>data browser</b>: a read-only paged grid of the table&#39;s rows (latest first), with per-column filters and foreign-key click-through — click an FK value to open the referenced row.</p>
 <figure><a class="shot-link" href="user-guide/screenshots/dark/07-data-browser.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/07-data-browser.png" data-dark-src="user-guide/screenshots/dark/07-data-browser.png" data-light-src="user-guide/screenshots/light/07-data-browser.png" alt="The read-only data browser" loading="lazy"></a><figcaption>The read-only data browser</figcaption></figure>
@@ -833,6 +837,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <ul><li>Refresh intervals: <b>0.5, 1, 2, 5 or 10 seconds</b>. The last successful refresh time is visible.</li><li>Closing the dialog <b>does not kill the statement</b>.</li><li>When the statement finishes, the final observed statistics remain available and one summary is written to the session log.</li><li>Concurrent statements and repeated phase names are tracked independently by <code>(THREAD_ID, EVENT_ID)</code>, so their progress is not mixed together.</li></ul>
 <p><b>If progress data is missing:</b></p>
 <p>MySQL&#39;s <code>performance_schema</code> stage instruments and consumers must be enabled. The dialog identifies what is missing and offers <b>Enable progress tracking</b>. After your confirmation, TxUI runs the two setup <code>UPDATE</code> statements if your account has the required privileges.</p>
+<p><b>MariaDB also has native progress.</b> Stage number, stage count, current-stage percentage and the documented overall percentage come from <code>information_schema.PROCESSLIST</code>, so progress still works with Performance Schema off. Optional Performance Schema detail is merged when available. Warnings cover vector indexes, system versioning, UCA collations, row/page compression and rebuild/space-reclamation implications; <code>DATA_FREE</code> is not treated as a universal fragmentation measure.</p>
+<h4 id="cloud-sql-read-replica-indexes">Cloud SQL read-replica indexes</h4>
+<p>Run Google&#39;s documented <code>CALL mysql.addSecondaryIdxOnReplica(...)</code> on the replica as usual. TxUI recognizes this as a Cloud SQL control operation, not a primary-side build, and reads <code>mysql.cloudsql_replica_idx_status</code> for <b>PENDING</b>, <b>RUNNING</b>, <b>DONE</b> and <b>FAILED</b> jobs. The table shows action, thread ID when assigned, start/end time, retry count, error and SQL. Queued jobs remain visible without a processlist thread; active jobs retain their ordinary InnoDB stages. Other MySQL servers probe this optional table once and then leave the feed disabled.</p>
+<p><b>Compare primary and replica indexes by direction, not just count.</b> Fleet → Indexes shows <b>on N</b> and <b>missing N</b> for each differing index, with server names. An index found only on a replica is informational because Cloud SQL supports that intentionally. An index present on the primary but missing on a replica is an error: promoting that replica would change query plans. A server that did not answer is excluded rather than treated as missing every index.</p>
 <h4 id="execution-plans-explain-visualization">Execution plans — EXPLAIN visualization</h4>
 <p>Select a statement and click <b>Explain</b> or press <b><code>Mod+E</code></b>.</p>
 <p><b>Four views of the same plan:</b></p>
@@ -1105,7 +1113,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <p><b>Safety and limits:</b></p>
 <ul><li>READONLY is enforced by TxUI&#39;s application and driver pre-execution guards; it is not claimed as server-side authorization.</li><li>Quack-over-SSH is refused because discovered remote addresses would bypass a single tunnel.</li><li>Processlist/kill, replication, Playground, dump/restore and Tuner are unavailable.</li><li>Use SQL (<code>COPY … FROM</code> or <code>read_csv()</code>) instead of the CSV import wizard.</li><li>Table designer, view editor and the default-database picker are unavailable.</li></ul>
 <h3 id="cve-2026-111497-broccoli2shell">CVE-2026-111497 / Broccoli2Shell</h3>
-<p><b>Security advisory: TxUI 1.5.1 is affected through its bundled DuckDB. We are waiting for the upstream DuckDB bugfix.</b> The bundled DuckDB 2.0 contains Brotli 1.1.0 without the upstream <code>BLOCK_SWITCH</code> fix. A malicious Brotli-compressed Parquet file opened through DuckDB or a Parquet dataset could crash TxUI, corrupt memory, or potentially execute code with the user&#39;s permissions.</p>
+<p><b>Security advisory: TxUI 1.5.2 remains affected through its bundled DuckDB. We are still waiting for the upstream DuckDB bugfix.</b> The bundled DuckDB 2.0 contains Brotli 1.1.0 without the upstream <code>BLOCK_SWITCH</code> fix. A malicious Brotli-compressed Parquet file opened through DuckDB or a Parquet dataset could crash TxUI, corrupt memory, or potentially execute code with the user&#39;s permissions.</p>
 <p>Updating macOS or Homebrew alone does not fix TxUI&#39;s bundled decoder. Direct single-file Parquet inspection uses the safe Rust decoder and is not affected by this CVE. Ordinary database connections and TxUI&#39;s Rust HTTP clients do not expose this decoder.</p>
 <h4 id="recommended-actions">Recommended actions</h4>
 <ol><li><b>Until patched, do not open untrusted Brotli-compressed Parquet files through DuckDB or Parquet datasets.</b> Re-encode them using a patched tool to Snappy or Zstandard.</li><li><b>TxUI will take the upstream DuckDB fix and rebuild all desktop releases.</b> The relevant DuckDB fix is still pending; updating the system Brotli library cannot repair the bundled copy.</li><li><b>Development machines should separately upgrade vulnerable runtimes:</b> Node.js 24.22.1 or 26.12.1 and Brotli 1.2.1. These upgrades protect local tooling but do not repair the shipped TxUI binary.</li></ol>
@@ -1185,7 +1193,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="shortcuts" class="doc-section">
   <h1 id="keyboard-shortcuts">Keyboard shortcuts</h1>
-  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.5.1). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
+  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.5.2). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
   <div class="toolbar"><input id="scFilter" class="filter" placeholder="Filter shortcuts by action or key…" oninput="filterTable('scFilter','scTable')"></div>
   <table class="ref" id="scTable">
     <thead><tr><th>Command</th><th>Category</th><th>Shortcut</th><th>What it does</th></tr></thead>
@@ -2126,8 +2134,8 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
         <td>Statements with errors / warnings</td><td class="dim">Queries</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="statements with sorting queries stmt-sorting" data-engines="mysql">
         <td>Statements with sorting</td><td class="dim">Queries</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="unused indexes indexes &amp; schema idx-unused" data-engines="mysql">
         <td>Unused indexes</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="redundant indexes indexes &amp; schema idx-redundant" data-engines="mysql">
-        <td>Redundant indexes</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="table sizes indexes &amp; schema tbl-sizes" data-engines="mysql">
-        <td>Table sizes</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="auto-increment usage indexes &amp; schema auto-inc" data-engines="mysql">
+        <td>Redundant indexes</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="table sizes &amp; compression indexes &amp; schema tbl-sizes" data-engines="mysql">
+        <td>Table sizes &amp; compression</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="auto-increment usage indexes &amp; schema auto-inc" data-engines="mysql">
         <td>Auto-increment usage</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="table io statistics indexes &amp; schema tbl-stats" data-engines="mysql">
         <td>Table IO statistics</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="tables with full scans indexes &amp; schema tbl-fullscan" data-engines="mysql">
         <td>Tables with full scans</td><td class="dim">Indexes &amp; schema</td><td><span class="eng-badge e-mysql">MySQL</span></td></tr><tr data-search="lock instrumentation status locks lock-check" data-engines="mysql">
@@ -2469,7 +2477,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.5.1 · 37 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.5.2 · 37 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).
