@@ -218,15 +218,26 @@ async function verifySettings(browser) {
   await page.getByRole('tab', { name: 'Updates' }).click();
   const automatic = page.getByRole('checkbox', { name: /Automatically check for updates/ });
   if (await automatic.isChecked()) throw new Error('automatic update checks are enabled by default');
+  await page.evaluate(() => { window.__MOCK__.update_check = { latest: null, branch: null }; });
+  const checkRow = page.locator('.settings-row').filter({ has: page.getByRole('button', { name: 'Check now' }) });
+  const sectionHeight = await checkRow.evaluate(row => row.parentElement.getBoundingClientRect().height);
   await page.getByRole('button', { name: 'Check now' }).click();
   await page.waitForFunction(() =>
     (window.__CALLS__ ?? []).filter(call => call.cmd === 'update_check').length === 1,
   null, { polling: 100 });
+  await page.getByText(/You're up to date/).waitFor();
+  const currentHeight = await checkRow.evaluate(row => row.parentElement.getBoundingClientRect().height);
+  if (Math.abs(currentHeight - sectionHeight) > 1) {
+    throw new Error(`up-to-date result moved the Updates section: ${sectionHeight} → ${currentHeight}`);
+  }
+  await checkRow.locator('.settings-update-result').waitFor();
   await page.clock.fastForward(11_000);
   if (await updateCalls() !== 1) throw new Error('manual check unexpectedly enabled scheduled checks');
 
   await automatic.check();
-  await page.clock.fastForward(11_000);
+  await page.clock.fastForward(59_000);
+  if (await updateCalls() !== 1) throw new Error('opt-in launch check ran before one minute');
+  await page.clock.fastForward(1_000);
   await page.waitForFunction(() =>
     (window.__CALLS__ ?? []).filter(call => call.cmd === 'update_check').length === 2,
   null, { polling: 100 });
@@ -234,6 +245,22 @@ async function verifySettings(browser) {
   await page.clock.fastForward(6 * 60 * 60 * 1000 + 11_000);
   if (await updateCalls() !== 2) throw new Error('disabling automatic checks did not cancel the schedule');
   console.log('PASS update checks are opt-in; manual checks and disabling the schedule work');
+
+  await page.evaluate(() => {
+    window.__MOCK__.update_check = {
+      latest: { version: '99.0.0', date: null, body: null },
+      branch: { version: '99.0.0', date: null, body: null },
+    };
+  });
+  await page.getByRole('button', { name: 'Check now' }).click();
+  await page.getByText(/Update v99\.0\.0/).waitFor();
+  const availableHeight = await checkRow.evaluate(row => row.parentElement.getBoundingClientRect().height);
+  if (Math.abs(availableHeight - sectionHeight) > 1) {
+    throw new Error(`update-available result moved the Updates section: ${sectionHeight} → ${availableHeight}`);
+  }
+  await checkRow.locator('.settings-update-result').waitFor();
+  console.log('PASS update results stay inline without moving the Updates section');
+  if (process.env.TXUI_UPDATES_SHOT) await page.screenshot({ path: process.env.TXUI_UPDATES_SHOT });
 
   const handle = page.getByRole('button', { name: 'Resize Settings window' });
   const handleBox = await handle.boundingBox();

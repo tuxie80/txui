@@ -770,11 +770,11 @@ function UpdatesSection() {
       </div>
       <div className="settings-row">
         <span>Check for updates <em>(only when you click Check now)</em></span>
+        <span className="settings-update-result" aria-live="polite" title={result ?? undefined}>{result}</span>
         <button className="toolbar-btn" onClick={() => { void checkNow(); }} disabled={checking}>
           {checking ? 'Checking…' : 'Check now'}
         </button>
       </div>
-      {result && <p className="settings-hint">{result}</p>}
       <label className="settings-check">
         <input type="checkbox" checked={autoCheck} onChange={e => setAutoCheck(e.target.checked)} />
         <span>Automatically check for updates <em>(off by default; when enabled, after launch and every 6 hours)</em></span>

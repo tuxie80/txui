@@ -428,7 +428,7 @@ export default function App() {
   // pending launch check and the six-hour schedule; Check now remains manual.
   useEffect(() => {
     if (!autoCheckUpdates) return;
-    const first = setTimeout(() => { void runUpdateCheck(); }, 10_000);
+    const first = setTimeout(() => { void runUpdateCheck(); }, 60_000);
     const every = setInterval(() => { void runUpdateCheck(); }, 6 * 60 * 60 * 1000);
     return () => { clearTimeout(first); clearInterval(every); };
   }, [autoCheckUpdates]);
