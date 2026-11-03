@@ -581,6 +581,297 @@ async function verifyConnectionForm(browser) {
   await page.close();
 }
 
+async function verifyErrorPresentation(browser) {
+  const page = await openSession(browser);
+  await page.evaluate(() => {
+    window.__MOCK__.ai_has_key = false;
+    window.__MOCK__.execute_query = () => {
+      throw new Error("ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'sdf sdf sdf sdf sf' at line 1");
+    };
+    window.dispatchEvent(new CustomEvent('dbgui:ai-config-changed'));
+  });
+  await page.locator('.cm-content').first().click();
+  await page.keyboard.press('Meta+a');
+  await page.keyboard.type('sdf sdf sdf sdf sf');
+  await page.keyboard.press('Meta+Enter');
+  const error = page.locator('.query-error');
+  await error.waitFor({ timeout: 5000 });
+  const metrics = await error.evaluate(element => {
+    const guidance = element.querySelector('.query-error-guidance');
+    const title = guidance.querySelector('strong');
+    const detail = guidance.querySelector('span');
+    return {
+      height: element.getBoundingClientRect().height,
+      message: element.querySelector('.query-error-msg').textContent,
+      titleBottom: title.getBoundingClientRect().bottom,
+      detailTop: detail.getBoundingClientRect().top,
+    };
+  });
+  if (metrics.height > 220) throw new Error(`query error consumes excessive height: ${JSON.stringify(metrics)}`);
+  if (!metrics.message.includes('ERROR 1064')) throw new Error('server error message is not visible');
+  if (metrics.detailTop < metrics.titleBottom - 1) {
+    throw new Error(`error guidance title and detail are not separated: ${JSON.stringify(metrics)}`);
+  }
+  const fix = page.getByRole('button', { name: '✦ Fix with AI' });
+  if (await fix.getAttribute('aria-disabled') !== 'true') {
+    throw new Error('unconfigured AI action is presented as available');
+  }
+  await page.waitForFunction(() =>
+    document.querySelector('.query-error-fix')?.closest('[data-tip]')?.getAttribute('data-tip')?.includes('Settings → AI'),
+  null, { polling: 100, timeout: 3000 });
+  const reason = await fix.evaluate(button => button.closest('[data-tip]')?.getAttribute('data-tip') ?? '');
+  if (!reason.includes('Settings → AI')) throw new Error('unconfigured AI action does not explain the fix');
+  await fix.dispatchEvent('click');
+  if (await page.locator('.ai-modal').count() !== 0) throw new Error('unconfigured AI action opened the assistant');
+  await page.locator('.cm-content').first().click();
+  await page.keyboard.press('Meta+i');
+  if (await page.locator('.ai-modal').count() !== 0) throw new Error('AI shortcut bypassed the configuration guard');
+
+  await page.evaluate(() => {
+    window.__MOCK__.ai_has_key = true;
+    window.__MOCK__.ai_complete = () => 'SELECT 1';
+    window.dispatchEvent(new CustomEvent('dbgui:ai-config-changed'));
+  });
+  await page.waitForFunction(() =>
+    document.querySelector('.query-error-fix')?.getAttribute('aria-disabled') === 'false',
+  null, { polling: 100, timeout: 3000 });
+  await fix.click();
+  await page.locator('.ai-modal').waitFor();
+  await page.locator('.ai-result').getByText('SELECT 1', { exact: true }).waitFor();
+  await page.locator('.ai-modal .icon-btn').click();
+  console.log('PASS compact errors and live AI availability guards work');
+  if (process.env.TXUI_ERROR_SHOT) await page.screenshot({ path: process.env.TXUI_ERROR_SHOT });
+
+  const sample = "show global status like '%cnt%';\nshow global variables;\nshow processlist;\nshow replica status;\n\n\nUser;Host;db;Command;Time;State\nroot;localhost:57587;;Sleep;45;";
+  const failing = 'root;localhost:57587;;Sleep;45;';
+  await page.evaluate(sample => {
+    window.__MOCK__.execute_query = () => {
+      throw new Error("ERROR 1064 (42000): You have an error in your SQL syntax near 'root' at line 2");
+    };
+    window.dispatchEvent(new CustomEvent('dbgui:replace-sql', { detail: { sql: sample } }));
+  }, sample);
+  await page.locator('.cm-content').first().click();
+  await page.evaluate(from => {
+    window.dispatchEvent(new CustomEvent('dbgui:goto-range', { detail: { from, to: from } }));
+  }, sample.indexOf(failing) + 2);
+  const executeCalls = await page.evaluate(() =>
+    (window.__CALLS__ ?? []).filter(call => call.cmd === 'execute_query').length);
+  await page.locator('.run-btn-go').click();
+  await page.waitForFunction(before =>
+    (window.__CALLS__ ?? []).filter(call => call.cmd === 'execute_query').length > before,
+  executeCalls, { polling: 100, timeout: 3000 });
+  await page.waitForTimeout(100);
+  await page.locator('.query-error').waitFor();
+  await page.getByRole('button', { name: 'Go to error' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('.cm-activeLine')?.textContent?.includes('root;localhost:57587'),
+  null, { polling: 100, timeout: 3000 });
+  console.log('PASS Go to error maps statement-relative positions into the buffer');
+
+  const actionTexts = await page.locator('.query-error-actions button').allTextContents();
+  if (actionTexts.at(-1) !== '✦ Fix with AI' || !actionTexts.includes('Copy diagnostics')) {
+    throw new Error(`error actions are not consolidated: ${JSON.stringify(actionTexts)}`);
+  }
+  await page.close();
+  const markerPage = await openSession(browser);
+  {
+    const page = markerPage;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
+    const markerSample = "show global variables;\nshow processlist;\nshow replica status;\nUser;Host;db;Command;Time;State\nsystem user;;;Sleep;340666;wsrep aborter idle\nroot;localhost:57584;;Sleep;0;\nroot;localhost:57586;;Query;0;starting\nroot;localhost:57587;;Sleep;45;";
+    await page.evaluate(sample => {
+      window.__MOCK_OK__ = window.__MOCK__.execute_query;
+      window.__MOCK__.execute_query = () => {
+        throw new Error("ERROR 1064 (42000): You have an error in your SQL syntax near 'db' at line 1");
+      };
+      window.dispatchEvent(new CustomEvent('dbgui:replace-sql', { detail: { sql: sample } }));
+    }, markerSample);
+    const targets = [
+      'User;Host;db;Command;Time;State',
+      'system user;;;Sleep;340666;wsrep aborter idle',
+      'root;localhost:57584;;Sleep;0;',
+      'root;localhost:57586;;Query;0;starting',
+    ];
+    const caretColumns = new Map([[targets[0], 7], [targets[1], 2]]);
+    const priorMarkers = new Map();
+    for (const target of targets) {
+      const targetLine = page.locator('.cm-content .cm-line').filter({ hasText: target }).first();
+      await targetLine.click();
+      await page.keyboard.press('Home');
+      const caretColumn = caretColumns.get(target);
+      if (caretColumn === undefined) await page.keyboard.press('End');
+      else for (let i = 0; i < caretColumn; i++) await page.keyboard.press('ArrowRight');
+      const targetLineNumber = await targetLine.evaluate(element =>
+        [...element.parentElement.children].indexOf(element) + 1);
+      const before = await page.evaluate(() =>
+        (window.__CALLS__ ?? []).filter(call => call.cmd === 'execute_query').length);
+      await page.locator('.run-btn-go').click();
+      await page.waitForFunction(count =>
+        (window.__CALLS__ ?? []).filter(call => call.cmd === 'execute_query').length > count,
+      before, { polling: 100, timeout: 3000 });
+      await page.waitForFunction(count =>
+        document.querySelectorAll('.cm-run-gutter .cm-run-error').length === count,
+      priorMarkers.size + 1, { polling: 16, timeout: 3000 });
+      await page.locator('.query-error').waitFor();
+      const markers = await page.evaluate(() => {
+        const codeLines = [...document.querySelectorAll('.cm-content .cm-line')].map((element, index) => ({
+          number: index + 1,
+          text: element.textContent,
+          top: element.getBoundingClientRect().top,
+          bottom: element.getBoundingClientRect().bottom,
+        }));
+        return [...document.querySelectorAll('.cm-run-gutter .cm-run-error')].map(element => {
+          const rect = element.closest('.cm-gutterElement').getBoundingClientRect();
+          const y = rect.top + rect.height / 2;
+          const line = codeLines.find(candidate => y >= candidate.top && y <= candidate.bottom);
+          return { line: line?.number, lineText: line?.text, text: element.textContent, title: element.getAttribute('title') };
+        });
+      });
+      const expected = [...priorMarkers.keys(), targetLineNumber].sort((a, b) => a - b);
+      if (JSON.stringify(markers.map(marker => marker.line)) !== JSON.stringify(expected)) {
+        throw new Error(`run on ${target} moved or replaced timestamps: ${JSON.stringify({ expected, markers })}`);
+      }
+      for (const [line, marker] of priorMarkers) {
+        const current = markers.find(candidate => candidate.line === line);
+        if (!current || current.text !== marker.text || current.title !== marker.title) {
+          throw new Error(`run on ${target} rewrote line ${line}: ${JSON.stringify({ marker, current })}`);
+        }
+      }
+      for (const marker of markers) priorMarkers.set(marker.line, marker);
+    }
+    console.log('PASS sequential failures keep each timestamp on its executed line');
+    const redSnapshot = () => page.locator('.cm-run-gutter .cm-run-error').evaluateAll(elements => {
+      const lines = [...document.querySelectorAll('.cm-content .cm-line')].map((line, index) => ({
+        number: index + 1,
+        text: line.textContent,
+        top: line.getBoundingClientRect().top,
+        bottom: line.getBoundingClientRect().bottom,
+      }));
+      return elements.map(element => {
+        const rect = element.closest('.cm-gutterElement').getBoundingClientRect();
+        const y = rect.top + rect.height / 2;
+        const line = lines.find(candidate => y >= candidate.top && y <= candidate.bottom);
+        return { line: line?.number, lineText: line?.text,
+          text: element.textContent, title: element.getAttribute('title') };
+      });
+    });
+    const redBeforeClose = await redSnapshot();
+    await page.getByRole('button', { name: 'Close error', exact: true }).click();
+    await page.locator('.query-error').waitFor({ state: 'hidden' });
+    if (JSON.stringify(await redSnapshot()) !== JSON.stringify(redBeforeClose)) {
+      throw new Error('dismissing the error panel removed or changed red statement timings');
+    }
+    console.log('PASS error actions stay together and dismissing preserves red timings');
+
+    await page.evaluate(() => { window.__MOCK__.execute_query = window.__MOCK_OK__; });
+    const successTarget = page.locator('.cm-content .cm-line').filter({ hasText: 'show global variables' }).first();
+    await successTarget.click();
+    await page.locator('.run-btn-go').click();
+    await page.locator('.cm-run-gutter .cm-run-ok').waitFor();
+    await page.waitForTimeout(200);
+    if (JSON.stringify(await redSnapshot()) !== JSON.stringify(redBeforeClose)) {
+      throw new Error(`a successful statement removed earlier red timings: ${JSON.stringify(await redSnapshot())}`);
+    }
+    await page.evaluate(() => {
+      window.__MOCK__.execute_query = () => { throw new Error('ERROR 1064 (42000): forced failure'); };
+    });
+    await page.locator('.cm-content .cm-line').filter({ hasText: targets.at(-1) }).first().click();
+    await page.locator('.run-btn-go').click();
+    await page.locator('.query-error').waitFor();
+    await page.waitForTimeout(100);
+    if (await page.locator('.cm-run-gutter .cm-run-ok').count() !== 1) {
+      throw new Error('a later failure removed the successful statement timing');
+    }
+    console.log('PASS red and green timings coexist across mixed runs');
+    const redAfterMixed = await redSnapshot();
+    await page.evaluate(() => { window.__MOCK__.execute_query = window.__MOCK_OK__; });
+    await page.getByRole('button', { name: 'Close error', exact: true }).click();
+    await page.locator('.cm-content').first().click();
+    await page.keyboard.press('Meta+End');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('SELECT 42;');
+    await page.locator('.run-btn-go').click();
+    await page.waitForFunction(() => document.querySelectorAll('.cm-run-gutter .cm-run-ok').length === 2,
+      null, { polling: 100, timeout: 3000 });
+    if (JSON.stringify(await redSnapshot()) !== JSON.stringify(redAfterMixed)) {
+      throw new Error(`adding and running new SQL removed earlier red timings: ${JSON.stringify(await redSnapshot())}`);
+    }
+    console.log('PASS editing and running new SQL preserves every earlier red timing');
+
+    const redBeforeSelection = await redSnapshot();
+    await page.locator('.cm-content .cm-line').filter({ hasText: 'show global variables' }).first().click();
+    await page.keyboard.press('Home');
+    await page.keyboard.down('Shift');
+    for (let i = 0; i < 2; i++) await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('End');
+    await page.keyboard.up('Shift');
+    const beforeSelection = await page.evaluate(() =>
+      (window.__CALLS__ ?? []).filter(call => call.cmd === 'execute_query').length);
+    await page.locator('.run-btn-go').click();
+    await page.waitForFunction(before =>
+      (window.__CALLS__ ?? []).filter(call => call.cmd === 'execute_query').length >= before + 3,
+    beforeSelection, { polling: 100, timeout: 5000 });
+    await page.locator('.run-btn-go').waitFor();
+    if (JSON.stringify(await redSnapshot()) !== JSON.stringify(redBeforeSelection)) {
+      throw new Error(`successful selection erased unrelated red timings: ${JSON.stringify({
+        before: redBeforeSelection, after: await redSnapshot(),
+      })}`);
+    }
+    console.log('PASS a successful multi-line selection preserves unrelated red timings');
+
+    await page.evaluate(() => {
+      const succeed = window.__MOCK_OK__;
+      window.__MOCK__.execute_query = args => /^(?:show|select)\b/i.test(args.sql.trim())
+        ? (typeof succeed === 'function' ? succeed(args) : succeed)
+        : (() => { throw new Error('ERROR 1064 (42000): forced script failure'); })();
+    });
+    await page.locator('.cm-content').first().click();
+    await page.keyboard.press('Meta+Shift+Enter');
+    await page.getByRole('button', { name: 'Ignore all', exact: true }).click();
+    await page.locator('.run-btn-go').waitFor({ timeout: 10000 });
+    await page.waitForTimeout(200);
+    const redAfterScript = await redSnapshot();
+    if (redAfterScript.length === 0) throw new Error('script run produced no error markers for the fold test');
+    await page.locator('.cm-content .cm-line').filter({ hasText: 'show global variables' }).first().click();
+    await page.locator('.run-btn-go').click();
+    await page.waitForTimeout(250);
+    if (JSON.stringify(await redSnapshot()) !== JSON.stringify(redAfterScript)) {
+      throw new Error(`single run after a script removed red timings: ${JSON.stringify({
+        before: redAfterScript, after: await redSnapshot(),
+      })}`);
+    }
+    console.log('PASS folding a finished script into a single run preserves red timings');
+    const redBeforeRefresh = await redSnapshot();
+    const refreshTarget = redBeforeRefresh.find(marker => marker.lineText?.includes(targets.at(-1)));
+    if (!refreshTarget) throw new Error('cannot locate the failed statement for its single-run refresh');
+    await page.evaluate(() => {
+      window.__MOCK__.execute_query = () => new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('ERROR 1064 (42000): delayed single-run failure')), 60);
+      });
+    });
+    await page.locator('.cm-content .cm-line').filter({ hasText: targets.at(-1) }).first().click();
+    await page.locator('.run-btn-go').click();
+    await page.locator('.query-error').waitFor();
+    await page.waitForTimeout(150);
+    const redAfterRefresh = await redSnapshot();
+    const refreshed = redAfterRefresh.find(marker => marker.line === refreshTarget.line);
+    if (!refreshed || refreshed.text === refreshTarget.text) {
+      throw new Error(`single failure did not refresh its old script timing: ${JSON.stringify({
+        before: refreshTarget, after: refreshed,
+      })}`);
+    }
+    for (const before of redBeforeRefresh) {
+      if (before.line === refreshTarget.line) continue;
+      const after = redAfterRefresh.find(marker => marker.line === before.line);
+      if (JSON.stringify(after) !== JSON.stringify(before)) {
+        throw new Error(`single failure changed an unrelated red marker: ${JSON.stringify({ before, after })}`);
+      }
+    }
+    console.log('PASS a single failure after Ignore all refreshes only its own old timing');
+    await page.close();
+  }
+}
+
 const server = await ensureServer();
 const browser = await chromium.launch({ executablePath: EXE });
 try {
@@ -590,6 +881,7 @@ try {
   await verifySettings(browser);
   await verifyFirstLineDiagnostic(browser);
   await verifyObjectNavigation(browser);
+  await verifyErrorPresentation(browser);
   await verifyTooltipLifetime(browser);
   await verifyCursorPreferences(browser);
   await verifyConnectionForm(browser);

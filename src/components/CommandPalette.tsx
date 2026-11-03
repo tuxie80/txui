@@ -17,6 +17,7 @@ export interface PaletteItem extends OpenEntry {
   hint?: string;    // right-aligned context (engine, group, shortcut)
   /** Glyph before the label — an emoji string or a <PanelIcon> element. */
   icon?: React.ReactNode;
+  unavailableReason?: string;
   action: () => void;
 }
 
@@ -50,7 +51,7 @@ export function CommandPalette({ items, onClose, onlySections, perSection, place
   const sel = Math.min(cursor, Math.max(0, matches.length - 1));
 
   function run(item: PaletteItem | undefined) {
-    if (!item) return;
+    if (!item || item.unavailableReason) return;
     onClose();
     item.action();
   }
@@ -92,7 +93,9 @@ export function CommandPalette({ items, onClose, onlySections, perSection, place
                 return (
                   <div
                     key={item.id}
-                    className={`cp-item ${i === sel ? 'selected' : ''}`}
+                    className={`cp-item${i === sel ? ' selected' : ''}${item.unavailableReason ? ' unavail' : ''}`}
+                    data-tip={item.unavailableReason}
+                    aria-disabled={Boolean(item.unavailableReason)}
                     onMouseEnter={() => setCursor(i)}
                     onMouseDown={e => { e.preventDefault(); run(item); }}
                   >

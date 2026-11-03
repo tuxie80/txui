@@ -5,9 +5,9 @@
  *
  * The accumulating model: the tab keeps a per-statement map (`stmtRuns`).
  * A single ⌘↵ run updates ONLY its statement's entry — the others' chips and
- * times persist. A whole-script run replaces every entry (and its per-
- * statement lines drive the gutter directly while they exist). When a single
- * run follows a script run, the script's finished entries fold INTO the
+ * times persist. Script progress folds into that SAME accumulator on every
+ * flush (foldScriptProgressInto), preserving outcomes outside its range. When
+ * a single run follows a script, the script's finished entries fold INTO the
  * accumulator first (foldScriptInto), so its markers survive too — a marker
  * lives until its own statement is re-run, deleted or rewritten. Editing or
  * inserting another statement preserves it. Token-preserving whitespace edits
@@ -29,6 +29,8 @@ export interface StmtRun {
   ms?: number;
   /** Wall-clock start (epoch ms) — shown in the marker's hover tooltip. */
   startedAt?: number;
+  /** Caret/selection offset captured with the run, for its gutter line. */
+  at?: number;
   /**
    * An auto-EXPLAIN plan for this statement is cached on the tab
    * (`tab.autoPlans`). Set by the background fetch, AFTER the run's own entry
@@ -89,18 +91,21 @@ export function scriptLinesToRuns(script: ScriptRunLine[], base = 0): StatementR
 /**
  * Fold a script run's FINISHED lines into the accumulator. Called when a
  * single run replaces the script's result view: its markers must not vanish
- * with it. Existing accumulator entries win — they are newer by construction
- * (a single run is what creates them, and it clears the script lines).
+ * with it. Finished script lines are newer than earlier single-run entries and
+ * replace them; skipped lines leave earlier entries untouched. `base` maps a
+ * selection's line zero back to its statement in the whole buffer.
  */
 export function foldScriptInto(
   script: ScriptRunLine[] | null | undefined,
   acc: StmtRunMap,
+  base = 0,
 ): StmtRunMap {
   if (!script) return acc;
   const out: Record<number, StmtRun> = { ...acc };
   script.forEach((l, i) => {
-    if ((l.status === 'ok' || l.status === 'error') && out[i] === undefined) {
-      out[i] = { status: l.status, ms: l.ms, startedAt: l.startedAt };
+    const at = i + base;
+    if (l.status === 'ok' || l.status === 'error') {
+      out[at] = { status: l.status, ms: l.ms, startedAt: l.startedAt };
     }
   });
   return out;
@@ -119,9 +124,24 @@ export function stmtRunsToRuns(acc: StmtRunMap): StatementRun[] | undefined {
   for (let i = 0; i <= max; i++) {
     const r = acc[i];
     out.push(r
-      ? { status: r.status, ms: r.ms, startedAt: r.startedAt, hasPlan: r.hasPlan, stats: r.stats }
+      ? { status: r.status, ms: r.ms, startedAt: r.startedAt, at: r.at, hasPlan: r.hasPlan, stats: r.stats }
       : { status: 'skipped' });
   }
+  return out;
+}
+
+/** Fold live script progress into the one accumulator shared with single runs. */
+export function foldScriptProgressInto(
+  script: ScriptRunLine[],
+  acc: StmtRunMap,
+  base = 0,
+): StmtRunMap {
+  const out: Record<number, StmtRun> = { ...acc };
+  script.forEach((line, i) => {
+    if (line.status === 'ok' || line.status === 'error' || line.status === 'running') {
+      out[i + base] = { status: line.status, ms: line.ms, startedAt: line.startedAt };
+    }
+  });
   return out;
 }
 

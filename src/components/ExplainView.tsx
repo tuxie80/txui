@@ -66,6 +66,7 @@ interface Props {
   /** Re-run with EXPLAIN ANALYZE (executes the query — caller confirms) */
   onAnalyze?: () => void;
   onAiExplain?: (evidence: string) => void;
+  aiUnavailableReason?: string;
   /** ClickHouse: re-run with a different EXPLAIN kind. None of them execute. */
   onMode?: (mode: string) => void;
   /** Needed by the profiler, which runs the statement on this session. */
@@ -152,7 +153,7 @@ function severityClass(s: number): string {
   return '';
 }
 
-export function ExplainView({ data, onAnalyze, onAiExplain, onMode, sessionId, runs, onRecordRuns }: Props) {
+export function ExplainView({ data, onAnalyze, onAiExplain, aiUnavailableReason, onMode, sessionId, runs, onRecordRuns }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -392,15 +393,21 @@ export function ExplainView({ data, onAnalyze, onAiExplain, onMode, sessionId, r
           </div>
         )}
         {onAiExplain && (
-          <button className="toolbar-btn" title="Ask AI to interpret this plan, its deterministic findings and relevant schema metadata"
-            onClick={() => onAiExplain([
-              `Statement:\n${data.sql}`,
-              `Plan evidence (${data.analyzed ? 'measured EXPLAIN ANALYZE' : 'estimated EXPLAIN'}):\n${data.content.slice(0, 50_000)}${data.content.length > 50_000 ? '\n… plan truncated' : ''}`,
-              `TxUI deterministic findings:\n${findings.length
-                ? findings.slice(0, 20).map(f => `- [${f.finding.level}] ${f.finding.observed} Why: ${f.finding.why} Suggested deterministic action: ${f.finding.action}`).join('\n')
-                : '- No deterministic findings'}`,
-            ].join('\n\n'))}
-          >✦ Explain plan</button>
+          <span className={aiUnavailableReason ? 'unavail' : undefined} data-tip={aiUnavailableReason}>
+            <button className="toolbar-btn" title="Ask AI to interpret this plan, its deterministic findings and relevant schema metadata"
+              aria-disabled={Boolean(aiUnavailableReason)}
+              onClick={() => {
+                if (aiUnavailableReason) return;
+                onAiExplain([
+                  `Statement:\n${data.sql}`,
+                  `Plan evidence (${data.analyzed ? 'measured EXPLAIN ANALYZE' : 'estimated EXPLAIN'}):\n${data.content.slice(0, 50_000)}${data.content.length > 50_000 ? '\n… plan truncated' : ''}`,
+                  `TxUI deterministic findings:\n${findings.length
+                    ? findings.slice(0, 20).map(f => `- [${f.finding.level}] ${f.finding.observed} Why: ${f.finding.why} Suggested deterministic action: ${f.finding.action}`).join('\n')
+                    : '- No deterministic findings'}`,
+                ].join('\n\n'));
+              }}
+            >✦ Explain plan</button>
+          </span>
         )}
         {data.engine !== 'clickhouse' && !data.analyzed && onAnalyze && (
           <button

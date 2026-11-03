@@ -89,7 +89,7 @@ import { engineGapReason } from '../utils/engineGaps';
 import type { TxMode } from '../utils/txUi';
 const WriteConfirm = lazy(() => import('./WriteConfirm').then(m => ({ default: m.WriteConfirm })));
 import type { WriteConfirmRequest } from './WriteConfirm';
-import { scriptLinesToRuns, stmtRunsToRuns } from '../utils/runMarkers';
+import { stmtRunsToRuns } from '../utils/runMarkers';
 import type { PlanRun } from '../utils/planHistory';
 import type { StmtRunMap } from '../utils/runMarkers';
 import type { AliasDef } from '../utils/aliasExpand';
@@ -99,6 +99,8 @@ import { PLUGIN_MENU } from '../utils/pluginMenu';
 import type { PluginMenuItem } from '../utils/pluginMenu';
 import { errorDisplay } from '../utils/appError';
 import { errorGuidance } from '../utils/errorActions';
+import { aiHasKey } from '../utils/aiClient';
+import { aiKeyRequired } from '../utils/aiProviders';
 import { alertDialog, confirmDialog } from '../utils/appDialog';
 import { findVirtualTables } from '../utils/sqlContext';
 import { findAliases } from '../utils/sqlAlias';
@@ -299,6 +301,8 @@ export interface QueryTab {
   browserGraphics: boolean;             // Graphics over the active table browser
   view: 'grid' | 'plan' | 'browser' | 'log' | 'map'; // ADS-style result-area tabs
   error: string | null;
+  /** Executed statement and its buffer offset, for statement-relative error positions. */
+  errorLocation?: { sql: string; from: number } | null;
   running: boolean;
   autoLimited: number | null;           // default LIMIT that was auto-appended
   prodCap: number | null;               // prod row cap that replaced the default LIMIT
@@ -890,7 +894,7 @@ function newTab(label?: string): QueryTab {
     id: _tabCounter++, bid: newBid(), label: label ?? pad2(_tabCounter - 1),
     sql: '', result: null, resultSql: null, scriptResults: null, scriptBase: 0, stmtRuns: {}, explain: null,
     autoPlans: {}, planRuns: [],
-    browsers: [], activeBrowser: 0, browserGraphics: false, view: 'grid', error: null, running: false,
+    browsers: [], activeBrowser: 0, browserGraphics: false, view: 'grid', error: null, errorLocation: null, running: false,
     autoLimited: null, prodCap: null,
   };
 }
@@ -978,12 +982,10 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
    * Commit a structural change (add / close / reorder) to the tab list.
    *
    * The updater runs against React's CURRENT state, never against a snapshot:
-   * `patchTab`, the 250 ms SQL-sync and query-completion patches all use
-   * functional updates and do not touch `tabsRef`, so committing a pre-computed
-   * array would silently roll them back — a query that finished a moment before
-   * you opened a tab would go back to looking like it was still running.
-   * `tabsRef`/`activeIdRef` are refreshed in the same tick so back-to-back
-   * actions (a fast double-click on "+") each see the previous one.
+   * the 250 ms SQL-sync also uses a functional update, so committing a
+   * pre-computed array would silently roll it back. `patchTab` and this helper
+   * refresh `tabsRef` inside their updaters, before the UI can offer another
+   * run; `activeIdRef` is refreshed here for back-to-back structural actions.
    */
   const commitTabs = useCallback(
     (update: (prev: QueryTab[]) => QueryTab[], nextActive?: number | null) => {
@@ -1091,6 +1093,39 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const [peekDdl, setPeekDdl] = useState<{ title: string; sql: string } | null>(null);
   // AI assistant modal (⌘I generate / explain / fix).
   const [aiModal, setAiModal] = useState<{ mode: AiMode; sql?: string; error?: string } | null>(null);
+  const [aiConfigured, setAiConfigured] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let seq = 0;
+    const check = () => {
+      const current = ++seq;
+      setAiConfigured(null);
+      if (!aiKeyRequired(getPref(PREFS.aiProvider), getPref(PREFS.aiBaseUrl))) {
+        setAiConfigured(true);
+        return;
+      }
+      aiHasKey().then(has => {
+        if (!cancelled && current === seq) setAiConfigured(has);
+      }).catch(() => {
+        if (!cancelled && current === seq) setAiConfigured(false);
+      });
+    };
+    check();
+    window.addEventListener('dbgui:prefs-changed', check);
+    window.addEventListener('dbgui:ai-config-changed', check);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('dbgui:prefs-changed', check);
+      window.removeEventListener('dbgui:ai-config-changed', check);
+    };
+  }, []);
+  const aiUnavailableReason = aiConfigured === true ? undefined
+    : aiConfigured === null ? 'Checking the AI assistant configuration…'
+      : 'AI assistant is not configured. Open Settings → AI to choose a provider and save an API key.';
+  const openAiAssistant = useCallback((mode: AiMode, sql?: string, error?: string) => {
+    if (aiConfigured !== true) return;
+    setAiModal({ mode, sql, error });
+  }, [aiConfigured]);
   const [columnCandidates, setColumnCandidates] = useState<string[]>([]);
   // MySQL optimizer-trace viewer (pretty-printed JSON).
   const [traceJson, setTraceJson] = useState<string | null>(null);
@@ -1267,7 +1302,12 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const patchTab = useCallback((id: number, patch: Partial<QueryTab>) => {
     const clean = Object.fromEntries(
       Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<QueryTab>;
-    setTabs(prev => prev.map(t => (t.id === id ? { ...t, ...clean } : t)));
+    if ('error' in clean && !('errorLocation' in clean)) clean.errorLocation = null;
+    setTabs(prev => {
+      const next = prev.map(t => (t.id === id ? { ...t, ...clean } : t));
+      tabsRef.current = next;
+      return next;
+    });
   }, []);
 
   /**
@@ -2702,34 +2742,18 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   }
 
   /**
-   * Gutter markers for a tab: the last script run's per-statement lines while
-   * they exist, otherwise the accumulated single-run outcomes (`stmtRuns`) —
-   * one entry per statement ever run with ⌘↵, each persisting until its own
-   * statement is re-run or the buffer is substantively edited. The offset → statement-index
-   * translation lives in utils/runMarkers (resolved once, at run time).
-   * Memoised per tab so the editor does not receive a fresh array (and dispatch
-   * a state effect) on every single render of the workspace.
+   * One gutter source for every run mode. Single and script execution both
+   * write `stmtRuns`; `scriptResults` is only for grids/logs and can never
+   * restore an older marker. Memoised per tab so unrelated renders do not
+   * dispatch a fresh marker array into the editor.
    */
-  const runMarkerCache = useRef<Map<number, { src: unknown; base: number; runs: StatementRun[] }>>(new Map());
+  const runMarkerCache = useRef<Map<number, { src: unknown; runs: StatementRun[] }>>(new Map());
   const statementRunsFor = (tab: QueryTab): StatementRun[] | undefined => {
-    // Script lines while a script run exists; otherwise the accumulated
-    // single-run map. stmtRuns holds run-time statement INDICES — deliberately
-    // nothing derived from the live buffer — so editing the doc cannot move
-    // the output and re-dispatch markers the editor has invalidated on edit.
-    //
-    // Cache key = INPUT IDENTITY (WP-14 14.3): every mutation site replaces
-    // scriptResults / stmtRuns immutably (including the post-run hasPlan /
-    // stats patches), so object identity fully determines the derived array —
-    // the old serialized `runs.map(...).join('|')` key re-walked every
-    // statement for every tab on every render during a script run.
-    const src: unknown = tab.scriptResults ?? tab.stmtRuns;
     const hit = runMarkerCache.current.get(tab.id);
-    if (hit && hit.src === src && hit.base === tab.scriptBase) return hit.runs;
-    const runs = tab.scriptResults
-      ? scriptLinesToRuns(tab.scriptResults, tab.scriptBase)
-      : stmtRunsToRuns(tab.stmtRuns);
+    if (hit && hit.src === tab.stmtRuns) return hit.runs;
+    const runs = stmtRunsToRuns(tab.stmtRuns);
     if (!runs) { runMarkerCache.current.delete(tab.id); return undefined; }
-    runMarkerCache.current.set(tab.id, { src, base: tab.scriptBase, runs });
+    runMarkerCache.current.set(tab.id, { src: tab.stmtRuns, runs });
     return runs;
   };
 
@@ -3278,7 +3302,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                     .then(sql => setPeekDdl({ title: t, sql }))
                     .catch(() => { /* object not resolvable — no peek */ });
                 }}
-                onAiAssist={(mode, sql) => setAiModal({ mode, sql })}
+                onAiAssist={openAiAssistant}
+                aiUnavailableReason={aiUnavailableReason}
                 onOptimizerTrace={sql => {
                   if (!sql.trim()) return;
                   invoke<string>('optimizer_trace', { sessionId: session.sessionId, sql, db: currentDb || null })
@@ -3327,51 +3352,64 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
             <div className="v-resizer" onMouseDown={dragEditor} title="Drag to resize editor" />
 
             {tab.error && (() => {
+              const location = tab.errorLocation;
               const guide = errorGuidance(tab.error, {
-                sql: tab.sql,
+                sql: location?.sql ?? tab.sql,
                 tables: completions.map(relation => relation.label),
                 columns: columnCandidates,
               });
+              const errorGoto = guide?.goto && location
+                ? { from: location.from + guide.goto.from, to: location.from + guide.goto.to }
+                : guide?.goto;
               return (
                 <div className="query-error">
-                  <span className="query-error-msg">{tab.error}</span>
-                  <button className="toolbar-btn query-error-fix"
-                    title="Ask the AI assistant for a corrected statement"
-                    onClick={() => setAiModal({ mode: 'fix', sql: currentEditorSql(), error: tab.error ?? '' })}>
-                    ✦ Fix with AI
-                  </button>
+                  <div className="query-error-summary">
+                    <span className="query-error-msg">{tab.error}</span>
+                    <button className="icon-btn query-error-close" aria-label="Close error" title="Dismiss error"
+                      onClick={() => patchTab(tab.id, { error: null })}>×</button>
+                  </div>
                   {guide && (
                     <div className="query-error-guidance">
                       <strong>{guide.title}</strong>
                       <span>{guide.detail}</span>
-                      {guide.goto && (
-                        <button className="toolbar-btn"
-                          onClick={() => window.dispatchEvent(new CustomEvent('dbgui:goto-range', { detail: guide.goto }))}>
-                          Go to error
-                        </button>
-                      )}
-                      {guide.insertSql && (
-                        <button className="toolbar-btn"
-                          onClick={() => window.dispatchEvent(new CustomEvent('dbgui:insert-sql', {
-                            detail: { sql: guide.insertSql, tabId: tab.id },
-                          }))}>
-                          Insert {guide.insertSql}
-                        </button>
-                      )}
-                      {guide.schemaObject && (
-                        <button className="toolbar-btn"
-                          onClick={() => window.dispatchEvent(new CustomEvent('dbgui:reveal-object', {
-                            detail: { name: guide.schemaObject },
-                          }))}>
-                          Open object
-                        </button>
-                      )}
-                      <button className="toolbar-btn" onClick={() => {
-                        const text = `${tab.error}\n${guide.title}\n${guide.detail}\n\n${tab.sql}`;
-                        void navigator.clipboard.writeText(text);
-                      }}>Copy diagnostics</button>
                     </div>
                   )}
+                  <div className="query-error-actions">
+                    {errorGoto && (
+                      <button className="toolbar-btn"
+                        onClick={() => window.dispatchEvent(new CustomEvent('dbgui:goto-range', { detail: errorGoto }))}>
+                        Go to error
+                      </button>
+                    )}
+                    {guide?.insertSql && (
+                      <button className="toolbar-btn"
+                        onClick={() => window.dispatchEvent(new CustomEvent('dbgui:insert-sql', {
+                          detail: { sql: guide.insertSql, tabId: tab.id },
+                        }))}>
+                        Insert {guide.insertSql}
+                      </button>
+                    )}
+                    {guide?.schemaObject && (
+                      <button className="toolbar-btn"
+                        onClick={() => window.dispatchEvent(new CustomEvent('dbgui:reveal-object', {
+                          detail: { name: guide.schemaObject },
+                        }))}>
+                        Open object
+                      </button>
+                    )}
+                    <button className="toolbar-btn" onClick={() => {
+                      const text = `${tab.error}${guide ? `\n${guide.title}\n${guide.detail}` : ''}\n\n${tab.sql}`;
+                      void navigator.clipboard.writeText(text);
+                    }}>Copy diagnostics</button>
+                    <span className={aiUnavailableReason ? 'unavail' : undefined} data-tip={aiUnavailableReason}>
+                      <button className="toolbar-btn query-error-fix"
+                        title="Ask the AI assistant for a corrected statement"
+                        aria-disabled={Boolean(aiUnavailableReason)}
+                        onClick={() => openAiAssistant('fix', currentEditorSql(), tab.error ?? '')}>
+                        ✦ Fix with AI
+                      </button>
+                    </span>
+                  </div>
                 </div>
               );
             })()}
@@ -3474,7 +3512,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                     // against another session's runs was never meaningful.
                     runs={tab.planRuns}
                     onRecordRuns={runs => patchTab(tab.id, { planRuns: runs })}
-                    onAiExplain={evidence => setAiModal({ mode: 'plan', sql: evidence })}
+                    onAiExplain={evidence => openAiAssistant('plan', evidence)}
+                    aiUnavailableReason={aiUnavailableReason}
                     onAnalyze={async () => {
                       if (await confirmDialog('EXPLAIN ANALYZE executes the statement. Continue?')) {
                         runExplain(tab.explain!.sql, true);

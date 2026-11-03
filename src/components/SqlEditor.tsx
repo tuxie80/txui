@@ -495,7 +495,13 @@ function markerMap(view: EditorView): Map<number, RunMarker> {
     const text = doc.toString();
     const stmts = splitDoc(doc, sqlDelimiter()).filter(x => x.text.trim());
     for (let i = 0; i < stmts.length && i < runs.length; i++) {
-      const at = Math.min(text.length, firstCodeOffset(stmts[i]));
+      // Several fragments can share one physical line. Invisible placeholders
+      // must not hide an earlier visible result on that line.
+      if (runs[i].status === 'skipped') continue;
+      const anchor = runs[i].at;
+      const at = Math.min(text.length, anchor === undefined
+        ? firstCodeOffset(stmts[i])
+        : Math.max(stmts[i].from, Math.min(stmts[i].to, anchor)));
       map.set(doc.lineAt(at).from,
         new RunMarker(runs[i], runs[i].status === 'running' ? elapsed : undefined));
     }
@@ -829,10 +835,10 @@ interface Props {
   /** `SHOW VARIABLES` / pg_settings — powers `@@…` completion */
   getServerVariables?: () => Promise<{ name: string; value: string }[]>;
   /**
-   * Run SQL. `from` is the doc offset of the statement being run (its first
-   * non-whitespace char), so the host can pin the gutter's run marker to THAT
-   * statement — the offset survives variable substitution, which rewrites the
-   * text. Omitted for whole-buffer runs (script markers cover those).
+   * Run SQL. `from` is the caret (or selection start) in the document, so the
+   * host can identify the statement and pin its single-run timing to the line
+   * actually invoked. The offset survives variable substitution, which rewrites
+   * the text. Omitted for whole-buffer runs (script markers cover those).
    * `opts.noResults` (F9) runs a script for side effects/timings only —
    * the host suppresses the per-statement Result tabs.
    */
@@ -899,6 +905,7 @@ interface Props {
   onPeekObject?: (name: string) => void;
   /** Open the AI assistant (generate / explain the current statement). */
   onAiAssist?: (mode: 'generate' | 'explain' | 'fix', sql?: string) => void;
+  aiUnavailableReason?: string;
   /** MySQL: capture and show the optimizer trace for the current statement. */
   onOptimizerTrace?: (sql: string) => void;
   /**
@@ -970,6 +977,7 @@ export function SqlEditor({
   onOpenDatabase,
   onPeekObject,
   onAiAssist,
+  aiUnavailableReason,
   onOptimizerTrace,
   diagContext,
   onDiagnostics,
@@ -1409,17 +1417,15 @@ export function SqlEditor({
         : content.slice(selection.from, selection.to)).trim();
     };
 
-    // The doc offset of what currentSql would run — the statement's first char
-    // (or the selection's start), so the gutter marker lands on the right line.
-    // Multi-cursor joins ranges into a NEW text whose offsets are meaningless;
-    // undefined there (the script path's per-statement markers take over).
+    // The caret (or selection start) identifies both what currentSql runs and
+    // the physical line whose gutter should carry its timing. Multi-cursor joins
+    // ranges into a NEW text whose offsets are meaningless; undefined there (the
+    // script path's per-statement markers take over).
     const currentSqlFrom = (view: EditorView): number | undefined => {
-      const content = view.state.doc.toString();
       const nonEmpty = view.state.selection.ranges.filter(r => !r.empty);
       if (nonEmpty.length > 1) return undefined;
       const selection = view.state.selection.main;
-      if (!selection.empty) return selection.from;
-      return statementAtCaret(content, selection.head, sqlDelimiter())?.from;
+      return selection.empty ? selection.head : selection.from;
     };
 
     // ⌘↵: run statement at caret / selection
@@ -2590,7 +2596,7 @@ export function SqlEditor({
             const q = (sel.empty
               ? (stmt?.text ?? content)
               : content.slice(sel.from, sel.to)).trim();
-            onRunRef.current(q, sel.empty ? stmt?.from : sel.from);
+            onRunRef.current(q, sel.empty ? sel.head : sel.from);
             return true;
           } },
           // Ctrl+Alt+Shift-Enter aliases the no-results run (and must precede
@@ -3339,6 +3345,7 @@ export function SqlEditor({
                 label,
                 hint: c.keys ? formatKeys(c.keys) : c.category,
                 keywords: c.category,
+                unavailableReason: c.id.startsWith('editor.ai') ? aiUnavailableReason : undefined,
                 // Dispatch through the recorder choke point so a palette
                 // invocation is captured into a macro just like a keystroke.
                 action: () => dispatchCommand(c.id),

@@ -7917,10 +7917,38 @@ tr.cmp-same td { opacity: .62; }
 .ai-context { color: var(--text2); font-size: calc(12px * var(--font-scale, 1)); }
 .ai-context pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-family: var(--mono, monospace); }
 .ai-loading { color: var(--text2); font-style: italic; }
-/* Error bar with a Fix-with-AI action */
-.query-error { display: flex; align-items: center; gap: 8px; }
-.query-error-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Compact query failure: server message, guidance and actions never compete
+   for width in one row. Long errors scroll inside a bounded region. */
+.query-error {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+.query-error-summary { display: flex; align-items: flex-start; gap: 8px; }
+.query-error-msg {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.query-error-close { flex: none; margin: -5px -8px -5px 0; }
+.query-error-actions > .unavail,
 .query-error-fix { flex: none; }
+.query-error-guidance {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text2);
+  font-family: var(--font-ui);
+  font-size: calc(11px * var(--font-scale, 1));
+}
+.query-error-guidance > strong { color: var(--text); }
+.query-error-guidance > span { line-height: 1.4; }
+.query-error-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 
 /* Occurrence highlight of the identifier under the caret (utils/occurrenceHighlight.ts) */
 .cm-occurrence { background: rgba(77,168,255,0.18); border-radius: 2px; }

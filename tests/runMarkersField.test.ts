@@ -145,3 +145,24 @@ test('the tick field carries the elapsed value the gutter renders', () => {
   s = s.update({ effects: setRunTick.of(500) }).state;
   assert.equal(s.field(runElapsedField), 500, 'each tick replaces the value');
 });
+
+test('single-run caret anchors follow later document edits', () => {
+  let s = stateWith('SELECT 1;\nSELECT 2;\n');
+  const secondCaret = s.doc.toString().indexOf('SELECT 2;') + 3;
+  s = s.update({ effects: setStatementRuns.of([
+    { status: 'ok', ms: 12, at: 2 },
+    { status: 'error', ms: 34, at: secondCaret },
+  ]) }).state;
+  s = s.update({ changes: { from: 0, insert: '-- note\n' } }).state;
+  assert.equal(runs(s)[0].status, 'skipped', 'the edited first statement loses its proof');
+  assert.deepEqual(runs(s)[1],
+    { status: 'error', ms: 34, at: secondCaret + 8 },
+    'the untouched statement keeps its proof at the mapped caret offset');
+});
+
+test('whitespace inserted before a caret anchor moves it to the same line', () => {
+  let s = stateWith('SELECT 1;\n');
+  s = s.update({ effects: setStatementRuns.of([{ status: 'ok', ms: 12, at: 4 }]) }).state;
+  s = s.update({ changes: { from: 0, insert: '\n\n' } }).state;
+  assert.deepEqual(runs(s), [{ status: 'ok', ms: 12, at: 6 }]);
+});

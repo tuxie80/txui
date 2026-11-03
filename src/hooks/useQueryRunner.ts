@@ -23,8 +23,8 @@ import { beep } from '../utils/beep';
 import { notifyLongQuery } from '../store/notify';
 import { fmtDuration } from '../utils/fmtDuration';
 import { redactSecrets } from '../utils/redactSecrets';
-import { splitStatements } from '../utils/sqlSplit';
-import { statementIndexAt, foldScriptInto } from '../utils/runMarkers';
+import { splitStatements, statementAtCaret } from '../utils/sqlSplit';
+import { statementIndexAt, foldScriptInto, foldScriptProgressInto, type StmtRun } from '../utils/runMarkers';
 import {
   newStreamAccum, applyStreamEvent, partialResult, finishStream, streamComplete, streamArrivedCount,
 } from '../utils/resultStream';
@@ -370,14 +370,16 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       const tabNow = tabsRef.current.find(t => t.id === tabId);
       const idx = from == null || !tabNow ? 0
         : Math.max(0, statementIndexAt(liveSql(tabNow), from, getPref(PREFS.sqlDelimiter)));
+      const locationFrom = from == null || !tabNow ? from
+        : statementAtCaret(liveSql(tabNow), from, getPref(PREFS.sqlDelimiter))?.from ?? from;
       // A single run updates ONLY its statement's gutter entry — the others
       // persist (a script run's finished markers fold in first, so replacing
       // the script result view doesn't take its chips with it).
-      const acc = foldScriptInto(tabNow?.scriptResults, tabNow?.stmtRuns ?? {});
+      const acc = foldScriptInto(tabNow?.scriptResults, tabNow?.stmtRuns ?? {}, tabNow?.scriptBase ?? 0);
       patchTab(tabId, { running: true, error: null, result: null, resultSql: null, scriptResults: null,
         scriptResultView: null, autoLimited: null, prodCap: null, runningSql: sql, runStartedAt: startedMs,
         resultStmtIdx: idx,
-        stmtRuns: { ...acc, [idx]: { status: 'running', startedAt: startedMs } } });
+        stmtRuns: { ...acc, [idx]: { status: 'running', startedAt: startedMs, at: from } } });
       markRunning(tabId, sql);
       try {
         // Streamed results render as they arrive: each page patch shows the
@@ -394,7 +396,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         patchTab(tabId, {
           result, resultSql: sql, running: false, view: 'grid',
           autoLimited: limit, prodCap: prodCapped ? limit : null, resultStmtIdx: idx,
-          stmtRuns: { ...acc, [idx]: { status: 'ok', ms, startedAt: startedMs } },
+          stmtRuns: { ...acc, [idx]: { status: 'ok', ms, startedAt: startedMs, at: from } },
         });
         beepIfLong(startedMs, true);
         notifyIfLong(startedMs, true, { statements: 1 });
@@ -404,8 +406,8 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         maybeDigestStats(sql, tabId, idx, startedMs, ms);
       } catch (err) {
         if (stale()) return;
-        patchTab(tabId, { error: errorDisplay(err), running: false,
-          stmtRuns: { ...acc, [idx]: { status: 'error', ms: Date.now() - startedMs, startedAt: startedMs } } });
+        patchTab(tabId, { error: errorDisplay(err), errorLocation: { sql, from: locationFrom ?? 0 }, running: false,
+          stmtRuns: { ...acc, [idx]: { status: 'error', ms: Date.now() - startedMs, startedAt: startedMs, at: from } } });
         beepIfLong(startedMs, false);
         notifyIfLong(startedMs, false, { statements: 1, error: errorDisplay(err) });
       } finally {
@@ -418,6 +420,17 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
 
     // ── script mode: run every statement sequentially, timing each ──
     const lines: ScriptLine[] = stmts.map(s => ({ text: s.text, status: 'pending' }));
+    // A selection run's statement 0 is buffer statement K — resolve the base
+    // ONCE, at run start, with the same split/filter rule the gutter uses, so
+    // the markers land on the lines that actually ran. Whole-buffer runs pass
+    // no `from` → base 0. statementIndexAt clamps, so a stale offset is safe.
+    const tabNow = tabsRef.current.find(t => t.id === tabId);
+    const scriptBase = from == null || !tabNow ? 0
+      : Math.max(0, statementIndexAt(liveSql(tabNow), from, getPref(PREFS.sqlDelimiter)));
+    const acc: Record<number, StmtRun> = {
+      ...foldScriptInto(tabNow?.scriptResults, tabNow?.stmtRuns ?? {}, tabNow?.scriptBase ?? 0),
+    };
+    for (let i = 0; i < stmts.length; i++) delete acc[scriptBase + i];
     // Coalesced commits (WP-14 14.3): the loop calls setLines 2–3× per
     // statement and each commit re-renders every tab — buffered in a local
     // and flushed to state at most once per ~100 ms during the run. The
@@ -429,7 +442,10 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       // A superseded run never patches the tab — the newer run owns it.
       if (stale()) { pendingLines = null; return; }
       if (pendingLines) {
-        patchTab(tabId, { scriptResults: [...pendingLines] });
+        patchTab(tabId, {
+          scriptResults: [...pendingLines],
+          stmtRuns: foldScriptProgressInto(pendingLines, acc, scriptBase),
+        });
         pendingLines = null;
       }
     };
@@ -440,13 +456,6 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         linesFlushTimer = window.setTimeout(flushLines, 100);
       }
     };
-    // A selection run's statement 0 is buffer statement K — resolve the base
-    // ONCE, at run start, with the same split/filter rule the gutter uses, so
-    // the markers land on the lines that actually ran. Whole-buffer runs pass
-    // no `from` → base 0. statementIndexAt clamps, so a stale offset is safe.
-    const tabNow = tabsRef.current.find(t => t.id === tabId);
-    const scriptBase = from == null || !tabNow ? 0
-      : Math.max(0, statementIndexAt(liveSql(tabNow), from, getPref(PREFS.sqlDelimiter)));
     patchTab(tabId, {
       running: true, error: null, result: null, resultSql: null, scriptResults: [...lines],
       scriptBase,
@@ -456,9 +465,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       // row-producing statement opens its own result as it completes.
       view: 'log',
       autoLimited: null, prodCap: null,
-      // A script run replaces every accumulated single-run marker: its own
-      // per-statement lines drive the gutter from here on.
-      stmtRuns: {},
+      stmtRuns: acc,
       // Say the mode in the UI — a stale webview or an eaten shortcut must be
       // visible as "no results" NOT appearing here, not discovered after the run.
       runningSql: `${stmts.length} statements${noResults ? ' · no results' : ''}`,

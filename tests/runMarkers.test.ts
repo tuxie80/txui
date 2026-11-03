@@ -5,15 +5,15 @@
  * markerMap() in SqlEditor.tsx does with the runs array this module returns.
  *
  * The accumulating model: a tab keeps stmtRuns (statement index → outcome).
- * Single ⌘↵ runs update one entry; script runs drive the gutter from their
- * lines and replace the map; a single run after a script run folds the
+ * Single ⌘↵ runs update one entry; script runs overlay their executed lines
+ * without clearing unrelated outcomes; a single run after a script folds the
  * script's finished markers in first, so nothing vanishes until its own
  * statement is re-run or the buffer is substantively edited.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  foldScriptInto, nextRunTick, runningIndex, runStamp, scriptLinesToRuns, spinnerFrame,
+  foldScriptInto, foldScriptProgressInto, nextRunTick, runningIndex, runStamp, scriptLinesToRuns, spinnerFrame,
   statementIndexAt, stmtRunsToRuns, tickElapsed, timingLine,
 } from '../src/utils/runMarkers.ts';
 import type { StmtRunMap } from '../src/utils/runMarkers.ts';
@@ -133,9 +133,9 @@ test('a single run after a script run folds the script’s finished markers in',
     'statements 1 and 3 keep the script’s chips; statement 2 shows the new run');
 });
 
-test('the fold never overwrites a newer single-run entry', () => {
+test('the fold replaces an older single-run entry with the finished script outcome', () => {
   const acc = foldScriptInto([{ status: 'ok', ms: 100 }], { 0: { status: 'error', ms: 3 } });
-  assert.deepEqual(acc[0], { status: 'error', ms: 3 }, 'the accumulator’s entry is newer');
+  assert.deepEqual(acc[0], { status: 'ok', ms: 100, startedAt: undefined }, 'the script ran later');
 });
 
 test('the fold skips unfinished script lines (pending/skipped/running)', () => {
@@ -145,13 +145,42 @@ test('the fold skips unfinished script lines (pending/skipped/running)', () => {
   assert.deepEqual(Object.keys(acc), ['0']);
 });
 
-test('a script run replaces the accumulated entries (host clears stmtRuns)', () => {
-  // The host side: script start sets stmtRuns {} and drives the gutter from
-  // its lines — nothing accumulated survives.
-  const runs = scriptLinesToRuns([
-    { status: 'ok', ms: 1 }, { status: 'ok', ms: 1 }, { status: 'ok', ms: 1 },
-  ]);
-  assert.deepEqual(runs.map(r => r.ms), [1, 1, 1]);
+test('live script progress shares the single-run accumulator and preserves other statements', () => {
+  const acc = foldScriptProgressInto([
+    { status: 'ok', ms: 21 },
+    { status: 'error', ms: 22 },
+  ], {
+    0: { status: 'ok', ms: 8 },
+    1: { status: 'error', ms: 11 },
+    3: { status: 'error', ms: 44 },
+  }, 1);
+  const runs = stmtRunsToRuns(acc)!;
+  assert.deepEqual(runs.map(r => `${r.status}:${r.ms ?? ''}`),
+    ['ok:8', 'ok:21', 'error:22', 'error:44'],
+    'the selection replaces statements 1–2 only; earlier statement 0 and later error 3 survive');
+});
+
+test('statements skipped after a script stop keep their earlier outcome', () => {
+  const acc = foldScriptProgressInto([
+    { status: 'ok', ms: 21 },
+    { status: 'skipped', ms: 1 },
+  ], {
+    0: { status: 'ok', ms: 8 },
+    1: { status: 'error', ms: 11 },
+  });
+  const runs = stmtRunsToRuns(acc)!;
+  assert.deepEqual(runs.map(r => `${r.status}:${r.ms ?? ''}`), ['ok:21', 'error:11']);
+});
+
+test('folding a selection uses its buffer offset', () => {
+  const acc = foldScriptInto([
+    { status: 'ok', ms: 21 },
+    { status: 'error', ms: 22 },
+  ], {}, 2);
+  assert.deepEqual(acc, {
+    2: { status: 'ok', ms: 21, startedAt: undefined },
+    3: { status: 'error', ms: 22, startedAt: undefined },
+  });
 });
 
 // ── rerun transitions: old chips must RESET, not stick ───────────────────────

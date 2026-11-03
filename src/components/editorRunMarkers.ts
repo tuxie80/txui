@@ -34,6 +34,8 @@ export interface StatementRun {
   ms?: number;
   /** Wall-clock start (epoch ms) — the marker tooltip leads with it. */
   startedAt?: number;
+  /** Caret/selection offset for a single run; script runs use statement starts. */
+  at?: number;
   /** An auto-EXPLAIN plan for this statement is cached on the tab. */
   hasPlan?: boolean;
   /** Digest stats from the local query history (same statement shape). */
@@ -68,10 +70,11 @@ const statementRunsField = StateField.define<StatementRun[]>({
   create: () => [],
   update(value, tr) {
     for (const e of tr.effects) if (e.is(setStatementRuns)) return e.value;
+    if (!tr.docChanged) return value;
     // Formatting between SQL tokens keeps every measured outcome. A substantive
     // edit invalidates only statements whose text was removed or rewritten.
-    if (tr.docChanged && !whitespaceOnlyChange(tr)) return reconcileStatementRuns(value, tr);
-    return value;
+    const next = whitespaceOnlyChange(tr) ? value : reconcileStatementRuns(value, tr);
+    return next.map(run => run.at === undefined ? run : { ...run, at: tr.changes.mapPos(run.at, 1) });
   },
 });
 

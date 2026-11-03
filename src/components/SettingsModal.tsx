@@ -131,6 +131,7 @@ export function SettingsModal({ onClose }: Props) {
       setAiKeySet(Boolean(key));
       setAiKey('');
       setAiTestMessage(key ? 'API key saved.' : 'API key cleared.');
+      window.dispatchEvent(new CustomEvent('dbgui:ai-config-changed'));
     } catch (e) {
       setAiTestMessage(errorDisplay(e));
     } finally {
