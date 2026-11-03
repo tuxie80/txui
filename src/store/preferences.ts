@@ -180,6 +180,8 @@ export const PREFS = {
   ]),
   /** App-wide base font size in px (clamped 10–20 by utils/fontScale). */
   appFontSize: num('dbgui.appFontSize', 13),
+  /** How long shared mouse-hover tooltips stay visible, in milliseconds. */
+  tooltipDurationMs: num('dbgui.tooltipDurationMs', 1000),
   /** Line endings written into exported files (not the clipboard). */
   exportEol: choice<EolMode>('dbgui.exportEol', 'platform', EOL_MODES),
   /** How verbose a SQL Quality report is. Applies to the screen AND exports. */

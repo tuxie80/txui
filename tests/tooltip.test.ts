@@ -215,3 +215,40 @@ test('a short tip stays on one line', () => {
     assert.equal(tipEl()!.style.whiteSpace, 'nowrap');
   });
 });
+
+test('a tooltip hides after 1 second and restores the native title', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  withDom(({ fire, tipEl }) => {
+    installTooltips();
+    const el = new FakeEl();
+    el.setAttribute('title', 'Default database');
+    fire('mouseover', el);
+    assert.equal(tipEl()!.style.display, 'block');
+    t.mock.timers.tick(999);
+    assert.equal(tipEl()!.style.display, 'block');
+    t.mock.timers.tick(1);
+    assert.equal(tipEl()!.style.display, 'none');
+    assert.equal(el.getAttribute('title'), 'Default database');
+  });
+});
+
+test('moving between targets restarts the display timeout', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  withDom(({ fire, tipEl }) => {
+    installTooltips();
+    const a = new FakeEl();
+    const b = new FakeEl();
+    a.setAttribute('title', 'First');
+    b.setAttribute('title', 'Second');
+    fire('mouseover', a);
+    t.mock.timers.tick(600);
+    fire('mouseover', b);
+    t.mock.timers.tick(600);
+    assert.equal(tipEl()!.style.display, 'block');
+    assert.equal(tipEl()!.textContent, 'Second');
+    t.mock.timers.tick(400);
+    assert.equal(tipEl()!.style.display, 'none');
+    assert.equal(a.getAttribute('title'), 'First');
+    assert.equal(b.getAttribute('title'), 'Second');
+  });
+});

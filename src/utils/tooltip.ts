@@ -2,7 +2,8 @@
  * Instant, clip-proof tooltips. A single fixed-position element appended to
  * <body>, driven by delegated mouseover/mouseout. Native `title` has a ~1.5s
  * delay and CSS ::after gets clipped by overflow containers (toolbars) — this
- * avoids both.
+ * avoids both. Tips hide after the configured lifetime (1s by default);
+ * moving targets restarts that timer, while mouse-out and scroll hide at once.
  *
  * ## It adopts `title` as well as `data-tip`
  *
@@ -20,8 +21,11 @@
  * experience by quietly deleting the accessibility of the control would be a
  * bad trade made silently.
  */
+import { getPref, PREFS } from '../store/preferences.ts';
+
 let el: HTMLDivElement | null = null;
 let current: Element | null = null;
+let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
 function ensure(): HTMLDivElement {
   if (!el) {
@@ -104,9 +108,16 @@ function show(target: Element) {
   if (top + th > window.innerHeight - 4) top = r.top - th - 4;
   box.style.left = `${Math.max(4, left)}px`;
   box.style.top = `${Math.max(4, top)}px`;
+  if (hideTimer) clearTimeout(hideTimer);
+  const duration = Math.max(500, Math.min(60_000, Math.round(getPref(PREFS.tooltipDurationMs))));
+  hideTimer = setTimeout(hide, duration);
 }
 
 function hide() {
+  if (hideTimer) {
+    clearTimeout(hideTimer);
+    hideTimer = null;
+  }
   restoreTitle(current);
   current = null;
   if (el) el.style.display = 'none';

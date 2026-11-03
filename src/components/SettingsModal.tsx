@@ -65,6 +65,7 @@ export function SettingsModal({ onClose }: Props) {
   const [autoFormat, setAutoFormat] = usePreference(PREFS.editorAutoFormat);
   const [writeConfirm, setWriteConfirm] = usePreference(PREFS.writeConfirm);
   const [fontSize, setFontSize] = usePreference(PREFS.appFontSize);
+  const [tooltipDuration, setTooltipDuration] = usePreference(PREFS.tooltipDurationMs);
   const [monoFont, setMonoFont] = usePreference(PREFS.monoFontFamily);
   const [prodRowCap, setProdRowCap] = usePreference(PREFS.prodRowCap);
   const [serverLog, setServerLog] = usePreference(PREFS.serverLog);
@@ -208,6 +209,18 @@ export function SettingsModal({ onClose }: Props) {
                   aria-label="Increase font size"
                 >+</button>
               </span>
+            </label>
+            <label className="settings-row">
+              <span>Tooltip display time <em>(all mouse-hover tips)</em></span>
+              <select aria-label="Tooltip display time" value={tooltipDuration}
+                onChange={e => setTooltipDuration(Number(e.target.value))}>
+                <option value={1000}>1 second (default)</option>
+                <option value={1500}>1.5 seconds</option>
+                <option value={2000}>2 seconds</option>
+                <option value={3000}>3 seconds</option>
+                <option value={5000}>5 seconds</option>
+                <option value={10000}>10 seconds</option>
+              </select>
             </label>
             <p className="settings-hint">Grid font, density and zebra stripes live in the grid's Aa popover (they apply per-grid, live). TxUI Mono is derived from Victor Mono; both use SIL OFL 1.1. See FONT-LICENSES.md for attribution and permitted use.</p>
           </section>

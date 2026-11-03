@@ -235,6 +235,28 @@ async function verifySettings(browser) {
   await page.close();
 }
 
+async function verifyTooltipLifetime(browser) {
+  const page = await openSession(browser);
+  const target = page.locator('.db-roulette .mselect-btn');
+  const tip = page.locator('.dbgui-tip');
+  await target.hover();
+  await tip.waitFor({ state: 'visible' });
+  await tip.waitFor({ state: 'hidden', timeout: 2500 });
+  if (await target.getAttribute('title') === null) throw new Error('tooltip timeout did not restore the native title');
+
+  await page.keyboard.press('Meta+Comma');
+  await page.getByRole('tab', { name: 'Appearance', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Tooltip display time' }).selectOption('3000');
+  await page.locator('.settings-modal .modal-close').click();
+  await target.hover();
+  await tip.waitFor({ state: 'visible' });
+  await page.waitForTimeout(1600);
+  if (!await tip.isVisible()) throw new Error('custom tooltip timeout was not respected');
+  await tip.waitFor({ state: 'hidden', timeout: 2000 });
+  console.log('PASS tooltips time out by default and honor the configured lifetime');
+  await page.close();
+}
+
 async function verifyCursorPreferences(browser) {
   const page = await openSession(browser);
   const width = () => page.locator('.cm-editor').first().evaluate(editor =>
@@ -330,6 +352,7 @@ try {
   await verifyLiveDatabaseList(browser);
   await verifyGraphicsConsistency(browser);
   await verifySettings(browser);
+  await verifyTooltipLifetime(browser);
   await verifyCursorPreferences(browser);
   await verifyConnectionForm(browser);
   const errors = pages.flatMap(page => page._coreErrors);
