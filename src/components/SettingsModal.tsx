@@ -23,6 +23,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { runUpdateCheck } from '../store/updater';
 import { SecurityPanel } from './SecurityPanel';
+import { DialogResizeHandle } from './DialogResizeHandle';
 import { SqlTemplatesStore } from '../store/sqlTemplates';
 import type { SqlTemplate } from '../store/sqlTemplates';
 import { defaultEol, shortcuts } from '../utils/platform';
@@ -46,6 +47,7 @@ const QUERY_TIMEOUT_STEP = 15;
 const QUERY_TIMEOUT_MAX = 3600;
 
 export function SettingsModal({ onClose }: Props) {
+  const [dialogSize, setDialogSize] = useState<{ width: number; height: number } | null>(null);
   const [showCreate, setShowCreate] = usePreference(PREFS.showCreateOnBrowse);
   const [defaultLimit, setDefaultLimit] = usePreference(PREFS.defaultLimit);
   const [editorWrap, setEditorWrap] = usePreference(PREFS.editorWrap);
@@ -150,7 +152,7 @@ export function SettingsModal({ onClose }: Props) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal settings-modal" onClick={e => e.stopPropagation()}>
+      <div className="modal settings-modal" style={dialogSize ?? undefined} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">⚙ Settings</span>
           <button className="modal-close" onClick={onClose}>×</button>
@@ -719,6 +721,8 @@ export function SettingsModal({ onClose }: Props) {
 
           {tab === 'Updates' && <UpdatesSection />}
         </div>
+        <DialogResizeHandle target=".settings-modal" label="Resize Settings window"
+          minWidth={680} minHeight={360} onResize={setDialogSize} />
       </div>
     </div>
   );

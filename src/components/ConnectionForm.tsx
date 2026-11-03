@@ -10,6 +10,7 @@ import { withDeadline, connectDeadlineMs } from '../utils/withDeadline';
 import { stagedDeadlineMs, verdictLine } from '../utils/connDiag';
 import type { StagedConnectResult } from '../utils/connDiag';
 import { ConnDiagChecklist } from './ConnDiagChecklist';
+import { DialogResizeHandle } from './DialogResizeHandle';
 import {
   ENGINE_DEFAULTS, DEFAULT_HOST, resolveDefaults, clearStaleDefaults, databasePlaceholder,
 } from '../utils/connDefaults';
@@ -602,7 +603,6 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   const [drag, setDrag] = useState({ x: 0, y: 0 });
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   const dragStart = useRef<{ px: number; py: number; x: number; y: number } | null>(null);
-  const resizeStart = useRef<{ px: number; py: number; width: number; height: number } | null>(null);
   function onTitleDown(e: React.PointerEvent<HTMLElement>) {
     dragStart.current = { px: e.clientX, py: e.clientY, x: drag.x, y: drag.y };
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -613,25 +613,6 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     setDrag({ x: s.x + e.clientX - s.px, y: s.y + e.clientY - s.py });
   }
   function onTitleUp() { dragStart.current = null; }
-  function onResizeDown(e: React.PointerEvent<HTMLElement>) {
-    const form = e.currentTarget.closest('.conn-form');
-    if (!form) return;
-    const rect = form.getBoundingClientRect();
-    resizeStart.current = { px: e.clientX, py: e.clientY, width: rect.width, height: rect.height };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  }
-  function onResizeMove(e: React.PointerEvent<HTMLElement>) {
-    const s = resizeStart.current;
-    if (!s) return;
-    const maxWidth = Math.max(280, window.innerWidth - 32);
-    const maxHeight = Math.max(240, window.innerHeight - 32);
-    setSize({
-      width: Math.max(Math.min(420, maxWidth), Math.min(maxWidth, s.width + e.clientX - s.px)),
-      height: Math.max(Math.min(320, maxHeight), Math.min(maxHeight, s.height + e.clientY - s.py)),
-    });
-  }
-  function onResizeUp() { resizeStart.current = null; }
 
   // A dot on the Advanced tab is the only way to see — without opening it —
   // that an edited connection carries non-default tuning.
@@ -1524,10 +1505,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           }}
         />
       )}
-      <button type="button" className="cf-resize-handle" title="Resize connection window"
-        aria-label="Resize connection window"
-        onPointerDown={onResizeDown} onPointerMove={onResizeMove}
-        onPointerUp={onResizeUp} onPointerCancel={onResizeUp}>◢</button>
+      <DialogResizeHandle target=".conn-form" label="Resize connection window" onResize={setSize} />
     </div>
   );
 }

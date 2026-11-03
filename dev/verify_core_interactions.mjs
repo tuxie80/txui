@@ -208,10 +208,12 @@ async function verifySettings(browser) {
       lastRight: last.getBoundingClientRect().right,
     };
   });
-  if (metrics.modalWidth < 800 || metrics.scrollWidth > metrics.clientWidth + 1 || metrics.lastRight > metrics.tabsRight + 1) {
-    throw new Error(`Settings tabs do not fit: ${JSON.stringify(metrics)}`);
+  if (metrics.modalWidth < 680 || metrics.modalWidth > 760
+      || metrics.scrollWidth > metrics.clientWidth + 1 || metrics.lastRight > metrics.tabsRight + 1) {
+    throw new Error(`Settings is not compact with all tabs fitting: ${JSON.stringify(metrics)}`);
   }
-  console.log('PASS Settings shows all nine tabs without horizontal scrolling');
+  console.log('PASS Settings is compact and shows all nine tabs without scrolling');
+  if (process.env.TXUI_SETTINGS_SHOT) await page.screenshot({ path: process.env.TXUI_SETTINGS_SHOT });
 
   await page.getByRole('tab', { name: 'Updates' }).click();
   const automatic = page.getByRole('checkbox', { name: /Automatically check for updates/ });
@@ -232,6 +234,21 @@ async function verifySettings(browser) {
   await page.clock.fastForward(6 * 60 * 60 * 1000 + 11_000);
   if (await updateCalls() !== 2) throw new Error('disabling automatic checks did not cancel the schedule');
   console.log('PASS update checks are opt-in; manual checks and disabling the schedule work');
+
+  const handle = page.getByRole('button', { name: 'Resize Settings window' });
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) throw new Error('Settings has no resize handle');
+  const oldSize = await page.locator('.settings-modal').boundingBox();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 80, handleBox.y + handleBox.height / 2 - 60, { steps: 6 });
+  await page.mouse.up();
+  const newSize = await page.locator('.settings-modal').boundingBox();
+  if (!oldSize || !newSize || Math.abs(newSize.width - oldSize.width - 80) > 2
+      || Math.abs(newSize.height - oldSize.height + 60) > 2) {
+    throw new Error(`Settings did not resize: ${JSON.stringify({ oldSize, newSize })}`);
+  }
+  console.log('PASS Settings resizes in both dimensions');
   await page.close();
 }
 
