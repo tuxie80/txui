@@ -200,6 +200,8 @@ export function shortcuts(p: Platform = platform()) {
     zen:         s('0', { alt: true }),
     /** Click-to-navigate in the editor. */
     clickOpen:   p === 'mac' ? '⌘-click' : 'Ctrl+click',
+    /** Keyboard navigation to the object under the caret; F12 also works. */
+    openObject:  p === 'mac' ? '⌘L' : 'Ctrl+L',
     /** Bare keys, used in the kill picker's footer. */
     enter:       l.enter,
     shiftEnter:  p === 'mac' ? '⇧↵' : 'Shift+Enter',

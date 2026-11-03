@@ -168,7 +168,7 @@ export function inStringOrComment(doc: string, pos: number, engine: HoverEngine 
 
 export interface HoverTarget {
   span: TokenSpan;
-  kind: 'table' | 'column' | 'function' | 'variable' | 'keyword' | 'unknown';
+  kind: 'database' | 'table' | 'column' | 'function' | 'variable' | 'keyword' | 'unknown';
   /** resolved table for a column, or the table itself */
   table?: string;
   /** column name when kind === 'column' */
@@ -182,6 +182,8 @@ export interface HoverContext {
   aliases: Map<string, string>;
   /** known object names, lower-cased → canonical "schema.name" or name */
   objects: Map<string, string>;
+  /** known database/schema names, when the host can distinguish them */
+  databases?: Map<string, string>;
   /** known function names, upper-cased */
   functions: Set<string>;
   /** SQL keywords, lower-cased — hovering these is noise, so they resolve to `keyword` */
@@ -217,6 +219,9 @@ export function resolveHover(
     if (ctx.objects.has(q)) return { span, kind: 'column', table: ctx.objects.get(q), column: span.text };
     return { span, kind: 'column', table: span.qualifier, column: span.text };
   }
+
+  const dbHit = ctx.databases?.get(lower);
+  if (dbHit) return { span, kind: 'database', name: dbHit };
 
   // a table/view name we know about
   const objHit = ctx.objects.get(lower);

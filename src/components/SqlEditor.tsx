@@ -764,6 +764,8 @@ export interface SchemaCompletion {
   detail?: string;
   /** text inserted on pick when different from the label (e.g. schema-qualified) */
   apply?: string;
+  /** stable schema-qualified object name, independent of the insertion text */
+  qualified?: string;
   /** column is (part of) the primary key — sorted first in column contexts */
   pk?: boolean;
   /** longer explanation shown in the completion docs pane (type, path, flags) */
@@ -891,6 +893,8 @@ interface Props {
    * only way from a name in the editor to its data was retyping it into ⌘P.
    */
   onOpenObject?: (name: string) => void;
+  /** Select a database/schema name as the session default. */
+  onOpenDatabase?: (name: string) => void;
   /** Peek an object's DDL inline (Quick Definition) without leaving the editor. */
   onPeekObject?: (name: string) => void;
   /** Open the AI assistant (generate / explain the current statement). */
@@ -963,6 +967,7 @@ export function SqlEditor({
   onKillContext,
   killReplaceRef,
   onOpenObject,
+  onOpenDatabase,
   onPeekObject,
   onAiAssist,
   onOptimizerTrace,
@@ -1148,6 +1153,7 @@ export function SqlEditor({
   const getServerVariablesRef = useRef(getServerVariables);
   const onKillContextRef = useRef(onKillContext);
   const onOpenObjectRef = useRef(onOpenObject);
+  const onOpenDatabaseRef = useRef(onOpenDatabase);
   const onPeekObjectRef = useRef(onPeekObject);
   const onAiAssistRef = useRef(onAiAssist);
   const onOptimizerTraceRef = useRef(onOptimizerTrace);
@@ -1216,6 +1222,7 @@ export function SqlEditor({
     getServerVariablesRef.current = getServerVariables;
     onKillContextRef.current = onKillContext;
     onOpenObjectRef.current = onOpenObject;
+    onOpenDatabaseRef.current = onOpenDatabase;
     onPeekObjectRef.current = onPeekObject;
     onAiAssistRef.current = onAiAssist;
     onOptimizerTraceRef.current = onOptimizerTrace;
@@ -1271,15 +1278,21 @@ export function SqlEditor({
   // do — so build the expensive part once per schema/engine.
   const hoverBase = useMemo(() => {
     const objects = new Map<string, string>();
+    const databases = new Map<string, string>();
     for (const c of schemaCompletions) {
-      if (c.kind === 'schema') { objects.set(c.label.toLowerCase(), c.label); continue; }
-      const qualified = c.apply && c.apply.includes('.') ? c.apply : c.label;
+      if (c.kind === 'schema') {
+        objects.set(c.label.toLowerCase(), c.label);
+        databases.set(c.label.toLowerCase(), c.label);
+        continue;
+      }
+      const qualified = c.qualified ?? (c.apply && c.apply.includes('.') ? c.apply : c.label);
       objects.set(c.label.toLowerCase(), qualified);
       if (qualified.includes('.')) objects.set(qualified.toLowerCase().replace(/[`"]/g, ''), qualified);
     }
     const cat = keywordCatalog(engine, undefined, { duckdbSpatial });
     return {
       objects,
+      databases,
       functions: new Set(cat.filter(k => k.type === 'function').map(k => k.label.toUpperCase())),
       keywords: new Set(cat.filter(k => k.type === 'keyword')
         .flatMap(k => k.label.toLowerCase().split(/[^a-z_]+/)).filter(Boolean)),
@@ -1319,6 +1332,13 @@ export function SqlEditor({
         ? 'server / session variable'
         : t.name?.startsWith(':') ? 'TxUI query variable — prompted before the run'
         : 'user-defined session variable');
+      return dom;
+    }
+
+    if (t.kind === 'database' && t.name) {
+      line('cm-tip-head', t.name);
+      line('cm-tip-detail', 'database / schema');
+      line('cm-tip-hint', `${shortcuts().clickOpen} / F12 to use it as the default database`);
       return dom;
     }
 
@@ -1678,11 +1698,15 @@ export function SqlEditor({
       return true;
     };
 
-    // F12 / ⌘-click: open the table or view under the cursor
+    // F12 / Mod-L / ⌘-click: open the object under the cursor
     const goToObjectCommand = (view: EditorView) => {
       const doc = view.state.doc.toString();
       const target = resolveHover(doc, view.state.selection.main.head,
         hoverCtxForRef.current(doc), engine);
+      if (target?.kind === 'database' && target.name && onOpenDatabaseRef.current) {
+        onOpenDatabaseRef.current(target.name);
+        return true;
+      }
       if (target?.kind !== 'table' || !target.table || !onOpenObjectRef.current) return false;
       onOpenObjectRef.current(target.table);
       return true;
@@ -2101,14 +2125,14 @@ export function SqlEditor({
               dom.appendChild(btn);
             }
           }
-          return { pos: diags[0].from, end: diags[0].to, above: true, create: () => ({ dom }) };
+          return { pos: diags[0].from, end: diags[0].to, above: false, create: () => ({ dom }) };
         }
         const doc = view.state.doc.toString();
         const target = resolveHover(doc, pos, hoverCtxForRef.current(doc), engine);
         if (!target) return null;
         const dom = await describeTargetRef.current(target);
         if (!dom) return null;
-        return { pos: target.span.from, end: target.span.to, above: true, create: () => ({ dom }) };
+        return { pos: target.span.from, end: target.span.to, above: false, create: () => ({ dom }) };
       }, { hoverTime: 250 }),
     ];
     hintExtensionsRef.current = hintExtensions;
@@ -2231,15 +2255,20 @@ export function SqlEditor({
             view.dispatch({ effects: setSymbolRefs.of(refs) });
           }, 150);
         }),
-        // ⌘-click a table/view name → open it (the host decides how).
+        // ⌘-click an object name → open it (the host decides how).
         EditorView.domEventHandlers({
           mousedown(event, view) {
-            if (!(event.metaKey || event.ctrlKey) || !onOpenObjectRef.current) return false;
+            if (!(event.metaKey || event.ctrlKey)) return false;
             const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
             if (pos == null) return false;
             const doc = view.state.doc.toString();
             const target = resolveHover(doc, pos, hoverCtxForRef.current(doc), engine);
-            if (target?.kind !== 'table' || !target.table) return false;
+            if (target?.kind === 'database' && target.name && onOpenDatabaseRef.current) {
+              event.preventDefault();
+              onOpenDatabaseRef.current(target.name);
+              return true;
+            }
+            if (target?.kind !== 'table' || !target.table || !onOpenObjectRef.current) return false;
             event.preventDefault();
             onOpenObjectRef.current(target.table);
             return true;
@@ -2297,6 +2326,7 @@ export function SqlEditor({
           { key: 'Mod-Shift-,', run: () => { playMacro(); return true; } },
           { key: 'Mod-e', run: explainCommand },
           { key: 'F12', run: goToObjectCommand },
+          { key: 'Mod-l', run: goToObjectCommand },
           { key: 'Mod-y', run: peekObjectCommand },   // Quick Definition (peek DDL)
           { key: 'Mod-i', run: () => { onAiAssistRef.current?.('generate'); return true; } }, // AI: generate SQL
           { key: 'Mod-Shift-8', run: expandStarCommand },        // expand * (B5/B8)
@@ -3131,7 +3161,7 @@ export function SqlEditor({
             </>
           )}
           <ContextMenuItem
-            label="Go to table under cursor   F12"
+            label={`Go to object under cursor   ${SC.openObject} / F12`}
             onClick={() => { editorCommandsRef.current['editor.goToObject']?.(); setMenu(null); }}
           />
           <ContextMenuItem

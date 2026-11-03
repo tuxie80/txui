@@ -75,6 +75,18 @@ test('a known object resolves to a table, a known function to a function', () =>
   assert.equal(h?.table, 'shop.orders');
 });
 
+test('a known database resolves as a database, while a qualified relation stays a table', () => {
+  const withDb = ctx({
+    databases: new Map([['nyc_taxi', 'nyc_taxi']]),
+    objects: new Map([['nyc_taxi.gps_pings', 'nyc_taxi.gps_pings']]),
+  });
+  const database = resolveHover('select * from nyc_taxi.gps_pings', 18, withDb);
+  assert.equal(database?.kind, 'database');
+  assert.equal(database?.name, 'nyc_taxi');
+  const table = resolveHover('select * from nyc_taxi.gps_pings', 28, withDb);
+  assert.equal(table?.kind, 'table');
+});
+
 test('keywords are recognised so they do not produce noisy tooltips', () => {
   const doc = 'SELECT x FROM y';
   assert.equal(resolveHover(doc, 2, ctx())?.kind, 'keyword');

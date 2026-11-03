@@ -328,6 +328,146 @@ async function verifySettings(browser) {
   await page.close();
 }
 
+async function verifyFirstLineDiagnostic(browser) {
+  const page = await openSession(browser);
+  await page.locator('.cm-content').first().click();
+  await page.keyboard.press('Meta+a');
+  await page.keyboard.type('select * from nyc_taxi.gps_pings;');
+  await page.waitForTimeout(700);
+  const line = await page.locator('.cm-line').first().boundingBox();
+  const toolbar = await page.locator('.editor-toolbar').first().boundingBox();
+  if (!line || !toolbar) throw new Error('editor line or toolbar is not measurable');
+  await page.mouse.move(line.x + 20, line.y + line.height / 2);
+  const tip = page.locator('.cm-tooltip:visible').first();
+  await tip.waitFor({ timeout: 3000 });
+  const box = await tip.boundingBox();
+  if (!box || box.y < toolbar.y + toolbar.height - 1) {
+    throw new Error(`first-line diagnostic is clipped by the toolbar: ${JSON.stringify({ box, toolbar })}`);
+  }
+  console.log('PASS first-line diagnostic tooltip stays below the editor toolbar');
+  await page.close();
+}
+
+async function verifyObjectNavigation(browser) {
+  const page = await newPage(browser);
+  await page.evaluate(() => {
+    const original = window.__MOCK__.list_schema;
+    window.__MOCK__.list_schema = args => {
+      const nodes = original(args);
+      return args?.context ? nodes : [...nodes, { kind: 'database', name: 'nyc_taxi' }];
+    };
+    const originalMonitor = window.__MOCK__.monitor_query;
+    window.__MOCK__.monitor_query = args => {
+      const result = originalMonitor(args);
+      const sql = String(args?.sql ?? '');
+      if (sql.includes('information_schema.schemata')) return { ...result, rows: [['nyc_taxi']] };
+      if (sql.includes('information_schema.tables')) {
+        return { ...result, rows: [['nyc_taxi', 'gps_pings', 'BASE TABLE']] };
+      }
+      if (/information_schema\.(routines|triggers|events|KEY_COLUMN_USAGE|STATISTICS)/i.test(sql)) {
+        return { ...result, rows: [] };
+      }
+      return result;
+    };
+  });
+  await page.evaluate(() => { window.dispatchEvent(new CustomEvent('dbgui:schema-changed')); });
+  const header = page.locator('.conn-item-header', { has: page.locator('.conn-name', { hasText: 'prod-orders' }) }).first();
+  await header.dblclick();
+  await page.waitForSelector('.cm-content', { timeout: 15000 });
+  await page.locator('.cm-content').first().click();
+  await page.keyboard.press('Meta+a');
+  await page.keyboard.type('select * from nyc_taxi.gps_pings;');
+  await page.waitForTimeout(500);
+  const line = await page.locator('.cm-line').first().boundingBox();
+  const editorToolbar = await page.locator('.editor-toolbar').first().boundingBox();
+  if (!line || !editorToolbar) throw new Error('database identifier or toolbar is not measurable');
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('dbgui:goto-range', { detail: { from: 14, to: 22 } }));
+  });
+  await page.keyboard.press('Meta+l');
+  await page.waitForFunction(() =>
+    (window.__CALLS__ ?? []).some(call => call.cmd === 'set_session_db' && call.args?.db === 'nyc_taxi'),
+  null, { polling: 100, timeout: 3000 });
+  await page.mouse.move(line.x + 120, line.y + line.height / 2);
+  const databaseTip = page.locator('.cm-tooltip:visible').filter({ hasText: 'default database' });
+  await databaseTip.waitFor({ timeout: 3000 });
+  const databaseTipBox = await databaseTip.boundingBox();
+  if (!databaseTipBox || databaseTipBox.y < editorToolbar.y + editorToolbar.height - 1) {
+    throw new Error(`first-line database tooltip is clipped by the toolbar: ${JSON.stringify({ databaseTipBox, editorToolbar })}`);
+  }
+  console.log('PASS first-line database tooltip stays below the editor toolbar');
+  await page.mouse.move(0, 0);
+  await page.keyboard.down('Meta');
+  await page.mouse.click(line.x + 120, line.y + line.height / 2);
+  await page.keyboard.up('Meta');
+  await page.waitForFunction(() =>
+    (window.__CALLS__ ?? []).filter(call => call.cmd === 'set_session_db' && call.args?.db === 'nyc_taxi').length >= 2,
+  null, { polling: 100, timeout: 3000 });
+  const tableBrowses = await page.evaluate(() =>
+    (window.__CALLS__ ?? []).filter(call => call.cmd === 'browse_table').length);
+  if (tableBrowses !== 0) throw new Error('database name incorrectly opened the table browser');
+  console.log('PASS command-click and Mod-L select a database without browsing a table');
+  await page.close();
+
+  const tablePage = await newPage(browser);
+  await tablePage.evaluate(() => {
+    window.__MOCK__.get_table_meta = { ...window.__MOCK__.get_table_meta, pk_columns: [] };
+    const originalMonitor = window.__MOCK__.monitor_query;
+    window.__MOCK__.monitor_query = args => {
+      const result = originalMonitor(args);
+      const sql = String(args?.sql ?? '');
+      if (sql === 'SELECT DATABASE()') return { ...result, rows: [['shop']] };
+      if (sql.includes('information_schema.tables')) {
+        return { ...result, rows: [['shop', 'orders', 'BASE TABLE']] };
+      }
+      if (sql.includes('information_schema.schemata')) return { ...result, rows: [['shop']] };
+      if (/information_schema\.(routines|triggers|events|KEY_COLUMN_USAGE|STATISTICS)/i.test(sql)) {
+        return { ...result, rows: [] };
+      }
+      return result;
+    };
+  });
+  const tableHeader = tablePage.locator('.conn-item-header', { has: tablePage.locator('.conn-name', { hasText: 'prod-orders' }) }).first();
+  await tableHeader.dblclick();
+  await tablePage.waitForSelector('.cm-content', { timeout: 15000 });
+  await tablePage.locator('.cm-content').first().click();
+  await tablePage.keyboard.press('Meta+a');
+  await tablePage.keyboard.type('select * from shop.orders;');
+  await tablePage.waitForTimeout(500);
+  const tablePoint = await tablePage.locator('.cm-line').first().evaluate(line => {
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const offset = node.textContent.indexOf('orders');
+      if (offset < 0) continue;
+      const range = document.createRange();
+      range.setStart(node, offset);
+      range.setEnd(node, offset + 'orders'.length);
+      const rect = range.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    }
+    return null;
+  });
+  if (!tablePoint) throw new Error('table identifier is not measurable');
+  await tablePage.mouse.move(tablePoint.x, tablePoint.y);
+  const tableTip = tablePage.locator('.cm-tooltip:visible').filter({ hasText: 'to browse it' });
+  await tableTip.waitFor({ timeout: 3000 });
+  if (!await tableTip.getByText('shop.orders', { exact: true }).count()) {
+    throw new Error(`table hover shows the wrong target: ${await tableTip.textContent()}`);
+  }
+  console.log('PASS table hover shows schema, columns and browse hint');
+  await tablePage.mouse.move(0, 0);
+  await tablePage.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('dbgui:goto-range', { detail: { from: 19, to: 25 } }));
+  });
+  await tablePage.keyboard.press('Meta+l');
+  await tablePage.waitForFunction(() =>
+    (window.__CALLS__ ?? []).some(call => call.cmd === 'browse_table' && call.args?.params?.table === 'shop.orders'),
+  null, { polling: 100 });
+  console.log('PASS Mod-L on a table keeps its 100-row browser');
+  await tablePage.close();
+}
+
 async function verifyTooltipLifetime(browser) {
   const page = await openSession(browser);
   const target = page.locator('.db-roulette .mselect-btn');
@@ -448,6 +588,8 @@ try {
   await verifyLiveDatabaseList(browser);
   await verifyGraphicsConsistency(browser);
   await verifySettings(browser);
+  await verifyFirstLineDiagnostic(browser);
+  await verifyObjectNavigation(browser);
   await verifyTooltipLifetime(browser);
   await verifyCursorPreferences(browser);
   await verifyConnectionForm(browser);

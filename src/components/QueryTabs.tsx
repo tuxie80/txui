@@ -3271,6 +3271,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                 onOpenObject={name => window.dispatchEvent(new CustomEvent('dbgui:browse-table', {
                   detail: { table: name.replace(/[`"]/g, '') },
                 }))}
+                onOpenDatabase={name => { void changeDb(name); }}
                 onPeekObject={name => {
                   const t = name.replace(/[`"]/g, '');
                   SchemaStore.getDdl(session.sessionId, t)

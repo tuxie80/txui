@@ -53,7 +53,7 @@ export const EDITOR_COMMANDS: readonly CommandSpec[] = [
   { id: 'editor.explain',       label: 'Explain statement',           category: 'Run', keys: 'Mod-e' },
 
   // ── Navigate ──
-  { id: 'editor.goToObject',    label: 'Go to table under cursor',    category: 'Navigate', keys: 'F12' },
+  { id: 'editor.goToObject',    label: 'Go to object under cursor (F12 also works)', category: 'Navigate', keys: 'Mod-l' },
   { id: 'editor.peekObject',    label: 'Quick definition (peek DDL)', category: 'Navigate', keys: 'Mod-y' },
   // The F12 companion: go-to-object opens the object, this flashes it in the
   // sidebar's schema tree. No chord of its own — F12 and the palette are how

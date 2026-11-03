@@ -357,6 +357,7 @@ export function useSchemaCompletions(
       // A chosen database narrows the list — but never hides schema-less
       // objects, which belong to no database and are always in scope.
       if (!isPg && db && o.schema !== '' && o.schema.toLowerCase() !== db) continue;
+      const qualified = o.schema === '' ? undefined : safePath([o.schema, o.name], engine);
 
       if (bare(o)) {
         // Reachable unqualified — insert the bare (quoted if needed) name.
@@ -364,6 +365,7 @@ export function useSchemaCompletions(
         items.push({
           label: o.name,
           apply: bare === o.name ? undefined : bare,
+          qualified,
           type: KIND_TYPE[o.kind],
           kind: o.kind,
           scopeRank: scopeRank(o),
@@ -380,6 +382,7 @@ export function useSchemaCompletions(
         items.push({
           label: o.name,
           apply: safePath([o.schema, o.name], engine),
+          qualified,
           type: KIND_TYPE[o.kind],
           kind: o.kind,
           scopeRank: scopeRank(o),
