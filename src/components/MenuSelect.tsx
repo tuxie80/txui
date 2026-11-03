@@ -21,10 +21,11 @@ export interface MenuSelectOption {
   label: string;
 }
 
-export function MenuSelect({ value, options, onChange, className, title }: {
+export function MenuSelect({ value, options, onChange, onOpen, className, title }: {
   value: string;
   options: MenuSelectOption[];
   onChange: (value: string) => void;
+  onOpen?: () => void;
   /** Extra class on the wrapper — the control's look (font, colors) comes from
    *  it, so the button and the list always share one font. */
   className?: string;
@@ -54,6 +55,7 @@ export function MenuSelect({ value, options, onChange, className, title }: {
 
   const toggle = () => {
     if (open) { setOpen(null); return; }
+    onOpen?.();
     const r = rootRef.current?.getBoundingClientRect();
     if (!r) return;
     // Opening starts the highlight on the current value — the native behavior.

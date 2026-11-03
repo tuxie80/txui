@@ -296,6 +296,7 @@ export interface QueryTab {
   explain: ExplainData | null;
   browsers: string[];                   // open table browsers (Result 1..N)
   activeBrowser: number;                // index into browsers when view === 'browser'
+  browserGraphics: boolean;             // Graphics over the active table browser
   view: 'grid' | 'plan' | 'browser' | 'log' | 'map'; // ADS-style result-area tabs
   error: string | null;
   running: boolean;
@@ -450,19 +451,19 @@ function ResultTabBar({ tab, sid, patchTab, setTabs }: {
             }}>×</span>
         </span>
       )}
-      {/* Any result with rows can be visualised — a map (if it has
-          coordinates) or a chart. The picker inside chooses which. */}
-      {tab.result && tab.result.rows.length > 0 && (
+      {/* Graphics belongs to the active result. A table browser keeps its own
+          rows in DataBrowser; never substitute the last SQL result for them. */}
+      {(tab.view === 'browser' ? tab.browsers.length > 0 : !!tab.result && tab.result.rows.length > 0) && (
         <button
-          className={`rtab ${tab.view === 'map' ? 'active' : ''}`}
+          className={`rtab ${tab.view === 'map' || (tab.view === 'browser' && tab.browserGraphics) ? 'active' : ''}`}
           data-tip="Visualise this result — a map (coordinates) or a chart"
-          onClick={() => patchTab(tab.id, { view: 'map' })}
+          onClick={() => patchTab(tab.id, tab.view === 'browser' ? { browserGraphics: true } : { view: 'map' })}
         >📈 Graphics</button>
       )}
       {tab.browsers.map((bt, bi) => (
         <span key={bt} className={`rtab rtab-result ${tab.view === 'browser' && tab.activeBrowser === bi ? 'active' : ''}`}
           title={bt}
-          onClick={() => patchTab(tab.id, { view: 'browser', activeBrowser: bi })}>
+          onClick={() => patchTab(tab.id, { view: 'browser', activeBrowser: bi, browserGraphics: false })}>
           ▦ Result {bi + 1}
           <span className="rtab-close" title="Close result"
             onClick={e => {
@@ -554,6 +555,7 @@ interface PanelCtx {
   currentDb: string;
   dbList: string[];
   changeDb: (db: string) => void;
+  refreshDbList: () => void;
   tabs: QueryTab[];
   tabsRef: React.MutableRefObject<QueryTab[]>;
   activeIdRef: React.MutableRefObject<number | null>;
@@ -592,7 +594,7 @@ function withDbScope(c: PanelCtx, panel: React.ReactNode): React.ReactNode {
   return (
     <div className="db-scope-wrap">
       <DbScopeBar sessionId={c.session.sessionId} engine={c.session.engine}
-        dbList={c.dbList} currentDb={c.currentDb} onChange={c.changeDb} />
+        dbList={c.dbList} currentDb={c.currentDb} onChange={c.changeDb} onRefresh={c.refreshDbList} />
       {panel}
     </div>
   );
@@ -715,6 +717,7 @@ const PANEL_META: Record<string, {
           dbList={c.dbList}
           currentDb={c.currentDb}
           onChangeDb={c.changeDb}
+          onRefreshDb={c.refreshDbList}
           scope={c.compareScope ?? undefined}
           onScopeConsumed={c.clearCompareScope}
           onClose={close} />,
@@ -887,7 +890,7 @@ function newTab(label?: string): QueryTab {
     id: _tabCounter++, bid: newBid(), label: label ?? pad2(_tabCounter - 1),
     sql: '', result: null, resultSql: null, scriptResults: null, scriptBase: 0, stmtRuns: {}, explain: null,
     autoPlans: {}, planRuns: [],
-    browsers: [], activeBrowser: 0, view: 'grid', error: null, running: false,
+    browsers: [], activeBrowser: 0, browserGraphics: false, view: 'grid', error: null, running: false,
     autoLimited: null, prodCap: null,
   };
 }
@@ -1508,6 +1511,15 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const supportsDbSelect = can(session.engine, 'databaseSelect');
   const [dbList, setDbList] = useState<string[]>([]);
   const [currentDb, setCurrentDb] = useState('');
+  const dbListRequest = useRef(0);
+  const refreshDbList = useCallback(async () => {
+    const request = ++dbListRequest.current;
+    try {
+      const nodes = await SchemaStore.listSchema(session.sessionId);
+      if (request !== dbListRequest.current) return;
+      setDbList(nodes.filter(n => n.kind === 'database' || n.kind === 'schema').map(n => n.name));
+    } catch { /* keep the last usable list if a refresh fails */ }
+  }, [session.sessionId]);
   // Read inside callbacks that must not re-create on every database switch.
   const currentDbRef = useRef(currentDb);
   useEffect(() => { currentDbRef.current = currentDb; }, [currentDb]);
@@ -1520,11 +1532,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
          : 'SELECT current_schema()',
     }).then(r => setCurrentDb(String(r.rows[0]?.[0] ?? '') === 'null' ? '' : String(r.rows[0]?.[0] ?? '')))
       .catch(() => {});
-    SchemaStore.listSchema(session.sessionId)
-      .then(nodes => setDbList(
-        nodes.filter(n => n.kind === 'database' || n.kind === 'schema').map(n => n.name)))
-      .catch(() => {});
-  }, [session.sessionId, session.engine, supportsDbSelect]);
+    void refreshDbList();
+  }, [session.sessionId, session.engine, supportsDbSelect, refreshDbList]);
 
   const changeDb = useCallback(async (db: string) => {
     try {
@@ -2342,7 +2351,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
         if (t.id !== targetId) return t;
         const idx = t.browsers.indexOf(d.table);
         const browsers = idx >= 0 ? t.browsers : [...t.browsers, d.table];
-        return { ...t, browsers, activeBrowser: idx >= 0 ? idx : browsers.length - 1, view: 'browser' };
+        return { ...t, browsers, activeBrowser: idx >= 0 ? idx : browsers.length - 1, browserGraphics: false, view: 'browser' };
       }));
       addLog(env().sessionId, { level: 'info', action: 'BROWSE', detail: d.table });
       // …and, when the preference is on, run SHOW CREATE and drop its OUTPUT
@@ -2775,7 +2784,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     const meta = tab.panel ? PANEL_META[tab.panel] : undefined;
     if (!meta) return <div className="mx-empty">Unknown panel “{tab.panel}”.</div>;
     const c: PanelCtx = {
-      session, openSessions, currentDb, dbList, changeDb, tabs, tabsRef, activeIdRef, liveSql,
+      session, openSessions, currentDb, dbList, changeDb, refreshDbList, tabs, tabsRef, activeIdRef, liveSql,
       handleHistorySelect, currentEditorSql, focusSqlTab, insertIntoEditor,
       onExplain: (sql: string) => {
         const id = focusSqlTab();
@@ -3061,6 +3070,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                   options={[{ value: '', label: '— no default DB —' },
                     ...dbList.map(d => ({ value: d, label: d }))]}
                   onChange={changeDb}
+                  onOpen={() => { void refreshDbList(); }}
                 />
               )}
               {/* Identity, then actions as icons. The old row spelled out
@@ -3492,6 +3502,8 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
                       txOpen={txOpen}
                       onBeginTx={beginTx}
                       onEndTx={endTx}
+                      showGraphics={tab.browserGraphics}
+                      onToggleGraphics={() => patchTab(tab.id, { browserGraphics: !tab.browserGraphics })}
                       onClose={() => setTabs(prev => prev.map(t => {
                         if (t.id !== tab.id) return t;
                         const browsers = t.browsers.filter((_, i) => i !== bi);

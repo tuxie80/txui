@@ -81,13 +81,14 @@ interface Props {
   dbList: string[];
   currentDb: string;
   onChangeDb: (db: string) => void;
+  onRefreshDb: () => void;
   /** Preselected mode, from an opener that knows which compare it wants. */
   scope?: CompareScope;
   onScopeConsumed?: () => void;
   onClose: () => void;
 }
 
-export function ComparePanel({ session, openSessions, schema, results, dbList, currentDb, onChangeDb, scope, onScopeConsumed, onClose }: Props) {
+export function ComparePanel({ session, openSessions, schema, results, dbList, currentDb, onChangeDb, onRefreshDb, scope, onScopeConsumed, onClose }: Props) {
   const engineLabel = ENGINE_LABELS[session.engine] ?? session.engine;
   const modeOk = (m: ModeDef) => !m.cap || can(session.engine, m.cap);
   // The default is the first mode — schema always works (it carries its own
@@ -148,7 +149,7 @@ export function ComparePanel({ session, openSessions, schema, results, dbList, c
         {activeOk && active === 'data' && (
           <div className="db-scope-wrap">
             <DbScopeBar sessionId={session.sessionId} engine={session.engine}
-              dbList={dbList} currentDb={currentDb} onChange={onChangeDb} />
+              dbList={dbList} currentDb={currentDb} onChange={onChangeDb} onRefresh={onRefreshDb} />
             <DataComparePanel key={currentDb} session={session} openSessions={openSessions}
               schema={schema} onClose={onClose} />
           </div>

@@ -49,6 +49,8 @@ interface Props {
   dbUser:         string;
   resultLabel?: string;   // "Result N" — shown small; the table name isn't repeated big
   onClose:      () => void;
+  showGraphics: boolean;
+  onToggleGraphics: () => void;
   onFkNavigate: (fkTable: string, fkColumn: string, value: unknown) => void;
   /** Session transaction state + controls, so edit mode can arm/commit one
    *  through the SAME state machine the tab's ⛁ TX buttons use. */
@@ -66,8 +68,8 @@ const PAGE = 100;   // rows per fetch; the row cap (default 100) is user-raisabl
 const dbOf = (t: string) => (t.includes('.') ? t.slice(0, t.indexOf('.')) : '');
 
 export function DataBrowser({
-  sessionId, table, engine, connectionName, connectionId, dbUser, resultLabel, onClose, onFkNavigate,
-  txOpen, onBeginTx, onEndTx, onRunDerived,
+  sessionId, table, engine, connectionName, connectionId, dbUser, resultLabel, onClose,
+  showGraphics, onToggleGraphics, onFkNavigate, txOpen, onBeginTx, onEndTx, onRunDerived,
 }: Props) {
   const [meta, setMeta]     = useState<TableMeta | null>(null);
   const [rows, setRows]     = useState<unknown[][]>([]);
@@ -89,7 +91,6 @@ export function DataBrowser({
   const [loading, setLoading] = useState(false);
   const [error, setError]   = useState<string | null>(null);
   const [viewer, setViewer] = useState<{ column: string; value: unknown } | null>(null);
-  const [showGraphics, setShowGraphics] = useState(false);
   const fetchSeq = useRef(0);
   const offsetRef = useRef(0);
   const loadingRef = useRef(false);
@@ -562,7 +563,7 @@ export function DataBrowser({
           {cols.length > 0 && (
             <button className={`toolbar-btn ${showGraphics ? 'active' : ''}`}
               data-tip="Visualise these rows — a map (coordinates) or a chart"
-              onClick={() => setShowGraphics(v => !v)}>📈 Graphics</button>
+              onClick={onToggleGraphics}>📈 Graphics</button>
           )}
           {cols.length > 0 && (
             <CopyExportMenu

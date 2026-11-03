@@ -14,13 +14,14 @@ import { MenuSelect } from './MenuSelect';
 import { can } from '../utils/engineCaps';
 import type { Engine } from '../utils/engineCaps';
 
-export function DbScopeBar({ engine, dbList, currentDb, onChange }: {
+export function DbScopeBar({ engine, dbList, currentDb, onChange, onRefresh }: {
   /** Owning session — the selector changes THAT session's default database. */
   sessionId: string;
   engine: Engine;
   dbList: string[];
   currentDb: string;
   onChange: (db: string) => void;
+  onRefresh: () => void;
 }) {
   if (!can(engine, 'databaseSelect') || dbList.length === 0) return null;
   return (
@@ -33,6 +34,7 @@ export function DbScopeBar({ engine, dbList, currentDb, onChange }: {
         options={[{ value: '', label: '— no default DB —' },
           ...dbList.map(d => ({ value: d, label: d }))]}
         onChange={onChange}
+        onOpen={onRefresh}
       />
     </div>
   );
