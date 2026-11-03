@@ -135,6 +135,23 @@ async function verifySelections(browser) {
   await multi.close();
 }
 
+async function verifyFlavorPersistence(browser) {
+  const page = await openSession(browser);
+  await page.waitForFunction(() =>
+    (window.__CALLS__ ?? []).some(call => call.cmd === 'save_connection'
+      && call.args?.config?.detected_flavor && call.args?.config?.detected_platform),
+  null, { polling: 100, timeout: 5000 });
+  const metadata = await page.evaluate(() =>
+    (window.__CALLS__ ?? []).filter(call => call.cmd === 'save_connection')
+      .map(call => call.args.config)
+      .find(config => config.detected_flavor && config.detected_platform));
+  if (metadata.detected_flavor !== 'mysql' || metadata.detected_platform !== 'generic') {
+    throw new Error(`unexpected detected metadata: ${JSON.stringify(metadata)}`);
+  }
+  console.log('PASS server probe persists fork and platform in hidden connection metadata');
+  await page.close();
+}
+
 async function browseOrders(page) {
   await page.evaluate(() => {
     window.__MOCK__.get_table_meta = { ...window.__MOCK__.get_table_meta, pk_columns: [] };
@@ -740,6 +757,25 @@ async function verifyErrorPresentation(browser) {
       for (const marker of markers) priorMarkers.set(marker.line, marker);
     }
     console.log('PASS sequential failures keep each timestamp on its executed line');
+    const proofMarker = page.locator('.cm-run-gutter .cm-run-error').first();
+    await proofMarker.hover();
+    const proofTip = page.locator('.dbgui-tip');
+    await proofTip.waitFor({ state: 'visible' });
+    await page.waitForTimeout(1400);
+    if (!await proofTip.isVisible()) throw new Error('run-proof tooltip expired with ordinary tooltips');
+    if (!await proofTip.textContent().then(text => text?.includes('Click to copy timestamp + statement'))) {
+      throw new Error('run-proof tooltip does not explain click-to-copy');
+    }
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE.slice(0, -1) });
+    await proofMarker.click();
+    const proof = await page.evaluate(() => navigator.clipboard.readText());
+    if (!/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\]/.test(proof)
+        || !proof.includes('Host; → error') || proof.includes('User;')) {
+      throw new Error(`marker copied the wrong proof: ${JSON.stringify(proof)}`);
+    }
+    await page.mouse.move(0, 0);
+    await proofTip.waitFor({ state: 'hidden' });
+    console.log('PASS run-proof tooltip persists and click copies timestamp plus exact SQL');
     const redSnapshot = () => page.locator('.cm-run-gutter .cm-run-error').evaluateAll(elements => {
       const lines = [...document.querySelectorAll('.cm-content .cm-line')].map((line, index) => ({
         number: index + 1,
@@ -877,6 +913,7 @@ const browser = await chromium.launch({ executablePath: EXE });
 try {
   await verifySelections(browser);
   await verifyLiveDatabaseList(browser);
+  await verifyFlavorPersistence(browser);
   await verifyGraphicsConsistency(browser);
   await verifySettings(browser);
   await verifyFirstLineDiagnostic(browser);

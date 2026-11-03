@@ -18,14 +18,23 @@
  */
 
 export type Flavor = 'mysql' | 'mariadb' | 'percona';
+export type ServerPlatform = 'generic' | 'cloudsql' | 'aws' | 'aurora' | 'alisql';
 
 export interface ServerFlavor {
   flavor: Flavor;
+  platform: ServerPlatform;
   major: number;
   minor: number;
   patch: number;
+  /** Aurora's own release, distinct from its MySQL compatibility version. */
+  platformVersion?: string;
   /** The unparsed string, kept because it is what a user recognises. */
   raw: string;
+}
+
+export interface FlavorDetectionContext {
+  host?: string | null;
+  cloudSqlIam?: boolean;
 }
 
 /**
@@ -48,9 +57,14 @@ export interface ServerFlavor {
  * Percona identifies itself only in `version_comment`; its version string is
  * MySQL's.
  */
-export function detectFlavor(version: string, versionComment = ''): ServerFlavor {
+export function detectFlavor(
+  version: string,
+  versionComment = '',
+  context: FlavorDetectionContext = {},
+): ServerFlavor {
   const raw = version.trim();
   const lower = `${raw} ${versionComment}`.toLowerCase();
+  const host = (context.host ?? '').trim().toLowerCase();
 
   // Strip the 5.5.5- compatibility prefix before reading any number.
   const cleaned = raw.replace(/^5\.5\.5-/, '');
@@ -59,12 +73,20 @@ export function detectFlavor(version: string, versionComment = ''): ServerFlavor
   const flavor: Flavor = lower.includes('mariadb') ? 'mariadb'
     : lower.includes('percona') ? 'percona'
     : 'mysql';
+  const platform: ServerPlatform = /alisql|alibaba|apsaradb|aliyun/.test(lower)
+      || host.endsWith('.rds.aliyuncs.com') ? 'alisql'
+    : context.cloudSqlIam || /google|cloudsql|cloud sql/.test(lower) ? 'cloudsql'
+    : lower.includes('aurora') ? 'aurora'
+    : host.endsWith('.rds.amazonaws.com') || host.endsWith('.rds.amazonaws.com.cn') ? 'aws'
+    : 'generic';
 
   return {
     flavor,
+    platform,
     major: m ? Number(m[1]) : 0,
     minor: m ? Number(m[2]) : 0,
     patch: m ? Number(m[3]) : 0,
+    platformVersion: /mysql_aurora\.(\d+\.\d+\.\d+)/.exec(raw)?.[1],
     raw,
   };
 }
@@ -162,9 +184,15 @@ export function capabilities(v: ServerFlavor): Capabilities {
   };
 }
 
-/** `MariaDB 11.8.8`, for a status bar. */
+/** `MariaDB 11.8.8`, `Cloud SQL for MySQL 8.0.41`, for a status bar. */
 export function flavorLabel(v: ServerFlavor): string {
   const name = v.flavor === 'mariadb' ? 'MariaDB'
     : v.flavor === 'percona' ? 'Percona' : 'MySQL';
-  return `${name} ${v.major}.${v.minor}.${v.patch}`;
+  const platform = v.platform === 'cloudsql' ? 'Cloud SQL for '
+    : v.platform === 'aurora' ? 'Aurora '
+    : v.platform === 'aws' ? 'AWS '
+    : v.platform === 'alisql' ? 'AliSQL ' : '';
+  const version = v.platform === 'aurora' && v.platformVersion
+    ? v.platformVersion : `${v.major}.${v.minor}.${v.patch}`;
+  return `${platform}${v.platform === 'alisql' ? '' : `${name} `}${version}`;
 }

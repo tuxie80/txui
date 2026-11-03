@@ -5,6 +5,11 @@ this project follows semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent, clickable statement-run proofs** — gutter timing tooltips ignore the ordinary tooltip timeout and remain open until the pointer leaves. Clicking a finished green or red marker copies its timestamp with three fractional-second digits, exact SQL, outcome and duration, with exact statement identity even when several fragments share one physical line. The existing plan badge keeps its separate action.
+- **MySQL fork and cloud-platform metadata** — detection now distinguishes the SQL fork (MySQL/MariaDB/Percona) from Cloud SQL, AWS RDS, Aurora and AliSQL using server version/comment plus connection evidence. Hidden detected fields persist after probing, reset on edits/imports, and Server Info shows the label, including Aurora's own release version. `docs/MYSQL_FLAVORS.md` records current coverage and the remaining vendor-specific SQL and cloud-API workflows.
+
 ### Changed
 
 - **Automatic update checks are opt-in** — TxUI no longer contacts the release service after launch or on a schedule by default. Settings → Updates adds a disabled-by-default automatic-check switch; when enabled, the first check runs one minute after launch and subsequent checks run every six hours. Check now remains available for an explicit manual check.

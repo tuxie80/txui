@@ -17,6 +17,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { QueryResult } from '../types';
 import { detectFlavor, capabilities } from '../utils/serverFlavor';
 import type { ServerFlavor, Capabilities } from '../utils/serverFlavor';
+import { ConnectionsStore } from './connections';
 
 const cache = new Map<string, ServerFlavor>();
 const inFlight = new Map<string, Promise<ServerFlavor>>();
@@ -31,16 +32,33 @@ const emit = () => listeners.forEach(fn => fn());
  * briefly too cautious is recoverable; running MariaDB-only SQL against MySQL
  * because we assumed is not.
  */
-const UNKNOWN: ServerFlavor = { flavor: 'mysql', major: 0, minor: 0, patch: 0, raw: '' };
+const UNKNOWN: ServerFlavor = { flavor: 'mysql', platform: 'generic', major: 0, minor: 0, patch: 0, raw: '' };
 
-async function probe(sessionId: string): Promise<ServerFlavor> {
+async function probe(sessionId: string, connectionId?: string): Promise<ServerFlavor> {
   try {
+    const config = connectionId
+      ? await ConnectionsStore.list()
+        .then(all => all.find(c => c.id === connectionId))
+        .catch(() => undefined)
+      : undefined;
     const r = await invoke<QueryResult>('monitor_query', {
       sessionId,
       sql: 'SELECT VERSION() AS v, @@version_comment AS c',
     });
     const row = r.rows[0] ?? [];
-    return detectFlavor(String(row[0] ?? ''), String(row[1] ?? ''));
+    const detected = detectFlavor(String(row[0] ?? ''), String(row[1] ?? ''), {
+      host: config?.host,
+      cloudSqlIam: config?.use_iam_auth,
+    });
+    if (config && (config.detected_flavor !== detected.flavor
+        || config.detected_platform !== detected.platform)) {
+      await ConnectionsStore.save({
+        ...config,
+        detected_flavor: detected.flavor,
+        detected_platform: detected.platform,
+      }).catch(() => {});
+    }
+    return detected;
   } catch {
     // A server that will not answer this is not one to guess about.
     return UNKNOWN;
@@ -48,7 +66,7 @@ async function probe(sessionId: string): Promise<ServerFlavor> {
 }
 
 /** The flavour of this session's server. `UNKNOWN` until the probe returns. */
-export function useServerFlavor(sessionId: string, engine: string): ServerFlavor {
+export function useServerFlavor(sessionId: string, engine: string, connectionId?: string): ServerFlavor {
   const [, force] = useState(0);
 
   useEffect(() => {
@@ -57,7 +75,7 @@ export function useServerFlavor(sessionId: string, engine: string): ServerFlavor
     const fn = () => force(n => n + 1);
     listeners.add(fn);
     if (!cache.has(sessionId) && !inFlight.has(sessionId)) {
-      const p = probe(sessionId).then(res => {
+      const p = probe(sessionId, connectionId).then(res => {
         cache.set(sessionId, res);
         inFlight.delete(sessionId);
         emit();
@@ -66,7 +84,7 @@ export function useServerFlavor(sessionId: string, engine: string): ServerFlavor
       inFlight.set(sessionId, p);
     }
     return () => { listeners.delete(fn); };
-  }, [sessionId, engine]);
+  }, [sessionId, engine, connectionId]);
 
   return cache.get(sessionId) ?? UNKNOWN;
 }

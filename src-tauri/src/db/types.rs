@@ -194,6 +194,11 @@ pub struct ConnectionConfig {
     /// Free-form note shown as a sidebar tooltip and searchable in the filter
     #[serde(default)]
     pub notes: Option<String>,
+    /// Hidden metadata refreshed after the server identifies itself.
+    #[serde(default)]
+    pub detected_flavor: Option<String>,
+    #[serde(default)]
+    pub detected_platform: Option<String>,
     /// Connect automatically at app launch
     #[serde(default)]
     pub auto_connect: bool,
@@ -404,12 +409,15 @@ impl ConnectionConfig {
     /// Returns true when anything was removed.
     pub fn sanitize_import(&mut self) -> bool {
         let sanitized = self.password_exec.is_some() || self.auto_connect
-            || self.log_dir.is_some() || self.ssh_accept_new_host;
+            || self.log_dir.is_some() || self.ssh_accept_new_host
+            || self.detected_flavor.is_some() || self.detected_platform.is_some();
         self.password_exec = None;
         self.password_exec_ttl_secs = None;
         self.auto_connect = false;
         self.log_dir = None;
         self.ssh_accept_new_host = false;
+        self.detected_flavor = None;
+        self.detected_platform = None;
         sanitized
     }
 
@@ -432,6 +440,8 @@ impl ConnectionConfig {
             read_only:   false,
             autocommit:  true,
             notes:        None,
+            detected_flavor: None,
+            detected_platform: None,
             auto_connect: false,
             tags:         Vec::new(),
             labels:       Vec::new(),

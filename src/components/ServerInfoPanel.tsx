@@ -18,6 +18,8 @@ import type { SelRect } from './FastGrid';
 import { CopyExportMenu } from './CopyExportMenu';
 import { buildServerVarSql } from '../utils/serverVarEdit';
 import { buildPgVarSql, buildPgVarResetSql } from '../utils/pgVarEdit';
+import { useServerFlavor } from '../store/serverFlavors';
+import { flavorLabel } from '../utils/serverFlavor';
 
 interface Props {
   sessionId: string;
@@ -42,6 +44,7 @@ export function ServerInfoPanel({ sessionId, engine, onClose }: Props) {
   const hasStatus = true;
   const isPg = engine === 'postgres';
   const isRedis = engine === 'redis';
+  const flavor = useServerFlavor(sessionId, engine);
   // MySQL/MariaDB both connect as the 'mysql' engine. Only their global
   // variables can be turned into a SET GLOBAL statement.
   const canEdit = (engine === 'mysql' || engine === 'postgres') && kind === 'variables';
@@ -142,6 +145,7 @@ export function ServerInfoPanel({ sessionId, engine, onClose }: Props) {
     <div className="proc-panel">
       <div className="proc-toolbar">
         <span className="proc-title">ⓘ Server</span>
+        {engine === 'mysql' && <span className="proc-status">{flavorLabel(flavor)}</span>}
         <div className="gsp-seg" style={{ width: 190 }}>
           <button
             className={kind === 'variables' ? 'active' : ''}

@@ -32,6 +32,9 @@ export interface ConnectionConfig {
    *  pooled connection the statement happened to use. */
   autocommit: boolean;
   notes: string | null;
+  /** Hidden metadata refreshed after the server identifies itself. */
+  detected_flavor?: string | null;
+  detected_platform?: string | null;
   auto_connect: boolean;
   /** Superseded by `labels`; still read so an old config or import loads. */
   tags: string[];

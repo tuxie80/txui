@@ -2,8 +2,9 @@
  * Instant, clip-proof tooltips. A single fixed-position element appended to
  * <body>, driven by delegated mouseover/mouseout. Native `title` has a ~1.5s
  * delay and CSS ::after gets clipped by overflow containers (toolbars) — this
- * avoids both. Tips hide after the configured lifetime (1s by default);
- * moving targets restarts that timer, while mouse-out and scroll hide at once.
+ * avoids both. Tips hide after the configured lifetime (1s by default), except
+ * `[data-tip-persistent]` run proofs; moving targets restarts that timer, while
+ * mouse-out and scroll hide at once.
  *
  * ## It adopts `title` as well as `data-tip`
  *
@@ -108,9 +109,14 @@ function show(target: Element) {
   if (top + th > window.innerHeight - 4) top = r.top - th - 4;
   box.style.left = `${Math.max(4, left)}px`;
   box.style.top = `${Math.max(4, top)}px`;
-  if (hideTimer) clearTimeout(hideTimer);
-  const duration = Math.max(500, Math.min(60_000, Math.round(getPref(PREFS.tooltipDurationMs))));
-  hideTimer = setTimeout(hide, duration);
+  if (hideTimer) {
+    clearTimeout(hideTimer);
+    hideTimer = null;
+  }
+  if (!target.closest('[data-tip-persistent]')) {
+    const duration = Math.max(500, Math.min(60_000, Math.round(getPref(PREFS.tooltipDurationMs))));
+    hideTimer = setTimeout(hide, duration);
+  }
 }
 
 function hide() {

@@ -349,13 +349,20 @@ class RunMarker extends GutterMarker {
   readonly run: StatementRun;
   /** Live elapsed ms while the statement runs — from the ticker field. */
   readonly elapsed?: number;
-  constructor(run: StatementRun, elapsed?: number) { super(); this.run = run; this.elapsed = elapsed; }
+  readonly statementIndex?: number;
+  constructor(run: StatementRun, elapsed?: number, statementIndex?: number) {
+    super();
+    this.run = run;
+    this.elapsed = elapsed;
+    this.statementIndex = statementIndex;
+  }
   // Without eq, every tick would rebuild EVERY visible gutter element; with it,
   // only the line whose elapsed actually moved gets a fresh DOM node.
   override eq(other: RunMarker) {
     return other.run.status === this.run.status
       && other.run.ms === this.run.ms
       && other.elapsed === this.elapsed
+      && other.statementIndex === this.statementIndex
       // The background enrichments (auto-EXPLAIN badge, digest stats) land
       // after the run's own marker — without comparing them the badge would
       // never repaint onto the existing chip.
@@ -366,6 +373,7 @@ class RunMarker extends GutterMarker {
   override toDOM() {
     const el = document.createElement('span');
     el.className = `cm-run-marker cm-run-${this.run.status}`;
+    el.dataset.tipPersistent = 'true';
     // Hover leads with WHEN the statement started — the same stamp the
     // session log prefixes its lines with, so the two read as one record.
     const stamp = this.run.startedAt != null ? `${runStamp(this.run.startedAt)} ` : '';
@@ -378,6 +386,9 @@ class RunMarker extends GutterMarker {
       tip.push(`ran ${this.run.stats.runs}× in history · p95 ${fmtDurationCompact(this.run.stats.p95Ms)}`);
     }
     if (this.run.hasPlan) tip.push('plan available — right-click → Open plan');
+    if ((this.run.status === 'ok' || this.run.status === 'error') && this.run.ms != null) {
+      tip.push('Click to copy timestamp + statement');
+    }
     el.title = tip.join('\n');
     // Finished: a coloured chip (green/red via the status class) plus the
     // compact wall time — the ✓/✗ glyphs spent the gutter's width saying less.
@@ -503,7 +514,7 @@ function markerMap(view: EditorView): Map<number, RunMarker> {
         ? firstCodeOffset(stmts[i])
         : Math.max(stmts[i].from, Math.min(stmts[i].to, anchor)));
       map.set(doc.lineAt(at).from,
-        new RunMarker(runs[i], runs[i].status === 'running' ? elapsed : undefined));
+        new RunMarker(runs[i], runs[i].status === 'running' ? elapsed : undefined, i));
     }
   }
   if (!ticking) runMarkersByLine.set(runs, { doc, map });
@@ -516,7 +527,8 @@ function markerMap(view: EditorView): Map<number, RunMarker> {
  * plan-badge click, so the two can never disagree about which statement a
  * click belonged to.
  */
-function runStatementIndexAt(view: EditorView, lineFrom: number): number {
+function runStatementIndexAt(view: EditorView, lineFrom: number, marker?: RunMarker): number {
+  if (marker?.statementIndex !== undefined) return marker.statementIndex;
   const doc = view.state.doc;
   const stmts = splitDoc(doc, sqlDelimiter()).filter(x => x.text.trim());
   return stmts.findIndex(s =>
@@ -538,16 +550,21 @@ const statementGutter = gutter({
     update.transactions.some(tr =>
       tr.effects.some(e => e.is(setStatementRuns) || e.is(setRunTick))),
   domEventHandlers: {
-    // Clicking the ▦ badge of a marker with a cached auto-EXPLAIN plan opens
-    // the plan view (the host listens for dbgui:open-plan). Only the badge is
-    // clickable — a click on the chip or the time keeps doing nothing.
+    // ▦ opens a cached plan; the rest of a finished marker copies its proof.
     click(view, line, event) {
-      if (!(event.target as HTMLElement).closest?.('.cm-run-plan')) return false;
       const marker = markerMap(view).get(line.from);
-      if (!marker?.run.hasPlan) return false;
-      const idx = runStatementIndexAt(view, line.from);
+      if (!marker) return false;
+      const idx = runStatementIndexAt(view, line.from, marker);
       if (idx < 0) return false;
-      window.dispatchEvent(new CustomEvent('dbgui:open-plan', { detail: { idx } }));
+      if ((event.target as HTMLElement).closest?.('.cm-run-plan')) {
+        if (!marker.run.hasPlan) return false;
+        window.dispatchEvent(new CustomEvent('dbgui:open-plan', { detail: { idx } }));
+        return true;
+      }
+      const stmts = splitDoc(view.state.doc, sqlDelimiter()).filter(x => x.text.trim());
+      const proof = stmts[idx] ? timingLine(marker.run, stmts[idx].text) : null;
+      if (!proof) return false;
+      void copyToClipboard(proof);
       return true;
     },
   },
@@ -3073,7 +3090,7 @@ export function SqlEditor({
               if (pos != null && marker) {
                 const doc = view.state.doc;
                 const lineFrom = doc.lineAt(pos).from;
-                const idx = runStatementIndexAt(view, lineFrom);
+                const idx = runStatementIndexAt(view, lineFrom, marker);
                 if (idx >= 0) {
                   const stmts = splitDoc(doc, sqlDelimiter()).filter(x => x.text.trim());
                   setRunMenu({ x: e.clientX, y: e.clientY, sql: stmts[idx].text, from: stmts[idx].from, run: marker.run, idx });

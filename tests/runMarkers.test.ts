@@ -425,23 +425,23 @@ test('startedAt survives every translation the gutter array goes through', () =>
   assert.equal(stmtRunsToRuns({ 1: { status: 'ok', ms: 1 } })![0].startedAt, undefined);
 });
 
-test('runStamp renders the canonical log-line prefix in local time', () => {
-  const t = new Date(2026, 7, 25, 22, 54, 4).getTime();  // local components
-  assert.equal(runStamp(t), '[2026-08-25 22:54:04]');
-  assert.match(runStamp(Date.now()), /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]$/);
+test('runStamp renders the canonical log-line prefix with milliseconds', () => {
+  const t = new Date(2026, 7, 25, 22, 54, 4, 123).getTime();  // local components
+  assert.equal(runStamp(t), '[2026-08-25 22:54:04.123]');
+  assert.match(runStamp(Date.now()), /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\]$/);
 });
 
 // ── timingLine: the marker context menu's "Copy timing line" ────────────────
 
 test('timingLine renders stamp, one-line SQL, status and ms like a log line', () => {
-  const t = new Date(2026, 7, 25, 22, 54, 4).getTime();
+  const t = new Date(2026, 7, 25, 22, 54, 4, 123).getTime();
   assert.equal(
     timingLine({ status: 'ok', ms: 1012, startedAt: t }, 'SELECT *\nFROM   users'),
-    '[2026-08-25 22:54:04] SELECT * FROM users → ok · 1012 ms',
+    '[2026-08-25 22:54:04.123] SELECT * FROM users → ok · 1012 ms',
   );
   assert.equal(
     timingLine({ status: 'error', ms: 3, startedAt: t }, 'DELETE FROM t'),
-    '[2026-08-25 22:54:04] DELETE FROM t → error · 3 ms',
+    '[2026-08-25 22:54:04.123] DELETE FROM t → error · 3 ms',
   );
 });
 

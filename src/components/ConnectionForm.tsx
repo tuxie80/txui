@@ -414,6 +414,8 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       prod_allow_ddl: environment === 'prod' ? prodAllowDdl : false,
       prod_allow_unfiltered_write: environment === 'prod' ? prodAllowUnfiltered : false,
       notes:        notes.trim() || null,
+      detected_flavor: null,
+      detected_platform: null,
       auto_connect: autoConnect,
       labels:       parseLabels(labelText),
       // Stored only where it can act — a Redis/PG/file-engine config carrying

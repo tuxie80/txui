@@ -1539,7 +1539,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   // MySQL and MariaDB do not accept the same statements, so completion has to
   // know which one this is. Probed once per session and cached. The whole
   // flavour object is kept: menu gates (Sequences) read its capabilities too.
-  const serverFlavor = useServerFlavor(session.sessionId, session.engine);
+  const serverFlavor = useServerFlavor(session.sessionId, session.engine, session.connectionId);
   const editorFlavor = serverFlavor.flavor;
   // Every engine has a settings + status view now: MySQL SHOW VARIABLES/STATUS,
   // PostgreSQL pg_settings/pg_stat_database, Redis CONFIG GET / INFO,

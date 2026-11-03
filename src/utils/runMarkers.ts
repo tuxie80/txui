@@ -146,21 +146,21 @@ export function foldScriptProgressInto(
 }
 
 /**
- * `[YYYY-MM-DD HH:MM:SS]` — local time, the same stamp the session log
- * prefixes every line with (store/logStore). The run-marker tooltip leads
- * with it, so hovering a chip says WHEN the statement ran, not just how long.
+ * `[YYYY-MM-DD HH:MM:SS.sss]` — local time with milliseconds, extending the
+ * canonical log stamp for run proofs. The run-marker tooltip leads with it,
+ * so hovering a chip says WHEN the statement ran, not just how long.
  */
 export function runStamp(epochMs: number): string {
   const d = new Date(epochMs);
   const p = (n: number) => String(n).padStart(2, '0');
   return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
-    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`;
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}]`;
 }
 
 /**
  * The clipboard form of a finished run marker, one line:
- * `[YYYY-MM-DD HH:MM:SS] <one-line SQL> → ok · 1012 ms` — the same stamp and
- * the same one-line-SQL convention the session log uses (store/logStore), so a
+ * `[YYYY-MM-DD HH:MM:SS.sss] <one-line SQL> → ok · 1012 ms` — a millisecond
+ * stamp and the same one-line-SQL convention the session log uses, so a
  * pasted line reads as one more log entry.
  *
  * Returns null when there is no timing to copy (running / skipped / untimed):

@@ -71,6 +71,29 @@ describe('detection', () => {
   test('the raw string is kept — it is what a user recognises', () => {
     assert.equal(detectFlavor(' 11.8.8-MariaDB-log ').raw, '11.8.8-MariaDB-log');
   });
+
+  test('Cloud SQL is recognised from the server and from IAM configuration', () => {
+    assert.equal(detectFlavor('8.0.41-google', 'Google').platform, 'cloudsql');
+    assert.equal(detectFlavor('8.0.41', '', { cloudSqlIam: true }).platform, 'cloudsql');
+  });
+
+  test('AWS RDS and Aurora stay independent of the SQL fork', () => {
+    const rds = detectFlavor('10.11.18-MariaDB', '', { host: 'db.eu-west-1.rds.amazonaws.com' });
+    assert.equal(rds.platform, 'aws');
+    assert.equal(rds.flavor, 'mariadb');
+    const aurora = detectFlavor('8.0.mysql_aurora.3.08.2', '', { host: 'cluster.us-east-1.rds.amazonaws.com' });
+    assert.equal(aurora.platform, 'aurora');
+    assert.equal(aurora.flavor, 'mysql');
+  });
+
+  test('AliSQL is recognised from server evidence and the RDS hostname', () => {
+    assert.equal(detectFlavor('8.0.36', 'AliSQL').platform, 'alisql');
+    assert.equal(detectFlavor('8.0.36', '', { host: 'rm-abc.mysql.rds.aliyuncs.com' }).platform, 'alisql');
+  });
+
+  test('ordinary MySQL stays on the generic platform', () => {
+    assert.equal(detectFlavor('8.0.46', '', { host: 'localhost' }).platform, 'generic');
+  });
 });
 
 describe('atLeast', () => {
@@ -178,6 +201,13 @@ describe('label', () => {
 
   test('the 5.5.5 prefix does not reach the label either', () => {
     assert.equal(flavorLabel(detectFlavor('5.5.5-10.6.27-MariaDB-log')), 'MariaDB 10.6.27');
+  });
+
+  test('platform labels preserve the fork and provider', () => {
+    assert.equal(flavorLabel(detectFlavor('8.0.41-google', 'Google')), 'Cloud SQL for MySQL 8.0.41');
+    assert.equal(flavorLabel(detectFlavor('10.11.18-MariaDB', '', { host: 'db.rds.amazonaws.com' })), 'AWS MariaDB 10.11.18');
+    assert.equal(flavorLabel(detectFlavor('8.0.mysql_aurora.3.08.2')), 'Aurora MySQL 3.08.2');
+    assert.equal(flavorLabel(detectFlavor('8.0.36', 'AliSQL')), 'AliSQL 8.0.36');
   });
 
   test('isMariaDb agrees with the flavour', () => {

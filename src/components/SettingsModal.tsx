@@ -242,7 +242,7 @@ export function SettingsModal({ onClose }: Props) {
               </span>
             </label>
             <label className="settings-row">
-              <span>Tooltip display time <em>(all mouse-hover tips)</em></span>
+              <span>Tooltip display time <em>(ordinary tips; run proofs stay open)</em></span>
               <select aria-label="Tooltip display time" value={tooltipDuration}
                 onChange={e => setTooltipDuration(Number(e.target.value))}>
                 <option value={1000}>1 second (default)</option>
