@@ -196,6 +196,16 @@ async function verifySettings(browser) {
   if (await updateCalls() !== 0) throw new Error('default preferences triggered a launch update check');
   await page.keyboard.press('Meta+Comma');
   await page.waitForSelector('.settings-modal');
+  await page.locator('.settings-tabs').evaluate(tabs => {
+    const range = document.createRange();
+    range.selectNodeContents(tabs);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('tab', { name: 'Editor', exact: true }).click();
+  const selectedText = await page.evaluate(() => window.getSelection().toString());
+  if (selectedText) throw new Error(`Settings text selection did not clear on outside click: ${selectedText}`);
   const metrics = await page.evaluate(() => {
     const modal = document.querySelector('.settings-modal');
     const tabs = document.querySelector('.settings-tabs');
@@ -214,6 +224,33 @@ async function verifySettings(browser) {
   }
   console.log('PASS Settings is compact and shows all nine tabs without scrolling');
   if (process.env.TXUI_SETTINGS_SHOT) await page.screenshot({ path: process.env.TXUI_SETTINGS_SHOT });
+
+  await page.getByRole('tab', { name: 'Editor', exact: true }).click();
+  await page.getByRole('tablist', { name: 'Editor settings sections' }).waitFor();
+  for (const [section, control] of [
+    ['Visuals', 'Cursor shape'],
+    ['Editing', 'Auto-format SQL'],
+    ['Results', 'Include column headers when copying cells'],
+    ['Execution', 'Beep when a long-running query finishes'],
+  ]) {
+    await page.getByRole('tab', { name: section, exact: true }).click();
+    await page.getByText(control, { exact: false }).first().waitFor();
+    if (section === 'Editing' && process.env.TXUI_EDITOR_SETTINGS_SHOT) {
+      await page.screenshot({ path: process.env.TXUI_EDITOR_SETTINGS_SHOT });
+    }
+    const body = await page.locator('.settings-body').evaluate(element => ({
+      client: element.clientHeight, scroll: element.scrollHeight,
+    }));
+    if (body.scroll > body.client + 1) {
+      throw new Error(`${section} still needs vertical scrolling: ${JSON.stringify(body)}`);
+    }
+    const waste = await page.locator('.settings-modal').evaluate(modal => {
+      const section = modal.querySelector('.settings-section');
+      return modal.getBoundingClientRect().bottom - section.getBoundingClientRect().bottom;
+    });
+    if (waste > 32) throw new Error(`${section} leaves ${Math.round(waste)}px of unused space below its content`);
+  }
+  console.log('PASS Editor settings use four compact purpose-based sections');
 
   await page.getByRole('tab', { name: 'Updates' }).click();
   const automatic = page.getByRole('checkbox', { name: /Automatically check for updates/ });
@@ -276,6 +313,18 @@ async function verifySettings(browser) {
     throw new Error(`Settings did not resize: ${JSON.stringify({ oldSize, newSize })}`);
   }
   console.log('PASS Settings resizes in both dimensions');
+
+  const header = await page.locator('.settings-modal .modal-header').boundingBox();
+  if (!header) throw new Error('Settings has no draggable header');
+  await page.mouse.move(header.x + 60, header.y + header.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(header.x + 150, header.y + header.height / 2 + 40, { steps: 6 });
+  await page.mouse.up();
+  const moved = await page.locator('.settings-modal').boundingBox();
+  if (!newSize || !moved || Math.abs(moved.x - newSize.x - 90) > 2 || Math.abs(moved.y - newSize.y - 40) > 2) {
+    throw new Error(`Settings did not move: ${JSON.stringify({ newSize, moved })}`);
+  }
+  console.log('PASS Settings clears text selection and moves by its header');
   await page.close();
 }
 
@@ -370,6 +419,9 @@ async function verifyConnectionForm(browser) {
   if (await page.locator('.cf-advanced-group').count() !== 3) {
     throw new Error('Advanced fields are not organized into three compact groups');
   }
+  const wasted = await page.locator('.conn-form').evaluate(form =>
+    form.getBoundingClientRect().bottom - form.querySelector('.form-actions').getBoundingClientRect().bottom);
+  if (wasted > 32) throw new Error(`connection form leaves ${Math.round(wasted)}px below its actions`);
   const handle = page.getByRole('button', { name: 'Resize connection window' });
   const handleBox = await handle.boundingBox();
   if (!handleBox) throw new Error('connection form has no resize handle');

@@ -483,14 +483,14 @@ body.zen .status-bar {
   max-width: calc(100% - 32px);
   max-height: calc(100vh - 32px);
   margin: 16px auto;
-  padding: 14px 18px;
+  padding: 12px 16px;
   overflow: auto;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 .conn-form h2 { margin: 0 0 4px; font-size: calc(15px * var(--font-scale, 1)); }
 
@@ -504,7 +504,7 @@ body.zen .status-bar {
   color: var(--text2); cursor: nwse-resize; touch-action: none;
   display: grid; place-items: center; font-size: calc(13px * var(--font-scale, 1));
 }
-.conn-form .form-actions { padding-right: 14px; }
+.conn-form .form-actions { margin-top: 8px; padding-top: 8px; padding-right: 14px; }
 
 /* Sections sit on tabs (Connection / Options / SSH·SSL / Advanced) — the old
    two-column sprawl pushed Advanced's three-across rows past the card edge. */
@@ -520,8 +520,8 @@ body.zen .status-bar {
 .conn-form .form-row select { min-width: 0; }
 .conn-form .form-section { margin-top: 0; padding: 8px 10px; }
 .conn-form .form-subsection { margin-top: 8px; }
-.cf-advanced { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; margin-top: 8px; }
-.cf-advanced-group { min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.cf-advanced { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; margin-top: 8px; align-items: start; }
+.cf-advanced-group { min-width: 0; padding: 8px 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
 .cf-advanced-group:last-child { grid-column: 1 / -1; }
 .cf-advanced-group h3 { margin: 0 0 8px; color: var(--text); font-size: calc(12px * var(--font-scale, 1)); font-weight: 600; }
 .cf-advanced-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; align-items: start; }
@@ -5693,18 +5693,24 @@ button.primary:disabled { opacity: .5; cursor: default; }
 
 .schema-tree-title { font-weight: 600; color: var(--text); font-size: calc(12px * var(--font-scale, 1)); }
 
-/* Settings window */
-/* A FIXED height, not a max: the panel is centred in the overlay, so content
-   of different heights re-centred it and the whole window appeared to jump
-   every time you changed tab. */
+/* Settings window: fit the content, capped by the viewport. Top anchoring
+   keeps tab-dependent height changes from re-centering the dialog. */
 .settings-modal {
   position: relative;
   width: min(720px, 96vw);
-  height: min(660px, 86vh);
+  max-height: 86vh;
+  align-self: start;
+  margin: 7vh 0;
   display: flex;
   flex-direction: column;
 }
 .settings-body { overflow-y: auto; flex: 1; padding: 4px 18px 16px; }
+.settings-drag-title { cursor: grab; user-select: none; touch-action: none; }
+.settings-drag-title:active { cursor: grabbing; }
+.settings-subtabs { display: flex; gap: 4px; margin: 0 0 10px; border-bottom: 1px solid var(--border); user-select: none; }
+.settings-subtab { appearance: none; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text2); padding: 6px 10px; font-size: calc(12px * var(--font-scale, 1)); cursor: pointer; }
+.settings-subtab:hover { color: var(--text); }
+.settings-subtab.active { color: var(--text); border-bottom-color: var(--accent); }
 .settings-section { padding: 12px 0; border-bottom: 1px solid var(--border); }
 .settings-section:last-child { border-bottom: none; }
 .settings-section h3 { margin: 0 0 10px; font-size: calc(12px * var(--font-scale, 1)); text-transform: uppercase; letter-spacing: .06em; color: var(--text2); }
@@ -6549,6 +6555,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
   scrollbar-width: none;
+  user-select: none;
 }
 .settings-tabs::-webkit-scrollbar { display: none; }
 .settings-tab {
@@ -7790,9 +7797,10 @@ tr.cmp-same td { opacity: .62; }
 .settings-profile {
   border: 1px solid var(--border); border-radius: 5px;
   padding: 7px 10px; background: var(--bg2);
-  display: flex; flex-direction: column; gap: 5px; margin-top: 4px;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px 10px; margin-top: 4px;
 }
 .settings-profile .settings-row { margin: 0; }
+.settings-profile .settings-row:last-child { grid-column: 1 / -1; }
 .settings-profile-actions { display: inline-flex; gap: 6px; }
 
 /* ── maintenance (components/MaintenancePanel.tsx) ─────────────────────────

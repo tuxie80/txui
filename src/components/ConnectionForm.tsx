@@ -627,7 +627,7 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
            ...(drag.x || drag.y ? { transform: `translate(${drag.x}px, ${drag.y}px)` } : {}),
            ...(size ?? {}),
          }}>
-      <h2 className="cf-title" title="Drag to move"
+      <h2 className="cf-title"
           onPointerDown={onTitleDown} onPointerMove={onTitleMove}
           onPointerUp={onTitleUp} onPointerCancel={onTitleUp}>
         {initial?.id ? 'Edit connection' : 'New connection'}

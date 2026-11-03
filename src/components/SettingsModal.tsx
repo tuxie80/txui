@@ -7,7 +7,7 @@
  * remembered, because settings are usually revisited for the same reason.
  */
 import { errorDisplay } from '../utils/appError';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { aiHasKey, aiSetKey, aiTestConnection } from '../utils/aiClient';
 import { AI_PROVIDER_PRESETS, detectAiPreset } from '../utils/aiProviders';
 import { PREFS, usePreference } from '../store/preferences';
@@ -33,6 +33,8 @@ const SC = shortcuts();
 
 const TABS = ['Appearance', 'Editor', 'Connections', 'AI', 'Security', 'Safety', 'SQL templates', 'Logging', 'Updates'] as const;
 type Tab = typeof TABS[number];
+const EDITOR_SECTIONS = ['Visuals', 'Editing', 'Results', 'Execution'] as const;
+type EditorSection = typeof EDITOR_SECTIONS[number];
 const TAB_KEY = 'dbgui.settingsTab';
 
 interface Props { onClose: () => void }
@@ -48,6 +50,25 @@ const QUERY_TIMEOUT_MAX = 3600;
 
 export function SettingsModal({ onClose }: Props) {
   const [dialogSize, setDialogSize] = useState<{ width: number; height: number } | null>(null);
+  const [drag, setDrag] = useState({ x: 0, y: 0 });
+  const dragStart = useRef<{ px: number; py: number; x: number; y: number } | null>(null);
+  function onDragStart(e: React.PointerEvent<HTMLElement>) {
+    if ((e.target as HTMLElement).closest('button, input, select, textarea, a')) return;
+    dragStart.current = { px: e.clientX, py: e.clientY, x: drag.x, y: drag.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onDragMove(e: React.PointerEvent<HTMLElement>) {
+    const start = dragStart.current;
+    if (!start) return;
+    setDrag({ x: start.x + e.clientX - start.px, y: start.y + e.clientY - start.py });
+  }
+  function onDragEnd() { dragStart.current = null; }
+  function clearTextSelection(e: React.PointerEvent<HTMLElement>) {
+    if (!(e.target as HTMLElement).closest('input, textarea, [contenteditable="true"]')) {
+      window.getSelection()?.removeAllRanges();
+    }
+  }
+  const [editorSection, setEditorSection] = useState<EditorSection>('Visuals');
   const [showCreate, setShowCreate] = usePreference(PREFS.showCreateOnBrowse);
   const [defaultLimit, setDefaultLimit] = usePreference(PREFS.defaultLimit);
   const [editorWrap, setEditorWrap] = usePreference(PREFS.editorWrap);
@@ -152,8 +173,15 @@ export function SettingsModal({ onClose }: Props) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal settings-modal" style={dialogSize ?? undefined} onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
+      <div className="modal settings-modal"
+        style={{
+          ...(drag.x || drag.y ? { transform: `translate(${drag.x}px, ${drag.y}px)` } : {}),
+          ...(dialogSize ?? {}),
+        }}
+        onPointerDown={clearTextSelection} onClick={e => e.stopPropagation()}>
+        <div className="modal-header settings-drag-title"
+          onPointerDown={onDragStart} onPointerMove={onDragMove}
+          onPointerUp={onDragEnd} onPointerCancel={onDragEnd}>
           <span className="modal-title">⚙ Settings</span>
           <button className="modal-close" onClick={onClose}>×</button>
         </div>
@@ -230,309 +258,269 @@ export function SettingsModal({ onClose }: Props) {
 
           {tab === 'Editor' && (
           <section className="settings-section">
-            <h3>Editor & browsing</h3>
-            <label className="settings-check">
-              <input type="checkbox" checked={showCreate} onChange={e => setShowCreate(e.target.checked)} />
-              <span>Insert <code>SHOW CREATE</code> output into the editor when browsing a table/view</span>
-            </label>
-            <label className="settings-check">
-              <input type="checkbox" checked={editorWrap} onChange={e => setEditorWrap(e.target.checked)} />
-              <span>Word-wrap the SQL editor by default <em>(new editors; toggle live with {SC.wrap} or View → Toggle Word Wrap)</em></span>
-            </label>
-            <label className="settings-row">
-              <span>Cursor shape <em>(applies live to every editor)</em></span>
-              <select aria-label="Cursor shape" value={cursorStyle} onChange={e => setCursorStyle(e.target.value as typeof cursorStyle)}>
-                <option value="bar">Bar</option>
-                <option value="block">Block</option>
-                <option value="underline">Underline</option>
-              </select>
-            </label>
-            {cursorStyle === 'bar' && (
+            <div className="settings-subtabs" role="tablist" aria-label="Editor settings sections">
+              {EDITOR_SECTIONS.map(section => (
+                <button key={section} type="button" role="tab" aria-selected={editorSection === section}
+                  className={`settings-subtab${editorSection === section ? ' active' : ''}`}
+                  onClick={() => setEditorSection(section)}>{section}</button>
+              ))}
+            </div>
+
+            {editorSection === 'Visuals' && (<>
+              <label className="settings-check">
+                <input type="checkbox" checked={editorWrap} onChange={e => setEditorWrap(e.target.checked)} />
+                <span>Word-wrap the SQL editor by default <em>(new editors; toggle live with {SC.wrap} or View → Toggle Word Wrap)</em></span>
+              </label>
               <label className="settings-row">
-                <span>Cursor bar width <em>(applies live to every editor)</em></span>
-                <select aria-label="Cursor bar width" value={cursorBarWidth}
-                  onChange={e => setCursorBarWidth(e.target.value as typeof cursorBarWidth)}>
-                  <option value="1">1 px — thin (default)</option>
-                  <option value="1.5">1.5 px — medium</option>
-                  <option value="2">2 px — regular</option>
-                  <option value="2.5">2.5 px — bold (previous)</option>
-                  <option value="3">3 px — extra bold</option>
+                <span>Cursor shape <em>(applies live to every editor)</em></span>
+                <select aria-label="Cursor shape" value={cursorStyle} onChange={e => setCursorStyle(e.target.value as typeof cursorStyle)}>
+                  <option value="bar">Bar</option>
+                  <option value="block">Block</option>
+                  <option value="underline">Underline</option>
                 </select>
               </label>
-            )}
-            <label className="settings-row">
-              <span>Cursor opacity <em>({cursorOpacity}%)</em></span>
-              <input
-                aria-label="Cursor opacity"
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={Math.max(0, Math.min(100, cursorOpacity))}
-                onChange={e => setCursorOpacity(Number(e.target.value))}
-              />
-            </label>
-            <div className="settings-row">
-              <span>Cursor color</span>
-              <div className="settings-cursor-color">
-                <input
-                  aria-label="Cursor color"
-                  type="color"
-                  value={/^#[0-9a-f]{6}$/i.test(cursorColor) ? cursorColor : PREFS.editorCursorColor.default}
-                  onChange={e => setCursorColor(e.target.value)}
-                />
-                <label><input
-                  type="checkbox"
-                  checked={cursorColor === 'transparent'}
-                  onChange={e => setCursorColor(e.target.checked ? 'transparent' : PREFS.editorCursorColor.default)}
-                /> Invisible</label>
-              </div>
-            </div>
-            {cursorStyle !== 'underline' && (
+              {cursorStyle === 'bar' && (
+                <label className="settings-row">
+                  <span>Cursor bar width <em>(applies live to every editor)</em></span>
+                  <select aria-label="Cursor bar width" value={cursorBarWidth}
+                    onChange={e => setCursorBarWidth(e.target.value as typeof cursorBarWidth)}>
+                    <option value="1">1 px — thin (default)</option>
+                    <option value="1.5">1.5 px — medium</option>
+                    <option value="2">2 px — regular</option>
+                    <option value="2.5">2.5 px — bold (previous)</option>
+                    <option value="3">3 px — extra bold</option>
+                  </select>
+                </label>
+              )}
+              <label className="settings-row">
+                <span>Cursor opacity <em>({cursorOpacity}%)</em></span>
+                <input aria-label="Cursor opacity" type="range" min="0" max="100" step="1"
+                  value={Math.max(0, Math.min(100, cursorOpacity))}
+                  onChange={e => setCursorOpacity(Number(e.target.value))} />
+              </label>
               <div className="settings-row">
-                <span>Cursor border color <em>(1 px outline)</em></span>
+                <span>Cursor color</span>
                 <div className="settings-cursor-color">
-                  <input
-                    aria-label="Cursor border color"
-                    type="color"
-                    value={/^#[0-9a-f]{6}$/i.test(cursorBorderColor) ? cursorBorderColor : PREFS.editorCursorColor.default}
-                    onChange={e => setCursorBorderColor(e.target.value)}
-                  />
-                  <label><input
-                    type="checkbox"
-                    checked={cursorBorderColor === 'transparent'}
-                    onChange={e => setCursorBorderColor(e.target.checked ? 'transparent' : PREFS.editorCursorColor.default)}
+                  <input aria-label="Cursor color" type="color"
+                    value={/^#[0-9a-f]{6}$/i.test(cursorColor) ? cursorColor : PREFS.editorCursorColor.default}
+                    onChange={e => setCursorColor(e.target.value)} />
+                  <label><input type="checkbox" checked={cursorColor === 'transparent'}
+                    onChange={e => setCursorColor(e.target.checked ? 'transparent' : PREFS.editorCursorColor.default)}
                   /> Invisible</label>
                 </div>
               </div>
-            )}
-            <label className="settings-check">
-              <input type="checkbox" checked={cursorBlink} onChange={e => setCursorBlink(e.target.checked)} />
-              <span>Blinking cursor</span>
-            </label>
-            <label className="settings-row">
-              <span>Blink interval <em>({cursorBlinkMs} ms for a full on/off cycle)</em></span>
-              <input
-                aria-label="Blink interval"
-                type="range"
-                min="200"
-                max="5000"
-                step="100"
-                disabled={!cursorBlink}
-                value={Math.max(200, Math.min(5000, cursorBlinkMs))}
-                onChange={e => setCursorBlinkMs(Number(e.target.value))}
-              />
-            </label>
-            <label className="settings-check">
-              <input type="checkbox" checked={copyHeaders} onChange={e => setCopyHeaders(e.target.checked)} />
-              <span>Include column headers when copying cells <em>(semicolon CSV; {SC.copy}; toggle with {SC.copyHeaders})</em></span>
-            </label>
-            <label className="settings-row">
-              <span>Line endings in exported files</span>
-              <select value={exportEol} onChange={e => setExportEol(e.target.value as typeof exportEol)}>
-                <option value="platform">This platform ({defaultEol() === '\r\n' ? 'CRLF' : 'LF'})</option>
-                <option value="lf">LF (\n) — Unix, Excel, modern Notepad</option>
-                <option value="crlf">CRLF (\r\n) — older Windows tooling</option>
-              </select>
-            </label>
-            {/* The clipboard is deliberately untouched: pasting is between two
-                applications that have already agreed on a convention. */}
-            <label className="settings-row">
-              <span>Confirm writes <em>(shows the statement and counts the rows it will change)</em></span>
-              <select value={writeConfirm} onChange={e => setWriteConfirm(e.target.value as typeof writeConfirm)}>
-                <option value="destructive">UPDATE / DELETE always, others on prod</option>
-                <option value="always">every write statement</option>
-                <option value="prod">only on prod, or with no WHERE</option>
-              </select>
-            </label>
-            <label className="settings-row">
-              <span>SQL keyword case <em>(what completion inserts — formatting follows the profile below)</em></span>
-              <select value={keywordCase} onChange={e => setKeywordCase(e.target.value as typeof keywordCase)}>
-                <option value="upper">SELECT — upper case</option>
-                <option value="lower">select — lower case</option>
-              </select>
-            </label>
-            <label className="settings-check">
-              <input type="checkbox" checked={editorMinimap} onChange={e => setEditorMinimap(e.target.checked)} />
-              <span>Editor minimap <em>(line-density map with viewport + search markers; toggles live)</em></span>
-            </label>
-            <label className="settings-check">
-              <input type="checkbox" checked={editorChangeBars} onChange={e => setEditorChangeBars(e.target.checked)} />
-              <span>Change bars in editor gutter <em>(mark lines that differ from the buffer as first loaded; off by default)</em></span>
-            </label>
-            <label className="settings-check">
-              <input type="checkbox" checked={editorHints} onChange={e => setEditorHints(e.target.checked)} />
-              <span>Hints (completion, lint, hover) <em>(the automatic popups, squiggles and tooltips; toggles live — explicit commands like quick definition and the kill picker stay on)</em></span>
-            </label>
-            <label className="settings-row">
-              <span>Auto-format SQL <em>(the built-in beautifier — also on demand with {SC.beautify})</em></span>
-              <select value={autoFormat} onChange={e => setAutoFormat(e.target.value as typeof autoFormat)}>
-                <option value="off">off — format only on demand</option>
-                <option value="semicolon">when ; completes a statement</option>
-                <option value="paste">after pasting SQL</option>
-              </select>
-            </label>
-            <p className="settings-hint">Auto-format reflows keywords, clauses and indentation using the active formatting profile; strings, quoted identifiers and comments are never touched.</p>
+              {cursorStyle !== 'underline' && (
+                <div className="settings-row">
+                  <span>Cursor border color <em>(1 px outline)</em></span>
+                  <div className="settings-cursor-color">
+                    <input aria-label="Cursor border color" type="color"
+                      value={/^#[0-9a-f]{6}$/i.test(cursorBorderColor) ? cursorBorderColor : PREFS.editorCursorColor.default}
+                      onChange={e => setCursorBorderColor(e.target.value)} />
+                    <label><input type="checkbox" checked={cursorBorderColor === 'transparent'}
+                      onChange={e => setCursorBorderColor(e.target.checked ? 'transparent' : PREFS.editorCursorColor.default)}
+                    /> Invisible</label>
+                  </div>
+                </div>
+              )}
+              <label className="settings-check">
+                <input type="checkbox" checked={cursorBlink} onChange={e => setCursorBlink(e.target.checked)} />
+                <span>Blinking cursor</span>
+              </label>
+              <label className="settings-row">
+                <span>Blink interval <em>({cursorBlinkMs} ms for a full on/off cycle)</em></span>
+                <input aria-label="Blink interval" type="range" min="200" max="5000" step="100"
+                  disabled={!cursorBlink} value={Math.max(200, Math.min(5000, cursorBlinkMs))}
+                  onChange={e => setCursorBlinkMs(Number(e.target.value))} />
+              </label>
+              <label className="settings-check">
+                <input type="checkbox" checked={editorMinimap} onChange={e => setEditorMinimap(e.target.checked)} />
+                <span>Editor minimap <em>(line-density map with viewport + search markers; toggles live)</em></span>
+              </label>
+              <label className="settings-check">
+                <input type="checkbox" checked={editorChangeBars} onChange={e => setEditorChangeBars(e.target.checked)} />
+                <span>Change bars in editor gutter <em>(mark lines that differ from the buffer as first loaded; off by default)</em></span>
+              </label>
+            </>)}
 
-            <label className="settings-row">
-              <span>Formatting profile <em>(used by {SC.format}, {SC.beautify} and auto-format)</em></span>
-              <select
-                value={profileId}
-                onChange={e => { setProfileId(e.target.value); setActiveProfile(e.target.value, localStorage); }}
-              >
-                {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </label>
-            {profile?.note && <p className="settings-hint">{profile.note}</p>}
-
-            <div className="settings-profile">
+            {editorSection === 'Editing' && (<>
+              <label className="settings-check">
+                <input type="checkbox" checked={showCreate} onChange={e => setShowCreate(e.target.checked)} />
+                <span>Insert <code>SHOW CREATE</code> output into the editor when browsing a table/view</span>
+              </label>
+              <label className="settings-check">
+                <input type="checkbox" checked={editorHints} onChange={e => setEditorHints(e.target.checked)} />
+                <span>Hints (completion, lint, hover) <em>(the automatic popups, squiggles and tooltips; toggles live — explicit commands like quick definition and the kill picker stay on)</em></span>
+              </label>
               <label className="settings-row">
-                <span>Keywords</span>
-                <select value={profile.keywordCase} disabled={profile.builtin}
-                        onChange={e => patchProfile({ keywordCase: e.target.value as 'upper' | 'lower' })}>
-                  <option value="upper">UPPERCASE</option>
-                  <option value="lower">lowercase</option>
+                <span>SQL keyword case <em>(what completion inserts — formatting follows the profile below)</em></span>
+                <select value={keywordCase} onChange={e => setKeywordCase(e.target.value as typeof keywordCase)}>
+                  <option value="upper">SELECT — upper case</option>
+                  <option value="lower">select — lower case</option>
                 </select>
               </label>
               <label className="settings-row">
-                <span>Indent</span>
-                <select value={profile.indentWidth} disabled={profile.builtin}
-                        onChange={e => patchProfile({ indentWidth: Number(e.target.value) })}>
-                  <option value={0}>Tab</option>
-                  <option value={2}>2 spaces</option>
-                  <option value={4}>4 spaces</option>
-                  <option value={8}>8 spaces</option>
+                <span>Auto-format SQL <em>(the built-in beautifier — also on demand with {SC.beautify})</em></span>
+                <select value={autoFormat} onChange={e => setAutoFormat(e.target.value as typeof autoFormat)}>
+                  <option value="off">off — format only on demand</option>
+                  <option value="semicolon">when ; completes a statement</option>
+                  <option value="paste">after pasting SQL</option>
                 </select>
               </label>
+              <p className="settings-hint">Auto-format reflows keywords, clauses and indentation using the active formatting profile; strings, quoted identifiers and comments are never touched.</p>
               <label className="settings-row">
-                <span>Commas</span>
-                <select value={profile.commaStyle} disabled={profile.builtin}
-                        onChange={e => patchProfile({ commaStyle: e.target.value as 'trailing' | 'leading' })}>
-                  <option value="trailing">trailing — a,</option>
-                  <option value="leading">leading — , a</option>
+                <span>Formatting profile <em>(used by {SC.format}, {SC.beautify} and auto-format)</em></span>
+                <select value={profileId}
+                  onChange={e => { setProfileId(e.target.value); setActiveProfile(e.target.value, localStorage); }}>
+                  {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
               </label>
-              <div className="settings-row">
-                <span>{profile.builtin
-                  ? 'Built-in profiles are read-only — copy one to edit it.'
-                  : 'Custom profile.'}</span>
-                <span className="settings-profile-actions">
-                  <button type="button" className="toolbar-btn" onClick={() => {
-                    const copy = duplicateProfile(profile, profiles);
-                    const next = [...profiles, copy];
-                    setProfiles(next);
-                    saveProfiles(next, localStorage);
-                    setProfileId(copy.id);
-                    setActiveProfile(copy.id, localStorage);
-                  }}>Duplicate</button>
-                  {!profile.builtin && (
+              {profile?.note && <p className="settings-hint">{profile.note}</p>}
+              <div className="settings-profile">
+                <label className="settings-row">
+                  <span>Keywords</span>
+                  <select value={profile.keywordCase} disabled={profile.builtin}
+                    onChange={e => patchProfile({ keywordCase: e.target.value as 'upper' | 'lower' })}>
+                    <option value="upper">UPPERCASE</option>
+                    <option value="lower">lowercase</option>
+                  </select>
+                </label>
+                <label className="settings-row">
+                  <span>Indent</span>
+                  <select value={profile.indentWidth} disabled={profile.builtin}
+                    onChange={e => patchProfile({ indentWidth: Number(e.target.value) })}>
+                    <option value={0}>Tab</option>
+                    <option value={2}>2 spaces</option>
+                    <option value={4}>4 spaces</option>
+                    <option value={8}>8 spaces</option>
+                  </select>
+                </label>
+                <label className="settings-row">
+                  <span>Commas</span>
+                  <select value={profile.commaStyle} disabled={profile.builtin}
+                    onChange={e => patchProfile({ commaStyle: e.target.value as 'trailing' | 'leading' })}>
+                    <option value="trailing">trailing — a,</option>
+                    <option value="leading">leading — , a</option>
+                  </select>
+                </label>
+                <div className="settings-row">
+                  <span>{profile.builtin ? 'Built-in profiles are read-only — copy one to edit it.' : 'Custom profile.'}</span>
+                  <span className="settings-profile-actions">
                     <button type="button" className="toolbar-btn" onClick={() => {
-                      const next = profiles.filter(p => p.id !== profile.id);
+                      const copy = duplicateProfile(profile, profiles);
+                      const next = [...profiles, copy];
                       setProfiles(next);
                       saveProfiles(next, localStorage);
-                      setProfileId(next[0].id);
-                      setActiveProfile(next[0].id, localStorage);
-                    }}>Delete</button>
-                  )}
-                </span>
+                      setProfileId(copy.id);
+                      setActiveProfile(copy.id, localStorage);
+                    }}>Duplicate</button>
+                    {!profile.builtin && (
+                      <button type="button" className="toolbar-btn" onClick={() => {
+                        const next = profiles.filter(p => p.id !== profile.id);
+                        setProfiles(next);
+                        saveProfiles(next, localStorage);
+                        setProfileId(next[0].id);
+                        setActiveProfile(next[0].id, localStorage);
+                      }}>Delete</button>
+                    )}
+                  </span>
+                </div>
               </div>
-            </div>
-            <label className="settings-row">
-              <span>Default row limit</span>
-              <select value={defaultLimit} onChange={e => setDefaultLimit(Number(e.target.value))}>
-                {LIMIT_CHOICES.map(n => <option key={n} value={n}>{n === 0 ? 'No limit' : n.toLocaleString()}</option>)}
-              </select>
-            </label>
-            <p className="settings-hint">The limit caps SELECTs with no LIMIT of their own — applies to newly opened sessions; change it live per session from the status bar.</p>
-            <label className="settings-row">
-              <span>Statement delimiter <em>(what separates one statement from the next)</em></span>
-              <input
-                className="settings-text settings-text-sm"
-                value={delimiter}
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                onChange={e => setDelimiter(e.target.value)}
-                onBlur={e => { if (!e.target.value.trim()) setDelimiter(';'); }}
-                aria-label="SQL statement delimiter"
-              />
-            </label>
-            <p className="settings-hint">
-              Almost always <code>;</code>. Change it for dialects and dumps that terminate
-              differently (<code>/</code>, <code>GO</code>); a <code>DELIMITER</code> directive inside
-              the script still overrides it from that line on. Leaving it empty resets it to <code>;</code>.
-            </p>
-            <label className="settings-check">
-              <input type="checkbox" checked={beepOnLong} onChange={e => setBeepOnLong(e.target.checked)} />
-              <span>Beep when a long-running query finishes</span>
-            </label>
-            <label className="settings-check">
-              <input type="checkbox" checked={notifyOnLong} onChange={e => setNotifyOnLong(e.target.checked)} />
-              <span>Notify when a long-running query finishes (window in the background)</span>
-            </label>
-            <label className="settings-row">
-              <span>Long-running query is <em>(only runs at least this long get a beep / notification)</em></span>
-              <span className="settings-stepper">
-                <button
-                  type="button"
-                  className="settings-stepper-btn"
-                  disabled={(!beepOnLong && !notifyOnLong) || beepSecs <= 1}
-                  onClick={() => setBeepSecs(Math.max(1, beepSecs - 5))}
-                  aria-label="Decrease long-query threshold"
-                >−</button>
-                <span className="settings-stepper-value">{beepSecs} s</span>
-                <button
-                  type="button"
-                  className="settings-stepper-btn"
-                  disabled={(!beepOnLong && !notifyOnLong) || beepSecs >= 3600}
-                  onClick={() => setBeepSecs(Math.min(3600, beepSecs + 5))}
-                  aria-label="Increase long-query threshold"
-                >+</button>
-                <button
-                  type="button"
-                  className="settings-stepper-btn settings-stepper-wide"
-                  disabled={!beepOnLong}
-                  onClick={() => beep('ok')}
-                  title="Play the sound"
-                >Test</button>
-              </span>
-            </label>
-            <p className="settings-hint">
-              Rises on success, falls on failure — so you can tell what happened from another window.
-              Queries faster than the threshold stay quiet; the notification fires only while the window is unfocused.
-            </p>
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={autoExplainSecs > 0}
-                onChange={e => setAutoExplainSecs(e.target.checked ? (autoExplainSecs || PREFS.autoExplainSecs.default) : 0)}
-              />
-              <span>Fetch the plan when a slow query finishes <em>(auto-EXPLAIN)</em></span>
-            </label>
-            <label className="settings-row">
-              <span>Slow means at least <em>(0 = never fetch; the plan waits behind a badge on the statement's gutter marker, it never steals focus)</em></span>
-              <span className="settings-stepper">
-                <button
-                  type="button"
-                  className="settings-stepper-btn"
-                  disabled={autoExplainSecs <= 1}
-                  onClick={() => setAutoExplainSecs(Math.max(1, autoExplainSecs - 1))}
-                  aria-label="Decrease auto-explain threshold"
-                >−</button>
-                <span className="settings-stepper-value">{autoExplainSecs > 0 ? `${autoExplainSecs} s` : 'off'}</span>
-                <button
-                  type="button"
-                  className="settings-stepper-btn"
-                  disabled={autoExplainSecs >= 300}
-                  onClick={() => setAutoExplainSecs(Math.min(300, autoExplainSecs + 1))}
-                  aria-label="Increase auto-explain threshold"
-                >+</button>
-              </span>
-            </label>
-            <p className="settings-hint">
-              Read-family single statements only, on engines that have EXPLAIN — a script would mean
-              one background plan per statement. A failed fetch stays silent.
-            </p>
+              <label className="settings-row">
+                <span>Statement delimiter <em>(what separates one statement from the next)</em></span>
+                <input className="settings-text settings-text-sm" value={delimiter}
+                  spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                  onChange={e => setDelimiter(e.target.value)}
+                  onBlur={e => { if (!e.target.value.trim()) setDelimiter(';'); }}
+                  aria-label="SQL statement delimiter" />
+              </label>
+              <p className="settings-hint">
+                Almost always <code>;</code>. Change it for dialects and dumps that terminate
+                differently (<code>/</code>, <code>GO</code>); a <code>DELIMITER</code> directive inside
+                the script still overrides it from that line on. Leaving it empty resets it to <code>;</code>.
+              </p>
+            </>)}
+
+            {editorSection === 'Results' && (<>
+              <label className="settings-check">
+                <input type="checkbox" checked={copyHeaders} onChange={e => setCopyHeaders(e.target.checked)} />
+                <span>Include column headers when copying cells <em>(semicolon CSV; {SC.copy}; toggle with {SC.copyHeaders})</em></span>
+              </label>
+              <label className="settings-row">
+                <span>Line endings in exported files</span>
+                <select value={exportEol} onChange={e => setExportEol(e.target.value as typeof exportEol)}>
+                  <option value="platform">This platform ({defaultEol() === '\r\n' ? 'CRLF' : 'LF'})</option>
+                  <option value="lf">LF (\n) — Unix, Excel, modern Notepad</option>
+                  <option value="crlf">CRLF (\r\n) — older Windows tooling</option>
+                </select>
+              </label>
+              <label className="settings-row">
+                <span>Confirm writes <em>(shows the statement and counts the rows it will change)</em></span>
+                <select value={writeConfirm} onChange={e => setWriteConfirm(e.target.value as typeof writeConfirm)}>
+                  <option value="destructive">UPDATE / DELETE always, others on prod</option>
+                  <option value="always">every write statement</option>
+                  <option value="prod">only on prod, or with no WHERE</option>
+                </select>
+              </label>
+              <label className="settings-row">
+                <span>Default row limit</span>
+                <select value={defaultLimit} onChange={e => setDefaultLimit(Number(e.target.value))}>
+                  {LIMIT_CHOICES.map(n => <option key={n} value={n}>{n === 0 ? 'No limit' : n.toLocaleString()}</option>)}
+                </select>
+              </label>
+              <p className="settings-hint">The limit caps SELECTs with no LIMIT of their own — applies to newly opened sessions; change it live per session from the status bar.</p>
+            </>)}
+
+            {editorSection === 'Execution' && (<>
+              <label className="settings-check">
+                <input type="checkbox" checked={beepOnLong} onChange={e => setBeepOnLong(e.target.checked)} />
+                <span>Beep when a long-running query finishes</span>
+              </label>
+              <label className="settings-check">
+                <input type="checkbox" checked={notifyOnLong} onChange={e => setNotifyOnLong(e.target.checked)} />
+                <span>Notify when a long-running query finishes (window in the background)</span>
+              </label>
+              <label className="settings-row">
+                <span>Long-running query is <em>(only runs at least this long get a beep / notification)</em></span>
+                <span className="settings-stepper">
+                  <button type="button" className="settings-stepper-btn"
+                    disabled={(!beepOnLong && !notifyOnLong) || beepSecs <= 1}
+                    onClick={() => setBeepSecs(Math.max(1, beepSecs - 5))}
+                    aria-label="Decrease long-query threshold">−</button>
+                  <span className="settings-stepper-value">{beepSecs} s</span>
+                  <button type="button" className="settings-stepper-btn"
+                    disabled={(!beepOnLong && !notifyOnLong) || beepSecs >= 3600}
+                    onClick={() => setBeepSecs(Math.min(3600, beepSecs + 5))}
+                    aria-label="Increase long-query threshold">+</button>
+                  <button type="button" className="settings-stepper-btn settings-stepper-wide"
+                    disabled={!beepOnLong} onClick={() => beep('ok')} title="Play the sound">Test</button>
+                </span>
+              </label>
+              <p className="settings-hint">
+                Rises on success, falls on failure — so you can tell what happened from another window.
+                Queries faster than the threshold stay quiet; the notification fires only while the window is unfocused.
+              </p>
+              <label className="settings-check">
+                <input type="checkbox" checked={autoExplainSecs > 0}
+                  onChange={e => setAutoExplainSecs(e.target.checked ? (autoExplainSecs || PREFS.autoExplainSecs.default) : 0)} />
+                <span>Fetch the plan when a slow query finishes <em>(auto-EXPLAIN)</em></span>
+              </label>
+              <label className="settings-row">
+                <span>Slow means at least <em>(0 = never fetch; the plan waits behind a badge on the statement's gutter marker, it never steals focus)</em></span>
+                <span className="settings-stepper">
+                  <button type="button" className="settings-stepper-btn" disabled={autoExplainSecs <= 1}
+                    onClick={() => setAutoExplainSecs(Math.max(1, autoExplainSecs - 1))}
+                    aria-label="Decrease auto-explain threshold">−</button>
+                  <span className="settings-stepper-value">{autoExplainSecs > 0 ? `${autoExplainSecs} s` : 'off'}</span>
+                  <button type="button" className="settings-stepper-btn" disabled={autoExplainSecs >= 300}
+                    onClick={() => setAutoExplainSecs(Math.min(300, autoExplainSecs + 1))}
+                    aria-label="Increase auto-explain threshold">+</button>
+                </span>
+              </label>
+              <p className="settings-hint">
+                Read-family single statements only, on engines that have EXPLAIN — a script would mean
+                one background plan per statement. A failed fetch stays silent.
+              </p>
+            </>)}
           </section>
           )}
 
@@ -722,7 +710,7 @@ export function SettingsModal({ onClose }: Props) {
           {tab === 'Updates' && <UpdatesSection />}
         </div>
         <DialogResizeHandle target=".settings-modal" label="Resize Settings window"
-          minWidth={680} minHeight={360} onResize={setDialogSize} />
+          minWidth={680} minHeight={240} onResize={setDialogSize} />
       </div>
     </div>
   );
