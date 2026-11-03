@@ -55,11 +55,16 @@ async function newPage(browser, multi = false, fakeTime = false) {
   return page;
 }
 
-async function openResult(browser, multi) {
+async function openSession(browser, multi = false) {
   const page = await newPage(browser, multi);
   const header = page.locator('.conn-item-header', { has: page.locator('.conn-name', { hasText: 'prod-orders' }) }).first();
   await header.dblclick();
   await page.waitForSelector('.cm-content', { timeout: 15000 });
+  return page;
+}
+
+async function openResult(browser, multi) {
+  const page = await openSession(browser, multi);
   await page.locator('.cm-content').first().click();
   await page.keyboard.press('Meta+a');
   await page.keyboard.type('SELECT id, customer, status, total, created_at FROM orders;');
@@ -130,6 +135,59 @@ async function verifySelections(browser) {
   await multi.close();
 }
 
+async function browseOrders(page) {
+  await page.evaluate(() => {
+    window.__MOCK__.get_table_meta = { ...window.__MOCK__.get_table_meta, pk_columns: [] };
+  });
+  const shop = page.locator('.tree-row').filter({ has: page.locator('.tree-label').getByText('shop', { exact: true }) });
+  await shop.locator('.tree-chevron').click();
+  const tables = page.locator('.tree-row').filter({ has: page.locator('.tree-label').getByText('Tables', { exact: true }) });
+  await tables.locator('.tree-chevron').click();
+  const orders = page.locator('.tree-label').getByText('orders', { exact: true });
+  await orders.waitFor({ timeout: 3000 });
+  await orders.dblclick();
+  await page.waitForSelector('.data-browser .fg-cell:visible', { timeout: 10000 });
+}
+
+async function verifyLiveDatabaseList(browser) {
+  const page = await openSession(browser);
+  await page.evaluate(() => {
+    const original = window.__MOCK__.list_schema;
+    window.__MOCK__.list_schema = args => {
+      const nodes = original(args);
+      return args?.context ? nodes : [...nodes, { kind: 'database', name: 'fresh_db' }];
+    };
+  });
+  await page.locator('.db-roulette .mselect-btn').click();
+  await page.getByRole('option', { name: 'fresh_db', exact: true }).waitFor({ timeout: 3000 });
+  console.log('PASS database roulette refreshes its options when opened');
+  await page.close();
+}
+
+async function verifyGraphicsConsistency(browser) {
+  const browsed = await openSession(browser);
+  await browseOrders(browsed);
+  const browseGraphics = browsed.locator('.result-area > .rtab-bar').getByRole('button', { name: '📈 Graphics' });
+  await browseGraphics.click({ timeout: 3000 });
+  await browsed.locator('.data-browser:visible .graphics-view').waitFor({ timeout: 3000 });
+  console.log('PASS table double-click exposes Graphics for the browsed rows');
+  await browsed.close();
+
+  const combined = await openResult(browser, false);
+  await browseOrders(combined);
+  const graphics = combined.locator('.result-area > .rtab-bar').getByRole('button', { name: '📈 Graphics' });
+  await graphics.click();
+  await combined.locator('.data-browser:visible .graphics-view').waitFor({ timeout: 3000 });
+  await combined.locator('.result-area > .rtab-bar').getByRole('button', { name: 'Grid', exact: true }).click();
+  await graphics.click();
+  await combined.locator('.result-area > .graphics-view').waitFor({ timeout: 3000 });
+  if (await combined.locator('.data-browser:visible').count() !== 0) {
+    throw new Error('SQL Graphics left the table browser visible');
+  }
+  console.log('PASS Graphics follows the active SQL or browsed-table result');
+  await combined.close();
+}
+
 async function verifySettings(browser) {
   const page = await newPage(browser, false, true);
   const updateCalls = () => page.evaluate(() =>
@@ -177,6 +235,26 @@ async function verifySettings(browser) {
   await page.close();
 }
 
+async function verifyCursorPreferences(browser) {
+  const page = await openSession(browser);
+  const width = () => page.locator('.cm-editor').first().evaluate(editor =>
+    getComputedStyle(editor).getPropertyValue('--txui-cursor-width').trim());
+  if (await width() !== '1px') throw new Error(`default bar cursor is not thin: ${await width()}`);
+  await page.keyboard.press('Meta+Comma');
+  await page.getByRole('tab', { name: 'Editor', exact: true }).click();
+  const picker = page.getByRole('combobox', { name: 'Cursor bar width' });
+  await picker.selectOption('1.5');
+  await page.locator('.settings-modal .modal-close').click();
+  if (await width() !== '1.5px') throw new Error(`cursor width did not update live: ${await width()}`);
+  await page.keyboard.press('Meta+Comma');
+  await page.getByRole('tab', { name: 'Editor', exact: true }).click();
+  await picker.selectOption('2.5');
+  await page.locator('.settings-modal .modal-close').click();
+  if (await width() !== '2.5px') throw new Error(`previous bold cursor is not available: ${await width()}`);
+  console.log('PASS cursor bar is thin by default and width choices apply live');
+  await page.close();
+}
+
 async function verifyConnectionForm(browser) {
   const page = await newPage(browser);
   await page.locator('button[title^="New connection"]').first().click();
@@ -189,6 +267,7 @@ async function verifyConnectionForm(browser) {
       mainHeight: main.getBoundingClientRect().height,
       rowHeight: row.getBoundingClientRect().height,
       formHeight: document.querySelector('.conn-form').getBoundingClientRect().height,
+      formWidth: document.querySelector('.conn-form').getBoundingClientRect().width,
       credentialVisibility: getComputedStyle(main.querySelector('.cf-iam-path')).visibility,
       chipWidth: chip.getBoundingClientRect().width,
       chipHeight: chip.getBoundingClientRect().height,
@@ -217,6 +296,30 @@ async function verifyConnectionForm(browser) {
     throw new Error(`palette is too large: ${JSON.stringify(before)}`);
   }
   console.log('PASS Cloud SQL IAM does not jump; color swatches are compact');
+  if (before.formWidth > 740) throw new Error(`connection form is too wide: ${before.formWidth}px`);
+
+  await page.getByRole('tab', { name: 'Advanced', exact: true }).click();
+  await page.locator('.cf-advanced').waitFor();
+  if (process.env.TXUI_CONNECTION_SHOT) await page.screenshot({ path: process.env.TXUI_CONNECTION_SHOT });
+  if (await page.locator('.cf-advanced-group').count() !== 3) {
+    throw new Error('Advanced fields are not organized into three compact groups');
+  }
+  const handle = page.getByRole('button', { name: 'Resize connection window' });
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) throw new Error('connection form has no resize handle');
+  const oldSize = await page.locator('.conn-form').boundingBox();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 80, handleBox.y + handleBox.height / 2 - 60, { steps: 6 });
+  await page.mouse.up();
+  const newSize = await page.locator('.conn-form').boundingBox();
+  if (!oldSize || !newSize || Math.abs(newSize.width - oldSize.width - 80) > 2
+      || Math.abs(newSize.height - oldSize.height + 60) > 2) {
+    throw new Error(`connection form did not resize: ${JSON.stringify({ oldSize, newSize })}`);
+  }
+  const overflow = await page.locator('.conn-form').evaluate(form => form.scrollWidth - form.clientWidth);
+  if (overflow > 1) throw new Error(`Advanced form overflows horizontally by ${overflow}px`);
+  console.log('PASS connection form is compact, Advanced is grouped, and resizing works');
   await page.close();
 }
 
@@ -224,7 +327,10 @@ const server = await ensureServer();
 const browser = await chromium.launch({ executablePath: EXE });
 try {
   await verifySelections(browser);
+  await verifyLiveDatabaseList(browser);
+  await verifyGraphicsConsistency(browser);
   await verifySettings(browser);
+  await verifyCursorPreferences(browser);
   await verifyConnectionForm(browser);
   const errors = pages.flatMap(page => page._coreErrors);
   if (errors.length) throw new Error(`uncaught browser errors: ${errors.join(' | ')}`);

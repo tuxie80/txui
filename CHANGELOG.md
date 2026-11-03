@@ -8,13 +8,16 @@ this project follows semantic versioning.
 ### Changed
 
 - **Automatic update checks are opt-in** — TxUI no longer contacts the release service after launch or on a schedule by default. Settings → Updates adds a disabled-by-default automatic-check switch, while Check now remains available for an explicit manual check.
+- **Editor bar cursor is thinner and configurable** — the default is now 1px instead of 2.5px. Settings → Editor offers 1, 1.5, 2, 2.5 and 3px widths, applying live to every editor; 2.5px preserves the previous appearance.
 
 ### Fixed
 
 - **Cell drag-selection no longer resets on the first update** — memoize the laid-out column array passed to FastGrid so selection updates do not look like a new result. Single-result grids and every result-set tab preserve the drag origin and selected values; covered by mounted regressions and real Chromium pointer drags.
 - **Selections survive result-set switching** — every result grid stays mounted with its own state, hiding only inactive panes while the external grid API follows the active one. Switching Result 1 → Result 2 → Result 1 preserves each selection and its values.
-- **Settings and connection-form layout fixes** — the Settings dialog is wide enough for all nine tabs without horizontal scrolling. Cloud SQL IAM credential controls reserve one stable line in both checkbox states, and the connection color palette uses compact 16×14 swatches within a max-content grid.
-- **Core UI interactions now have a real-browser release gate** — `dev/core_interactions.sh` drives single-cell and rectangular pointer selection, verifies highlighted and copied values across result switching, checks opt-in update scheduling, measures Settings tab fit, IAM geometry and palette size, and cleans up its Vite server and Chromium processes.
+- **Database roulettes refresh when opened** — the editor and schema-scoped panel selectors re-read the root schema on every open, so databases created after connection appear without reconnecting. Stale responses cannot overwrite a newer refresh.
+- **Graphics follows the active result** — double-clicking a table exposes Graphics even when no SQL result exists. With both SQL and browsed-table results open, Graphics visualizes the active dataset instead of silently substituting the last SQL result; both entry points share one controlled browser-Graphics state.
+- **Settings and connection-form layout fixes** — the Settings dialog is wide enough for all nine tabs without horizontal scrolling. Cloud SQL IAM credential controls reserve one stable line in both checkbox states, and the connection color palette uses compact 16×14 swatches within a max-content grid. The connection card now defaults to 720px, Advanced fields use compact Session / Connection / Driver & pool groups, and a bottom-right handle resizes both dimensions within viewport bounds.
+- **Core UI interactions now have a real-browser release gate** — `dev/core_interactions.sh` drives single-cell and rectangular pointer selection, verifies highlighted and copied values across result switching, refreshes database options on open, checks Graphics for table-only and mixed SQL/browser results, verifies opt-in update scheduling, measures Settings tab fit, IAM geometry, palette size and Advanced layout, exercises pointer-driven connection-form resizing, and cleans up its Vite server and Chromium processes.
 
 ## [1.5.2] - 2026-11-02
 
