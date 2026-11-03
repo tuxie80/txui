@@ -78,6 +78,7 @@ test('the shipped defaults are the documented ones', () => {
   assert.equal(PREFS.sqlDelimiter.default, ';');
   assert.equal(PREFS.scriptErrorMode.default, 'ask');
   assert.equal(PREFS.editorCursorStyle.default, 'bar');
+  assert.equal(PREFS.editorCursorBarWidth.default, '1');
   assert.equal(PREFS.editorCursorBlink.default, true);
   assert.equal(PREFS.editorCursorBlinkMs.default, 1200);
   assert.equal(PREFS.editorCursorColor.default, '#ffa94d');
@@ -89,6 +90,8 @@ test('cursor preferences reject invalid shapes and malformed stored numbers', ()
   assert.equal(PREFS.editorCursorStyle.parse('block'), 'block');
   assert.equal(PREFS.editorCursorStyle.parse('underline'), 'underline');
   assert.equal(PREFS.editorCursorStyle.parse('crosshair'), 'bar');
+  assert.equal(PREFS.editorCursorBarWidth.parse('1.5'), '1.5');
+  assert.equal(PREFS.editorCursorBarWidth.parse('4'), '1');
   assert.equal(PREFS.editorCursorBlinkMs.parse('not-a-number'), 1200);
   assert.equal(PREFS.editorCursorBlinkMs.parse('800'), 800);
 });

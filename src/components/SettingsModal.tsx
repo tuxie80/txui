@@ -50,6 +50,7 @@ export function SettingsModal({ onClose }: Props) {
   const [defaultLimit, setDefaultLimit] = usePreference(PREFS.defaultLimit);
   const [editorWrap, setEditorWrap] = usePreference(PREFS.editorWrap);
   const [cursorStyle, setCursorStyle] = usePreference(PREFS.editorCursorStyle);
+  const [cursorBarWidth, setCursorBarWidth] = usePreference(PREFS.editorCursorBarWidth);
   const [cursorBlink, setCursorBlink] = usePreference(PREFS.editorCursorBlink);
   const [cursorBlinkMs, setCursorBlinkMs] = usePreference(PREFS.editorCursorBlinkMs);
   const [cursorColor, setCursorColor] = usePreference(PREFS.editorCursorColor);
@@ -231,6 +232,19 @@ export function SettingsModal({ onClose }: Props) {
                 <option value="underline">Underline</option>
               </select>
             </label>
+            {cursorStyle === 'bar' && (
+              <label className="settings-row">
+                <span>Cursor bar width <em>(applies live to every editor)</em></span>
+                <select aria-label="Cursor bar width" value={cursorBarWidth}
+                  onChange={e => setCursorBarWidth(e.target.value as typeof cursorBarWidth)}>
+                  <option value="1">1 px — thin (default)</option>
+                  <option value="1.5">1.5 px — medium</option>
+                  <option value="2">2 px — regular</option>
+                  <option value="2.5">2.5 px — bold (previous)</option>
+                  <option value="3">3 px — extra bold</option>
+                </select>
+              </label>
+            )}
             <label className="settings-row">
               <span>Cursor opacity <em>({cursorOpacity}%)</em></span>
               <input

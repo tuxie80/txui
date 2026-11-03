@@ -78,6 +78,8 @@ export type KeywordCase = typeof KEYWORD_CASES[number];
 
 export const CURSOR_STYLES = ['bar', 'block', 'underline'] as const;
 export type CursorStyle = typeof CURSOR_STYLES[number];
+export const CURSOR_BAR_WIDTHS = ['1', '1.5', '2', '2.5', '3'] as const;
+export type CursorBarWidth = typeof CURSOR_BAR_WIDTHS[number];
 
 /**
  * When the editor formats SQL for you (see utils/sqlBeautify.ts).
@@ -133,6 +135,8 @@ export const PREFS = {
   /** Word-wrap the SQL editor by default (new editors). */
   editorWrap: bool('dbgui:editor-wrap', false),
   editorCursorStyle: choice<CursorStyle>('dbgui.editorCursorStyle', 'bar', CURSOR_STYLES),
+  /** Bar thickness in CSS pixels; 2.5 was the original TxUI appearance. */
+  editorCursorBarWidth: choice<CursorBarWidth>('dbgui.editorCursorBarWidth', '1', CURSOR_BAR_WIDTHS),
   editorCursorBlink: bool('dbgui.editorCursorBlink', true),
   /** Full on/off blink cycle in milliseconds; 200–10000 when applied. */
   editorCursorBlinkMs: num('dbgui.editorCursorBlinkMs', 1200),
