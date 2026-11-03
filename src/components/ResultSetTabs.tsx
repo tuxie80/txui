@@ -20,7 +20,6 @@ export function ResultSetTabs(props: Props) {
   }
   const active = activeState.index;
   const sets = useMemo(() => resultSetList(props.result), [props.result]);
-  const current = sets[Math.min(active, sets.length - 1)];
   return (
     <>
       {sets.length > 1 && (
@@ -35,7 +34,14 @@ export function ResultSetTabs(props: Props) {
           ))}
         </div>
       )}
-      <ResultGrid {...props} result={current} />
+      {sets.map((set, index) => (
+        <div key={index} style={{
+          flex: '1 1 auto', minHeight: 0, minWidth: 0,
+          display: index === active ? 'flex' : 'none',
+        }}>
+          <ResultGrid {...props} result={set} apiOutRef={index === active ? props.apiOutRef : undefined} />
+        </div>
+      ))}
     </>
   );
 }

@@ -72,6 +72,7 @@ test('the SQL delimiter never comes back empty', () => {
 // ── the defaults the user asked for ─────────────────────────────────────────
 
 test('the shipped defaults are the documented ones', () => {
+  assert.equal(PREFS.autoCheckUpdates.default, false);
   assert.equal(PREFS.beepOnLongQuery.default, true);
   assert.equal(PREFS.longQueryBeepSecs.default, 60);
   assert.equal(PREFS.sqlDelimiter.default, ';');

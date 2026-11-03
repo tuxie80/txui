@@ -806,17 +806,12 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
                      onChange={e => setUseIamAuth(e.target.checked)} />
               Cloud SQL IAM
             </label>
-            {useIamAuth && (
-              <>
-                <input value={iamKeyPath} onChange={e => setIamKeyPath(e.target.value)}
-                       placeholder="Credential JSON path — blank uses gcloud application-default credentials"
-                       spellCheck={false} />
-                <span className="form-hint">
-                  User = IAM principal. TxUI mints the short-lived password token automatically;
-                  leave the credential path blank after `gcloud auth application-default login`.
-                </span>
-              </>
-            )}
+            <input className={`cf-iam-path${useIamAuth ? '' : ' cf-iam-hidden'}`}
+                   value={iamKeyPath} onChange={e => setIamKeyPath(e.target.value)}
+                   placeholder="Credential JSON path — blank uses gcloud application-default credentials"
+                   title="User = IAM principal. TxUI mints the short-lived password token automatically; leave blank after gcloud auth application-default login."
+                   aria-hidden={!useIamAuth} tabIndex={useIamAuth ? 0 : -1} readOnly={!useIamAuth}
+                   spellCheck={false} />
           </div>
         </div>
         )}

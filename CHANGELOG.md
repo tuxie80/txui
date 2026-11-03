@@ -3,6 +3,19 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- **Automatic update checks are opt-in** — TxUI no longer contacts the release service after launch or on a schedule by default. Settings → Updates adds a disabled-by-default automatic-check switch, while Check now remains available for an explicit manual check.
+
+### Fixed
+
+- **Cell drag-selection no longer resets on the first update** — memoize the laid-out column array passed to FastGrid so selection updates do not look like a new result. Single-result grids and every result-set tab preserve the drag origin and selected values; covered by mounted regressions and real Chromium pointer drags.
+- **Selections survive result-set switching** — every result grid stays mounted with its own state, hiding only inactive panes while the external grid API follows the active one. Switching Result 1 → Result 2 → Result 1 preserves each selection and its values.
+- **Settings and connection-form layout fixes** — the Settings dialog is wide enough for all nine tabs without horizontal scrolling. Cloud SQL IAM credential controls reserve one stable line in both checkbox states, and the connection color palette uses compact 16×14 swatches within a max-content grid.
+- **Core UI interactions now have a real-browser release gate** — `dev/core_interactions.sh` drives single-cell and rectangular pointer selection, verifies highlighted and copied values across result switching, checks opt-in update scheduling, measures Settings tab fit, IAM geometry and palette size, and cleans up its Vite server and Chromium processes.
+
 ## [1.5.2] - 2026-11-02
 
 ### Added

@@ -151,6 +151,10 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
 
   const displayColumns = useMemo(
     () => layoutColumns(result.columns.map(c => c.name), layout), [result.columns, layout]);
+  // FastGrid treats columns identity as a result boundary; a fresh array on
+  // every selection render would clear the selection being updated.
+  const gridColumns = useMemo(
+    () => displayColumns.map(column => result.columns[column.index]), [displayColumns, result.columns]);
   const displayRows = useMemo(() => sortedRows.map(row =>
     displayColumns.map(column => row[column.index])), [sortedRows, displayColumns]);
   const onLayoutCol = useCallback((_column: string, action: ColumnLayoutAction) => {
@@ -325,7 +329,7 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
         )}
         <div style={{ flex: 1, minWidth: 0, display: showChart || showPivot ? 'none' : 'flex' }}>
           <FastGrid
-            columns={displayColumns.map(column => result.columns[column.index])}
+            columns={gridColumns}
             rows={displayRows}
             sort={sort}
             onSortCol={handleSortCol}

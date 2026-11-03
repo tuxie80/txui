@@ -67,6 +67,7 @@ export interface FastGridApi {
 }
 
 interface Props {
+  /** Stable for a result's lifetime; changing this identity clears selection. */
   columns: ColumnInfo[];
   rows: unknown[][];
   /** Sort indicators + header-click callback (server- or client-side, parent decides) */

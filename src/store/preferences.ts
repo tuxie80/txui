@@ -290,9 +290,10 @@ export const PREFS = {
   keepAlive: bool('dbgui.keepAlive', true),
 
   // ── Updates ─────────────────────────────────────────────────────────────
-  // Gate AUTO-DOWNLOAD per version class; either way an available update
-  // still gets the passive status-bar chip (utils/updatePolicy.ts). A failed
-  // check just retries on the next launch — never a dialog.
+  // Scheduled checks are opt-in. Manual checks always work; auto-download is
+  // gated separately per version class (utils/updatePolicy.ts).
+  /** Check after launch and every six hours. Off by default for stability. */
+  autoCheckUpdates: bool('dbgui.autoCheckUpdates', false),
   /** Auto-download patch/minor updates in the background (restart prompt after). */
   autoUpdateMinor: bool('dbgui.autoUpdateMinor', true),
   /**

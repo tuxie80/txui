@@ -698,7 +698,7 @@ export function SettingsModal({ onClose }: Props) {
 }
 
 /**
- * Updates — self-update status and the two auto-download gates.
+ * Updates — opt-in scheduled checks, manual checks and auto-download gates.
  *
  * The version comes from the Tauri runtime (AboutModal pattern), never
  * hardcoded. "Check now" runs the same cycle the 6 h scheduler runs
@@ -707,6 +707,7 @@ export function SettingsModal({ onClose }: Props) {
  * here because the user ASKED — the scheduled path stays silent instead.
  */
 function UpdatesSection() {
+  const [autoCheck, setAutoCheck] = usePreference(PREFS.autoCheckUpdates);
   const [autoMinor, setAutoMinor] = usePreference(PREFS.autoUpdateMinor);
   const [autoMajor, setAutoMajor] = usePreference(PREFS.autoUpdateMajor);
   const [version, setVersion] = useState('');
@@ -737,12 +738,16 @@ function UpdatesSection() {
         <span>{version ? `v${version}` : '…'}</span>
       </div>
       <div className="settings-row">
-        <span>Check for updates <em>(also runs automatically after launch and every 6 hours)</em></span>
+        <span>Check for updates <em>(only when you click Check now)</em></span>
         <button className="toolbar-btn" onClick={() => { void checkNow(); }} disabled={checking}>
           {checking ? 'Checking…' : 'Check now'}
         </button>
       </div>
       {result && <p className="settings-hint">{result}</p>}
+      <label className="settings-check">
+        <input type="checkbox" checked={autoCheck} onChange={e => setAutoCheck(e.target.checked)} />
+        <span>Automatically check for updates <em>(off by default; when enabled, after launch and every 6 hours)</em></span>
+      </label>
       <label className="settings-check">
         <input type="checkbox" checked={autoMinor} onChange={e => setAutoMinor(e.target.checked)} />
         <span>Download minor and patch updates automatically <em>(installed in the background; restart from the status bar)</em></span>

@@ -80,7 +80,7 @@ import { useResizable } from './hooks/useResizable';
 import { installTooltips } from './utils/tooltip';
 import { initTheme, applyTheme } from './utils/themes';
 import { initFontScale } from './utils/fontScale';
-import { getPref, setPref, PREFS } from './store/preferences';
+import { getPref, setPref, usePreference, PREFS } from './store/preferences';
 import './App.css';
 import { shortcuts } from './utils/platform';
 
@@ -113,6 +113,7 @@ const ENGINE_ICON: Record<Engine, string> = {
 };
 
 export default function App() {
+  const [autoCheckUpdates] = usePreference(PREFS.autoCheckUpdates);
   const [view, setView] = useState<View>({ kind: 'welcome' });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -423,14 +424,14 @@ export default function App() {
   // Background Galera cluster watches opted into earlier resume polling
   // without any panel opening (store/galeraWatch; idempotent).
   useEffect(() => { initGaleraWatches(); }, []);
-  // Self-update: one polite background check 10 s after launch, then every
-  // 6 h. Auto-download only when the Settings → Updates prefs allow the
-  // class; failures are silent and retried next cycle (store/updater).
+  // Self-update checks are opt-in. Disabling the preference cancels both the
+  // pending launch check and the six-hour schedule; Check now remains manual.
   useEffect(() => {
+    if (!autoCheckUpdates) return;
     const first = setTimeout(() => { void runUpdateCheck(); }, 10_000);
     const every = setInterval(() => { void runUpdateCheck(); }, 6 * 60 * 60 * 1000);
     return () => { clearTimeout(first); clearInterval(every); };
-  }, []);
+  }, [autoCheckUpdates]);
 
   // Auto-connect connections flagged auto_connect, once at launch. Each one
   // goes through the sidebar's connect path (the dbgui:connect event), so a
