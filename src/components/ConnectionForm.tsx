@@ -600,7 +600,9 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
   // The card is draggable by its title bar, so it can be parked aside while
   // credentials are copied out of whatever password manager sits behind it.
   const [drag, setDrag] = useState({ x: 0, y: 0 });
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   const dragStart = useRef<{ px: number; py: number; x: number; y: number } | null>(null);
+  const resizeStart = useRef<{ px: number; py: number; width: number; height: number } | null>(null);
   function onTitleDown(e: React.PointerEvent<HTMLElement>) {
     dragStart.current = { px: e.clientX, py: e.clientY, x: drag.x, y: drag.y };
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -611,6 +613,25 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
     setDrag({ x: s.x + e.clientX - s.px, y: s.y + e.clientY - s.py });
   }
   function onTitleUp() { dragStart.current = null; }
+  function onResizeDown(e: React.PointerEvent<HTMLElement>) {
+    const form = e.currentTarget.closest('.conn-form');
+    if (!form) return;
+    const rect = form.getBoundingClientRect();
+    resizeStart.current = { px: e.clientX, py: e.clientY, width: rect.width, height: rect.height };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+  function onResizeMove(e: React.PointerEvent<HTMLElement>) {
+    const s = resizeStart.current;
+    if (!s) return;
+    const maxWidth = Math.max(280, window.innerWidth - 32);
+    const maxHeight = Math.max(240, window.innerHeight - 32);
+    setSize({
+      width: Math.max(Math.min(420, maxWidth), Math.min(maxWidth, s.width + e.clientX - s.px)),
+      height: Math.max(Math.min(320, maxHeight), Math.min(maxHeight, s.height + e.clientY - s.py)),
+    });
+  }
+  function onResizeUp() { resizeStart.current = null; }
 
   // A dot on the Advanced tab is the only way to see — without opening it —
   // that an edited connection carries non-default tuning.
@@ -621,7 +642,10 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
 
   return (
     <div className="conn-form"
-         style={drag.x || drag.y ? { transform: `translate(${drag.x}px, ${drag.y}px)` } : undefined}>
+         style={{
+           ...(drag.x || drag.y ? { transform: `translate(${drag.x}px, ${drag.y}px)` } : {}),
+           ...(size ?? {}),
+         }}>
       <h2 className="cf-title" title="Drag to move"
           onPointerDown={onTitleDown} onPointerMove={onTitleMove}
           onPointerUp={onTitleUp} onPointerCancel={onTitleUp}>
@@ -1314,175 +1338,154 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
       </>)}
 
       {tab === 'advanced' && (
-          <div className="form-subsection">
-            {engine === 'clickhouse' && (
-              <div className="cf-block">
-                <label>Memory &amp; row ceilings{' '}
-                  <span className="form-hint">(blank / 0 = no limit)</span>
-                  <div className="form-row">
-                    <input type="number" min={0} value={chMaxMemory} disabled={readOnly}
-                           onChange={e => setChMaxMemory(e.target.value)}
-                           placeholder="max_memory_usage (bytes)" style={{ flex: 1 }} />
-                    <input type="number" min={0} value={chMaxRows} disabled={readOnly}
-                           onChange={e => setChMaxRows(e.target.value)}
-                           placeholder="max_rows_to_read (rows)" style={{ flex: 1 }} />
-                  </div>
-                  <p className="form-hint">
-                    {readOnly
-                      ? <>Turn off READ-ONLY to set these — <code>readonly=1</code> makes the
-                        server reject them.</>
-                      : <>Per-query RAM (bytes) and rows-scanned ceilings, sent with every
-                        request — the stop against an OOM.</>}
-                  </p>
-                </label>
-              </div>
-            )}
-            <div className="form-row">
-              <label style={{ flex: 1 }}>Connect timeout (s)
+        <div className="cf-advanced">
+          <section className="cf-advanced-group">
+            <h3>Session</h3>
+            <div className="cf-advanced-fields">
+              <label>Connect timeout (s)
                 <input type="number" min={0} value={connectTimeout} onChange={e => setConnectTimeout(e.target.value)} placeholder="default" />
               </label>
-              {/* Blank and 0 are different answers and the placeholder says so:
-                  blank defers to Settings, 0 exempts this connection from a
-                  global deadline someone else set. */}
-              <label style={{ flex: 1 }} title={
-                'Kill a query on this connection after this many seconds. '
-                + 'Leave blank to use the Settings value; 0 means no deadline.'}>
+              <label title={'Kill a query on this connection after this many seconds. Leave blank to use the Settings value; 0 means no deadline.'}>
                 Query timeout (s)
                 <input type="number" min={0} value={queryTimeout}
-                       onChange={e => setQueryTimeout(e.target.value)}
-                       placeholder="from Settings" />
+                  onChange={e => setQueryTimeout(e.target.value)} placeholder="from Settings" />
               </label>
-              {/* PostgreSQL is the only engine that carries this: it becomes
-                  the startup `application_name` and shows in
-                  pg_stat_activity. MySQL's equivalent is the `program_name`
-                  connection attribute, which is frozen into the handshake and
-                  which sqlx gives us no way to send — so for every other
-                  engine the field is not shown at all, rather than accepting
-                  a value the server will never see. */}
               {engine === 'postgres' && (
-                <label style={{ flex: 1 }}>
-                  Application name
-                  <input value={applicationName} onChange={e => setApplicationName(e.target.value)}
-                         placeholder="TxUI" />
+                <label>Application name
+                  <input value={applicationName} onChange={e => setApplicationName(e.target.value)} placeholder="TxUI" />
+                </label>
+              )}
+              {engine === 'mysql' && (
+                <>
+                  <label>Charset
+                    <input value={charset} onChange={e => setCharset(e.target.value)} placeholder="utf8mb4" />
+                  </label>
+                  <label>Collation
+                    <input value={collation} onChange={e => setCollation(e.target.value)} placeholder="server default" />
+                  </label>
+                  <label className="cf-advanced-wide">Session time zone{' '}
+                    <span className="form-hint">(blank = UTC)</span>
+                    <input value={timeZone} onChange={e => setTimeZone(e.target.value)}
+                      placeholder="SYSTEM, +02:00, Europe/Prague" list="txui-tz-suggestions" />
+                    <datalist id="txui-tz-suggestions">
+                      <option value="SYSTEM">Match the server&rsquo;s own zone</option>
+                      <option value="+00:00">UTC</option>
+                    </datalist>
+                    <p className="form-hint">
+                      <code>SYSTEM</code> matches the mysql CLI. Named zones need the server&rsquo;s time-zone tables.
+                    </p>
+                  </label>
+                </>
+              )}
+              {engine !== 'redis' && engine !== 'sqlite' && engine !== 'parquet' && engine !== 'duckdb' && engine !== 'mongodb' && engine !== 'sqlserver' && (
+                <label className="cf-advanced-wide">Statement timeout{' '}
+                  <span className="form-hint">(seconds; blank = server default)</span>
+                  <input type="number" min={0} value={stmtTimeout}
+                    onChange={e => setStmtTimeout(e.target.value)} placeholder="e.g. 30" />
+                  <p className="form-hint">
+                    {engine === 'mysql'
+                      ? <><code>max_execution_time</code> — bounds read-only SELECTs only, not writes.</>
+                      : engine === 'clickhouse'
+                      ? <><code>max_execution_time</code>, applied to every query.</>
+                      : <><code>statement_timeout</code> — reads and writes alike.</>}
+                  </p>
                 </label>
               )}
             </div>
-            {/* Windows has no Unix domain sockets — MySQL there uses a named
-                pipe and PostgreSQL is TCP-only. The field is greyed rather
-                than removed: the form then has the same shape on every
-                desktop, and the reason travels with the control (hover) instead
-                of being a sentence that only exists while it is not offered. */}
-            <label {...unavailableProps('unix-socket')}>
-              Unix socket {engine === 'postgres' ? 'directory' : 'path'}{' '}
-              <span className="form-hint">
-                {available('unix-socket')
-                  ? <>(overrides host/port
-                      {engine === 'postgres' ? ' — takes the directory, not the socket file' : ''})</>
-                  : <>(not available on Windows — use host/port)</>}
-              </span>
-              <input
-                value={socketPath}
-                onChange={e => setSocketPath(e.target.value)}
-                disabled={!available('unix-socket')}
-                placeholder={engine === 'postgres' ? '/tmp' : '/var/run/mysqld/mysqld.sock'}
-              />
-            </label>
-            {/* charset/collation are MySQL handshake options — PostgreSQL takes
-                its encoding from the database, so showing them there implied a
-                setting that the backend silently ignores. */}
-            {engine === 'mysql' && (
-              <div className="form-row">
-                <label style={{ flex: 1 }}>Charset
-                  <input value={charset} onChange={e => setCharset(e.target.value)} placeholder="utf8mb4" />
-                </label>
-                <label style={{ flex: 1 }}>Collation
-                  <input value={collation} onChange={e => setCollation(e.target.value)} placeholder="server default" />
-                </label>
-              </div>
-            )}
-            {/* The driver pins sessions to UTC, which is why TxUI and the
-                mysql CLI can show the same TIMESTAMP two hours apart. The
-                field is where someone goes once the tuner has told them. */}
-            {engine === 'mysql' && (
-              <label>Session time zone{' '}
-                <span className="form-hint">(blank = UTC, as TxUI has always used)</span>
-                <input value={timeZone} onChange={e => setTimeZone(e.target.value)}
-                       placeholder="SYSTEM, +02:00, Europe/Prague" list="txui-tz-suggestions" />
-                <datalist id="txui-tz-suggestions">
-                  <option value="SYSTEM">Match the server&rsquo;s own zone</option>
-                  <option value="+00:00">UTC</option>
-                </datalist>
-                <p className="form-hint">
-                  Blank = UTC, so <code>TIMESTAMP</code> can differ from the{' '}
-                  <code>mysql</code> CLI — <code>SYSTEM</code> makes them agree.
-                  Named zones need the server&rsquo;s time-zone tables loaded.
-                </p>
+          </section>
+
+          <section className="cf-advanced-group">
+            <h3>Connection</h3>
+            <div className="cf-advanced-fields">
+              <label className="cf-advanced-wide" {...unavailableProps('unix-socket')}>
+                Unix socket {engine === 'postgres' ? 'directory' : 'path'}{' '}
+                <span className="form-hint">
+                  {available('unix-socket')
+                    ? <>(overrides host/port{engine === 'postgres' ? ' — directory, not socket file' : ''})</>
+                    : <>(not available on Windows — use host/port)</>}
+                </span>
+                <input value={socketPath} onChange={e => setSocketPath(e.target.value)}
+                  disabled={!available('unix-socket')}
+                  placeholder={engine === 'postgres' ? '/tmp' : '/var/run/mysqld/mysqld.sock'} />
               </label>
-            )}
-            <label>Init SQL <span className="form-hint">(run once per new pooled connection)</span>
-              <textarea value={initSql} onChange={e => setInitSql(e.target.value)} rows={2}
-                placeholder={engine === 'postgres'
-                  ? "SET statement_timeout = '30s';"
-                  : "SET time_zone = '+00:00';"}
-                style={{ resize: 'vertical', fontFamily: 'inherit' }} />
-            </label>
-            <label>Log directory <span className="form-hint">(writes &lt;dir&gt;/&lt;connection&gt;.log; enable in Settings → Logging)</span>
-              <input value={logDir} onChange={e => setLogDir(e.target.value)} placeholder="/var/log/txui" />
-            </label>
-            {engine === 'mysql' && (
-              <label className="form-check">
-                <input type="checkbox" checked={enableCleartext} onChange={e => setEnableCleartext(e.target.checked)} />
-                Enable cleartext auth plugin (mysql_clear_password — needed for PAM)
+              <label className="cf-advanced-wide">Log directory{' '}
+                <span className="form-hint">(enable in Settings → Logging)</span>
+                <input value={logDir} onChange={e => setLogDir(e.target.value)} placeholder="/var/log/txui" />
               </label>
-            )}
-            <label>Extra params <span className="form-hint">({engine === 'postgres' ? 'startup options' : 'SET SESSION key = value'})</span>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {extraRows.map((r, i) => (
-                  <div key={i} className="cf-pair">
-                    <input value={r.k} placeholder="key" style={{ flex: 1 }}
-                      onChange={e => setExtraRows(prev => prev.map((x, j) => j === i ? { ...x, k: e.target.value } : x))} />
-                    <input value={r.v} placeholder="value" style={{ flex: 1 }}
-                      onChange={e => setExtraRows(prev => prev.map((x, j) => j === i ? { ...x, v: e.target.value } : x))} />
-                    <button type="button" title="Remove" style={{ width: 28 }}
-                      onClick={() => setExtraRows(prev => prev.filter((_, j) => j !== i))}>×</button>
-                  </div>
-                ))}
-                <button type="button" style={{ alignSelf: 'flex-start' }}
-                  onClick={() => setExtraRows(prev => [...prev, { k: '', v: '' }])}>+ add param</button>
-              </div>
-              {/* This field is the general escape hatch, and nothing said so —
-                  people were asking for driver options that were already
-                  reachable here. Naming a few makes the shape obvious. */}
+              <label className="cf-advanced-wide">Init SQL{' '}
+                <span className="form-hint">(once per pooled connection)</span>
+                <textarea value={initSql} onChange={e => setInitSql(e.target.value)} rows={2}
+                  placeholder={engine === 'postgres' ? "SET statement_timeout = '30s';" : "SET time_zone = '+00:00';"}
+                  style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+              </label>
               {engine === 'mysql' && (
-                <p className="form-hint">
-                  Any <code>SET SESSION</code> option — e.g. <code>max_allowed_packet</code>,{' '}
-                  <code>sql_mode</code>, <code>net_read_timeout</code> — applied to every
-                  pooled connection.
-                </p>
+                <label className="form-check cf-advanced-wide">
+                  <input type="checkbox" checked={enableCleartext} onChange={e => setEnableCleartext(e.target.checked)} />
+                  Enable cleartext auth plugin (mysql_clear_password — needed for PAM)
+                </label>
               )}
-            </label>
-            <label>Pool <span className="form-hint">(blank = backend defaults)</span>
-              <div className="form-row">
-                <input type="number" min={0} value={poolMax} onChange={e => setPoolMax(e.target.value)} placeholder="max conns" style={{ flex: 1 }} />
-                <input type="number" min={0} value={poolAcquire} onChange={e => setPoolAcquire(e.target.value)} placeholder="acquire s" style={{ flex: 1 }} />
-                <input type="number" min={0} value={poolIdle} onChange={e => setPoolIdle(e.target.value)} placeholder="idle s" style={{ flex: 1 }} />
+            </div>
+          </section>
+
+          <section className="cf-advanced-group">
+            <h3>Driver &amp; pool</h3>
+            <div className="cf-advanced-fields">
+              {engine === 'clickhouse' && (
+                <div className="cf-advanced-wide">
+                  <span className="form-hint">Memory &amp; row ceilings (blank / 0 = no limit)</span>
+                  <div className="cf-advanced-fields">
+                    <label>RAM (bytes)
+                      <input type="number" min={0} value={chMaxMemory} disabled={readOnly}
+                        onChange={e => setChMaxMemory(e.target.value)} placeholder="max_memory_usage" />
+                    </label>
+                    <label>Rows scanned
+                      <input type="number" min={0} value={chMaxRows} disabled={readOnly}
+                        onChange={e => setChMaxRows(e.target.value)} placeholder="max_rows_to_read" />
+                    </label>
+                  </div>
+                  {readOnly && <p className="form-hint">Turn off READ-ONLY to set these — <code>readonly=1</code> makes the server reject them.</p>}
+                </div>
+              )}
+              <div className="cf-advanced-wide">
+                <span className="form-hint">Pool (blank = backend defaults)</span>
+                <div className="cf-pool-fields">
+                  <label>Max connections
+                    <input type="number" min={0} value={poolMax} onChange={e => setPoolMax(e.target.value)} placeholder="default" />
+                  </label>
+                  <label>Acquire (s)
+                    <input type="number" min={0} value={poolAcquire} onChange={e => setPoolAcquire(e.target.value)} placeholder="default" />
+                  </label>
+                  <label>Idle (s)
+                    <input type="number" min={0} value={poolIdle} onChange={e => setPoolIdle(e.target.value)} placeholder="default" />
+                  </label>
+                </div>
               </div>
-            </label>
-            {engine !== 'redis' && engine !== 'sqlite' && engine !== 'parquet' && engine !== 'duckdb' && engine !== 'mongodb' && engine !== 'sqlserver' && (
-              <label>Statement timeout <span className="form-hint">(seconds; blank = leave the server alone)</span>
-                <input type="number" min={0} value={stmtTimeout}
-                  onChange={e => setStmtTimeout(e.target.value)} placeholder="e.g. 30" />
-                <p className="form-hint">
-                  {engine === 'mysql'
-                    ? <><code>max_execution_time</code> — bounds read-only SELECTs only,
-                      not writes.</>
-                    : engine === 'clickhouse'
-                    ? <><code>max_execution_time</code>, applied to every query.</>
-                    : <><code>statement_timeout</code> — reads and writes alike.</>}
-                </p>
+              <label className="cf-advanced-wide">Extra params{' '}
+                <span className="form-hint">({engine === 'postgres' ? 'startup options' : 'SET SESSION key = value'})</span>
+                <div className="cf-extra-params">
+                  {extraRows.map((r, i) => (
+                    <div key={i} className="cf-pair">
+                      <input value={r.k} placeholder="key" style={{ flex: 1 }}
+                        onChange={e => setExtraRows(prev => prev.map((x, j) => j === i ? { ...x, k: e.target.value } : x))} />
+                      <input value={r.v} placeholder="value" style={{ flex: 1 }}
+                        onChange={e => setExtraRows(prev => prev.map((x, j) => j === i ? { ...x, v: e.target.value } : x))} />
+                      <button type="button" title="Remove" style={{ width: 28 }}
+                        onClick={() => setExtraRows(prev => prev.filter((_, j) => j !== i))}>×</button>
+                    </div>
+                  ))}
+                  <button type="button" style={{ alignSelf: 'flex-start' }}
+                    onClick={() => setExtraRows(prev => [...prev, { k: '', v: '' }])}>+ add param</button>
+                </div>
+                {engine === 'mysql' && (
+                  <p className="form-hint">
+                    Any <code>SET SESSION</code> option — e.g. <code>max_allowed_packet</code>,{' '}
+                    <code>sql_mode</code>, <code>net_read_timeout</code> — applied to every pooled connection.
+                  </p>
+                )}
               </label>
-            )}
-          </div>
+            </div>
+          </section>
+        </div>
       )}
 
       {error && <p className="error">{error}</p>}
@@ -1521,6 +1524,10 @@ export function ConnectionForm({ initial, initialGroup, onSave, onCancel }: Prop
           }}
         />
       )}
+      <button type="button" className="cf-resize-handle" title="Resize connection window"
+        aria-label="Resize connection window"
+        onPointerDown={onResizeDown} onPointerMove={onResizeMove}
+        onPointerUp={onResizeUp} onPointerCancel={onResizeUp}>◢</button>
     </div>
   );
 }

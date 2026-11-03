@@ -477,9 +477,14 @@ body.zen .status-bar {
 
 /* ── Connection form ────────────────────────────────────────── */
 .conn-form {
-  max-width: 960px;
+  position: relative;
+  box-sizing: border-box;
+  width: min(720px, calc(100% - 32px));
+  max-width: calc(100% - 32px);
+  max-height: calc(100vh - 32px);
   margin: 16px auto;
   padding: 14px 18px;
+  overflow: auto;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -493,6 +498,13 @@ body.zen .status-bar {
    credentials are copied out of whatever window sits behind it. */
 .conn-form h2.cf-title { cursor: grab; user-select: none; touch-action: none; }
 .conn-form h2.cf-title:active { cursor: grabbing; }
+.cf-resize-handle {
+  position: absolute; right: 2px; bottom: 2px; z-index: 2;
+  width: 20px; height: 20px; padding: 0; border: 0; background: transparent;
+  color: var(--text2); cursor: nwse-resize; touch-action: none;
+  display: grid; place-items: center; font-size: calc(13px * var(--font-scale, 1));
+}
+.conn-form .form-actions { padding-right: 14px; }
 
 /* Sections sit on tabs (Connection / Options / SSH·SSL / Advanced) — the old
    two-column sprawl pushed Advanced's three-across rows past the card edge. */
@@ -508,6 +520,20 @@ body.zen .status-bar {
 .conn-form .form-row select { min-width: 0; }
 .conn-form .form-section { margin-top: 0; padding: 8px 10px; }
 .conn-form .form-subsection { margin-top: 8px; }
+.cf-advanced { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; margin-top: 8px; }
+.cf-advanced-group { min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.cf-advanced-group:last-child { grid-column: 1 / -1; }
+.cf-advanced-group h3 { margin: 0 0 8px; color: var(--text); font-size: calc(12px * var(--font-scale, 1)); font-weight: 600; }
+.cf-advanced-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; align-items: start; }
+.cf-advanced-fields > * { min-width: 0; }
+.cf-advanced-wide { grid-column: 1 / -1; }
+.cf-pool-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }
+.cf-extra-params { display: flex; flex-direction: column; gap: 4px; }
+@media (max-width: 700px) {
+  .cf-advanced { grid-template-columns: 1fr; }
+  .cf-advanced-group:last-child, .cf-advanced-wide { grid-column: auto; }
+  .cf-advanced-fields, .cf-pool-fields { grid-template-columns: 1fr; }
+}
 .conn-form .cf-ro, .conn-form .cf-prod-warn { margin-top: 0; }
 /* .conn-form label stacks vertically; section toggles are checkbox + title rows. */
 .conn-form label.form-section-toggle { flex-direction: row; justify-content: flex-start; }
