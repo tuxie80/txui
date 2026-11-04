@@ -1,5 +1,5 @@
 {
-  "version": "1.5.2",
+  "version": "1.5.3",
   "engines": [
     "mysql",
     "postgres",
@@ -934,12 +934,12 @@
     },
     {
       "id": "editor.goToObject",
-      "label": "Go to table under cursor",
+      "label": "Go to object under cursor (F12 also works)",
       "category": "Navigate",
-      "keys": "F12",
+      "keys": "Mod-l",
       "shortcut": {
-        "mac": "F12",
-        "win": "F12"
+        "mac": "⌘L",
+        "win": "Ctrl+L"
       }
     },
     {
@@ -1545,6 +1545,11 @@
       "default": "bar"
     },
     {
+      "name": "editorCursorBarWidth",
+      "key": "dbgui.editorCursorBarWidth",
+      "default": "1"
+    },
+    {
       "name": "editorCursorBlink",
       "key": "dbgui.editorCursorBlink",
       "default": true
@@ -1618,6 +1623,11 @@
       "name": "appFontSize",
       "key": "dbgui.appFontSize",
       "default": 13
+    },
+    {
+      "name": "tooltipDurationMs",
+      "key": "dbgui.tooltipDurationMs",
+      "default": 1000
     },
     {
       "name": "exportEol",
@@ -1741,6 +1751,11 @@
       "name": "keepAlive",
       "key": "dbgui.keepAlive",
       "default": true
+    },
+    {
+      "name": "autoCheckUpdates",
+      "key": "dbgui.autoCheckUpdates",
+      "default": false
     },
     {
       "name": "autoUpdateMinor",
@@ -2949,7 +2964,7 @@
     "commands": 70,
     "engines": 9,
     "capabilities": 33,
-    "prefs": 45,
+    "prefs": 48,
     "dbaViews": 234
   }
 }

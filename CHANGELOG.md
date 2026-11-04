@@ -3,7 +3,7 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
-## [Unreleased]
+## [1.5.3] - 2026-11-04
 
 ### Added
 
@@ -26,6 +26,10 @@ this project follows semantic versioning.
 - **Query failures stay compact, dismissible and AI availability is honest** — server errors, actionable guidance and diagnostic actions use separate bounded regions instead of crushing the message into a viewport-height vertical strip. Go to error now translates the server's statement-relative line/position through the executed statement's buffer offset, so an error on line 7 no longer jumps to line 1. Fix with AI sits beside Go to error and Copy diagnostics, and a top-right × dismisses the panel. Fix with AI, editor AI commands and plan explanation share a live configuration check: when a required key is missing they stay visible but greyed with Settings → AI guidance and refuse activation. Saving or clearing a key updates every action immediately; local keyless providers remain available.
 - **Statement gutter timings persist correctly across every run mode** — each single run carries its caret/selection anchor through CodeMirror's edit reconciliation instead of always using the statement's first line. Invisible skipped placeholders no longer overwrite a visible red or green result when several semicolon-separated fragments share one physical line, so running `State\nsystem user;` no longer hides the earlier `Host;` timing on the preceding line. Script and multi-line selection runs share one accumulator instead of wiping earlier outcomes: unrelated timings survive, the latest finished run wins, and statements skipped after a stop keep their previous marker.
 - **Core UI interactions now have a real-browser release gate** — `dev/core_interactions.sh` drives single-cell and rectangular pointer selection, verifies highlighted and copied values across result switching, refreshes database options on open, checks Graphics for table-only and mixed SQL/browser results, verifies opt-in update scheduling, measures Settings tab fit, IAM geometry, palette size and Advanced layout, exercises pointer-driven Settings and connection-form resizing, reproduces compact syntax errors and AI availability transitions, and cleans up its Vite server and Chromium processes.
+
+### Security
+
+- **CVE-2026-111497 / Broccoli2Shell remains open in this release** — TxUI 1.5.3 still bundles DuckDB 2.0 with Brotli 1.1.0 and without the upstream `BLOCK_SWITCH` fix. DuckDB PR #27791 has now merged upstream, but that fix is not incorporated into this TxUI binary. Do not open untrusted Brotli-compressed Parquet through DuckDB or Parquet datasets: a malicious file could crash TxUI, corrupt memory or potentially execute code with the user's permissions. Re-encode with a patched tool to Snappy or Zstandard. Direct single-file Parquet inspection uses the safe Rust decoder and is unaffected; ordinary database connections and Rust HTTP clients do not expose this decoder. Updating Node.js, macOS, Homebrew or system Brotli protects local tooling only and does not repair the bundled binary. Details: [Broccoli2Shell advisory](https://broccoli2shell.com), [DuckDB PR #27791](https://github.com/duckdb/duckdb/pull/27791), [upstream Brotli fix](https://github.com/google/brotli/commit/0ed4268).
 
 ## [1.5.2] - 2026-11-02
 
