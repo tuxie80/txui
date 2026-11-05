@@ -328,6 +328,11 @@ test('a capability that only some engines have is not universally true', () => {
   assert.ok(enginesWith('writes').length < ENGINES.length);
 });
 
+test('native SQL script execution is MySQL-family only in the initial implementation', () => {
+  assert.deepEqual(enginesWith('sqlScript'), ['mysql']);
+  assert.equal(can('postgres', 'sqlScript'), false);
+});
+
 test('Query Store is SQL Server\'s alone — the others keep no plan history', () => {
   // MySQL's performance-schema digests and PostgreSQL's pg_stat_statements
   // both keep timings and neither keeps a plan, so neither can say "the plan

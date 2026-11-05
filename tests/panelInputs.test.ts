@@ -69,6 +69,7 @@ const PANELS: Entry[] = [
   { panel: 'maintenance', component: 'MaintenancePanel',  file: 'MaintenancePanel.tsx',   mechanism: 'schemaPick' },
   { panel: 'documenter', component: 'DocumenterPanel',    file: 'DocumenterPanel.tsx',    mechanism: 'schemaPick' },
   { panel: 'datagen',    component: 'DataGenPanel',       file: 'DataGenPanel.tsx',       mechanism: 'inline' },
+  { panel: 'sqlscript',  component: 'SqlScriptPanel',     file: 'SqlScriptPanel.tsx',     mechanism: 'inline' },    // exempt: MySQL-only
 ];
 
 /** Engines with no default-database plumbing — currentDb never arrives. */

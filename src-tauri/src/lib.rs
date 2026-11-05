@@ -14,9 +14,10 @@ pub mod secretstore;
 pub mod password_exec;
 pub mod connexport;
 pub mod tuner;
+pub mod sqlscript;
 mod commands;
 
-use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, sqlscript::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -501,6 +502,10 @@ pub fn run() {
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/csvimport.png"))?)
                 .build(app)?;
+            let t_sqlscript = IconMenuItemBuilder::with_id("tool:sqlscript", "SQL script")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/sqlscript.png"))?)
+                .build(app)?;
             let t_playground = IconMenuItemBuilder::with_id("tool:playground", "Playground")
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/playground.png"))?)
@@ -574,6 +579,7 @@ pub fn run() {
             let m_data = SubmenuBuilder::new(app, "Data")
                 .item(&t_datagen)
                 .item(&t_csvimport)
+                .item(&t_sqlscript)
                 .item(&t_colprofile)
                 .build()?;
             let m_findcompare = SubmenuBuilder::new(app, "Find & Compare")
@@ -888,6 +894,9 @@ pub fn run() {
             probe_dump_tools,
             run_dump_tool,
             cancel_dump_tool,
+            // built-in session-scoped SQL script runner
+            run_sql_script,
+            cancel_sql_script,
             // data generator (chunked streaming pipeline)
             generate_preview,
             generate_data,

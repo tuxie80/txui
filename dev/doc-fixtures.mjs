@@ -802,6 +802,24 @@ export function installMock(payload) {
     panel_query: args =>
       (grants && args && typeof args.token === 'string'
         && args.token.startsWith('privileges-')) ? grants : panel,
+    run_sql_script: args => {
+      const ch = args && args.onEvent;
+      const path = String((args && args.path) ?? '/tmp/flashback.sql.gz');
+      if (ch && ch.onmessage) {
+        const emit = event => ch.onmessage(event);
+        emit({ type: 'started', path, compression: 'gzip', source_total: 1048576, database: 'shop', max_statement_bytes: 67108864 });
+        emit({ type: 'phase', phase: 'validating', statements_total: null });
+        emit({ type: 'progress', phase: 'validating', source_bytes: 1048576, source_total: 1048576, uncompressed_bytes: 8388608, statements_seen: 3, statements_total: null, executed: 0, failed: 0, rows_affected: 0, current_line: null, backend_id: null });
+        emit({ type: 'phase', phase: 'executing', statements_total: 3 });
+        emit({ type: 'progress', phase: 'executing', source_bytes: 524288, source_total: 1048576, uncompressed_bytes: 4194304, statements_seen: 1, statements_total: 3, executed: 0, failed: 0, rows_affected: 0, current_line: 8, backend_id: 4711 });
+        emit({ type: 'statement_done', number: 1, line: 8, bytes: 1024, rows_affected: 0, ms: 4 });
+        emit({ type: 'statement_done', number: 2, line: 12, bytes: 2048, rows_affected: 1, ms: 9 });
+        emit({ type: 'statement_done', number: 3, line: 42, bytes: 4096, rows_affected: 1, ms: 17 });
+        emit({ type: 'progress', phase: 'executing', source_bytes: 1048576, source_total: 1048576, uncompressed_bytes: 8388608, statements_seen: 3, statements_total: 3, executed: 3, failed: 0, rows_affected: 2, current_line: 42, backend_id: 4711 });
+        emit({ type: 'done', ok: true, cancelled: false, partial: false, ms: 132, statements: 3, executed: 3, failed: 0, rows_affected: 2, uncompressed_bytes: 8388608, error: null });
+      }
+      return { statements: 3, executed: 3, rows_affected: 2, uncompressed_bytes: 8388608, ms: 132 };
+    },
     ...(gal ? {
       // The ❖ Galera tab's probe set (GaleraClusterView.tsx): detection, the
       // 5 s STATUS/VARIABLES poll, the ops probes. Anything else (the async

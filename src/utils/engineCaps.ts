@@ -256,6 +256,8 @@ export interface EngineCaps {
   dataGen: boolean;
   /** CSV can be loaded into a table. */
   csvImport: boolean;
+  /** Plain/gzipped SQL scripts can run on a dedicated native connection. */
+  sqlScript: boolean;
   /** The SQL quality audit (EXPLAIN + statistics + index advice). */
   sqlQuality: boolean;
   /** Statements can be parameterised with `:name` variables before running. */
@@ -288,13 +290,13 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
   mysql: {
     sql: true, transactions: true, databaseSelect: true, processList: true,
     serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, pgWorkload: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
-    csvImport: true, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
+    csvImport: true, sqlScript: true, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
     statementTimeout: true,
   },
   postgres: {
     sql: true, transactions: true, databaseSelect: true, processList: true,
     serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, pgWorkload: true, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
-    csvImport: true, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
+    csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
     statementTimeout: true,
   },
   clickhouse: {
@@ -311,7 +313,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // speaks CH natively (backslash-first literal quoting, no transaction
     // wrap — CH has none — TRUNCATE for the clear-first option). dataGen
     // stays false: that writer only speaks MySQL/PG wire protocols.
-    dataGen: false, csvImport: true, sqlQuality: true, sqlVariables: true,
+    dataGen: false, csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true,
     // The designer's ClickHouse dialect: CREATE with engine + MergeTree
     // clauses, and the narrow ALTER (columns, TTL) it genuinely has.
     writes: true, tableDesigner: true, statementTimeout: true,
@@ -321,7 +323,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // statement to bound. CLIENT LIST / CLIENT KILL do give a process list.
     sql: false, transactions: false, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
-    dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: false,
+    dataGen: false, csvImport: false, sqlScript: false, sqlQuality: false, sqlVariables: false,
     writes: true, tableDesigner: false, statementTimeout: false,
   },
   sqlite: {
@@ -339,7 +341,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // none; the gap is registered in utils/engineGaps.ts.
     sql: true, transactions: true, databaseSelect: false, processList: false,
     serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true,
-    dataGen: false, csvImport: true, sqlQuality: true, sqlVariables: true,
+    dataGen: false, csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: true, statementTimeout: false,
   },
   parquet: {
@@ -350,7 +352,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // in utils/engineGaps.ts.
     sql: true, transactions: false, databaseSelect: false, processList: false,
     serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
-    dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: true,
+    dataGen: false, csvImport: false, sqlScript: false, sqlQuality: false, sqlVariables: true,
     writes: false, tableDesigner: false, statementTimeout: false,
   },
   duckdb: {
@@ -368,7 +370,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // SQLite. The table designer has no DuckDB dialect; it refuses gracefully.
     sql: true, transactions: true, databaseSelect: false, processList: false,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
-    dataGen: false, csvImport: false, sqlQuality: true, sqlVariables: true,
+    dataGen: false, csvImport: false, sqlScript: false, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: false, statementTimeout: false,
   },
   mongodb: {
@@ -384,7 +386,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // claim one.
     sql: false, transactions: false, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
-    dataGen: false, csvImport: false, sqlQuality: false, sqlVariables: false,
+    dataGen: false, csvImport: false, sqlScript: false, sqlQuality: false, sqlVariables: false,
     writes: false, tableDesigner: false, statementTimeout: false,
   },
   sqlserver: {
@@ -420,7 +422,7 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     // a SqlServer arm (before, the timer fired and nothing happened).
     sql: true, transactions: true, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: true, sequences: true, longQueryWatch: true, replication: false,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: false, pgWorkload: false, queryStore: true, maintenance: true, tuner: true, erDiagram: true,
-    dataGen: true, csvImport: true, sqlQuality: true, sqlVariables: true,
+    dataGen: true, csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true,
     writes: true, tableDesigner: true, statementTimeout: false,
   },
 };

@@ -58,6 +58,7 @@ futures-util     = "0.3"
 chrono           = "0.4"
 rust_decimal     = "1"
 csv              = "1"
+flate2           = "1.1.10"
 
 # Serialization
 serde            = { version = "1", features = ["derive"] }

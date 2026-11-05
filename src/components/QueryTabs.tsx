@@ -71,6 +71,7 @@ const PlaygroundPanel = lazy(() => import('./PlaygroundPanel').then(m => ({ defa
 const KillPicker = lazy(() => import('./KillPicker').then(m => ({ default: m.KillPicker })));
 import type { KillContext, StatementRun } from './SqlEditor';
 const CsvImportPanel = lazy(() => import('./CsvImportPanel').then(m => ({ default: m.CsvImportPanel })));
+const SqlScriptPanel = lazy(() => import('./SqlScriptPanel').then(m => ({ default: m.SqlScriptPanel })));
 const SqlQualityPanel = lazy(() => import('./SqlQualityPanel').then(m => ({ default: m.SqlQualityPanel })));
 const DataBrowser = lazy(() => import('./DataBrowser').then(m => ({ default: m.DataBrowser })));
 import { SchemaStore } from '../store/schema';
@@ -365,6 +366,7 @@ const PANEL_ENGINE_CAP: Record<string, Parameters<typeof can>[1] | undefined> = 
   erdiagram:   'erDiagram',
   datagen:     'dataGen',
   csvimport:   'csvImport',
+  sqlscript:   'sqlScript',
   quality:     'sqlQuality',
   txshell:     'sql',
   views:       'sql',
@@ -799,6 +801,12 @@ const PANEL_META: Record<string, {
       <CsvImportPanel sessionId={c.session.sessionId} engine={c.session.engine}
           environment={c.session.environment} readOnly={c.session.readOnly} onClose={close}
           onSchemaChanged={() => window.dispatchEvent(new CustomEvent('dbgui:schema-changed'))} />,
+  },
+  sqlscript: {
+    label: 'SQL script',
+    render: (c, close) => withDbScope(c,
+      <SqlScriptPanel session={c.session} schema={c.currentDb || null} onClose={close}
+        onSchemaChanged={() => window.dispatchEvent(new CustomEvent('dbgui:schema-changed'))} />),
   },
   playground: {
     label: 'Playground',

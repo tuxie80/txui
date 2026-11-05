@@ -3,6 +3,16 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **Native, session-scoped `.sql` and `.sql.gz` runner for MySQL/MariaDB** — Data → SQL script validates the complete local file before any write (gzip/checksums, incremental UTF-8, MySQL statement boundaries and `DELIMITER`, client-command rejection, statement limits and read-only/prod guards), then executes a second bounded streaming pass sequentially on one dedicated physical connection. No external client, shell, `zcat`, decompressed temporary file or second SSH tunnel is used on macOS, Windows or Linux; an already connected SSH-backed session reuses its existing tunnel. The panel exposes compressed/uncompressed bytes, statement counts and source lines, per-statement timing/outcome, rows affected, backend id and final status. Cancellation reaches the running statement; failures and cancellation state plainly that committed work is not rolled back.
+
+### Changed
+
+- **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
+
 ## [1.5.3] - 2026-11-04
 
 ### Added

@@ -262,7 +262,7 @@ function engineMatrixSection() {
     dbSearch: 'Search every table for a value', findUsages: 'Find usages',
     columnProfile: 'Column profiling', routines: 'Stored routines', sequences: 'Sequences',
     tableDesigner: 'Table designer', namespaceDdl: 'Create / drop schemas',
-    dataGen: 'Data generator', csvImport: 'CSV import',
+    dataGen: 'Data generator', csvImport: 'CSV import', sqlScript: 'Native SQL script runner',
     dataCompare: 'Data compare & reconcile', userAdmin: 'Users & permissions',
   };
 
@@ -277,7 +277,7 @@ function engineMatrixSection() {
     ['Understanding a schema', 'Reading a database you did not write.',
       ['erDiagram', 'documenter', 'dbSearch', 'findUsages', 'columnProfile', 'routines', 'sequences']],
     ['Changing a schema & its data', 'The write-capable tooling.',
-      ['tableDesigner', 'namespaceDdl', 'dataGen', 'csvImport', 'dataCompare', 'userAdmin']],
+      ['tableDesigner', 'namespaceDdl', 'dataGen', 'csvImport', 'sqlScript', 'dataCompare', 'userAdmin']],
   ];
 
   // Neither map may silently lose a capability: a flag missing from CAP_LABEL

@@ -237,10 +237,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="overview" class="doc-section">
   <h1 id="txui-v1-5-3">TxUI <span class="ver">v1.5.3</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 37 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.3.</p>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 38 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.3.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
-    <div class="card"><div class="big">37</div><div>tool panels</div></div>
+    <div class="card"><div class="big">38</div><div>tool panels</div></div>
     <div class="card"><div class="big">70</div><div>editor commands</div></div>
     <div class="card"><div class="big">234</div><div>DBA views</div></div>
     <div class="card"><div class="big">48</div><div>settings</div></div>
@@ -261,8 +261,8 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </div>
   <div class="scroll-x"><table class="ref matrix" id="engTable">
     <thead>
-      <tr><th>Capability</th><th class="e-postgres">PostgreSQL</th><th class="e-mysql">MySQL</th><th class="e-sqlserver">SQL Server</th><th class="e-clickhouse">ClickHouse</th><th class="e-sqlite">SQLite</th><th class="e-duckdb">DuckDB</th><th class="e-redis">Redis</th><th class="e-parquet">Parquet</th><th class="e-mongodb">MongoDB</th></tr>
-      <tr class="cap-score"><th>of 33 capabilities</th><th class="ctr">32</th><th class="ctr">31</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">2</th><th class="ctr">2</th></tr>
+      <tr><th>Capability</th><th class="e-mysql">MySQL</th><th class="e-postgres">PostgreSQL</th><th class="e-sqlserver">SQL Server</th><th class="e-clickhouse">ClickHouse</th><th class="e-sqlite">SQLite</th><th class="e-duckdb">DuckDB</th><th class="e-redis">Redis</th><th class="e-parquet">Parquet</th><th class="e-mongodb">MongoDB</th></tr>
+      <tr class="cap-score"><th>of 34 capabilities</th><th class="ctr">32</th><th class="ctr">32</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">2</th><th class="ctr">2</th></tr>
     </thead>
     <tbody>
   <tr class="cap-group"><td colspan="10"><b>Running queries</b> <span class="dim">What you can do with the connection itself.</span></td></tr>
@@ -403,7 +403,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
       <div class="cap-unlocks">Opens: <a href="#panel-pgworkload">PostgreSQL Workload</a></div>
       <code class="cap-key">pgWorkload</code>
     </td>
-    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+    <td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
 <tr data-search="query store — plan history querystore the engine keeps a history of query plans, and can be told to use one. not &quot;has query statistics&quot; — mysql&#39;s digests and postgresql&#39;s `pg_stat_statements` both have those, and neither keeps a plan or can pin it. this flag means the two things that make a regression actionable: every plan a query has had, and `sp_query_store_force_plan`. query store">
     <td class="cap">
@@ -553,6 +553,15 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
+<tr data-search="native sql script runner sqlscript plain/gzipped sql scripts can run on a dedicated native connection. sql script">
+    <td class="cap">
+      <b>Native SQL script runner</b>
+      <div class="cap-desc">Plain/gzipped SQL scripts can run on a dedicated native connection.</div>
+      <div class="cap-unlocks">Opens: <a href="#panel-sqlscript">SQL script</a></div>
+      <code class="cap-key">sqlScript</code>
+    </td>
+    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+  </tr>
 <tr data-search="data compare &amp; reconcile datacompare two tables can be compared row by row, across sessions, and a reconciliation script generated. both sides must be the same engine — the panel filters the session list on it — because the generated insert/update/delete is written in one dialect, and the value representations have to agree before a diff means anything.">
     <td class="cap">
       <b>Data compare &amp; reconcile</b>
@@ -573,7 +582,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </tr></tbody>
   </table></div>
   <h2 id="panels-every-engine-gets">Panels every engine gets</h2>
-  <p>8 of the 37 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
+  <p>8 of the 38 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
   <h2 id="panels-only-one-engine-can-have">Panels only one engine can have</h2>
   <p>7 more panels are gated on the engine itself rather than on a capability, because nothing else has an equivalent to expose:</p>
   <ul class="cap-exclusives">
@@ -1344,77 +1353,77 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="coverage" class="doc-section">
   <h1 id="feature-coverage-matrix">Feature-coverage matrix</h1>
-  <p class="lede">All 37 tool panels, cross-checked against the source at build time: menu group, supported engines, documentation and screenshot coverage.</p>
-  <p class="lede"><b>35/37</b> panels have screenshots. Panels marked <span class="na">NA</span> need a live server to render meaningfully and are still fully documented in text.</p>
+  <p class="lede">All 38 tool panels, cross-checked against the source at build time: menu group, supported engines, documentation and screenshot coverage.</p>
+  <p class="lede"><b>35/38</b> panels have screenshots. Panels marked <span class="na">NA</span> need a live server to render meaningfully and are still fully documented in text.</p>
   <div class="toolbar">
     <input id="covFilter" class="filter" placeholder="Filter panels…" oninput="filterTable('covFilter','covTable')">
     <select id="covEngine" class="filter" onchange="filterEngine('covEngine','covTable')">
       <option value="">All engines</option>
-      <option value="postgres">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlserver">SQL Server</option><option value="clickhouse">ClickHouse</option><option value="sqlite">SQLite</option><option value="duckdb">DuckDB</option><option value="redis">Redis</option><option value="parquet">Parquet</option><option value="mongodb">MongoDB</option>
+      <option value="mysql">MySQL</option><option value="postgres">PostgreSQL</option><option value="sqlserver">SQL Server</option><option value="clickhouse">ClickHouse</option><option value="sqlite">SQLite</option><option value="duckdb">DuckDB</option><option value="redis">Redis</option><option value="parquet">Parquet</option><option value="mongodb">MongoDB</option>
     </select>
   </div>
   <table class="ref" id="covTable">
     <thead><tr><th>Panel</th><th>Group</th><th>Engines</th><th>Documented</th><th>Screenshot</th></tr></thead>
-    <tbody><tr data-search="processes activity processes" data-engines="postgres mysql sqlserver clickhouse redis mongodb">
+    <tbody><tr data-search="processes activity processes" data-engines="mysql postgres sqlserver clickhouse redis mongodb">
       <td><a href="#panel-processes">Processes</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="replication activity replication" data-engines="postgres mysql">
+<tr data-search="replication activity replication" data-engines="mysql postgres">
       <td><a href="#panel-replication">Replication</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="dba views server dbaviews" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="dba views server dbaviews" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-dbaviews">DBA views</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="tuner server tuner" data-engines="postgres mysql sqlserver clickhouse sqlite redis">
+<tr data-search="tuner server tuner" data-engines="mysql postgres sqlserver clickhouse sqlite redis">
       <td><a href="#panel-tuner">Tuner</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="routines schema routines" data-engines="postgres mysql sqlserver">
+<tr data-search="routines schema routines" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-routines">Routines</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="txshell sql txshell" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb parquet">
+<tr data-search="txshell sql txshell" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb parquet">
       <td><a href="#panel-txshell">TxShell</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="find find &amp; compare find" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="find find &amp; compare find" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-find">Find</a></td>
       <td class="dim">Find &amp; Compare</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="column profile data colprofile" data-engines="postgres mysql sqlserver">
+<tr data-search="column profile data colprofile" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-colprofile">Column profile</a></td>
       <td class="dim">Data</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="sequences schema sequences" data-engines="postgres mysql sqlserver">
+<tr data-search="sequences schema sequences" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-sequences">Sequences</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1425,10 +1434,10 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="views schema views" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb parquet">
+<tr data-search="views schema views" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb parquet">
       <td><a href="#panel-views">Views</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1439,17 +1448,17 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="table designer schema designer" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="table designer schema designer" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-designer">Table designer</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="compare find &amp; compare compare" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="compare find &amp; compare compare" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-compare">Compare</a></td>
       <td class="dim">Find &amp; Compare</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1460,10 +1469,10 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="statement statistics insights stmtstats" data-engines="postgres mysql">
+<tr data-search="statement statistics insights stmtstats" data-engines="mysql postgres">
       <td><a href="#panel-stmtstats">Statement statistics</a></td>
       <td class="dim">Insights</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1488,10 +1497,10 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="maintenance server maintenance" data-engines="postgres mysql sqlserver sqlite">
+<tr data-search="maintenance server maintenance" data-engines="mysql postgres sqlserver sqlite">
       <td><a href="#panel-maintenance">Maintenance</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1502,17 +1511,17 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="documenter schema documenter" data-engines="postgres mysql sqlserver">
+<tr data-search="documenter schema documenter" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-documenter">Documenter</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="fleet server fleet" data-engines="postgres mysql sqlserver">
+<tr data-search="fleet server fleet" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-fleet">Fleet</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1523,59 +1532,66 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="er diagram schema erdiagram" data-engines="postgres mysql sqlserver sqlite">
+<tr data-search="er diagram schema erdiagram" data-engines="mysql postgres sqlserver sqlite">
       <td><a href="#panel-erdiagram">ER diagram</a></td>
       <td class="dim">Schema</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="data generator data datagen" data-engines="postgres mysql sqlserver">
+<tr data-search="data generator data datagen" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-datagen">Data generator</a></td>
       <td class="dim">Data</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="csv import data csvimport" data-engines="postgres mysql sqlserver clickhouse sqlite">
+<tr data-search="csv import data csvimport" data-engines="mysql postgres sqlserver clickhouse sqlite">
       <td><a href="#panel-csvimport">CSV import</a></td>
       <td class="dim">Data</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="playground activity playground" data-engines="postgres mysql sqlserver">
+<tr data-search="sql script data sqlscript" data-engines="mysql">
+      <td><a href="#panel-sqlscript">SQL script</a></td>
+      <td class="dim">Data</td>
+      <td><span class="eng-badge e-mysql">MySQL</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+    </tr>
+<tr data-search="playground activity playground" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-playground">Playground</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="sql quality sql quality" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb">
+<tr data-search="sql quality sql quality" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb">
       <td><a href="#panel-quality">SQL Quality</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="server server serverinfo" data-engines="postgres mysql sqlserver clickhouse duckdb redis mongodb">
+<tr data-search="server server serverinfo" data-engines="mysql postgres sqlserver clickhouse duckdb redis mongodb">
       <td><a href="#panel-serverinfo">Server</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="watch activity watch" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="watch activity watch" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-watch">Watch</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="locks &amp; deadlocks activity locks" data-engines="postgres mysql sqlserver">
+<tr data-search="locks &amp; deadlocks activity locks" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-locks">Locks &amp; Deadlocks</a></td>
       <td class="dim">Activity</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
@@ -1586,31 +1602,31 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
     </tr>
-<tr data-search="users server users" data-engines="postgres mysql sqlserver">
+<tr data-search="users server users" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-users">Users</a></td>
       <td class="dim">Server</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="saved sql saved" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="saved sql saved" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-saved">Saved</a></td>
       <td class="dim">SQL</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="history insights history" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="history insights history" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-history">History</a></td>
       <td class="dim">Insights</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr>
-<tr data-search="incident timeline insights timeline" data-engines="postgres mysql sqlserver clickhouse sqlite duckdb redis parquet mongodb">
+<tr data-search="incident timeline insights timeline" data-engines="mysql postgres sqlserver clickhouse sqlite duckdb redis parquet mongodb">
       <td><a href="#panel-timeline">Incident timeline</a></td>
       <td class="dim">Insights</td>
-      <td><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
     </tr></tbody>
@@ -1619,12 +1635,12 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="panels" class="doc-section">
   <h1 id="tool-panels">Tool panels</h1>
-  <p class="lede">TxUI ships 37 tool panels, opened from the workspace menus (<b>Activity · Insights · Server · Schema · Data · Find & Compare · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
+  <p class="lede">TxUI ships 38 tool panels, opened from the workspace menus (<b>Activity · Insights · Server · Schema · Data · Find & Compare · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
   <figure><a class="shot-link" href="shots/dark/06-menu-activity.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="shots/dark/06-menu-activity.png" data-dark-src="shots/dark/06-menu-activity.png" data-light-src="shots/light/06-menu-activity.png" alt="Plugins menu" loading="lazy"></a><figcaption>The workspace menus — each panel is one click away, and only the panels the current engine supports appear.</figcaption></figure><h2 id="activity" class="group-h">Activity</h2>
 <div class="panel-doc" id="panel-processes">
   <div class="panel-head">
     <h3 id="processes-2">Processes</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>A live process/session list with auto-refresh, filtering and one-click kill. MySQL uses SHOW FULL PROCESSLIST; PostgreSQL uses pg_stat_activity. Long-running rows are tinted so runaway or blocking work stands out before you stop it.</p>
   <p class="how"><b>Open:</b> Activity menu -&gt; Processes (also on the native Tools menu)</p>
@@ -1636,7 +1652,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-replication">
   <div class="panel-head">
     <h3 id="replication-3">Replication</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></div>
   </div>
   <p>A replication dashboard refreshed every 5 seconds. MySQL summarizes every channel and exposes stopped-channel errors; PostgreSQL adds logical-replication SQL helpers. Use it to see whether replication is healthy and why it stalled.</p>
   <p class="how"><b>Open:</b> Activity menu -&gt; Replication (also on the native Tools menu)</p>
@@ -1660,7 +1676,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-playground">
   <div class="panel-head">
     <h3 id="playground-3">Playground</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Manufacture real load and lock scenarios for practising Processes, Locks and killall. Choose Sleep mess, Lock storm or Mixed mayhem, review the tagged statement shapes, then spawn and stop real server threads.</p>
   <p class="how"><b>Open:</b> Activity menu -&gt; Playground. Renders as the PlaygroundPanel tab with the current session.</p>
@@ -1672,7 +1688,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-watch">
   <div class="panel-head">
     <h3 id="watch-2">Watch</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Three monitoring modes: Metrics charts query values over time; Statement follows live work and watchdog candidates; Wait profile samples PostgreSQL waits. Thread progress for ALTER TABLE and CREATE INDEX opens read-only from Processes.</p>
   <p class="how"><b>Open:</b> Activity menu -&gt; Watch (also on the native Tools menu). The read-only Thread progress dialog opens from the Processes panel&#39;s &#39;⏱ Progress &lt;id&gt;&#39; button on a selected row.</p>
@@ -1684,7 +1700,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-locks">
   <div class="panel-head">
     <h3 id="locks-deadlocks">Locks &amp; Deadlocks</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>One panel with Blocking and Deadlocks tabs. Follow live blocking chains, inspect a deadlock wait-for graph and victim, and reopen retained incidents. MySQL, PostgreSQL and SQL Server use their native lock and deadlock sources.</p>
   <p class="how"><b>Open:</b> Activity menu -&gt; Locks &amp; Deadlocks. Renders as the LocksPanel tab with the session; the Blocking and Deadlocks tabs sit under the toolbar.</p>
@@ -1696,7 +1712,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-stmtstats">
   <div class="panel-head">
     <h3 id="statement-statistics">Statement statistics</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></div>
   </div>
   <p>Capture cumulative statement statistics at two moments and rank what changed. PostgreSQL diffs pg_stat_statements by queryid; MySQL/MariaDB diffs performance_schema digests. Read-only captures can also be saved for later comparison.</p>
   <p class="how"><b>Open:</b> Insights menu -&gt; Statement statistics (also on the native Tools menu). Renders PgssHistoryPanel on PostgreSQL and MysqlDigestPanel on MySQL as one tab receiving the current session.</p>
@@ -1756,7 +1772,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-history">
   <div class="panel-head">
     <h3 id="history">History</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Search the current connection&#39;s locally recorded statements with timestamps, row counts, execution times and errors. Click to reuse SQL, delete one entry, or clear the connection&#39;s history after confirmation.</p>
   <p class="how"><b>Open:</b> Insights menu -&gt; Query history. Renders as the HistoryPanel tab with the connectionId.</p>
@@ -1768,7 +1784,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-timeline">
   <div class="panel-head">
     <h3 id="incident-timeline">Incident timeline</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>A chronological incident view for one connection and time window. It merges local audit/session events, deadlocks, digest snapshots, fleet runs and long-query captures, with kind filters, day groups and a density strip.</p>
   <p class="how"><b>Open:</b> Insights menu -&gt; Incident timeline (also Tools ▸ Insights ▸ Incident timeline). Renders as the IncidentTimelinePanel tab with the session.</p>
@@ -1780,7 +1796,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-dbaviews">
   <div class="panel-head">
     <h3 id="dba-views">DBA views</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>A categorized catalog of read-only health queries over each engine&#39;s system views. Results appear in a sortable grid. Disabled instrumentation is diagnosed with copyable fix SQL instead of looking like an empty result.</p>
   <p class="how"><b>Open:</b> Server menu -&gt; DBA views (also on the native Tools menu)</p>
@@ -1792,7 +1808,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-tuner">
   <div class="panel-head">
     <h3 id="tuner">Tuner</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-redis">Redis</span></div>
   </div>
   <p>A read-only health analyzer with a 0–100 score, category sub-scores, end-of-life status and guided findings. Fixes are copied or inserted into the editor for review, never executed by the panel.</p>
   <p class="how"><b>Open:</b> Server menu -&gt; Tuner (labelled &#39;Server tuner&#39;; also on the native Tools menu)</p>
@@ -1804,7 +1820,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-maintenance">
   <div class="panel-head">
     <h3 id="maintenance-3">Maintenance</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
   </div>
   <p>Run table upkeep, find objects broken by schema changes, and perform reviewed bulk edits. Tabs cover Upkeep &amp; invalid objects, Bulk edit and conditional Vacuum advisor; SQLite has a separate whole-file view.</p>
   <p class="how"><b>Open:</b> Server menu -&gt; Maintenance. Renders as the MaintenancePanel tab (title &#39;🩹 Maintenance&#39;) with the current session and selected database; a &#39;prod&#39; badge shows when the environment is prod.</p>
@@ -1828,7 +1844,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-fleet">
   <div class="panel-head">
     <h3 id="fleet">Fleet</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Compare every server sharing a label with read-only checks. Detect roles from the servers, then review Variables, Indexes and Statistics tabs for configuration drift, index divergence and stale table statistics.</p>
   <p class="how"><b>Open:</b> Server menu -&gt; Fleet (can also be opened from a label chip). Renders as the FleetPanel tab; it opens its own sessions to each labeled connection and closes them on unmount.</p>
@@ -1852,7 +1868,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-serverinfo">
   <div class="panel-head">
     <h3 id="server-2">Server</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Search server variables, configuration and status. MySQL uses SHOW GLOBAL VARIABLES/STATUS, PostgreSQL uses pg_settings/pg_stat_database, and Redis uses CONFIG/INFO. MySQL and PostgreSQL changes are generated as SQL for review.</p>
   <p class="how"><b>Open:</b> Server menu -&gt; Server variables &amp; status. Renders as the ServerInfoPanel tab with sessionId and engine.</p>
@@ -1864,7 +1880,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-users">
   <div class="panel-head">
     <h3 id="users">Users</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Inspect MySQL accounts or PostgreSQL roles and decode their grants. Create, alter, drop, GRANT and REVOKE are always generated into the editor for deliberate review; the panel never executes a mutation.</p>
   <p class="how"><b>Open:</b> Server menu -&gt; Users &amp; grants. Renders as the UsersPanel tab (title &#39;👤 Users &amp; grants&#39;) with sessionId and engine. MariaDB is detected via an async server-flavor probe.</p>
@@ -1876,7 +1892,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-routines">
   <div class="panel-head">
     <h3 id="routines-3">Routines</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Create and edit procedures, functions, triggers and events with structured metadata and a full SQL body editor. Review exact DDL before saving. MySQL preserves the original routine if replacement fails.</p>
   <p class="how"><b>Open:</b> Schema menu -&gt; Routines (also on the native Tools menu); can also be opened on a specific routine from the schema tree</p>
@@ -1888,7 +1904,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-sequences">
   <div class="panel-head">
     <h3 id="sequences">Sequences</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Create, alter, restart and drop sequence objects without drop-and-recreate. Review the exact ALTER/CREATE statements before applying them and read the current position before a restart.</p>
   <p class="how"><b>Open:</b> Schema menu -&gt; Sequences (also on the native Tools menu); can be opened on a specific sequence from the schema tree</p>
@@ -1912,7 +1928,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-views">
   <div class="panel-head">
     <h3 id="views">Views</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
   </div>
   <p>Create, replace, refresh and drop views or materialized views in a full SQL editor. Existing definitions are loaded from the catalog and the exact statements are shown before Apply.</p>
   <p class="how"><b>Open:</b> Schema menu -&gt; Views (also on the native Tools menu); can be opened on a specific view from the schema tree</p>
@@ -1936,7 +1952,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-designer">
   <div class="panel-head">
     <h3 id="table-designer">Table designer</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Design table changes as a draft, then review the change set, risk labels and SQL before Apply. Columns, generated expressions, indexes, primary keys, storage engine and partitions are covered.</p>
   <p class="how"><b>Open:</b> Schema menu -&gt; Table designer (also on the native Tools menu); can be opened on an existing table from the schema tree</p>
@@ -1948,7 +1964,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-documenter">
   <div class="panel-head">
     <h3 id="documenter">Documenter</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Generate deterministic, commit-ready schema documentation in Markdown or HTML, with an optional relationship diagram. Catalog sections are introspected separately so one missing privilege does not erase the whole document.</p>
   <p class="how"><b>Open:</b> Schema menu -&gt; Documenter. Renders as the DocumenterPanel tab with the current session and selected database (schema).</p>
@@ -1960,7 +1976,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-erdiagram">
   <div class="panel-head">
     <h3 id="er-diagram-3">ER diagram</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-sqlite">SQLite</span></div>
   </div>
   <p>Explore a live schema as a pannable, zoomable foreign-key graph. Focus related tables, adjust density, search columns, save layouts and notes, compare snapshots, and export the diagram. Catalog metadata only; table data is never read.</p>
   <p class="how"><b>Open:</b> Schema menu -&gt; ER diagram. Renders as the ErDiagram tab with sessionId, connectionId, and engine (no readOnly/environment - it never writes).</p>
@@ -1972,7 +1988,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-colprofile">
   <div class="panel-head">
     <h3 id="column-profile">Column profile</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Profile actual column values: rows, NULLs, distinct counts, selectivity, min/max/avg and lengths. Large tables are sampled with the sample size shown. Unlike Analyze, this reports the data rather than optimizer statistics.</p>
   <p class="how"><b>Open:</b> Data menu -&gt; Column profile (also on the native Tools menu)</p>
@@ -1984,7 +2000,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-datagen">
   <div class="panel-head">
     <h3 id="data-generator">Data generator</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span></div>
   </div>
   <p>Generate realistic data in three steps: Target, Configure, Preview &amp; Run. Use a schema kit, fill an existing table or design a new one. Preview rows and exact SQL before a chunked insert with progress and ETA.</p>
   <p class="how"><b>Open:</b> Data menu -&gt; Data generator. Renders as the DataGenPanel tab (title &#39;🎲 Data generator&#39;) with sessionId, engine, environment, readOnly, connectionName, and schema.</p>
@@ -1996,7 +2012,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-csvimport">
   <div class="panel-head">
     <h3 id="csv-import">CSV import</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span></div>
   </div>
   <p>Import CSV, JSON, NDJSON or spreadsheets in three steps: File &amp; target, Columns, Run. Map or skip columns, create or reuse a table, review options, then run transactionally with live byte-based progress.</p>
   <p class="how"><b>Open:</b> Data menu -&gt; CSV import. Renders as the CsvImportPanel tab with sessionId, engine, environment, and readOnly.</p>
@@ -2004,11 +2020,23 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   <p class="dim"><b>Engines:</b> MySQL, PostgreSQL, and SQLite (gated to csvImport). Upsert wording differs: MySQL ON DUPLICATE KEY UPDATE vs PostgreSQL ON CONFLICT DO NOTHING (skip).</p>
   <p class="caveat"><b>Note:</b> Requires write access and is blocked on read-only connections. Prod confirms first, especially when deleting rows. Import is transactional and continues in the backend if the tab closes, with activity and cancellation still visible.</p>
   <figure><a class="shot-link" href="shots/dark/panel-csv-import.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="shots/dark/panel-csv-import.png" data-dark-src="shots/dark/panel-csv-import.png" data-light-src="shots/light/panel-csv-import.png" alt="CSV import panel" loading="lazy"></a><figcaption>CSV import <span class="cap-mac">— captured on macOS</span></figcaption></figure>
+</div>
+<div class="panel-doc" id="panel-sqlscript">
+  <div class="panel-head">
+    <h3 id="sql-script">SQL script</h3>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span></div>
+  </div>
+  <p>Validate and execute a local .sql or .sql.gz on the current MySQL/MariaDB session without external client tools. Two bounded streaming passes validate the complete file before writes, then execute statements sequentially on one dedicated connection.</p>
+  <p class="how"><b>Open:</b> Data menu -&gt; SQL script, native Tools -&gt; Data -&gt; SQL script, or the command palette. Requires an open MySQL/MariaDB session; the database bar chooses the initial target and USE in the script can override it.</p>
+  <div class="acts"><b>Key actions</b><ul><li>Browse... or enter a local .sql/.sql.gz path; gzip is detected by the case-insensitive .gz suffix</li><li>Set the per-statement memory limit (64 MiB default, 1-1024 MiB) and choose stop-on-first-error or continue-after-errors</li><li>Run script - first validates gzip/checksums, UTF-8, statement boundaries, DELIMITER, client commands and read-only/prod guards without writing</li><li>Watch the second execution pass: compressed/uncompressed bytes, statement counts, source line, backend id, rows affected and per-statement timings</li><li>Cancel between statements or cancel the current server statement; review final success/failure and partial-write status in the bounded statement-flow log</li></ul></div>
+  <p class="dim"><b>Engines:</b> MySQL and MariaDB only. The runner uses the existing native session and its existing SSH tunnel when one is configured; it starts no mysql/mariadb client, shell, zcat or second tunnel.</p>
+  <p class="caveat"><b>Note:</b> The entire file is read twice and must not change. Memory includes the current and one queued statement, not just fixed streaming buffers. No automatic transaction, retry, resume or rollback is implied. Already committed statements remain after failure or cancellation. The dedicated connection is closed afterward so script-mutated session state never returns to the shared pool.</p>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live MySQL connection with real data to render meaningfully, so it isn't captured in this offline build. The description above is complete and taken from the current source.</div>
 </div><h2 id="find-compare" class="group-h">Find &amp; Compare</h2>
 <div class="panel-doc" id="panel-find">
   <div class="panel-head">
     <h3 id="find">Find</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Three search scopes in one panel: Usages finds database references, In database searches table values, and In files searches local SQL scripts. Use it before destructive refactors, during incidents, or to find migration code.</p>
   <p class="how"><b>Open:</b> Find &amp; Compare menu -&gt; Find (also on the native Tools menu), then the Usages / In database / In files tabs. Open buffers are passed to the Usages scope so unsaved scripts are searched too; a programmatic open can preselect the scope.</p>
@@ -2020,7 +2048,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-compare">
   <div class="panel-head">
     <h3 id="compare">Compare</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>Four comparison modes: Schema, Data, Results and Scripts. Compare live catalogs or table rows, existing result grids, or local SQL text. Generated migration and reconciliation scripts always require review.</p>
   <p class="how"><b>Open:</b> Find &amp; Compare menu -&gt; Compare (also on the native Tools menu), then the Schema / Data / Results / Scripts tabs. The top bar&#39;s Compare icon opens the Schema mode directly as an app-level utility view; a programmatic open can preselect the mode.</p>
@@ -2032,7 +2060,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-txshell">
   <div class="panel-head">
     <h3 id="txshell-2">TxShell</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-parquet">Parquet</span></div>
   </div>
   <p>A keyboard-driven SQL console with real result grids, pipelines, variables, file sources, fan-out, command substitution and typed result diffs. Use it to query, compare, export and script without leaving the app.</p>
   <p class="how"><b>Open:</b> SQL menu -&gt; TxShell (also on the native Tools menu)</p>
@@ -2044,7 +2072,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-quality">
   <div class="panel-head">
     <h3 id="sql-quality-3">SQL Quality</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></div>
   </div>
   <p>Review queries, schemas and migrations before running them. Query mode combines static and server-backed checks; Schema reviews a MySQL catalog; Change review builds sequential and final models for MySQL/MariaDB or PostgreSQL migrations.</p>
   <p class="how"><b>Open:</b> SQL menu -&gt; SQL Quality. Renders as the SqlQualityPanel tab with the current session.</p>
@@ -2056,7 +2084,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
 <div class="panel-doc" id="panel-saved">
   <div class="panel-head">
     <h3 id="saved">Saved</h3>
-    <div class="panel-engs"><span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span> <span class="eng-badge e-redis">Redis</span> <span class="eng-badge e-parquet">Parquet</span> <span class="eng-badge e-mongodb">MongoDB</span></div>
   </div>
   <p>A local, folder-organized library of reusable SQL. Search folders and names, click to insert SQL, or save the current editor buffer. Positional aliases (:1, :2, …) substitute values when invoked from the editor.</p>
   <p class="how"><b>Open:</b> SQL menu -&gt; Saved queries. Renders as the SavedQueriesPanel tab; it takes the current editor buffer (for saving) and inserts selected SQL into the editor.</p>
@@ -2477,7 +2505,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.5.3 · 37 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.5.3 · 38 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

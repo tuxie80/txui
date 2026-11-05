@@ -114,6 +114,7 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
     items: [
       { panel: 'datagen', label: 'Data generator', tip: 'Data generator (objects + rows)', when: 'dataGen' },
       { panel: 'csvimport', label: 'CSV import', tip: 'CSV import', when: 'csvImport' },
+      { panel: 'sqlscript', label: 'SQL script', tip: 'SQL script — validate and run a local .sql or .sql.gz on this session, without external client tools', when: 'sqlScript' },
       { panel: 'colprofile', label: 'Column profile', tip: 'Column profile — what is actually in each column', when: 'columnProfile' },
     ],
   },

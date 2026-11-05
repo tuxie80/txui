@@ -40,6 +40,7 @@
     "erDiagram",
     "dataGen",
     "csvImport",
+    "sqlScript",
     "sqlQuality",
     "sqlVariables",
     "writes",
@@ -76,6 +77,7 @@
       "erDiagram": true,
       "dataGen": true,
       "csvImport": true,
+      "sqlScript": true,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -111,6 +113,7 @@
       "erDiagram": true,
       "dataGen": true,
       "csvImport": true,
+      "sqlScript": false,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -146,6 +149,7 @@
       "erDiagram": false,
       "dataGen": false,
       "csvImport": false,
+      "sqlScript": false,
       "sqlQuality": false,
       "sqlVariables": false,
       "writes": true,
@@ -181,6 +185,7 @@
       "erDiagram": false,
       "dataGen": false,
       "csvImport": true,
+      "sqlScript": false,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -216,6 +221,7 @@
       "erDiagram": true,
       "dataGen": false,
       "csvImport": true,
+      "sqlScript": false,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -251,6 +257,7 @@
       "erDiagram": false,
       "dataGen": false,
       "csvImport": false,
+      "sqlScript": false,
       "sqlQuality": false,
       "sqlVariables": true,
       "writes": false,
@@ -286,6 +293,7 @@
       "erDiagram": false,
       "dataGen": false,
       "csvImport": false,
+      "sqlScript": false,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -321,6 +329,7 @@
       "erDiagram": false,
       "dataGen": false,
       "csvImport": false,
+      "sqlScript": false,
       "sqlQuality": false,
       "sqlVariables": false,
       "writes": false,
@@ -356,6 +365,7 @@
       "erDiagram": true,
       "dataGen": true,
       "csvImport": true,
+      "sqlScript": false,
       "sqlQuality": true,
       "sqlVariables": true,
       "writes": true,
@@ -510,6 +520,10 @@
     },
     "csvImport": {
       "summary": "CSV can be loaded into a table.",
+      "detail": []
+    },
+    "sqlScript": {
+      "summary": "Plain/gzipped SQL scripts can run on a dedicated native connection.",
       "detail": []
     },
     "sqlQuality": {
@@ -788,6 +802,15 @@
       "group": "Data",
       "tip": "CSV import",
       "when": "csvImport",
+      "inMenu": true
+    },
+    {
+      "id": "sqlscript",
+      "label": "SQL script",
+      "menuLabel": "SQL script",
+      "group": "Data",
+      "tip": "SQL script — validate and run a local .sql or .sql.gz on this session, without external client tools",
+      "when": "sqlScript",
       "inMenu": true
     },
     {
@@ -2960,10 +2983,10 @@
     }
   },
   "counts": {
-    "panels": 37,
+    "panels": 38,
     "commands": 70,
     "engines": 9,
-    "capabilities": 33,
+    "capabilities": 34,
     "prefs": 48,
     "dbaViews": 234
   }

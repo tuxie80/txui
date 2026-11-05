@@ -29,6 +29,7 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const MUST_BE_AUDITED: Array<{ file: string; command: string }> = [
   { file: 'src/components/CsvImportPanel.tsx', command: 'csv_import' },
   { file: 'src/components/DumpRestorePanel.tsx', command: 'run_dump_tool' },
+  { file: 'src/components/SqlScriptPanel.tsx', command: 'run_sql_script' },
   { file: 'src/components/MultiExec.tsx', command: 'multi_execute' },
   { file: 'src/components/TxShellPanel.tsx', command: 'execute_query' },
   // The Redis browser's three write paths — they ran with no audit row at all

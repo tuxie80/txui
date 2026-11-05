@@ -136,6 +136,7 @@ dependencies = [
  "csv",
  "duckdb",
  "encoding_rs",
+ "flate2",
  "futures-util",
  "hex",
  "jsonwebtoken",

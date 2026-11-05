@@ -109,7 +109,7 @@ function tagColor(tag: string): string {
 // emoji: emoji render differently per platform/font and carry no brand colour,
 // which made MySQL and PostgreSQL rows hard to tell apart at a glance.
 
-export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSession, onOpenMultiExec, onOpenAudit, onOpenCompare, onOpenDump, onOpenReplicaSet, activeUtility, onHide, onDisconnect, activeSessionId }: Props) {
+export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSession, onOpenMultiExec, onOpenAudit, onOpenCompare, onOpenReplicaSet, activeUtility, onHide, onDisconnect, activeSessionId }: Props) {
   const [conns, setConns] = useState<ConnState[]>([]);
   // Latest rows for event handlers (dbgui:connect) that run outside render.
   const connsRef = useRef<ConnState[]>([]);
@@ -867,7 +867,8 @@ export function Sidebar({ sessions, onNewConnection, onEditConnection, onOpenSes
           <button className="icon-btn"
             title={`New connection… (${SC.newConnection})`}
             onClick={() => onNewConnection()}>+</button>
-          <button className={`icon-btn ${activeUtility === 'dump' ? 'active' : ''}`} title="Dump / restore" onClick={onOpenDump}>🗄</button>
+          {/* Legacy external dump/restore is hidden until properly tested.
+          <button className={`icon-btn ${activeUtility === 'dump' ? 'active' : ''}`} title="Dump / restore" onClick={onOpenDump}>🗄</button> */}
           <button className={`icon-btn ${activeUtility === 'compare' ? 'active' : ''}`} title="Compare schemas / instances" onClick={onOpenCompare}>⇆</button>
           <button className={`icon-btn ${activeUtility === 'audit' ? 'active' : ''}`} title="Audit log" onClick={onOpenAudit}>📜</button>
           <button className={`icon-btn ${activeUtility === 'multi-exec' ? 'active' : ''}`} title="Multi-server execution" onClick={onOpenMultiExec}>⚟</button>

@@ -453,6 +453,7 @@ const PANEL_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   documenter: DocumenterIcon,
   datagen: DataGenIcon,
   csvimport: CsvImportIcon,
+  sqlscript: CsvImportIcon,
   colprofile: ColProfileIcon,
   compare: CompareIcon,
   txshell: TxShellIcon,
