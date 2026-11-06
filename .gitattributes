@@ -1,0 +1,2 @@
+# Keep vendored upstream sources and patches byte-for-byte unchanged.
+src-tauri/vendor/libduckdb-sys/** -whitespace

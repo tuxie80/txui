@@ -7,11 +7,15 @@ this project follows semantic versioning.
 
 ### Added
 
-- **Native, session-scoped `.sql` and `.sql.gz` runner for MySQL/MariaDB** — Data → SQL script validates the complete local file before any write (gzip/checksums, incremental UTF-8, MySQL statement boundaries and `DELIMITER`, client-command rejection, statement limits and read-only/prod guards), then executes a second bounded streaming pass sequentially on one dedicated physical connection. No external client, shell, `zcat`, decompressed temporary file or second SSH tunnel is used on macOS, Windows or Linux; an already connected SSH-backed session reuses its existing tunnel. The panel exposes compressed/uncompressed bytes, statement counts and source lines, per-statement timing/outcome, rows affected, backend id and final status. Cancellation reaches the running statement; failures and cancellation state plainly that committed work is not rolled back.
+- **Native, session-scoped SQL runner for MySQL/MariaDB** — Data → SQL script accepts `.sql`, `.sql.gz`, `.sql.zst`, `.sql.xz`, `.sql.bz2`, `.sql.lz4`, `.zip`, `.tar.gz`, `.tar.xz` and `.tar.zst`, with exactly one SQL member required inside archives. It validates the complete local source before any write (compression/checksums/frame structure, incremental UTF-8, MySQL statement boundaries and `DELIMITER`, client-command rejection, statement limits and read-only/prod guards), then executes a second bounded streaming pass sequentially on one dedicated physical connection. XZ and Zstd decoder memory is capped, and LZ4 receives independent truncation/end-marker validation. No external client, shell, decompressed temporary file or second SSH tunnel is used on macOS, Windows or Linux; an already connected SSH-backed session reuses its existing tunnel. The panel exposes source/uncompressed bytes, statement counts and source lines, per-statement timing/outcome, rows affected, backend id and final status. Cancellation reaches the running statement; failures and cancellation state plainly that committed work is not rolled back.
 
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
+
+### Security
+
+- **CVE-2026-111497 / Broccoli2Shell is fixed in current source builds** — `libduckdb-sys` 1.20000.1 is vendored with upstream DuckDB PR #27791 applied verbatim to its Brotli decoder, and DuckDB's Parquet extension is now statically linked so this patched decoder is the one used without an extension download. Regression coverage checks the patched source and native `BLOCK_SWITCH` path, proves Parquet is statically linked, and round-trips a real Brotli-compressed Parquet file. All three desktops compile the same vendored source; published TxUI 1.5.3 and earlier binaries remain affected until a rebuilt release replaces them.
 
 ## [1.5.3] - 2026-11-04
 

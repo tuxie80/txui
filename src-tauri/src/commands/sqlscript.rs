@@ -63,13 +63,23 @@ pub enum SqlScriptEvent {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ScriptCompressionWire { Plain, Gzip }
+pub enum ScriptCompressionWire {
+    Plain, Gzip, Zstd, Xz, Bzip2, Lz4, Zip, TarGzip, TarXz, TarZstd,
+}
 
 impl From<ScriptCompression> for ScriptCompressionWire {
     fn from(c: ScriptCompression) -> Self {
         match c {
             ScriptCompression::Plain => Self::Plain,
             ScriptCompression::Gzip => Self::Gzip,
+            ScriptCompression::Zstd => Self::Zstd,
+            ScriptCompression::Xz => Self::Xz,
+            ScriptCompression::Bzip2 => Self::Bzip2,
+            ScriptCompression::Lz4 => Self::Lz4,
+            ScriptCompression::Zip => Self::Zip,
+            ScriptCompression::TarGzip => Self::TarGzip,
+            ScriptCompression::TarXz => Self::TarXz,
+            ScriptCompression::TarZstd => Self::TarZstd,
         }
     }
 }
@@ -482,6 +492,67 @@ mod tests {
         path
     }
 
+    fn encoded(name: &str, sql: &str, format: ScriptCompression) -> std::path::PathBuf {
+        use std::io::Write;
+        let bytes = match format {
+            ScriptCompression::Gzip => {
+                let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(sql.as_bytes()).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Zstd => zstd::stream::encode_all(sql.as_bytes(), 3).unwrap(),
+            ScriptCompression::Xz => {
+                let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+                encoder.write_all(sql.as_bytes()).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Bzip2 => {
+                let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+                encoder.write_all(sql.as_bytes()).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Lz4 => {
+                let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+                encoder.write_all(sql.as_bytes()).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Zip => {
+                let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+                writer.start_file("flashback.sql", zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated)).unwrap();
+                writer.write_all(sql.as_bytes()).unwrap();
+                writer.finish().unwrap().into_inner()
+            }
+            ScriptCompression::TarGzip | ScriptCompression::TarXz | ScriptCompression::TarZstd => {
+                let mut builder = tar::Builder::new(Vec::new());
+                let mut header = tar::Header::new_gnu();
+                header.set_size(sql.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, "flashback.sql", sql.as_bytes()).unwrap();
+                let plain = builder.into_inner().unwrap();
+                match format {
+                    ScriptCompression::TarGzip => {
+                        let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+                        encoder.write_all(&plain).unwrap();
+                        encoder.finish().unwrap()
+                    }
+                    ScriptCompression::TarXz => {
+                        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+                        encoder.write_all(&plain).unwrap();
+                        encoder.finish().unwrap()
+                    }
+                    ScriptCompression::TarZstd => zstd::stream::encode_all(&plain[..], 3).unwrap(),
+                    _ => unreachable!(),
+                }
+            }
+            ScriptCompression::Plain => sql.as_bytes().to_vec(),
+        };
+        let path = std::env::temp_dir().join(format!("txui-sqlscript-live-{}-{name}", Uuid::new_v4()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
     async fn state_for(pool: sqlx::MySqlPool) -> (AppState, Uuid) {
         let history = crate::history::open_in_memory().await.unwrap();
         let state = AppState::new(history, std::env::temp_dir(), Default::default());
@@ -566,6 +637,25 @@ mod tests {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plain_items").fetch_one(&pool).await.unwrap();
         assert_eq!(count, 1);
         std::fs::remove_file(plain).unwrap();
+
+        for (name, format) in [
+            ("zstd", ScriptCompression::Zstd), ("xz", ScriptCompression::Xz),
+            ("bzip2", ScriptCompression::Bzip2), ("lz4", ScriptCompression::Lz4),
+            ("zip", ScriptCompression::Zip), ("tar_gzip", ScriptCompression::TarGzip),
+            ("tar_xz", ScriptCompression::TarXz), ("tar_zstd", ScriptCompression::TarZstd),
+        ] {
+            let table = format!("format_{name}");
+            let sql = format!("CREATE TABLE {table}(id INT PRIMARY KEY);\nINSERT INTO {table} VALUES (1);\n");
+            let path = encoded(name, &sql, format);
+            let source = inspect_source(path.to_str().unwrap(), format).unwrap();
+            let (result, _) = run_fixture(&state, session_id, &pool, source, false).await;
+            assert_eq!(result.unwrap().executed, 2, "{name}");
+            let count: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 1, "{name}");
+            sqlx::query(AssertSqlSafe(format!("DROP TABLE {table}"))).execute(&pool).await.unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
 
         sqlx::query("DROP TABLE items").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE plain_items").execute(&pool).await.unwrap();

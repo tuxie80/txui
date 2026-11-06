@@ -130,6 +130,7 @@ dependencies = [
  "arrow-cast",
  "arrow-schema",
  "base64 0.22.1",
+ "bzip2",
  "calamine",
  "chardetng",
  "chrono",
@@ -141,6 +142,7 @@ dependencies = [
  "hex",
  "jsonwebtoken",
  "log",
+ "lz4_flex",
  "mongodb",
  "parquet",
  "rand 0.9.5",
@@ -154,6 +156,7 @@ dependencies = [
  "sqlparser",
  "sqlx",
  "sysinfo",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -168,7 +171,9 @@ dependencies = [
  "tokio-util",
  "uuid",
  "walkdir",
+ "xz2",
  "zeroize",
+ "zip",
  "zstd 0.13.3",
 ]
 
@@ -835,6 +840,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bzip2"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
+dependencies = [
+ "bzip2-sys",
+ "libbz2-rs-sys",
+]
+
+[[package]]
+name = "bzip2-sys"
+version = "0.1.13+1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225bff33b2141874fe80d71e07d6eec4f85c5c216453dd96388240f96e1acc14"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -3273,6 +3298,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0864a00c8d019e36216b69c2c4ce50b83b7bd966add3cf5ba554ec44f8bebcf5"
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3290,8 +3321,6 @@ dependencies = [
 [[package]]
 name = "libduckdb-sys"
 version = "1.20000.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0140448c472968ee5cf5ba697435deebe558b366ef1e5c080d24d9696b600725"
 dependencies = [
  "cc",
  "flate2",
@@ -3380,6 +3409,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
+]
+
+[[package]]
+name = "lzma-sys"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fda04ab3764e6cde78b9974eec4f779acaba7c4e84b36eca3cf77c581b85d27"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -8165,6 +8205,15 @@ checksum = "963d6fab92d5504b971dc8bd90ca743c2575e590bc8071ea5bc571598667ae08"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xz2"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "388c44dc09d76f1536602ead6d325eb532f5c122f17782bd57fb47baeeb767e2"
+dependencies = [
+ "lzma-sys",
 ]
 
 [[package]]

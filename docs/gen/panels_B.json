@@ -103,17 +103,18 @@
    "caveats": "Requires write access and is blocked on read-only connections. Prod confirms first, especially when deleting rows. Import is transactional and continues in the backend if the tab closes, with activity and cancellation still visible."
   },
   "sqlscript": {
-   "summary": "Validate and execute a local .sql or .sql.gz on the current MySQL/MariaDB session without external client tools. Two bounded streaming passes validate the complete file before writes, then execute statements sequentially on one dedicated connection.",
+   "summary": "Validate and execute local plain, compressed or archived SQL on the current MySQL/MariaDB session without external client tools. Two bounded streaming passes validate the complete source before writes, then execute statements sequentially on one dedicated connection.",
    "howToOpen": "Data menu -> SQL script, native Tools -> Data -> SQL script, or the command palette. Requires an open MySQL/MariaDB session; the database bar chooses the initial target and USE in the script can override it.",
    "keyActions": [
-    "Browse... or enter a local .sql/.sql.gz path; gzip is detected by the case-insensitive .gz suffix",
+    "Browse... or enter .sql, .sql.gz, .sql.zst, .sql.xz, .sql.bz2, .sql.lz4, .zip, .tar.gz, .tar.xz or .tar.zst; suffix matching is case-insensitive",
+    "For ZIP/tar, provide exactly one .sql entry and no other files; encrypted and non-Stored/non-Deflated ZIP entries are rejected",
     "Set the per-statement memory limit (64 MiB default, 1-1024 MiB) and choose stop-on-first-error or continue-after-errors",
-    "Run script - first validates gzip/checksums, UTF-8, statement boundaries, DELIMITER, client commands and read-only/prod guards without writing",
-    "Watch the second execution pass: compressed/uncompressed bytes, statement counts, source line, backend id, rows affected and per-statement timings",
+    "Run script - first validates compression/checksums/frame structure, UTF-8, statement boundaries, DELIMITER, client commands and read-only/prod guards without writing",
+    "Watch the second execution pass: source/uncompressed bytes, statement counts, source line, backend id, rows affected and per-statement timings",
     "Cancel between statements or cancel the current server statement; review final success/failure and partial-write status in the bounded statement-flow log"
    ],
-   "engines": "MySQL and MariaDB only. The runner uses the existing native session and its existing SSH tunnel when one is configured; it starts no mysql/mariadb client, shell, zcat or second tunnel.",
-   "caveats": "The entire file is read twice and must not change. Memory includes the current and one queued statement, not just fixed streaming buffers. No automatic transaction, retry, resume or rollback is implied. Already committed statements remain after failure or cancellation. The dedicated connection is closed afterward so script-mutated session state never returns to the shared pool."
+   "engines": "MySQL and MariaDB only. The runner uses the existing native session and its existing SSH tunnel when one is configured; it starts no external client, shell or second tunnel.",
+   "caveats": "The source goes through validation and execution passes and must not change; LZ4 adds a separate structural-validation read. Memory includes the current and one queued statement plus decoder windows (XZ 256 MiB max, Zstd 128 MiB max) and bounded read-ahead. LZ4 receives independent structural/end-marker validation. No automatic transaction, retry, resume or rollback is implied. Already committed statements remain after failure or cancellation. The dedicated connection is closed afterward so script-mutated session state never returns to the shared pool."
   },
   "playground": {
    "summary": "Manufacture real load and lock scenarios for practising Processes, Locks and killall. Choose Sleep mess, Lock storm or Mixed mayhem, review the tagged statement shapes, then spawn and stop real server threads.",

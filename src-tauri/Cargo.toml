@@ -59,6 +59,11 @@ chrono           = "0.4"
 rust_decimal     = "1"
 csv              = "1"
 flate2           = "1.1.10"
+xz2              = { version = "0.1.7", features = ["static"] }
+bzip2            = { version = "0.5.2", default-features = false, features = ["libbz2-rs-sys"] }
+lz4_flex         = "0.14.0"
+zip              = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tar              = "0.4.46"
 
 # Serialization
 serde            = { version = "1", features = ["derive"] }
@@ -170,7 +175,8 @@ tokio-util       = { version = "0.7", features = ["compat"] } # tiberius speaks 
 
 # DuckDB engine (in-process OLAP). `bundled` compiles DuckDB's C++ from source —
 # the first build is slow (~20-40 min), and this is the one dependency that
-# makes the binary meaningfully larger.
+# makes the binary meaningfully larger. `parquet` statically links its patched
+# native Parquet/Brotli path instead of downloading a separate extension.
 #
 # duckdb-rs versions after the bundled engine: `1.20000.x` bundles DuckDB
 # v2.0.x. The tilde requirement lets duckdb-rs PATCH releases flow (Rust-side
@@ -178,7 +184,7 @@ tokio-util       = { version = "0.7", features = ["compat"] } # tiberius speaks 
 # `1.20001`+ is a deliberate act that moves the DuckDB version every file is
 # read with, on every platform, so it is done by hand. (See the duckdb-rs
 # README's versioning section.)
-duckdb           = { version = "~1.20000.1", features = ["bundled"] }
+duckdb           = { version = "~1.20000.1", features = ["bundled", "parquet"] }
 
 # Secrets: encrypted-at-rest file (src/secretstore.rs) — see AGENTS.md; the OS
 # keychain was dropped as unreliable for unsigned desktop builds.
@@ -252,6 +258,13 @@ rand = "0.9.5"
 # core turns a ~1-minute serial ingest into a couple of seconds.
 rayon = "1.10"
 jsonwebtoken = { version = "9.3.1", default-features = false, features = ["use_pem"] }
+
+[patch.crates-io]
+# DuckDB 2.0.0 vendors Brotli without CVE-2026-111497's BLOCK_SWITCH fix.
+# Keep duckdb-rs 1.20000.1 but apply upstream DuckDB PR #27791 verbatim to its
+# source archive, and statically link Parquet so the patched decoder is the one
+# TxUI actually uses. Drop this override when duckdb-rs ships the fixed source.
+libduckdb-sys = { path = "vendor/libduckdb-sys" }
 
 [profile.release]
 opt-level     = 3

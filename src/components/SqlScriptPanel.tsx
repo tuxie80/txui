@@ -9,7 +9,7 @@ import { basename } from '../utils/platform';
 import { fmtDuration } from '../utils/fmtDuration';
 import {
   applySqlScriptEvent, compressionForSqlScript, formatSqlScriptBytes,
-  initialSqlScriptState, sqlScriptPercent, validSqlScriptLimitMiB,
+  initialSqlScriptState, sqlScriptCompressionLabel, sqlScriptPercent, validSqlScriptLimitMiB,
   type SqlScriptEvent,
 } from '../utils/sqlScript';
 import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity';
@@ -58,7 +58,7 @@ export function SqlScriptPanel({ session, schema, onClose, onSchemaChanged }: Pr
     if (session.engine !== 'mysql') return 'The built-in script runner currently supports MySQL and MariaDB only.';
     if (session.readOnly) return 'This connection is read-only. Enable writes before running a script.';
     if (running) return 'A script is already running.';
-    if (!path) return 'Choose a .sql or .sql.gz file first.';
+    if (!path) return 'Choose a SQL script or supported compressed/archive file first.';
     if (!validSqlScriptLimitMiB(limitMiB)) return 'Statement limit must be a whole number from 1 to 1024 MiB.';
     return null;
   }, [session.engine, session.readOnly, running, path, limitMiB]);
@@ -81,7 +81,7 @@ export function SqlScriptPanel({ session, schema, onClose, onSchemaChanged }: Pr
     try {
       const picked = await open({
         multiple: false,
-        filters: [{ name: 'SQL scripts', extensions: ['sql', 'gz'] }],
+        filters: [{ name: 'SQL scripts and archives', extensions: ['sql', 'gz', 'zst', 'xz', 'bz2', 'lz4', 'zip'] }],
       });
       if (typeof picked === 'string') {
         setPath(picked);
@@ -192,14 +192,18 @@ export function SqlScriptPanel({ session, schema, onClose, onSchemaChanged }: Pr
       <div className="ss-body">
         <div className="ss-form">
           <div className="ss-field">
-            <label>Source file (.sql or .sql.gz)</label>
+            <label>Source file (SQL / compressed / archive)</label>
             <div className="ss-target">
               <input value={path} onChange={e => { setPath(e.target.value); setState(initialSqlScriptState()); }}
-                disabled={running} placeholder="Path to a local SQL script" />
+                disabled={running} placeholder=".sql, .gz, .zst, .xz, .bz2, .lz4, .zip or tar archive" />
               <button className="toolbar-btn" onClick={browse} disabled={running}>Browse…</button>
             </div>
             <div className="ss-hint">
-              {path ? `${compression === 'gzip' ? 'Gzip' : 'Plain'} · ${basename(path)}` : 'No external mysql/mariadb client, shell, zcat or temporary SQL file.'}
+              {path ? `${sqlScriptCompressionLabel(compression)} · ${basename(path)}` : 'No external mysql/mariadb client, shell, zcat or temporary SQL file.'}
+            </div>
+            <div className="ss-hint">
+              Supported: .sql, .sql.gz, .sql.zst, .sql.xz, .sql.bz2, .sql.lz4, .zip, .tar.gz, .tar.xz, .tar.zst.
+              ZIP and tar archives must contain exactly one .sql file and no other files.
             </div>
           </div>
 
@@ -223,7 +227,7 @@ export function SqlScriptPanel({ session, schema, onClose, onSchemaChanged }: Pr
           </label>
 
           <div className="ss-note">
-            Two complete passes: gzip, UTF-8, statement and safety validation first; execution second.
+            Validation first, execution second; LZ4 also receives a separate structural frame-validation read.
             The file must not change. Every statement runs sequentially on one dedicated connection.
             No automatic transaction, retry, resume or rollback is implied.
           </div>

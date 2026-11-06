@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applySqlScriptEvent, compressionForSqlScript, formatSqlScriptBytes,
-  initialSqlScriptState, sqlScriptPercent, validSqlScriptLimitMiB,
+  initialSqlScriptState, sqlScriptCompressionLabel, sqlScriptPercent, validSqlScriptLimitMiB,
   SQL_SCRIPT_LOG_LIMIT, type SqlScriptEvent,
 } from '../src/utils/sqlScript.ts';
 
@@ -14,8 +14,18 @@ const started: SqlScriptEvent = {
 test('source compression and statement limits are explicit', () => {
   assert.equal(compressionForSqlScript('flashback.sql.gz'), 'gzip');
   assert.equal(compressionForSqlScript('FLASHBACK.SQL.GZ'), 'gzip');
+  assert.equal(compressionForSqlScript('flashback.sql.zst'), 'zstd');
+  assert.equal(compressionForSqlScript('flashback.sql.xz'), 'xz');
+  assert.equal(compressionForSqlScript('flashback.sql.bz2'), 'bzip2');
+  assert.equal(compressionForSqlScript('flashback.sql.lz4'), 'lz4');
+  assert.equal(compressionForSqlScript('flashback.sql.zip'), 'zip');
+  assert.equal(compressionForSqlScript('flashback.tar.gz'), 'tar_gzip');
+  assert.equal(compressionForSqlScript('FLASHBACK.TAR.XZ'), 'tar_xz');
+  assert.equal(compressionForSqlScript('flashback.tar.zst'), 'tar_zstd');
   assert.equal(compressionForSqlScript('flashback.sql'), 'plain');
   assert.equal(compressionForSqlScript('archive.tar'), 'plain');
+  assert.equal(sqlScriptCompressionLabel('tar_zstd'), 'tar + Zstandard');
+  assert.equal(sqlScriptCompressionLabel('zip'), 'ZIP archive');
   for (const n of [1, 64, 1024]) assert.equal(validSqlScriptLimitMiB(n), true);
   for (const n of [0, -1, 1025, 1.5, NaN]) assert.equal(validSqlScriptLimitMiB(n), false);
 });

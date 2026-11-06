@@ -1,4 +1,6 @@
-export type SqlScriptCompression = 'plain' | 'gzip';
+export type SqlScriptCompression =
+  | 'plain' | 'gzip' | 'zstd' | 'xz' | 'bzip2' | 'lz4'
+  | 'zip' | 'tar_gzip' | 'tar_xz' | 'tar_zstd';
 export type SqlScriptPhase = 'idle' | 'validating' | 'executing' | 'done';
 
 export type SqlScriptEvent =
@@ -62,7 +64,25 @@ export function initialSqlScriptState(): SqlScriptState {
 }
 
 export function compressionForSqlScript(path: string): SqlScriptCompression {
-  return path.toLowerCase().endsWith('.gz') ? 'gzip' : 'plain';
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.tar.gz')) return 'tar_gzip';
+  if (lower.endsWith('.tar.xz')) return 'tar_xz';
+  if (lower.endsWith('.tar.zst')) return 'tar_zstd';
+  if (lower.endsWith('.zip')) return 'zip';
+  if (lower.endsWith('.gz')) return 'gzip';
+  if (lower.endsWith('.zst')) return 'zstd';
+  if (lower.endsWith('.xz')) return 'xz';
+  if (lower.endsWith('.bz2')) return 'bzip2';
+  if (lower.endsWith('.lz4')) return 'lz4';
+  return 'plain';
+}
+
+export function sqlScriptCompressionLabel(compression: SqlScriptCompression): string {
+  return {
+    plain: 'Plain SQL', gzip: 'Gzip', zstd: 'Zstandard', xz: 'XZ', bzip2: 'Bzip2',
+    lz4: 'LZ4', zip: 'ZIP archive', tar_gzip: 'tar + gzip',
+    tar_xz: 'tar + XZ', tar_zstd: 'tar + Zstandard',
+  }[compression];
 }
 
 export function validSqlScriptLimitMiB(value: number): boolean {

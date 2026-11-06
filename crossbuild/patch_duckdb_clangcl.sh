@@ -15,18 +15,19 @@
 # compiler, MSVC included (a deleted function exports nothing anyway).
 #
 # The sources live inside the crate's duckdb.tar.gz (extracted fresh on every
-# build, so patching OUT_DIR is useless). This script patches the tarball in
-# the cargo registry, idempotently, keeping a one-time .txui-orig backup.
-# It is keyed to the tarball CONTENT, not a version number: upgrade duckdb
-# and a fixed upstream tarball is simply left alone; an unfixed one gets
-# patched again.
+# build, so patching OUT_DIR is useless). This script patches TxUI's vendored
+# tarball, plus registry copies used by older checkouts, idempotently while
+# keeping a one-time .txui-orig backup. It is keyed to the tarball CONTENT, not
+# a version number: upgrade duckdb and a fixed upstream tarball is simply left
+# alone; an unfixed one gets patched again.
 set -euo pipefail
 
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 HDR="duckdb/src/include/duckdb/storage/statistics/variant_stats.hpp"
 found=0
 
 shopt -s nullglob
-for crate in "$HOME"/.cargo/registry/src/*/libduckdb-sys-*/; do
+for crate in "$HOME"/.cargo/registry/src/*/libduckdb-sys-*/ "$ROOT/src-tauri/vendor/libduckdb-sys"; do
   tgz="$crate/duckdb.tar.gz"
   [ -f "$tgz" ] || continue
   found=1

@@ -21,6 +21,14 @@ const READ_CHUNK: usize = 64 * 1024;
 pub enum ScriptCompression {
     Plain,
     Gzip,
+    Zstd,
+    Xz,
+    Bzip2,
+    Lz4,
+    Zip,
+    TarGzip,
+    TarXz,
+    TarZstd,
 }
 
 #[derive(Clone, Debug)]
@@ -121,13 +129,33 @@ impl Read for HashReader {
     }
 }
 
+const XZ_DECODER_MEMORY_LIMIT: u64 = 256 * 1024 * 1024;
+const ZSTD_WINDOW_LOG_LIMIT: u32 = 27;
+
 fn source_reader(source: &ScriptSource, hash: SourceHash) -> Result<Box<dyn Read + Send>, String> {
     let file = std::fs::File::open(&source.path)
         .map_err(|e| format!("cannot open {}: {e}", source.path.display()))?;
     let raw = std::io::BufReader::new(HashReader { file, hash });
     Ok(match source.compression {
         ScriptCompression::Plain => Box::new(raw),
-        ScriptCompression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(raw)),
+        ScriptCompression::Gzip | ScriptCompression::TarGzip =>
+            Box::new(flate2::read::MultiGzDecoder::new(raw)),
+        ScriptCompression::Zstd | ScriptCompression::TarZstd => {
+            let mut decoder = zstd::stream::read::Decoder::new(raw)
+                .map_err(|e| format!("cannot initialize Zstandard decoder: {e}"))?;
+            decoder.window_log_max(ZSTD_WINDOW_LOG_LIMIT)
+                .map_err(|e| format!("cannot set the Zstandard window limit: {e}"))?;
+            Box::new(decoder)
+        },
+        ScriptCompression::Xz | ScriptCompression::TarXz => {
+            let stream = xz2::stream::Stream::new_auto_decoder(
+                XZ_DECODER_MEMORY_LIMIT, xz2::stream::CONCATENATED,
+            ).map_err(|e| format!("cannot initialize XZ decoder: {e}"))?;
+            Box::new(xz2::read::XzDecoder::new_stream(raw, stream))
+        }
+        ScriptCompression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(raw)),
+        ScriptCompression::Lz4 => Box::new(lz4_flex::frame::FrameDecoder::new(raw)),
+        ScriptCompression::Zip => return Err("ZIP must be read through its archive entries".into()),
     })
 }
 
@@ -145,36 +173,139 @@ pub fn spawn_scan(
     (rx, join)
 }
 
+type ScanSender = tokio::sync::mpsc::Sender<Result<ScriptScanEvent, String>>;
+
+fn send_event(tx: &ScanSender, event: Result<ScriptScanEvent, String>) -> Result<(), String> {
+    tx.blocking_send(event).map_err(|_| "scan cancelled".into())
+}
+
 fn scan_blocking(
     source: ScriptSource,
     max_statement_bytes: usize,
-    tx: tokio::sync::mpsc::Sender<Result<ScriptScanEvent, String>>,
+    tx: ScanSender,
 ) -> Result<ScanSummary, String> {
     let hash = SourceHash::new();
-    let mut reader = source_reader(&source, hash.clone())?;
+    let mut uncompressed = 0u64;
+    let mut statements = 0u64;
+    let lines = match source.compression {
+        ScriptCompression::Zip => scan_zip(
+            &source, &hash, max_statement_bytes, &tx, &mut uncompressed, &mut statements,
+        )?,
+        ScriptCompression::TarGzip | ScriptCompression::TarXz | ScriptCompression::TarZstd =>
+            scan_tar(&source, &hash, max_statement_bytes, &tx, &mut uncompressed, &mut statements)?,
+        ScriptCompression::Lz4 => {
+            let mut reader = source_reader(&source, hash.clone())?;
+            let lines = decode_stream(
+                &source, &mut reader, &hash, max_statement_bytes, &tx,
+                &mut uncompressed, &mut statements,
+            )?;
+            validate_lz4_file(&source.path)?;
+            lines
+        }
+        _ => {
+            let mut reader = source_reader(&source, hash.clone())?;
+            decode_stream(
+                &source, &mut reader, &hash, max_statement_bytes, &tx,
+                &mut uncompressed, &mut statements,
+            )?
+        }
+    };
+    if hash.bytes() != source.bytes {
+        return Err(format!(
+            "{} was not read completely ({} of {} source bytes); trailing or changed data is not accepted",
+            source.path.display(), hash.bytes(), source.bytes,
+        ));
+    }
+    Ok(ScanSummary {
+        source_bytes: hash.bytes(),
+        source_total: source.bytes,
+        uncompressed_bytes: uncompressed,
+        statements,
+        lines,
+        sha256: hash.finish(),
+    })
+}
+
+fn validate_lz4_file(path: &Path) -> Result<(), String> {
+    fn exact(reader: &mut impl Read, buf: &mut [u8], path: &Path) -> Result<(), String> {
+        reader.read_exact(buf).map_err(|e| format!("truncated LZ4 frame in {}: {e}", path.display()))
+    }
+    fn skip(reader: &mut impl Read, bytes: u64, path: &Path) -> Result<(), String> {
+        let copied = std::io::copy(&mut reader.take(bytes), &mut std::io::sink())
+            .map_err(|e| format!("cannot validate LZ4 frame in {}: {e}", path.display()))?;
+        if copied != bytes {
+            return Err(format!("truncated LZ4 frame in {}", path.display()));
+        }
+        Ok(())
+    }
+
+    let mut reader = std::fs::File::open(path)
+        .map_err(|e| format!("cannot reopen {} for LZ4 validation: {e}", path.display()))?;
+    let mut frames = 0u64;
+    loop {
+        let mut magic = [0u8; 4];
+        match reader.read(&mut magic) {
+            Ok(0) => break,
+            Ok(n) => exact(&mut reader, &mut magic[n..], path)?,
+            Err(e) => return Err(format!("cannot read LZ4 frame in {}: {e}", path.display())),
+        }
+        let magic = u32::from_le_bytes(magic);
+        if (0x184d2a50..=0x184d2a5f).contains(&magic) {
+            return Err("skippable LZ4 frames are not supported".into());
+        }
+        if magic != 0x184d2204 {
+            return Err(format!("invalid LZ4 frame magic in {}", path.display()));
+        }
+        let mut flags = [0u8; 2];
+        exact(&mut reader, &mut flags, path)?;
+        let flg = flags[0];
+        if flg >> 6 != 1 {
+            return Err(format!("unsupported LZ4 frame version in {}", path.display()));
+        }
+        if flg & 0x08 != 0 { skip(&mut reader, 8, path)?; }
+        if flg & 0x01 != 0 { skip(&mut reader, 4, path)?; }
+        skip(&mut reader, 1, path)?; // header checksum
+
+        loop {
+            let mut block = [0u8; 4];
+            exact(&mut reader, &mut block, path)?;
+            let size = u32::from_le_bytes(block) & 0x7fff_ffff;
+            if size == 0 {
+                if flg & 0x04 != 0 { skip(&mut reader, 4, path)?; }
+                break;
+            }
+            skip(&mut reader, size as u64, path)?;
+            if flg & 0x10 != 0 { skip(&mut reader, 4, path)?; }
+        }
+        frames += 1;
+    }
+    if frames == 0 {
+        return Err(format!("no LZ4 frame found in {}", path.display()));
+    }
+    Ok(())
+}
+
+fn decode_stream(
+    source: &ScriptSource,
+    reader: &mut dyn Read,
+    hash: &SourceHash,
+    max_statement_bytes: usize,
+    tx: &ScanSender,
+    uncompressed: &mut u64,
+    statements: &mut u64,
+) -> Result<u64, String> {
     let mut utf8 = IncrementalUtf8::default();
     let mut splitter = MysqlSplitter::new(max_statement_bytes);
     let mut buf = [0u8; READ_CHUNK];
-    let mut uncompressed = 0u64;
-    let mut statements = 0u64;
     let mut first_text = true;
-
-    macro_rules! send {
-        ($event:expr) => {
-            if tx.blocking_send($event).is_err() {
-                return Err("scan cancelled".into());
-            }
-        };
-    }
-
     loop {
         let n = reader.read(&mut buf)
             .map_err(|e| format!("cannot decode {}: {e}", source.path.display()))?;
         if n == 0 { break; }
-        uncompressed += n as u64;
+        *uncompressed += n as u64;
         let text = utf8.push(&buf[..n]).map_err(|e| format!(
             "{} is not valid UTF-8 at uncompressed byte {}: {e}",
-            source.path.display(), uncompressed - n as u64 + e.valid_up_to as u64,
+            source.path.display(), *uncompressed - n as u64 + e.valid_up_to as u64,
         ))?;
         let text = if first_text && !text.is_empty() {
             first_text = false;
@@ -184,14 +315,14 @@ fn scan_blocking(
         };
         for stmt in splitter.feed(text)? {
             validate_statement(&stmt)?;
-            statements += 1;
-            send!(Ok(ScriptScanEvent::Statement(stmt)));
+            *statements += 1;
+            send_event(tx, Ok(ScriptScanEvent::Statement(stmt)))?;
         }
-        send!(Ok(ScriptScanEvent::Progress {
+        send_event(tx, Ok(ScriptScanEvent::Progress {
             source_bytes: hash.bytes(),
             source_total: source.bytes,
-            uncompressed_bytes: uncompressed,
-        }));
+            uncompressed_bytes: *uncompressed,
+        }))?;
     }
     let tail = utf8.finish().map_err(|e| format!(
         "{} ends inside a UTF-8 sequence at uncompressed byte {}: {e}",
@@ -204,28 +335,105 @@ fn scan_blocking(
     };
     for stmt in splitter.feed(tail)? {
         validate_statement(&stmt)?;
-        statements += 1;
-        send!(Ok(ScriptScanEvent::Statement(stmt)));
+        *statements += 1;
+        send_event(tx, Ok(ScriptScanEvent::Statement(stmt)))?;
     }
     for stmt in splitter.finish()? {
         validate_statement(&stmt)?;
-        statements += 1;
-        send!(Ok(ScriptScanEvent::Statement(stmt)));
+        *statements += 1;
+        send_event(tx, Ok(ScriptScanEvent::Statement(stmt)))?;
     }
-    if hash.bytes() != source.bytes {
-        return Err(format!(
-            "{} was not read completely ({} of {} compressed bytes); trailing or changed data is not accepted",
-            source.path.display(), hash.bytes(), source.bytes,
-        ));
+    Ok(splitter.line)
+}
+
+fn scan_zip(
+    source: &ScriptSource,
+    hash: &SourceHash,
+    max_statement_bytes: usize,
+    tx: &ScanSender,
+    uncompressed: &mut u64,
+    statements: &mut u64,
+) -> Result<u64, String> {
+    let file = std::fs::File::open(&source.path)
+        .map_err(|e| format!("cannot open {}: {e}", source.path.display()))?;
+    let mut raw = std::io::BufReader::new(HashReader { file, hash: hash.clone() });
+    let mut found = 0u64;
+    let mut lines = 0;
+    loop {
+        let Some(mut entry) = zip::read::read_zipfile_from_stream(&mut raw)
+            .map_err(|e| format!("cannot read ZIP archive {}: {e}", source.path.display()))?
+        else { break; };
+        let name = entry.name()
+            .map_err(|e| format!("invalid ZIP entry name in {}: {e}", source.path.display()))?
+            .into_owned();
+        if entry.is_dir() { continue; }
+        if entry.encrypted() {
+            return Err(format!("ZIP entry '{name}' is encrypted; encrypted archives are not supported"));
+        }
+        if !matches!(entry.compression(), zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated) {
+            return Err(format!(
+                "ZIP entry '{name}' uses {:?}, only Stored and Deflated entries are supported",
+                entry.compression(),
+            ));
+        }
+        if !sql_archive_path(Path::new(&name)) {
+            return Err(format!(
+                "ZIP archive must contain exactly one .sql file and nothing else; found '{name}'"
+            ));
+        }
+        found += 1;
+        if found > 1 {
+            return Err("ZIP archive contains more than one .sql file; select a single-script archive".into());
+        }
+        lines = decode_stream(source, &mut entry, hash, max_statement_bytes, tx, uncompressed, statements)?;
     }
-    Ok(ScanSummary {
-        source_bytes: hash.bytes(),
-        source_total: source.bytes,
-        uncompressed_bytes: uncompressed,
-        statements,
-        lines: splitter.line,
-        sha256: hash.finish(),
-    })
+    if found != 1 {
+        return Err("ZIP archive contains no .sql file".into());
+    }
+    Ok(lines)
+}
+
+fn scan_tar(
+    source: &ScriptSource,
+    hash: &SourceHash,
+    max_statement_bytes: usize,
+    tx: &ScanSender,
+    uncompressed: &mut u64,
+    statements: &mut u64,
+) -> Result<u64, String> {
+    let reader = source_reader(source, hash.clone())?;
+    let mut archive = tar::Archive::new(reader);
+    let mut found = 0u64;
+    let mut lines = 0;
+    let entries = archive.entries()
+        .map_err(|e| format!("cannot read tar archive {}: {e}", source.path.display()))?;
+    for item in entries {
+        let mut entry = item
+            .map_err(|e| format!("cannot read tar archive {}: {e}", source.path.display()))?;
+        if !entry.header().entry_type().is_file() { continue; }
+        let name = entry.path()
+            .map_err(|e| format!("invalid tar entry name in {}: {e}", source.path.display()))?
+            .into_owned();
+        if !sql_archive_path(&name) {
+            return Err(format!(
+                "tar archive must contain exactly one .sql file and nothing else; found '{}'",
+                name.display(),
+            ));
+        }
+        found += 1;
+        if found > 1 {
+            return Err("tar archive contains more than one .sql file; select a single-script archive".into());
+        }
+        lines = decode_stream(source, &mut entry, hash, max_statement_bytes, tx, uncompressed, statements)?;
+    }
+    if found != 1 {
+        return Err("tar archive contains no .sql file".into());
+    }
+    Ok(lines)
+}
+
+fn sql_archive_path(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sql"))
 }
 
 #[derive(Debug)]
@@ -598,11 +806,17 @@ fn validate_statement(stmt: &ScriptStatement) -> Result<(), String> {
 }
 
 pub fn compression_for_path(path: &str) -> ScriptCompression {
-    if Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gz")) {
-        ScriptCompression::Gzip
-    } else {
-        ScriptCompression::Plain
-    }
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") { return ScriptCompression::TarGzip; }
+    if lower.ends_with(".tar.xz") { return ScriptCompression::TarXz; }
+    if lower.ends_with(".tar.zst") { return ScriptCompression::TarZstd; }
+    if lower.ends_with(".zip") { return ScriptCompression::Zip; }
+    if lower.ends_with(".gz") { return ScriptCompression::Gzip; }
+    if lower.ends_with(".zst") { return ScriptCompression::Zstd; }
+    if lower.ends_with(".xz") { return ScriptCompression::Xz; }
+    if lower.ends_with(".bz2") { return ScriptCompression::Bzip2; }
+    if lower.ends_with(".lz4") { return ScriptCompression::Lz4; }
+    ScriptCompression::Plain
 }
 
 #[cfg(test)]
@@ -703,6 +917,62 @@ mod tests {
         p
     }
 
+    fn encode_direct(format: ScriptCompression, sql: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        match format {
+            ScriptCompression::Gzip => {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(sql).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Zstd => zstd::stream::encode_all(sql, 3).unwrap(),
+            ScriptCompression::Xz => {
+                let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+                encoder.write_all(sql).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Bzip2 => {
+                let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+                encoder.write_all(sql).unwrap();
+                encoder.finish().unwrap()
+            }
+            ScriptCompression::Lz4 => {
+                let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+                encoder.write_all(sql).unwrap();
+                encoder.finish().unwrap()
+            }
+            _ => panic!("not a direct compression"),
+        }
+    }
+
+    fn zip_bytes(entries: &[(&str, &str)], method: zip::CompressionMethod) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default().compression_method(method);
+        for (name, sql) in entries {
+            writer.start_file(name, options).unwrap();
+            std::io::Write::write_all(&mut writer, sql.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn tar_bytes(format: ScriptCompression, entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, sql) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(sql.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, sql.as_bytes()).unwrap();
+        }
+        let plain = builder.into_inner().unwrap();
+        match format {
+            ScriptCompression::TarGzip => encode_direct(ScriptCompression::Gzip, &plain),
+            ScriptCompression::TarXz => encode_direct(ScriptCompression::Xz, &plain),
+            ScriptCompression::TarZstd => encode_direct(ScriptCompression::Zstd, &plain),
+            _ => panic!("not a tar compression"),
+        }
+    }
+
     async fn scan_file(path: &Path, compression: ScriptCompression) -> Result<(ScanSummary, Vec<ScriptStatement>), String> {
         let source = inspect_source(path.to_str().unwrap(), compression)?;
         let (mut rx, join) = spawn_scan(source, DEFAULT_MAX_STATEMENT_BYTES);
@@ -775,9 +1045,105 @@ mod tests {
         std::fs::remove_file(truncated).unwrap();
     }
 
+    #[tokio::test]
+    async fn every_direct_compression_round_trips_and_rejects_truncation() {
+        let sql = b"CREATE TABLE t(id int);\nINSERT INTO t VALUES (1);\n";
+        for format in [
+            ScriptCompression::Gzip, ScriptCompression::Zstd, ScriptCompression::Xz,
+            ScriptCompression::Bzip2, ScriptCompression::Lz4,
+        ] {
+            let bytes = encode_direct(format, sql);
+            let path = temp_file("roundtrip", &bytes);
+            let (summary, statements) = scan_file(&path, format).await.unwrap();
+            assert_eq!(summary.statements, 2, "{format:?}");
+            assert_eq!(summary.uncompressed_bytes, sql.len() as u64, "{format:?}");
+            assert_eq!(statements[1].sql, "INSERT INTO t VALUES (1)", "{format:?}");
+            assert_eq!(summary.source_bytes, bytes.len() as u64, "{format:?}");
+            std::fs::remove_file(&path).unwrap();
+
+            let truncated = temp_file("truncated", &bytes[..bytes.len() - 3]);
+            assert!(scan_file(&truncated, format).await.is_err(), "{format:?} truncation was accepted");
+            std::fs::remove_file(truncated).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn zip_supports_stored_and_deflated_single_sql_entries() {
+        let sql = "CREATE TABLE t(id int);\nINSERT INTO t VALUES (1);\n";
+        for method in [zip::CompressionMethod::Stored, zip::CompressionMethod::Deflated] {
+            let bytes = zip_bytes(&[("nested/flashback.SQL", sql)], method);
+            let path = temp_file("single.zip", &bytes);
+            let (summary, statements) = scan_file(&path, ScriptCompression::Zip).await.unwrap();
+            assert_eq!(summary.statements, 2);
+            assert_eq!(summary.uncompressed_bytes, sql.len() as u64);
+            assert_eq!(statements[0].sql, "CREATE TABLE t(id int)");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn zip_rejects_extra_files_multiple_sql_empty_and_encryption() {
+        for entries in [
+            &[("flashback.sql", "SELECT 1;"), ("README.txt", "not SQL")][..],
+            &[("one.sql", "SELECT 1;"), ("two.sql", "SELECT 2;")][..],
+        ] {
+            let path = temp_file("rejected.zip", &zip_bytes(entries, zip::CompressionMethod::Deflated));
+            assert!(scan_file(&path, ScriptCompression::Zip).await.is_err());
+            std::fs::remove_file(path).unwrap();
+        }
+        let empty = temp_file("empty.zip", &zip_bytes(&[], zip::CompressionMethod::Deflated));
+        assert!(scan_file(&empty, ScriptCompression::Zip).await.is_err());
+        std::fs::remove_file(empty).unwrap();
+
+        let mut encrypted = zip_bytes(&[("flashback.sql", "SELECT 1;")], zip::CompressionMethod::Deflated);
+        encrypted[6] |= 1;
+        let path = temp_file("encrypted.zip", &encrypted);
+        let error = scan_file(&path, ScriptCompression::Zip).await.unwrap_err();
+        assert!(error.contains("encrypted"), "{error}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_tar_compression_round_trips_and_rejects_bad_membership() {
+        let sql = "CREATE TABLE t(id int);\nINSERT INTO t VALUES (1);\n";
+        for format in [ScriptCompression::TarGzip, ScriptCompression::TarXz, ScriptCompression::TarZstd] {
+            let bytes = tar_bytes(format, &[("dump/flashback.sql", sql)]);
+            let path = temp_file("single.tar", &bytes);
+            let (summary, statements) = scan_file(&path, format).await.unwrap();
+            assert_eq!(summary.statements, 2, "{format:?}");
+            assert_eq!(summary.uncompressed_bytes, sql.len() as u64, "{format:?}");
+            assert_eq!(statements[1].sql, "INSERT INTO t VALUES (1)", "{format:?}");
+            std::fs::remove_file(path).unwrap();
+
+            let rejected = temp_file("rejected.tar", &tar_bytes(format, &[
+                ("flashback.sql", sql), ("notes.txt", "not SQL"),
+            ]));
+            assert!(scan_file(&rejected, format).await.is_err(), "{format:?}");
+            std::fs::remove_file(rejected).unwrap();
+
+            let multiple = temp_file("multiple.tar", &tar_bytes(format, &[
+                ("one.sql", "SELECT 1;"), ("two.sql", "SELECT 2;"),
+            ]));
+            assert!(scan_file(&multiple, format).await.is_err(), "{format:?}");
+            std::fs::remove_file(multiple).unwrap();
+
+            let empty = temp_file("empty.tar", &tar_bytes(format, &[]));
+            assert!(scan_file(&empty, format).await.is_err(), "{format:?}");
+            std::fs::remove_file(empty).unwrap();
+        }
+    }
+
     #[test]
     fn source_change_and_compression_detection_are_explicit() {
         assert_eq!(compression_for_path("x.SQL.GZ"), ScriptCompression::Gzip);
+        assert_eq!(compression_for_path("x.sql.zst"), ScriptCompression::Zstd);
+        assert_eq!(compression_for_path("x.sql.xz"), ScriptCompression::Xz);
+        assert_eq!(compression_for_path("x.sql.bz2"), ScriptCompression::Bzip2);
+        assert_eq!(compression_for_path("x.sql.lz4"), ScriptCompression::Lz4);
+        assert_eq!(compression_for_path("x.sql.zip"), ScriptCompression::Zip);
+        assert_eq!(compression_for_path("x.tar.gz"), ScriptCompression::TarGzip);
+        assert_eq!(compression_for_path("x.TAR.XZ"), ScriptCompression::TarXz);
+        assert_eq!(compression_for_path("x.tar.zst"), ScriptCompression::TarZstd);
         assert_eq!(compression_for_path("x.sql"), ScriptCompression::Plain);
         let p = temp_file("change.sql", b"SELECT 1;");
         let source = inspect_source(p.to_str().unwrap(), ScriptCompression::Plain).unwrap();

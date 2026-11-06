@@ -1364,6 +1364,36 @@ mod tests {
     }
 
     #[test]
+    fn bundled_brotli_source_has_block_switch_fix() {
+        use std::io::Read;
+
+        let file = std::fs::File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/vendor/libduckdb-sys/duckdb.tar.gz"
+        ))
+        .unwrap();
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let mut decoder = String::new();
+        let mut header = String::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            match entry.path().unwrap().to_str().unwrap() {
+                "duckdb/third_party/brotli/dec/decode.cpp" => {
+                    entry.read_to_string(&mut decoder).unwrap();
+                }
+                "duckdb/third_party/brotli/include/brotli/decode.h" => {
+                    entry.read_to_string(&mut header).unwrap();
+                }
+                _ => {}
+            }
+        }
+        assert!(decoder.contains("#define BROTLI_SAFE_WITH_STATUS(METHOD)"));
+        assert!(decoder.contains("BROTLI_SAFE_WITH_STATUS(DecodeLiteralBlockSwitch(s))"));
+        assert!(header.contains("BROTLI_ERROR_CODE(_ERROR_FORMAT_, BLOCK_SWITCH, -17)"));
+        assert!(!header.contains("/* -17 code is reserved */"));
+    }
+
+    #[test]
     fn quack_open_command_quotes_credentials_and_redacts_errors() {
         let mut c = ConnectionConfig::new(Engine::Duckdb, "remote");
         c.file_path = Some("quack://localhost:9494".into());
@@ -1839,6 +1869,44 @@ mod tests {
         let r = execute(&s, &format!("SELECT a, b FROM '{}'", pq.display())).await.unwrap();
         assert_eq!(r.rows[0][0], serde_json::json!(1));
         assert_eq!(r.rows[0][1], serde_json::json!("x"));
+        let _ = std::fs::remove_file(&pq);
+    }
+
+    #[tokio::test]
+    async fn parquet_brotli_is_static_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("txui-duckdb-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pq = dir.join("brotli.parquet");
+        let _ = std::fs::remove_file(&pq);
+
+        let s = mem().await;
+        let extension = execute(
+            &s,
+            "SELECT loaded, installed, install_mode FROM duckdb_extensions() \
+             WHERE extension_name = 'parquet'",
+        )
+        .await
+        .unwrap();
+        assert_eq!(extension.rows.len(), 1);
+        assert_eq!(extension.rows[0][0], serde_json::json!(true));
+        assert_eq!(extension.rows[0][1], serde_json::json!(true));
+        assert_eq!(extension.rows[0][2], serde_json::json!("STATICALLY_LINKED"));
+
+        execute(
+            &s,
+            &format!(
+                "COPY (SELECT 42 AS answer, 'ok' AS codec) TO '{}' \
+                 (FORMAT PARQUET, COMPRESSION BROTLI)",
+                pq.display()
+            ),
+        )
+        .await
+        .unwrap();
+        let result = execute(&s, &format!("SELECT answer, codec FROM '{}'", pq.display()))
+            .await
+            .unwrap();
+        assert_eq!(result.rows[0][0], serde_json::json!(42));
+        assert_eq!(result.rows[0][1], serde_json::json!("ok"));
         let _ = std::fs::remove_file(&pq);
     }
 
