@@ -130,6 +130,9 @@ export interface CatalogFk {
    * true) means valid — MySQL has no such state.
    */
   validated?: boolean;
+  matchType?: 'full' | 'partial' | 'simple';
+  deferrable?: boolean;
+  deferred?: boolean;
 }
 
 export interface SchemaSnapshot {

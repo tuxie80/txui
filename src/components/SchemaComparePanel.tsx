@@ -23,6 +23,7 @@ import type { DiffRow } from '../utils/lineDiff';
 import { saveTextAs } from '../utils/exportersIo';
 import { mdTable } from '../utils/qualityReport';
 import { basename } from '../utils/platform';
+import { OPEN_MIGRATION_EVENT } from '../utils/operationHandoff';
 
 interface SideState {
   connId: string;
@@ -193,27 +194,52 @@ export function SchemaComparePanel({ onClose }: PanelProps) {
     return parts.join('\n');
   }, [result, conns, left, right]);
 
+  const migrationFor = useCallback(async (direction: 'ltr' | 'rtl') => {
+    if (!result) throw new Error('compare two schemas before generating a migration');
+    const src = direction === 'ltr'
+      ? { snap: result.left, connId: left.connId, schema: left.schema }
+      : { snap: result.right, connId: right.connId, schema: right.schema };
+    const target = direction === 'ltr' ? right : left;
+    const dst = direction === 'ltr' ? result.right : result.left;
+    const diff = direction === 'ltr' ? result.diff : diffSnapshots(result.right, result.left);
+    const sid = await ensureSession(src.connId);
+    const script = await generateMigration(diff, src.snap, dst, name =>
+      invoke<string>('get_ddl', { sessionId: sid, parent: `${src.schema}.${name}` }));
+    return {
+      script,
+      targetConnectionId: target.connId,
+      database: target.schema,
+      engine: (conns.find(c => c.id === target.connId)?.engine ?? 'mysql') as 'mysql' | 'postgres',
+    };
+  }, [result, left, right, ensureSession, conns]);
+
   const exportMigration = useCallback(async (direction: 'ltr' | 'rtl') => {
-    if (!result) return;
     setBusy('Generating migration…');
     try {
-      const src = direction === 'ltr'
-        ? { snap: result.left, connId: left.connId, schema: left.schema }
-        : { snap: result.right, connId: right.connId, schema: right.schema };
-      const dst = direction === 'ltr' ? result.right : result.left;
-      // diff is oriented left→right; for rtl regenerate with sides swapped
-      const diff = direction === 'ltr' ? result.diff : diffSnapshots(result.right, result.left);
-      const sid = await ensureSession(src.connId);
-      const script = await generateMigration(diff, src.snap, dst, name =>
-        invoke<string>('get_ddl', { sessionId: sid, parent: `${src.schema}.${name}` }));
-      const p = await saveTextAs(script, `migration_${direction === 'ltr' ? 'to_right' : 'to_left'}.sql`, 'SQL', ['sql']);
+      const migration = await migrationFor(direction);
+      const p = await saveTextAs(migration.script, `migration_${direction === 'ltr' ? 'to_right' : 'to_left'}.sql`, 'SQL', ['sql']);
       if (p) note(`Saved ${basename(p)}`);
     } catch (e) {
       setError(errorDisplay(e));
     } finally {
       setBusy(null);
     }
-  }, [result, left, right, ensureSession]);
+  }, [migrationFor]);
+
+  const reviewMigration = useCallback(async (direction: 'ltr' | 'rtl') => {
+    setBusy('Opening migration review…');
+    try {
+      const migration = await migrationFor(direction);
+      window.dispatchEvent(new CustomEvent(OPEN_MIGRATION_EVENT, { detail: {
+        version: 1, engine: migration.engine, database: migration.database,
+        sql: migration.script, origin: 'schema-compare', targetConnectionId: migration.targetConnectionId,
+      } }));
+    } catch (e) {
+      setError(errorDisplay(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [migrationFor]);
 
   // ── derived ────────────────────────────────────────────────────────────────
 
@@ -276,6 +302,10 @@ export function SchemaComparePanel({ onClose }: PanelProps) {
               onClick={() => exportMigration('ltr')}>Migrate →</button>
             <button className="toolbar-btn" title="ALTER script that makes LEFT match RIGHT"
               onClick={() => exportMigration('rtl')}>← Migrate</button>
+            <button className="toolbar-btn" title="Review the right-target migration in Migration Cockpit; nothing runs"
+              onClick={() => void reviewMigration('ltr')}>Review →</button>
+            <button className="toolbar-btn" title="Review the left-target migration in Migration Cockpit; nothing runs"
+              onClick={() => void reviewMigration('rtl')}>← Review</button>
           </>
         )}
         {onClose && <button className="icon-btn" title="Close" onClick={onClose}>×</button>}

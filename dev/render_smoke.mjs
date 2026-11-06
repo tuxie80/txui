@@ -25,7 +25,7 @@ const sweepFix = namedOnly ? {} : await sweepFixtures(fixtures);
 // Every sweep target answers invoke from the docs-generator's own fixture
 // table (mockFor) — the shapes that file maintains precisely because a wrong
 // shape renders an empty panel. Per-target mocks override it.
-const defaultMock = { ...fixtures.mockFor('mysql'), audit_list: [] };
+const defaultMock = { ...fixtures.mockFor('mysql'), audit_list: [], migration_scratch_list: [] };
 const sweep = namedOnly ? [] : sweepTargets(sweepFix)
   .filter(s => !named.some(n => n.file === s.file && n.name === s.name))
   .map(s => ({ ...s, mock: { ...defaultMock, ...(s.mock ?? {}) } }));

@@ -258,6 +258,12 @@ export interface EngineCaps {
   csvImport: boolean;
   /** Plain/gzipped SQL scripts can run on a dedicated native connection. */
   sqlScript: boolean;
+  /** Reviewed, rehearsed and verified table migrations. */
+  migrationCockpit: boolean;
+  /** Relationally complete, masked same-engine environment refreshes. */
+  environmentRefresh: boolean;
+  /** Estimated and measured query/index experiments. */
+  queryLab: boolean;
   /** The SQL quality audit (EXPLAIN + statistics + index advice). */
   sqlQuality: boolean;
   /** Statements can be parameterised with `:name` variables before running. */
@@ -291,12 +297,14 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: true, transactions: true, databaseSelect: true, processList: true,
     serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, pgWorkload: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
     csvImport: true, sqlScript: true, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
+    migrationCockpit: true, environmentRefresh: true, queryLab: true,
     statementTimeout: true,
   },
   postgres: {
     sql: true, transactions: true, databaseSelect: true, processList: true,
     serverInfo: true, sqlDba: true, lockWaits: true, sequences: true, longQueryWatch: true, replication: true,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: true, pgWorkload: true, queryStore: false, maintenance: true, tuner: true, erDiagram: true, dataGen: true,
     csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true, writes: true, tableDesigner: true,
+    migrationCockpit: true, environmentRefresh: false, queryLab: true,
     statementTimeout: true,
   },
   clickhouse: {
@@ -316,7 +324,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     dataGen: false, csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true,
     // The designer's ClickHouse dialect: CREATE with engine + MergeTree
     // clauses, and the narrow ALTER (columns, TTL) it genuinely has.
-    writes: true, tableDesigner: true, statementTimeout: true,
+    writes: true, tableDesigner: true,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: true,
   },
   redis: {
     // Not SQL at all: no catalog, no databases to select in this sense, no
@@ -324,7 +334,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: false, transactions: false, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: true, erDiagram: false,
     dataGen: false, csvImport: false, sqlScript: false, sqlQuality: false, sqlVariables: false,
-    writes: true, tableDesigner: false, statementTimeout: false,
+    writes: true, tableDesigner: false,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: false,
   },
   sqlite: {
     // A real SQL engine, but in-process — so there is no server-side anything:
@@ -342,7 +354,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: true, transactions: true, databaseSelect: false, processList: false,
     serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: true, tuner: true, erDiagram: true,
     dataGen: false, csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true,
-    writes: true, tableDesigner: true, statementTimeout: false,
+    writes: true, tableDesigner: true,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: false,
   },
   parquet: {
     // A file format. It is read through a query engine, but there is nothing
@@ -353,7 +367,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: true, transactions: false, databaseSelect: false, processList: false,
     serverInfo: false, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlScript: false, sqlQuality: false, sqlVariables: true,
-    writes: false, tableDesigner: false, statementTimeout: false,
+    writes: false, tableDesigner: false,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: false,
   },
   duckdb: {
     // A real SQL engine in-process (like SQLite), but OLAP and three-level:
@@ -371,7 +387,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: true, transactions: true, databaseSelect: false, processList: false,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlScript: false, sqlQuality: true, sqlVariables: true,
-    writes: true, tableDesigner: false, statementTimeout: false,
+    writes: true, tableDesigner: false,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: false,
   },
   mongodb: {
     // Not SQL: the find editor (filter/projection/sort documents) is the query
@@ -387,7 +405,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: false, transactions: false, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: false, sequences: false, longQueryWatch: false, replication: false,columnProfile: false, dbSearch: false, findUsages: false, dataCompare: false, documenter: false, routines: false, userAdmin: false, fleet: false, playground: false, namespaceDdl: false, stmtStats: false, pgWorkload: false, queryStore: false, maintenance: false, tuner: false, erDiagram: false,
     dataGen: false, csvImport: false, sqlScript: false, sqlQuality: false, sqlVariables: false,
-    writes: false, tableDesigner: false, statementTimeout: false,
+    writes: false, tableDesigner: false,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: false,
   },
   sqlserver: {
     // At parity since 0.63.0: EXPLAIN exists (SHOWPLAN_XML estimated +
@@ -423,7 +443,9 @@ export const ENGINE_CAPS: Record<Engine, EngineCaps> = {
     sql: true, transactions: true, databaseSelect: false, processList: true,
     serverInfo: true, sqlDba: false, lockWaits: true, sequences: true, longQueryWatch: true, replication: false,columnProfile: true, dbSearch: true, findUsages: true, dataCompare: true, documenter: true, routines: true, userAdmin: true, fleet: true, playground: true, namespaceDdl: true, stmtStats: false, pgWorkload: false, queryStore: true, maintenance: true, tuner: true, erDiagram: true,
     dataGen: true, csvImport: true, sqlScript: false, sqlQuality: true, sqlVariables: true,
-    writes: true, tableDesigner: true, statementTimeout: false,
+    writes: true, tableDesigner: true,
+    migrationCockpit: false, environmentRefresh: false, queryLab: false,
+    statementTimeout: false,
   },
 };
 

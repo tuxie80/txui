@@ -90,14 +90,16 @@ test('YES/NO nullability and NULL defaults survive the trip', () => {
     [
       ['t', 'a', 'int', 'int unsigned', 'NO', null, 'auto_increment', null, null, null, ''],
       ['t', 'b', 'varchar', 'varchar(20)', 'YES', '', '', 'utf8mb4', 'utf8mb4_0900_ai_ci', 20, 'note'],
+      ['t', 'c', 'varchar', 'varchar(20)', 'YES', 'NULL', '', 'utf8mb4', 'utf8mb4_0900_ai_ci', 20, ''],
     ]);
-  const [a, b] = mapColumns(g);
+  const [a, b, c] = mapColumns(g);
   assert.equal(a.nullable, false);
   assert.equal(a.defaultValue, null);
   assert.equal(a.extra, 'auto_increment');
   assert.equal(b.nullable, true);
   assert.equal(b.defaultValue, '', 'an empty-string default is not the same as no default');
   assert.equal(b.charMaxLen, 20);
+  assert.equal(c.defaultValue, null, 'MariaDB textual NULL is no default, not a default expression');
 });
 
 test('foreign keys carry their ordinal so a composite key pairs correctly', () => {

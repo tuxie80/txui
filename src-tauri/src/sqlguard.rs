@@ -456,6 +456,18 @@ pub fn is_write_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool
 /// every input char to exactly one output char, so both strings cut at the
 /// same character positions — the `;`s in `blanked` (string/comment content
 /// no longer contains any) are safe split points for both.
+pub(crate) fn split_statements_for(
+    engine: Option<crate::db::types::Engine>,
+    sql: &str,
+) -> Vec<String> {
+    let dialect = Dialect::for_engine(engine);
+    let blanked = blank_dialect(sql, &dialect);
+    split_aligned(sql, &blanked).into_iter()
+        .map(|(raw, _)| raw.trim().to_string())
+        .filter(|statement| !statement.is_empty())
+        .collect()
+}
+
 fn split_aligned<'a>(raw: &'a str, blanked: &'a str) -> Vec<(&'a str, &'a str)> {
     let rb: Vec<usize> = raw.char_indices().map(|(i, _)| i)
         .chain(std::iter::once(raw.len())).collect();

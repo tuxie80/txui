@@ -17,6 +17,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -355,6 +356,353 @@ export function namedTargets(fixtures) {
         if (!html.includes('0.0.0-smoke')) return 'dbgui:about did not open the About modal (version string absent)';
       },
     },
+    ...[
+      { name: 'App_migration_handoff', production: false, tampered: false },
+      { name: 'App_migration_prod_handoff', production: true, tampered: false },
+      { name: 'App_migration_handoff_tampered', production: false, tampered: true },
+    ].map(testCase => ({
+      name: testCase.name, file: 'src/App.tsx', tier: 'mount', settleMs: 60,
+      mock: {
+        vault_status: VAULT_UNLOCKED,
+        list_connections: [{
+          id: 'c-target', name: 'target shop', engine: 'mysql',
+          environment: testCase.production ? 'prod' : 'dev', read_only: false,
+          color: null, auto_connect: false, tags: [], labels: [],
+        }],
+        open_connection: () => 's-target',
+        set_session_db: null,
+        migration_scratch_list: [],
+        list_schema: [],
+        get_app_version: '0.0.0-smoke',
+        monitor_query: ({ sql }) => String(sql).includes('DATABASE()')
+          ? fixtures.queryResult(['DATABASE()'], [['shop']]) : fixtures.queryResult([], []),
+      },
+      interact: async ({ container, act, shim }) => {
+        await act(async () => {
+          shim.window.dispatchEvent(new shim.window.CustomEvent('dbgui:open-migration', { detail: {
+            version: 1, engine: 'mysql', database: 'shop',
+            sql: 'ALTER TABLE orders ADD COLUMN note varchar(40);', origin: 'schema-compare',
+            targetConnectionId: 'c-target', ...(testCase.tampered ? { phase: 'done', rehearsalProof: {} } : {}),
+          } }));
+          await new Promise(resolve => setTimeout(resolve, 100));
+        });
+        if (testCase.production || testCase.tampered) {
+          container.__handoffDialogText = shim.document.body.textContent;
+          const buttons = [];
+          const walk = node => {
+            if (node.nodeName === 'BUTTON' && node.textContent === 'OK') buttons.push(node);
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          walk(shim.document.body);
+          await act(async () => { buttons[0]?.dispatchEvent(new shim.window.Event('click', { bubbles: true })); });
+        }
+      },
+      assert: ({ container, html, calls }) => {
+        const opened = calls.some(call => call.cmd === 'open_connection' && call.args.id === 'c-target');
+        const dialogText = container.__handoffDialogText ?? '';
+        if (testCase.production) {
+          if (opened) return 'unacknowledged production target was opened by a handoff';
+          if (!dialogText.includes('Open and acknowledge the production target')) return 'production handoff refusal was not explained';
+          return;
+        }
+        if (testCase.tampered) {
+          if (opened) return 'tampered handoff opened its target';
+          if (!dialogText.includes('unexpected fields')) return 'tampered proof fields were not rejected visibly';
+          return;
+        }
+        if (!opened) return 'exact non-production target was not opened';
+        if (!calls.some(call => call.cmd === 'set_session_db' && call.args.db === 'shop')) return 'handoff database was not selected';
+        const editors = [];
+        const walk = node => {
+          if (node.nodeName === 'TEXTAREA') editors.push(node);
+          for (const child of node.childNodes ?? []) walk(child);
+        };
+        walk(container);
+        if (!editors.some(editor => String(editor.value ?? '').includes('ALTER TABLE orders ADD COLUMN note varchar(40);'))) return 'handoff SQL did not reach Migration Cockpit';
+        if (!html.includes('Phase: draft')) return 'handoff bypassed the initial unreviewed draft';
+        if (calls.some(call => call.cmd === 'migration_preflight')) return 'handoff ran review/preflight without a user action';
+      },
+    })),
+    {
+      name: 'EnvironmentRefreshPanel_spec_journey', file: 'src/components/EnvironmentRefreshPanel.tsx', tier: 'mount', settleMs: 30,
+      mock: {
+        open: () => '/mock/imported-refresh.json',
+        save: () => '/mock/exported-refresh.json',
+        refresh_spec_load: () => JSON.stringify({
+          version: 1, engine: 'mysql',
+          source: { connectionId: 'c-source', sessionId: 'old-source' },
+          target: { connectionId: 'c-target', sessionId: 'old-target' },
+          schemaMappings: [{ source: 'shop', target: 'shop' }], seed: 'imported-seed', allowFkBreaking: false,
+          tables: [
+            { table: 'countries', policy: 'full' },
+            { table: 'orders', policy: 'time_window', column: 'created_at', mode: 'rolling', amount: 7, unit: 'days', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: '2026-11-06T12:00:00.000Z' },
+            { table: 'events', policy: 'time_window', column: 'created_at', mode: 'rolling', amount: 1, unit: 'days', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: '2026-11-06T12:00:00.000Z' },
+          ],
+          masks: [{ table: 'customers', column: 'email', rule: 'hash' }],
+          limits: { maxRowsPerChunk: 50000, maxBytesPerChunk: 67108864, planningKeyBatch: 10000, maxPlanningKeys: 1000000 },
+          verification: { exactCounts: true, foreignKeyOrphans: true, contentSha256: true },
+        }),
+        refresh_spec_save: null,
+      },
+      props: {
+        session: { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
+        openSessions: [
+          { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
+          { connectionId: 'c-target', sessionId: 's-target', connectionName: 'target fixture', engine: 'mysql', environment: 'dev', readOnly: false },
+        ],
+        onClose: () => {},
+      },
+      interact: async ({ container, act }) => {
+        const click = async text => {
+          const buttons = [];
+          const walk = node => {
+            if (node.nodeName === 'BUTTON' && node.textContent.includes(text)) buttons.push(node);
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          walk(container);
+          await act(async () => {
+            buttons[0]?.dispatchEvent(new Event('click', { bubbles: true }));
+            await new Promise(resolve => setTimeout(resolve, 15));
+          });
+        };
+        await click('Import JSON');
+        const selects = [];
+        const walk = node => {
+          if (node.nodeName === 'SELECT') selects.push(node);
+          for (const child of node.childNodes ?? []) walk(child);
+        };
+        walk(container);
+        for (const [select, value] of [[selects[0], 's-source'], [selects[1], 's-target']]) {
+          await act(async () => {
+            select.value = value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise(resolve => setTimeout(resolve, 10));
+          });
+        }
+        await click('Reconfirm source and target');
+        await click('Export JSON');
+      },
+      assert: ({ html, calls }) => {
+        if (!calls.some(call => call.cmd === 'refresh_spec_load')) return 'specification was not loaded';
+        if (!calls.some(call => call.cmd === 'refresh_spec_save')) return 'specification was not saved atomically';
+        if (!html.includes('Endpoints reconfirmed')) return 'endpoint reconfirmation was not visible';
+        const saved = calls.find(call => call.cmd === 'refresh_spec_save');
+        for (const needle of ['"sessionId": "s-source"', '"sessionId": "s-target"', '"seed": "imported-seed"']) {
+          if (!saved.args.contents.includes(needle)) return `exported specification lacks ${needle}`;
+        }
+        for (const forbidden of ['confirmed', 'password', 'connectionUrl', 'queryResult', 'private-row']) {
+          if (saved.args.contents.includes(forbidden)) return `exported specification contains ${forbidden}`;
+        }
+        if (calls.some(call => call.cmd === 'monitor_query')) return 'specification editing unexpectedly queried a database';
+      },
+    },
+    ...[
+      { name: 'MigrationPanel', file: 'src/components/MigrationPanel.tsx', supported: ['mysql', 'postgres'], readyText: 'Review migration' },
+      { name: 'EnvironmentRefreshPanel', file: 'src/components/EnvironmentRefreshPanel.tsx', supported: ['mysql'], readyText: 'Specification only' },
+      { name: 'QueryLabPanel', file: 'src/components/QueryLabPanel.tsx', supported: ['mysql', 'postgres'], readyText: 'not operational yet' },
+    ].flatMap(target => ['mysql', 'postgres', 'redis', 'clickhouse', 'sqlite', 'parquet', 'duckdb', 'mongodb', 'sqlserver'].map(engine => ({
+      name: `${target.name}_${engine}`, file: target.file, tier: 'mount',
+      mock: { migration_scratch_list: () => [] },
+      props: {
+        session: {
+          connectionId: `c-${engine}`, sessionId: `s-${engine}`,
+          connectionName: `${engine} fixture`, engine, environment: 'dev', readOnly: false,
+        },
+        schema: null, initialSql: '', initialOrigin: 'editor', onClose: () => {},
+      },
+      assert: ({ html }) => {
+        const expected = target.supported.includes(engine) ? target.readyText : 'not available';
+        if (!html.includes(expected)) return `${target.name} on ${engine} lacks "${expected}"`;
+      },
+    }))),
+    ...[
+      { name: 'MigrationPanel_review', denied: false },
+      { name: 'MigrationPanel_catalog_denied', denied: true },
+      { name: 'MigrationPanel_preflight_denied', denied: false, preflightDenied: true },
+      { name: 'MigrationPanel_scratch_lifecycle', denied: false, scratch: true },
+      { name: 'MigrationPanel_target_verification_mismatch', denied: false, scratch: true, targetMismatch: true },
+      { name: 'MigrationPanel_verification_mismatch', denied: false, scratch: true, mismatch: true },
+      { name: 'MigrationPanel_scratch_cancelled', denied: false, scratch: true, cancelCreate: true },
+    ].map(testCase => ({
+      name: testCase.name, file: 'src/components/MigrationPanel.tsx', tier: 'mount', settleMs: 30,
+      mock: {
+        save: () => '/mock/migration-report.md',
+        migration_scratch_list: () => testCase.activeScratch ? [testCase.activeScratch] : [],
+        migration_rehearsal_create: args => {
+          if (testCase.cancelCreate) throw { code: 'cancelled', message: 'scratch creation cancelled' };
+          testCase.activeScratch = {
+            run_key: args.runKey, session_id: args.sessionId, connection_id: 'c-migration',
+            engine: 'mysql', name: 'txui_mig_smoke', status: 'active', error: null,
+            created_at: '2026-01-01 00:00:00', updated_at: '2026-01-01 00:00:00',
+          };
+          return testCase.activeScratch;
+        },
+        migration_rehearsal_clone: args => ({
+          run_key: args.runKey, tables_cloned: 2, statements_executed: 5,
+          total_statements: 5, serial_sequences: 0, foreign_keys_added: 3,
+        }),
+        migration_rehearsal_execute: args => {
+          testCase.activeScratch = { ...testCase.activeScratch, status: 'executed' };
+          return {
+            run_key: args.runKey, sql_sha256: args.expectedSqlSha256, backend_id: 42,
+            statement_total: 1, executed: 1, committed: 1, unknown: 0, failed: 0, not_started: 0,
+            statements: [{ number: 1, line: 1, ms: 12, rows_affected: 0, ok: true, error: null, error_code: '', db_code: '', sqlstate: '' }],
+            ok: true, cancelled: false, partial: false, ms: 13, error: null,
+          };
+        },
+        migration_deploy_execute: args => {
+          testCase.deploymentDone = true;
+          const statement = { number: 1, line: 1, ms: 9, rows_affected: 0, ok: true, error: null, error_code: '', db_code: '', sqlstate: '' };
+          args.onEvent.onmessage?.({ type: 'backend', backend_id: 43 });
+          args.onEvent.onmessage?.({ type: 'statement', statement, committed: 1, unknown: 0, failed: 0, not_started: 0 });
+          args.onEvent.onmessage?.({ type: 'done', ok: true, cancelled: false, committed: 1, unknown: 0, failed: 0, not_started: 0 });
+          return {
+            run_key: args.runKey, sql_sha256: args.expectedSqlSha256, backend_id: 43,
+            statement_total: 1, executed: 1, committed: 1, unknown: 0, failed: 0, not_started: 0,
+            statements: [statement], ok: true, cancelled: false, partial: false, ms: 10, error: null,
+          };
+        },
+        migration_rehearsal_cleanup: args => {
+          const record = testCase.activeScratch ?? {
+            run_key: args.runKey, session_id: 's-migration', connection_id: 'c-migration',
+            engine: 'mysql', name: 'txui_mig_smoke', status: 'active', error: null,
+            created_at: '2026-01-01 00:00:00', updated_at: '2026-01-01 00:00:00',
+          };
+          testCase.activeScratch = null;
+          return { ...record, status: 'dropped' };
+        },
+        monitor_query: ({ sql }) => {
+          if (testCase.denied) throw new Error('SELECT command denied to user');
+          const columns = sql.includes('information_schema.SCHEMATA')
+            ? ['server_charset', 'server_collation', 'schema_charset', 'schema_collation', 'server_version']
+            : sql.includes('information_schema.TABLES') && sql.includes('TABLE_COMMENT')
+              ? ['TABLE_NAME', 'ENGINE', 'TABLE_COLLATION', 'AUTO_INCREMENT', 'TABLE_COMMENT']
+              : sql.includes('information_schema.COLUMNS')
+                ? ['TABLE_NAME', 'COLUMN_NAME', 'DATA_TYPE', 'COLUMN_TYPE', 'IS_NULLABLE', 'COLUMN_DEFAULT', 'EXTRA', 'CHARACTER_SET_NAME', 'COLLATION_NAME', 'CHARACTER_MAXIMUM_LENGTH', 'COLUMN_COMMENT']
+                : sql.includes('information_schema.STATISTICS')
+                  ? ['TABLE_NAME', 'INDEX_NAME', 'NON_UNIQUE', 'SEQ_IN_INDEX', 'COLUMN_NAME', 'SUB_PART', 'CARDINALITY', 'INDEX_TYPE']
+                  : sql.includes('KEY_COLUMN_USAGE')
+                    ? ['CONSTRAINT_NAME', 'TABLE_NAME', 'COLUMN_NAME', 'REFERENCED_TABLE_NAME', 'REFERENCED_COLUMN_NAME', 'ORDINAL_POSITION', 'DELETE_RULE', 'UPDATE_RULE']
+                    : ['table_name', 'n_rows', 'data_bytes', 'index_bytes', 'last_update'];
+          const verified = testCase.activeScratch?.status === 'executed';
+          const rows = !verified ? []
+            : columns.includes('TABLE_NAME') && columns.includes('TABLE_COMMENT')
+              ? [['orders', 'InnoDB', 'utf8mb4_0900_ai_ci', null, '']]
+              : columns.includes('COLUMN_NAME') && columns.includes('DATA_TYPE')
+                ? [['orders', 'id', 'int', 'int', 'NO', null, '', null, null, null, '']]
+                : columns.includes('INDEX_NAME')
+                  ? (testCase.mismatch || (testCase.targetMismatch && testCase.deploymentDone)) ? [] : [['orders', 'PRIMARY', 0, 1, 'id', null, 1, 'BTREE']]
+                  : [];
+          return fixtures.queryResult(columns, rows);
+        },
+        migration_preflight: args => {
+          if (testCase.preflightDenied) {
+            throw { code: 'guard_refused', message: 'connection is read-only — write statement rejected' };
+          }
+          const objects = [...new Set(args.statements.map(statement => statement.table).filter(Boolean))].sort();
+          return {
+            sql_sha256: createHash('sha256').update(args.sql).digest('hex'),
+            statement_count: args.statements.length,
+            affected_objects: objects,
+            unsupported: args.statements.filter(statement => !statement.supported).length,
+            destructive: args.statements.filter(statement => statement.destructive).length,
+            lossy: args.statements.filter(statement => statement.lossy).length,
+            implicit_commits: args.statements.length,
+            statements: args.statements.map((statement, index) => ({ ...statement, number: index + 1, implicit_commit: true })),
+            environment: 'dev', read_only: false,
+            prod_allow_ddl: false, prod_allow_unfiltered_write: false,
+            stop_on_first_error: true,
+          };
+        },
+      },
+      props: {
+        session: {
+          connectionId: 'c-migration', sessionId: 's-migration', connectionName: 'migration fixture',
+          engine: 'mysql', environment: 'dev', readOnly: false,
+        },
+        schema: 'shop', initialSql: 'CREATE TABLE orders(id int PRIMARY KEY);', initialOrigin: 'editor', onClose: () => {},
+      },
+      interact: async ({ container, act }) => {
+        const click = async text => {
+          const buttons = [];
+          const walk = node => {
+            if (node.nodeName === 'BUTTON' && node.textContent.includes(text)) buttons.push(node);
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          walk(container);
+          await act(async () => {
+            buttons[0]?.dispatchEvent(new Event('click', { bubbles: true }));
+            await new Promise(resolve => setTimeout(resolve, 15));
+          });
+        };
+        await click('Review migration');
+        if (testCase.scratch) {
+          await click('Create scratch');
+          if (!testCase.cancelCreate) await click('Clone before-state');
+          if (!testCase.cancelCreate) await click('Execute migration in scratch');
+          if (!testCase.cancelCreate) await click('Compare final objects');
+          if (!testCase.cancelCreate && !testCase.mismatch) {
+            await click('Prepare target deployment');
+            await click('Deploy exact SQL now');
+            await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)); });
+            testCase.verifyingBeforeFinal = container.textContent.includes('Phase: verifying');
+            await click('Verify deployed target');
+            await click('Export report .md');
+          }
+          if (!testCase.cancelCreate) await click('Drop scratch');
+        }
+      },
+      assert: ({ html, calls }) => {
+        if (!calls.some(call => call.cmd === 'monitor_query')) return 'catalog was never read';
+        if (!calls.some(call => call.cmd === 'migration_preflight')) return 'backend preflight was never called';
+        if (testCase.cancelCreate) {
+          if (!calls.some(call => call.cmd === 'migration_rehearsal_create')) return 'scratch creation was not attempted';
+          if (!html.includes('Scratch creation cancelled')) return 'cancelled creation was not reported honestly';
+        } else if (testCase.scratch) {
+          if (!calls.some(call => call.cmd === 'migration_rehearsal_create')) return 'scratch was not created';
+          if (!calls.some(call => call.cmd === 'migration_rehearsal_clone')) return 'before-state was not cloned';
+          if (!calls.some(call => call.cmd === 'migration_rehearsal_execute')) return 'exact migration was not executed in scratch';
+          if (!calls.some(call => call.cmd === 'migration_rehearsal_cleanup')) return 'scratch was not dropped';
+          if (!html.includes('migration SQL was not executed')) return 'clone result did not distinguish cloning from migration execution';
+          if (!html.includes('Exact migration hash executed')) return 'execution result was not rendered';
+          if (testCase.mismatch) {
+            if (!html.includes('Rehearsal proof withheld')) return 'mismatch did not visibly withhold rehearsal proof';
+            if (!html.includes('Phase: reviewed')) return 'mismatch incorrectly advanced the proof phase';
+          } else {
+            if (!html.includes('Final objects match the expected model')) return 'final-object comparison did not render its clean result';
+            if (!calls.some(call => call.cmd === 'migration_deploy_execute')) return 'confirmed target deployment was not executed';
+            if (!testCase.verifyingBeforeFinal) return 'successful deployment did not stop at target verification';
+            if (!html.includes('1 committed · 0 unknown · 0 failed · 0 not started')) return 'honest deployment counts were not rendered';
+            if (testCase.targetMismatch) {
+              if (!html.includes('Final verification withheld')) return 'target drift did not withhold final verification';
+              if (!html.includes('Phase: verifying')) return 'target drift incorrectly completed the migration';
+              if (html.includes('Deployed target verified')) return 'target drift produced a success badge';
+            } else {
+              if (!html.includes('Phase: done')) return 'clean target comparison did not complete the migration';
+              if (!html.includes('Deployed target verified')) return 'final target verification badge was not rendered';
+            }
+            const reportCall = calls.find(call => call.cmd === 'write_text_file');
+            if (!reportCall) return 'migration report was not written';
+            for (const needle of ['Migration Cockpit report', 'Rehearsal execution', 'Deployment execution', 'Deployment and verification', 'SQL SHA-256']) {
+              if (!reportCall.args.contents.includes(needle)) return `migration report lacks ${needle}`;
+            }
+          }
+          if (!html.includes('Scratch txui_mig_smoke dropped')) return 'successful cleanup was not rendered';
+        }
+        if (testCase.preflightDenied) {
+          if (!html.includes('Backend preflight refused') || !html.includes('1/1 modeled')) {
+            return 'guard refusal was not shown while preserving the review';
+          }
+          if (html.includes('SQL hash verified')) return 'guard refusal claimed a preflight proof';
+        } else if (!html.includes('SQL hash verified')) return 'successful backend preflight was not rendered';
+        if (testCase.denied) {
+          if (!html.includes('Migration-only')) return 'failed catalog reads did not produce migration-only state';
+          if (html.includes('Live before-state —')) return 'failed catalog reads claimed live verification';
+        } else if (!html.includes('Live before-state') || !html.includes('1/1 modeled')) {
+          return 'complete catalog review did not render its live proof and statement summary';
+        }
+      },
+    })),
   ];
 }
 
@@ -393,6 +741,7 @@ export async function sweepFixtures(fixtures) {
   };
 
   return {
+    MigrationPanel: { props: { initialOrigin: 'editor' } },
     CommandPalette: { props: { items: [
       { label: 'New tab', section: 'action', action: () => {} },
       { label: 'orders', section: 'table', action: () => {}, hint: 'shop' },

@@ -132,6 +132,11 @@ class FakeNode extends EventTarget {
     child.parentNode = this;
     return child;
   }
+  append(...nodes) {
+    for (const node of nodes) {
+      this.appendChild(typeof node === 'string' ? this.ownerDocument.createTextNode(node) : node);
+    }
+  }
   insertBefore(child, ref) {
     if (ref == null) return this.appendChild(child);
     if (child.parentNode) child.parentNode.removeChild(child);

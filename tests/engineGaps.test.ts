@@ -47,9 +47,9 @@ describe('registered engine gaps', () => {
   test('every registered gap contradicts its capability, never agrees with it', () => {
     // A gap whose capability is TRUE would grey a panel that works. The two
     // encode the same fact from different directions and must not drift.
-    for (const { engine, panel, reason } of registeredGaps()) {
+    for (const { engine, panel, capability, reason } of registeredGaps()) {
       assert.ok(reason.trim().length > 0, `${engine}::${panel} has an empty reason`);
-      assert.equal(can(engine, panel as never), false,
+      assert.equal(can(engine, (capability ?? panel) as never), false,
         `${engine}::${panel} is registered as a gap but its capability is true`);
     }
   });

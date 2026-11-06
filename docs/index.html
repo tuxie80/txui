@@ -237,10 +237,10 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="overview" class="doc-section">
   <h1 id="txui-v1-5-3">TxUI <span class="ver">v1.5.3</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 38 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.3.</p>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 41 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.3.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
-    <div class="card"><div class="big">38</div><div>tool panels</div></div>
+    <div class="card"><div class="big">41</div><div>tool panels</div></div>
     <div class="card"><div class="big">70</div><div>editor commands</div></div>
     <div class="card"><div class="big">234</div><div>DBA views</div></div>
     <div class="card"><div class="big">48</div><div>settings</div></div>
@@ -262,7 +262,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   <div class="scroll-x"><table class="ref matrix" id="engTable">
     <thead>
       <tr><th>Capability</th><th class="e-mysql">MySQL</th><th class="e-postgres">PostgreSQL</th><th class="e-sqlserver">SQL Server</th><th class="e-clickhouse">ClickHouse</th><th class="e-sqlite">SQLite</th><th class="e-duckdb">DuckDB</th><th class="e-redis">Redis</th><th class="e-parquet">Parquet</th><th class="e-mongodb">MongoDB</th></tr>
-      <tr class="cap-score"><th>of 34 capabilities</th><th class="ctr">32</th><th class="ctr">32</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">2</th><th class="ctr">2</th></tr>
+      <tr class="cap-score"><th>of 37 capabilities</th><th class="ctr">35</th><th class="ctr">34</th><th class="ctr">27</th><th class="ctr">11</th><th class="ctr">10</th><th class="ctr">6</th><th class="ctr">4</th><th class="ctr">2</th><th class="ctr">2</th></tr>
     </thead>
     <tbody>
   <tr class="cap-group"><td colspan="10"><b>Running queries</b> <span class="dim">What you can do with the connection itself.</span></td></tr>
@@ -423,6 +423,15 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
+<tr data-search="query optimization lab querylab estimated and measured query/index experiments. query optimization lab">
+    <td class="cap">
+      <b>Query Optimization Lab</b>
+      <div class="cap-desc">Estimated and measured query/index experiments.</div>
+      <div class="cap-unlocks">Opens: <a href="#panel-querylab">Query Optimization Lab</a></div>
+      <code class="cap-key">queryLab</code>
+    </td>
+    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+  </tr>
 <tr data-search="maintenance maintenance the maintenance panel: table upkeep — check / analyze / optimize / repair, plus the invalid-objects scan — and, on sqlite, file upkeep (vacuum, integrity checks, analyze). analyze is the one write in the read-only dba set: the panel pre-flights the server&#39;s read-only state before running it (`super_read_only`, `pg_is_in_recovery()`, `databasepropertyex(…, &#39;updateability&#39;)`). broader than `sqldba`, which sqlite lacks. maintenance">
     <td class="cap">
       <b>Maintenance</b>
@@ -526,6 +535,15 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
+<tr data-search="migration cockpit migrationcockpit reviewed, rehearsed and verified table migrations. migration cockpit">
+    <td class="cap">
+      <b>Migration Cockpit</b>
+      <div class="cap-desc">Reviewed, rehearsed and verified table migrations.</div>
+      <div class="cap-unlocks">Opens: <a href="#panel-migration">Migration Cockpit</a></div>
+      <code class="cap-key">migrationCockpit</code>
+    </td>
+    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+  </tr>
 <tr data-search="create / drop schemas namespaceddl namespaces (schemas / databases) can be created and dropped from the tree. its own flag rather than `sqldba` because the three engines that have them spell every part differently — `if not exists` does not exist on sql server, `cascade` is postgresql&#39;s alone, and `create schema` must lead its own batch in t-sql. an engine here needs a real builder in `utils/schemaobjsql.ts`, not a generic one.">
     <td class="cap">
       <b>Create / drop schemas</b>
@@ -562,6 +580,15 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     </td>
     <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
   </tr>
+<tr data-search="safe environment refresh environmentrefresh relationally complete, masked same-engine environment refreshes. safe environment refresh">
+    <td class="cap">
+      <b>Safe Environment Refresh</b>
+      <div class="cap-desc">Relationally complete, masked same-engine environment refreshes.</div>
+      <div class="cap-unlocks">Opens: <a href="#panel-refresh">Safe Environment Refresh</a></div>
+      <code class="cap-key">environmentRefresh</code>
+    </td>
+    <td class="ctr"><span class="yes">✓</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td><td class="ctr"><span class="no" title="Not available on this engine">—</span></td>
+  </tr>
 <tr data-search="data compare &amp; reconcile datacompare two tables can be compared row by row, across sessions, and a reconciliation script generated. both sides must be the same engine — the panel filters the session list on it — because the generated insert/update/delete is written in one dialect, and the value representations have to agree before a diff means anything.">
     <td class="cap">
       <b>Data compare &amp; reconcile</b>
@@ -582,7 +609,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
   </tr></tbody>
   </table></div>
   <h2 id="panels-every-engine-gets">Panels every engine gets</h2>
-  <p>8 of the 38 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
+  <p>8 of the 41 panels need no capability at all — they work on anything TxUI can open: <a href="#panel-dbaviews">DBA views</a>, <a href="#panel-find">Find</a>, <a href="#panel-designer">Table designer</a>, <a href="#panel-compare">Compare</a>, <a href="#panel-watch">Watch</a>, <a href="#panel-saved">Saved</a>, <a href="#panel-history">History</a>, <a href="#panel-timeline">Incident timeline</a>.</p>
   <h2 id="panels-only-one-engine-can-have">Panels only one engine can have</h2>
   <p>7 more panels are gated on the engine itself rather than on a capability, because nothing else has an equivalent to expose:</p>
   <ul class="cap-exclusives">
@@ -1354,8 +1381,8 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="coverage" class="doc-section">
   <h1 id="feature-coverage-matrix">Feature-coverage matrix</h1>
-  <p class="lede">All 38 tool panels, cross-checked against the source at build time: menu group, supported engines, documentation and screenshot coverage.</p>
-  <p class="lede"><b>35/38</b> panels have screenshots. Panels marked <span class="na">NA</span> need a live server to render meaningfully and are still fully documented in text.</p>
+  <p class="lede">All 41 tool panels, cross-checked against the source at build time: menu group, supported engines, documentation and screenshot coverage.</p>
+  <p class="lede"><b>35/41</b> panels have screenshots. Panels marked <span class="na">NA</span> need a live server to render meaningfully and are still fully documented in text.</p>
   <div class="toolbar">
     <input id="covFilter" class="filter" placeholder="Filter panels…" oninput="filterTable('covFilter','covTable')">
     <select id="covEngine" class="filter" onchange="filterEngine('covEngine','covTable')">
@@ -1561,6 +1588,20 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
     </tr>
+<tr data-search="migration cockpit schema migration" data-engines="mysql postgres">
+      <td><a href="#panel-migration">Migration Cockpit</a></td>
+      <td class="dim">Schema</td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+    </tr>
+<tr data-search="safe environment refresh data refresh" data-engines="mysql">
+      <td><a href="#panel-refresh">Safe Environment Refresh</a></td>
+      <td class="dim">Data</td>
+      <td><span class="eng-badge e-mysql">MySQL</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
+    </tr>
 <tr data-search="playground activity playground" data-engines="mysql postgres sqlserver">
       <td><a href="#panel-playground">Playground</a></td>
       <td class="dim">Activity</td>
@@ -1574,6 +1615,13 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
       <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span> <span class="eng-badge e-sqlserver">SQL Server</span> <span class="eng-badge e-clickhouse">ClickHouse</span> <span class="eng-badge e-sqlite">SQLite</span> <span class="eng-badge e-duckdb">DuckDB</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
       <td class="ctr"><span class="yes">✓</span></td>
+    </tr>
+<tr data-search="query optimization lab sql querylab" data-engines="mysql postgres">
+      <td><a href="#panel-querylab">Query Optimization Lab</a></td>
+      <td class="dim">SQL</td>
+      <td><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></td>
+      <td class="ctr"><span class="yes">✓</span></td>
+      <td class="ctr"><span class="na" title="Requires a live connection to capture">NA</span></td>
     </tr>
 <tr data-search="server server serverinfo" data-engines="mysql postgres sqlserver clickhouse duckdb redis mongodb">
       <td><a href="#panel-serverinfo">Server</a></td>
@@ -1636,7 +1684,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="panels" class="doc-section">
   <h1 id="tool-panels">Tool panels</h1>
-  <p class="lede">TxUI ships 38 tool panels, opened from the workspace menus (<b>Activity · Insights · Server · Schema · Data · Find & Compare · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
+  <p class="lede">TxUI ships 41 tool panels, opened from the workspace menus (<b>Activity · Insights · Server · Schema · Data · Find & Compare · SQL</b>) or the native Tools menu. Each panel below lists the engines it works on; where a panel needs a live server to show anything, its screenshot is marked <span class="na">NA</span>.</p>
   <figure><a class="shot-link" href="shots/dark/06-menu-activity.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="shots/dark/06-menu-activity.png" data-dark-src="shots/dark/06-menu-activity.png" data-light-src="shots/light/06-menu-activity.png" alt="Plugins menu" loading="lazy"></a><figcaption>The workspace menus — each panel is one click away, and only the panels the current engine supports appear.</figcaption></figure><h2 id="activity" class="group-h">Activity</h2>
 <div class="panel-doc" id="panel-processes">
   <div class="panel-head">
@@ -1732,7 +1780,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   <div class="acts"><b>Key actions</b><ul><li>Capture a baseline, run the workload, then capture After</li><li>Optionally sample waits during the measurement; sampling stops on After and on panel close</li><li>Read ranked statement deltas with reset/eviction warnings, exact-window wait aggregates and matching local incidents</li><li>Insert statement or incident SQL into the editor, or open the full incident timeline</li></ul></div>
   <p class="dim"><b>Engines:</b> PostgreSQL only, gated by the pgWorkload capability. pg_stat_statements uses the same availability/enable flow as Statement statistics.</p>
   <p class="caveat"><b>Note:</b> Wait samples are in-memory, capped at 2,000 and cover only time actively sampled while the panel is open; they are not server history. Incidents are limited by the existing local stores&#39; retention. There is no always-on collector or additional snapshot database.</p>
-  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live PostgreSQL connection with real data to render meaningfully, so it isn't captured in this offline build. The description above is complete and taken from the current source.</div>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live PostgreSQL connection with real data to render meaningfully, so it isn&#39;t captured in this offline build. The description above is complete and taken from the current source.</div>
 </div>
 <div class="panel-doc" id="panel-binlog">
   <div class="panel-head">
@@ -1768,7 +1816,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   <div class="acts"><b>Key actions</b><ul><li>Find the queries running a worse plan than their best, ranked by the execution time it is costing</li><li>Compare every plan a query has had by duration, executions and average logical reads</li><li>Open any stored plan&#39;s XML in the plan viewer, including the one that is no longer used</li><li>Generate sp_query_store_force_plan / sp_query_store_unforce_plan into the editor for review</li><li>See every plan already forced, and which forcings SQL Server has silently stopped applying</li></ul></div>
   <p class="dim"><b>Engines:</b> SQL Server (2016+). Requires Query Store to be ON for the database.</p>
   <p class="caveat"><b>Note:</b> Reading is free; forcing generates SQL into the editor and is never executed by the panel. Empty results distinguish Query Store OFF, READ_ONLY and AUTO capture skipping cheap queries. The Forced tab exposes abandoned or invalid pins.</p>
-  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live SQL Server connection with real data to render meaningfully, so it isn't captured in this offline build. The description above is complete and taken from the current source.</div>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live SQL Server connection with real data to render meaningfully, so it isn&#39;t captured in this offline build. The description above is complete and taken from the current source.</div>
 </div>
 <div class="panel-doc" id="panel-history">
   <div class="panel-head">
@@ -1985,6 +2033,18 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   <p class="dim"><b>Engines:</b> Gated to erDiagram (mysql, postgres, sqlite per the cap table), but the component&#39;s introspection SQL only branches MySQL vs PostgreSQL and its unsupported fallback reads &#39;ER diagram is available for MySQL and PostgreSQL.&#39; Unsupported: ClickHouse, Redis, Parquet.</p>
   <p class="caveat"><b>Note:</b> Requires live catalog introspection and is read-only. Virtual FKs, saved diagrams and snapshots are local state. FK-less schemas need column-comment scanning for soft references. The current component targets MySQL/PostgreSQL despite the SQLite capability flag.</p>
   <figure><a class="shot-link" href="shots/dark/panel-er-diagram.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="shots/dark/panel-er-diagram.png" data-dark-src="shots/dark/panel-er-diagram.png" data-light-src="shots/light/panel-er-diagram.png" alt="ER diagram panel" loading="lazy"></a><figcaption>ER diagram <span class="cap-mac">— captured on macOS</span></figcaption></figure>
+</div>
+<div class="panel-doc" id="panel-migration">
+  <div class="panel-head">
+    <h3 id="migration-cockpit">Migration Cockpit</h3>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></div>
+  </div>
+  <p>Review an ordered table migration against a complete live before-state, rehearse the exact SQL hash in isolated scratch, confirm guarded target deployment, then re-read the affected target objects for final verification. The panel reuses SQL Quality&#39;s Change Review engine and anchors proofs to the SQL hash, session identities, database and deployment run. Unrelated target tables are excluded explicitly; drift or incomplete checks prevent done.</p>
+  <p class="how"><b>Open:</b> Schema menu -&gt; Migration Cockpit (also native Tools -&gt; Schema), Schema Compare -&gt; Review in either direction, or Table Designer -&gt; Review in Migration Cockpit. Choose the database in the scope bar, paste or receive the ordered migration, then Review migration.</p>
+  <div class="acts"><b>Key actions</b><ul><li>Review CREATE/ALTER/DROP TABLE, columns, indexes and foreign keys in statement order without executing the migration</li><li>Load a complete live before-state; inspect per-statement models, findings with source positions and the final table model</li><li>See unsupported statements as named rehearsal blockers, and incomplete catalog access as migration-only rather than live verified</li><li>Run backend preflight: SHA-256 match, ordered affected objects, destructive/lossy counts, implicit commits, lock/rebuild/duration/disk estimates and stop-on-first-error</li><li>Read target environment/read-only/production opt-ins and any guard refusal without losing the read-only review</li><li>Choose an explicit writable non-production rehearsal session and create a generated scratch database/schema without executing migration SQL</li><li>Cancel creation, inspect active/executing/executed/failed/cancelled scratch records, and drop them through idempotent guarded cleanup</li><li>Clone before-state natively on the same connection: all tables before FKs, generated columns/defaults/indexes, composite/self/cyclic constraints and independent serial sequences</li><li>Cancel cloning and inspect exact table/FK/statement counts without treating cloning as migration execution</li><li>Execute the exact reviewed hash once in scratch; inspect statement number, source line, duration, backend ID, success/error and executed/total counts</li><li>Cancel a running statement through its backend ID/fingerprint; inspect or clean partial objects without an implied rollback or in-place retry</li><li>Compare or recheck actual final objects; inspect differences, unverified checks and explained server-generated names/support indexes</li><li>Advance from reviewed to rehearsed only after complete successful execution and zero differences/unverified checks</li><li>Prepare and separately confirm the exact deployment connection, database, statement count, SQL hash and rehearsal run</li><li>Watch committed/unknown/failed/not-started counts, backend ID and per-statement outcomes; cancel the live statement through its registered fingerprint</li><li>Inspect durable single-use deployment results without an implied rollback; successful execution enters verifying, never done directly</li><li>Verify or recheck the deployed target catalog; inspect scoped actual/expected tables, excluded unrelated tables, differences and unverified checks</li><li>Reach done only when the matching deployment run has zero target differences and zero unverified checks</li><li>Export a deterministic Markdown report with hashes, targets, findings, statement timings, partial-commit counts and verification gaps</li><li>Receive Schema Compare or Table Designer SQL through dbgui:open-migration on the exact target; every handoff starts at draft without transferred proof</li><li>SQL edits and schema changes invalidate the previous proof and any in-flight review result</li></ul></div>
+  <p class="dim"><b>Engines:</b> MySQL/MariaDB and PostgreSQL. SQL Server has a registered, explained gap; other unsupported engines fail closed. MariaDB uses the same flavor-aware review options as SQL Quality.</p>
+  <p class="caveat"><b>Note:</b> Only unqualified modeled CREATE/ALTER/DROP/index statements run in scratch or deployment. DML, client commands, executable comments and cross-schema qualification are refused. Execution stops on the first error, scratch and deployment run IDs are single-use and partial work is not rolled back. Rehearsal proof additionally requires complete final catalogs and zero differences/unverified checks. Deployment requires its uncleaned completed rehearsal record, matching identities, autocommit target and complete Rust preflight. Final verification checks only the affected/FK scope: unrelated target tables are excluded and externally linked tables remain visible. Any drift or incomplete evidence blocks done. Reports contain no credentials or row values. Handoffs carry SQL metadata only, reject proof/secret/row injection, require an acknowledged production target and never skip review or deployment guards. Every scratch requires explicit cleanup, including after a crash.</p>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> Not captured for the generated help set yet. The complete workflow has mounted tests, disposable live-engine verification and a real-Chromium visual matrix in both themes at 1600x1000 and 1100x760 under dev/verify-shots, including full reload, long names, 316 findings, progress/cancel and production/read-only states.</div>
 </div><h2 id="data" class="group-h">Data</h2>
 <div class="panel-doc" id="panel-colprofile">
   <div class="panel-head">
@@ -2032,7 +2092,19 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   <div class="acts"><b>Key actions</b><ul><li>Browse... or enter .sql, .sql.gz, .sql.zst, .sql.xz, .sql.bz2, .sql.lz4, .zip, .tar.gz, .tar.xz or .tar.zst; suffix matching is case-insensitive</li><li>For ZIP/tar, provide exactly one .sql entry and no other files; encrypted and non-Stored/non-Deflated ZIP entries are rejected</li><li>Set the per-statement memory limit (64 MiB default, 1-1024 MiB) and choose stop-on-first-error or continue-after-errors</li><li>Run script - first validates compression/checksums/frame structure, UTF-8, statement boundaries, DELIMITER, client commands and read-only/prod guards without writing</li><li>Watch the second execution pass: source/uncompressed bytes, statement counts, source line, backend id, rows affected and per-statement timings</li><li>Cancel between statements or cancel the current server statement; review final success/failure and partial-write status in the bounded statement-flow log</li></ul></div>
   <p class="dim"><b>Engines:</b> MySQL and MariaDB only. The runner uses the existing native session and its existing SSH tunnel when one is configured; it starts no external client, shell or second tunnel.</p>
   <p class="caveat"><b>Note:</b> The source goes through validation and execution passes and must not change; LZ4 adds a separate structural-validation read. Memory includes the current and one queued statement plus decoder windows (XZ 256 MiB max, Zstd 128 MiB max) and bounded read-ahead. LZ4 receives independent structural/end-marker validation. No automatic transaction, retry, resume or rollback is implied. Already committed statements remain after failure or cancellation. The dedicated connection is closed afterward so script-mutated session state never returns to the shared pool.</p>
-  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live MySQL connection with real data to render meaningfully, so it isn't captured in this offline build. The description above is complete and taken from the current source.</div>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live MySQL connection with real data to render meaningfully, so it isn&#39;t captured in this offline build. The description above is complete and taken from the current source.</div>
+</div>
+<div class="panel-doc" id="panel-refresh">
+  <div class="panel-head">
+    <h3 id="safe-environment-refresh">Safe Environment Refresh</h3>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span></div>
+  </div>
+  <p>Edit, import and export a strict, versioned, secret-free Environment Refresh specification. Configure independent table policies, frozen cutoffs, schema mappings, masks, bounded chunks and verification options. Endpoint confirmation and all planning/copying/verification remain separate from this editor checkpoint.</p>
+  <p class="how"><b>Open:</b> Data menu -&gt; Safe Environment Refresh (also native Tools -&gt; Data). Choose two different open MySQL/MariaDB sessions as source and target.</p>
+  <div class="acts"><b>Key actions</b><ul><li>Choose and reconfirm different source and target sessions; any edit or import revokes confirmation</li><li>Map source schemas to target schemas and set a deterministic seed</li><li>Configure independent full, time-window, row-limit, sample, predicate, exclude and generate table policies</li><li>Set time-window column, rolling/calendar mode, amount/unit, timezone, NULL policy and exact frozen UTC cutoff</li><li>Configure preserve, constant, hash and seeded fake masks plus bounded chunks/key planning and count/FK/content verification</li><li>Import strict JSON with connection IDs as hints only; both session selections are cleared</li><li>Export deterministic JSON without credentials, rows or confirmation state through the atomic refresh_spec_save command</li></ul></div>
+  <p class="dim"><b>Engines:</b> The specification and initial transfer contract are same-engine MySQL/MariaDB only. PostgreSQL and SQL Server have registered, explained gaps; other unsupported engines fail closed.</p>
+  <p class="caveat"><b>Note:</b> This checkpoint edits specifications only. No rows are read or written, no refresh specification is executed, and no verification result is implied. Imported IDs are hints only. Files are limited to 2 MiB of UTF-8 JSON.</p>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> Not captured for the generated help set yet: the specification editor has pure validation tests and a mounted import/reconfirm/export journey, but no generated screenshot.</div>
 </div><h2 id="find-compare" class="group-h">Find &amp; Compare</h2>
 <div class="panel-doc" id="panel-find">
   <div class="panel-head">
@@ -2081,6 +2153,18 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   <p class="dim"><b>Engines:</b> MySQL and PostgreSQL are server-capable. MySQL adds InnoDB statistics, integer ceilings, index advice and Schema review. Change review supports MySQL/MariaDB and PostgreSQL. SQLite and other engines run offline static lint only.</p>
   <p class="caveat"><b>Note:</b> Server-backed checks need a live connection. Migration-only Change review works offline; unsupported syntax produces a finding. EXPLAIN ANALYZE executes the query with a timeout. Sizes are estimates, and Schema review is MySQL-only.</p>
   <figure><a class="shot-link" href="shots/dark/panel-sql-quality.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="shots/dark/panel-sql-quality.png" data-dark-src="shots/dark/panel-sql-quality.png" data-light-src="shots/light/panel-sql-quality.png" alt="SQL Quality panel" loading="lazy"></a><figcaption>SQL Quality <span class="cap-mac">— captured on macOS</span></figcaption></figure>
+</div>
+<div class="panel-doc" id="panel-querylab">
+  <div class="panel-head">
+    <h3 id="query-optimization-lab">Query Optimization Lab</h3>
+    <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></div>
+  </div>
+  <p>Query Optimization Lab is the planned query/index experiment workflow. It will distinguish HypoPG estimates from real scratch measurements and reject different query results or inconclusive benchmarks; experiments are not operational yet.</p>
+  <p class="how"><b>Open:</b> SQL menu -&gt; Query Optimization Lab (also native Tools -&gt; SQL). MySQL/MariaDB and PostgreSQL sessions expose the shell.</p>
+  <div class="acts"><b>Key actions</b><ul><li>Open the panel and read the intended estimate-versus-measurement experiment model</li><li>Accept bounded numeric query-lab evidence contracts in code without row payloads</li><li>No database action is available in this checkpoint</li></ul></div>
+  <p class="dim"><b>Engines:</b> The shell opens on MySQL/MariaDB and PostgreSQL. SQL Server has a registered, explained gap; other unsupported engines fail closed.</p>
+  <p class="caveat"><b>Note:</b> This is not a working benchmark or HypoPG runner yet. It cannot execute a query, create an index, compare plans or generate a migration. No performance verdict is implied.</p>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> Not captured: this checkpoint exposes only an inert contract shell. It performs no database action and needs no connection; screenshots will be added with the operational UI.</div>
 </div>
 <div class="panel-doc" id="panel-saved">
   <div class="panel-head">
@@ -2506,7 +2590,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.5.3 · 38 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.5.3 · 41 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

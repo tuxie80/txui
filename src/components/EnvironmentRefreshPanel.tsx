@@ -1,0 +1,327 @@
+import { useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import type { Session } from '../types';
+import { safeOperationUnavailableReason } from '../utils/operationSupport';
+import {
+  createDefaultRefreshSpec, parseRefreshSpecText, refreshSpecHints, serializeRefreshSpec,
+} from '../utils/refreshSpec';
+import type {
+  RefreshMaskRule, RefreshSpec, RefreshTablePolicy,
+} from '../utils/refreshSpec';
+import { errorDisplay } from '../utils/appError';
+import { StatusIcon } from './StatusIcon';
+
+interface Props {
+  session: Session;
+  openSessions?: Session[];
+  onClose: () => void;
+}
+
+const POLICIES: RefreshTablePolicy['policy'][] = ['full', 'time_window', 'row_limit', 'sample', 'predicate', 'exclude', 'generate'];
+const MASKS: RefreshMaskRule['rule'][] = ['preserve', 'constant', 'hash', 'fake'];
+
+function policyFor(kind: RefreshTablePolicy['policy'], table: string, previous?: RefreshTablePolicy): RefreshTablePolicy {
+  if (previous && previous.policy === kind) return previous;
+  switch (kind) {
+    case 'full':
+    case 'exclude': return { table, policy: kind };
+    case 'time_window': return {
+      table, policy: kind, column: 'created_at', mode: 'rolling', amount: 7,
+      unit: 'days', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: new Date().toISOString(),
+    };
+    case 'row_limit': return { table, policy: kind, rows: 1000, orderBy: ['created_at'], direction: 'desc', tieBreaker: ['id'] };
+    case 'sample': return { table, policy: kind, rows: 1000, sampleSeed: 1 };
+    case 'predicate': return { table, policy: kind, where: 'tenant_id = 1' };
+    case 'generate': return { table, policy: kind, rows: 1000, seedOffset: 0 };
+  }
+}
+
+function maskFor(rule: RefreshMaskRule['rule'], table: string, column: string): RefreshMaskRule {
+  switch (rule) {
+    case 'preserve': return { table, column, rule };
+    case 'constant': return { table, column, rule, value: '' };
+    case 'hash': return { table, column, rule };
+    case 'fake': return { table, column, rule, generator: 'person.full_name' };
+  }
+}
+
+function numberValue(value: string): number {
+  return Number.isSafeInteger(Number(value)) ? Number(value) : 0;
+}
+
+export function EnvironmentRefreshPanel({ session, openSessions = [session], onClose }: Props) {
+  const unavailable = safeOperationUnavailableReason(session.engine, 'refresh');
+  const candidates = openSessions.filter(candidate => candidate.engine === 'mysql');
+  const [spec, setSpec] = useState<RefreshSpec>(() => {
+    const initial = createDefaultRefreshSpec({
+      source: { connectionId: session.connectionId, sessionId: session.sessionId },
+      schema: 'shop', cutoffUtc: new Date().toISOString(),
+    });
+    const target = candidates.find(candidate => candidate.sessionId !== session.sessionId);
+    if (target) initial.target = { connectionId: target.connectionId, sessionId: target.sessionId };
+    return initial;
+  });
+  const [confirmed, setConfirmed] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>(['Specification only — no catalog reads or database writes have run.']);
+
+  const validationError = useMemo(() => {
+    try {
+      serializeRefreshSpec(spec);
+      return null;
+    } catch (error) {
+      return errorDisplay(error);
+    }
+  }, [spec]);
+  const json = useMemo(() => {
+    try {
+      return serializeRefreshSpec(spec);
+    } catch {
+      return `${JSON.stringify(spec, null, 2)}\n`;
+    }
+  }, [spec]);
+
+  const patch = (change: (current: RefreshSpec) => RefreshSpec) => {
+    setSpec(change);
+    setConfirmed(false);
+    setFileError(null);
+  };
+  const selectEndpoint = (side: 'source' | 'target', sessionId: string) => {
+    const selected = candidates.find(candidate => candidate.sessionId === sessionId);
+    patch(current => ({
+      ...current,
+      [side]: selected
+        ? { connectionId: selected.connectionId, sessionId: selected.sessionId }
+        : { connectionId: '', sessionId: null },
+    }));
+  };
+  const updatePolicy = (index: number, value: RefreshTablePolicy) => {
+    patch(current => ({ ...current, tables: current.tables.map((table, at) => at === index ? value : table) }));
+  };
+  const updateMask = (index: number, value: RefreshMaskRule) => {
+    patch(current => ({ ...current, masks: current.masks.map((mask, at) => at === index ? value : mask) }));
+  };
+
+  const importSpec = async () => {
+    setFileError(null);
+    try {
+      const path = await open({ multiple: false, filters: [{ name: 'Refresh specification', extensions: ['json'] }] });
+      if (!path) return;
+      const text = await invoke<string>('refresh_spec_load', { path });
+      const imported = refreshSpecHints(parseRefreshSpecText(text));
+      setSpec(imported);
+      setConfirmed(false);
+      setLogs(current => [...current,
+        `Loaded ${path}. Connection IDs are hints only; both session selections were cleared. Reconfirm source and target before any future planning.`]);
+    } catch (error) {
+      setFileError(errorDisplay(error));
+    }
+  };
+
+  const exportSpec = async () => {
+    setFileError(null);
+    try {
+      const contents = serializeRefreshSpec(spec);
+      const path = await save({ defaultPath: 'environment-refresh.json', filters: [{ name: 'Refresh specification', extensions: ['json'] }] });
+      if (!path) return;
+      await invoke('refresh_spec_save', { path, contents });
+      setLogs(current => [...current, `Specification saved atomically to ${path}; no credentials or row data included.`]);
+    } catch (error) {
+      setFileError(errorDisplay(error));
+    }
+  };
+
+  const confirmEndpoints = () => {
+    try {
+      serializeRefreshSpec(spec);
+      if (!spec.source.sessionId || !spec.target.sessionId || spec.source.sessionId === spec.target.sessionId) {
+        throw new Error('choose two different open sessions before confirming endpoints');
+      }
+      setConfirmed(true);
+      setLogs(current => [...current,
+        `Endpoints reconfirmed for this editor only: ${spec.source.sessionId} → ${spec.target.sessionId}. Confirmation is not exported and is not execution proof.`]);
+    } catch (error) {
+      setFileError(errorDisplay(error));
+    }
+  };
+
+  return (
+    <div className="proc-panel">
+      <div className="proc-toolbar">
+        <span className="proc-title">Safe Environment Refresh</span>
+        <span className="dv-desc">{session.connectionName}</span>
+        <span className="dv-desc">Specification v1</span>
+        <div style={{ flex: 1 }} />
+        <button className="toolbar-btn" disabled={!!unavailable} onClick={() => void importSpec()}>Import JSON…</button>
+        <button className="toolbar-btn" disabled={!!unavailable || !!validationError} title={validationError ?? 'Export deterministic, secret-free JSON'} onClick={() => void exportSpec()}>Export JSON…</button>
+        <button className="icon-btn" onClick={onClose} title="Close">×</button>
+      </div>
+      <div className="dg-body">
+        {unavailable ? (
+          <div className="mnt-warn"><StatusIcon kind="error" /><span>{unavailable}</span></div>
+        ) : (
+          <div className="sqp-main">
+            <div className="sqp-left">
+              <section>
+                <h3>Endpoint hints and reconfirmation</h3>
+                <p className="dv-desc">Source and target must be different open MySQL/MariaDB sessions. Imported IDs are hints only. Confirmation belongs to this editor and is never exported.</p>
+                <label className="dg-field-inline"><span>Source session</span>
+                  <select className="toolbar-select" value={spec.source.sessionId ?? ''} onChange={event => selectEndpoint('source', event.target.value)}>
+                    <option value="">— choose source —</option>
+                    {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'}</option>)}
+                  </select>
+                </label>
+                <label className="dg-field-inline"><span>Target session</span>
+                  <select className="toolbar-select" value={spec.target.sessionId ?? ''} onChange={event => selectEndpoint('target', event.target.value)}>
+                    <option value="">— choose target —</option>
+                    {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'}</option>)}
+                  </select>
+                </label>
+                <div className="row-actions">
+                  <button className="primary" disabled={confirmed || !!validationError} title={validationError ?? 'Reconfirm both endpoints for this editor only'} onClick={confirmEndpoints}>
+                    {confirmed ? '✓ Endpoints reconfirmed' : 'Reconfirm source and target'}
+                  </button>
+                </div>
+                {confirmed && <p className="dv-desc">Confirmed for this editor only. No catalog read, plan or write has run.</p>}
+              </section>
+
+              <section>
+                <h3>Schema mappings and deterministic seed</h3>
+                <label className="dg-field-inline"><span>Seed (not a password or masking key)</span>
+                  <input value={spec.seed} onChange={event => patch(current => ({ ...current, seed: event.target.value }))} />
+                </label>
+                <label className="dg-field-inline"><span>Allow explicit FK-breaking masks</span>
+                  <input type="checkbox" checked={spec.allowFkBreaking} onChange={event => patch(current => ({ ...current, allowFkBreaking: event.target.checked }))} />
+                </label>
+                <label className="dg-field-inline" style={{ display: 'block' }}><span>Mappings (source =&gt; target, one per line)</span>
+                  <textarea
+                    className="sqp-sql"
+                    value={spec.schemaMappings.map(mapping => `${mapping.source} => ${mapping.target}`).join('\n')}
+                    onChange={event => patch(current => ({
+                      ...current,
+                      schemaMappings: event.target.value.split('\n').map(line => {
+                        const [source, target] = line.split('=>');
+                        return { source: source?.trim() ?? '', target: target?.trim() ?? '' };
+                      }),
+                    }))}
+                    spellCheck={false}
+                  />
+                </label>
+              </section>
+
+              <section>
+                <h3>Independent table policies</h3>
+                {spec.tables.map((table, index) => (
+                  <div key={`${table.table}-${index}`} className="sqp-finding">
+                    <div className="row-actions">
+                      <input aria-label={`Table ${index + 1}`} value={table.table} onChange={event => updatePolicy(index, { ...table, table: event.target.value })} />
+                      <select aria-label={`Policy ${index + 1}`} value={table.policy} onChange={event => updatePolicy(index, policyFor(event.target.value as RefreshTablePolicy['policy'], table.table, table))}>
+                        {POLICIES.map(policy => <option key={policy} value={policy}>{policy}</option>)}
+                      </select>
+                      <button className="toolbar-btn" onClick={() => patch(current => ({ ...current, tables: current.tables.filter((_, at) => at !== index) }))}>Remove</button>
+                    </div>
+                    {table.policy === 'time_window' && (
+                      <div className="sqp-f-evidence">
+                        <label>Column <input value={table.column} onChange={event => updatePolicy(index, { ...table, column: event.target.value })} /></label>
+                        <label>Amount <input type="number" value={table.amount} onChange={event => updatePolicy(index, { ...table, amount: numberValue(event.target.value) })} /></label>
+                        <label>Unit <select value={table.unit} onChange={event => updatePolicy(index, { ...table, unit: event.target.value as 'hours' | 'days' })}><option value="hours">hours</option><option value="days">days</option></select></label>
+                        <label>Mode <select value={table.mode} onChange={event => updatePolicy(index, { ...table, mode: event.target.value as 'rolling' | 'calendar_days' })}><option value="rolling">rolling</option><option value="calendar_days">calendar days</option></select></label>
+                        <label>Timezone <input value={table.timeZone} onChange={event => updatePolicy(index, { ...table, timeZone: event.target.value })} /></label>
+                        <label>NULLs <select value={table.nullPolicy} onChange={event => updatePolicy(index, { ...table, nullPolicy: event.target.value as 'exclude' | 'include' })}><option value="exclude">exclude</option><option value="include">include</option></select></label>
+                        <label>Frozen UTC cutoff <input value={table.cutoffUtc} onChange={event => updatePolicy(index, { ...table, cutoffUtc: event.target.value })} /></label>
+                      </div>
+                    )}
+                    {table.policy === 'row_limit' && (
+                      <div className="sqp-f-evidence">
+                        <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
+                        <label>Order columns <input value={table.orderBy.join(',')} onChange={event => updatePolicy(index, { ...table, orderBy: event.target.value.split(',').map(value => value.trim()) })} /></label>
+                        <label>Direction <select value={table.direction} onChange={event => updatePolicy(index, { ...table, direction: event.target.value as 'asc' | 'desc' })}><option value="desc">desc</option><option value="asc">asc</option></select></label>
+                        <label>Unique tie-breaker <input value={table.tieBreaker.join(',')} onChange={event => updatePolicy(index, { ...table, tieBreaker: event.target.value.split(',').map(value => value.trim()) })} /></label>
+                      </div>
+                    )}
+                    {table.policy === 'sample' && (
+                      <div className="sqp-f-evidence">
+                        <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
+                        <label>Sample seed <input type="number" value={table.sampleSeed} onChange={event => updatePolicy(index, { ...table, sampleSeed: numberValue(event.target.value) })} /></label>
+                      </div>
+                    )}
+                    {table.policy === 'predicate' && (
+                      <label className="dg-field-inline"><span>Predicate (no statement terminator)</span><input value={table.where} onChange={event => updatePolicy(index, { ...table, where: event.target.value })} /></label>
+                    )}
+                    {table.policy === 'generate' && (
+                      <div className="sqp-f-evidence">
+                        <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
+                        <label>Seed offset <input type="number" value={table.seedOffset} onChange={event => updatePolicy(index, { ...table, seedOffset: numberValue(event.target.value) })} /></label>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button className="toolbar-btn" onClick={() => patch(current => ({ ...current, tables: [...current.tables, { table: `table_${current.tables.length + 1}`, policy: 'full' }] }))}>+ Add table policy</button>
+              </section>
+            </div>
+
+            <div className="sqp-right">
+              <section>
+                <h3>Mask rules</h3>
+                <p className="dv-desc">Relational equality is preserved by default. Fake/hash rules are deterministic under the specification seed; no password-derived key exists.</p>
+                {spec.masks.map((mask, index) => (
+                  <div key={`${mask.table}.${mask.column}-${index}`} className="sqp-finding">
+                    <div className="row-actions">
+                      <input aria-label={`Mask table ${index + 1}`} value={mask.table} onChange={event => updateMask(index, { ...mask, table: event.target.value })} />
+                      <input aria-label={`Mask column ${index + 1}`} value={mask.column} onChange={event => updateMask(index, { ...mask, column: event.target.value })} />
+                      <select aria-label={`Mask rule ${index + 1}`} value={mask.rule} onChange={event => updateMask(index, maskFor(event.target.value as RefreshMaskRule['rule'], mask.table, mask.column))}>
+                        {MASKS.map(rule => <option key={rule} value={rule}>{rule}</option>)}
+                      </select>
+                      <button className="toolbar-btn" onClick={() => patch(current => ({ ...current, masks: current.masks.filter((_, at) => at !== index) }))}>Remove</button>
+                    </div>
+                    {mask.rule === 'constant' && <label className="dg-field-inline"><span>Constant</span><input value={String(mask.value ?? '')} onChange={event => updateMask(index, { ...mask, value: event.target.value })} /></label>}
+                    {mask.rule === 'fake' && <label className="dg-field-inline"><span>Seeded generator</span><input value={mask.generator} onChange={event => updateMask(index, { ...mask, generator: event.target.value })} /></label>}
+                  </div>
+                ))}
+                <button className="toolbar-btn" onClick={() => patch(current => ({ ...current, masks: [...current.masks, { table: 'customers', column: 'email', rule: 'hash' }] }))}>+ Add mask</button>
+              </section>
+
+              <section>
+                <h3>Bounded chunks and planning</h3>
+                {([
+                  ['maxRowsPerChunk', 'Max rows per chunk'],
+                  ['maxBytesPerChunk', 'Max bytes per chunk'],
+                  ['planningKeyBatch', 'Planning key batch'],
+                  ['maxPlanningKeys', 'Max planning keys'],
+                ] as const).map(([key, label]) => (
+                  <label key={key} className="dg-field-inline"><span>{label}</span>
+                    <input type="number" value={spec.limits[key]} onChange={event => patch(current => ({ ...current, limits: { ...current.limits, [key]: numberValue(event.target.value) } }))} />
+                  </label>
+                ))}
+              </section>
+
+              <section>
+                <h3>Verification options</h3>
+                {([
+                  ['exactCounts', 'Exact source/target counts'],
+                  ['foreignKeyOrphans', 'Foreign-key orphan checks'],
+                  ['contentSha256', 'Canonical masked-content SHA-256'],
+                ] as const).map(([key, label]) => (
+                  <label key={key} className="dg-field-inline"><span>{label}</span>
+                    <input type="checkbox" checked={spec.verification[key]} onChange={event => patch(current => ({ ...current, verification: { ...current.verification, [key]: event.target.checked } }))} />
+                  </label>
+                ))}
+              </section>
+
+              <section>
+                <h3>Specification status</h3>
+                {validationError
+                  ? <div className="mnt-warn"><StatusIcon kind="error" /><span>{validationError}</span></div>
+                  : <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Valid secret-free specification. Execution is not available yet.</span></div>}
+                {fileError && <div className="proc-error-bar">{fileError}</div>}
+                <div className="sqp-log">{logs.map((line, index) => <div key={index} className="sqp-log-line">{line}</div>)}</div>
+                <textarea className="sqp-sql" readOnly value={json} aria-label="Refresh specification JSON" spellCheck={false} />
+              </section>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

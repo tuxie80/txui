@@ -45,6 +45,9 @@
     "sqlVariables",
     "writes",
     "tableDesigner",
+    "migrationCockpit",
+    "environmentRefresh",
+    "queryLab",
     "statementTimeout"
   ],
   "capabilityMatrix": {
@@ -82,6 +85,9 @@
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": true,
+      "migrationCockpit": true,
+      "environmentRefresh": true,
+      "queryLab": true,
       "statementTimeout": true
     },
     "postgres": {
@@ -118,6 +124,9 @@
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": true,
+      "migrationCockpit": true,
+      "environmentRefresh": false,
+      "queryLab": true,
       "statementTimeout": true
     },
     "redis": {
@@ -154,6 +163,9 @@
       "sqlVariables": false,
       "writes": true,
       "tableDesigner": false,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": false
     },
     "clickhouse": {
@@ -190,6 +202,9 @@
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": true,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": true
     },
     "sqlite": {
@@ -226,6 +241,9 @@
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": true,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": false
     },
     "parquet": {
@@ -262,6 +280,9 @@
       "sqlVariables": true,
       "writes": false,
       "tableDesigner": false,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": false
     },
     "duckdb": {
@@ -298,6 +319,9 @@
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": false,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": false
     },
     "mongodb": {
@@ -334,6 +358,9 @@
       "sqlVariables": false,
       "writes": false,
       "tableDesigner": false,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": false
     },
     "sqlserver": {
@@ -370,6 +397,9 @@
       "sqlVariables": true,
       "writes": true,
       "tableDesigner": true,
+      "migrationCockpit": false,
+      "environmentRefresh": false,
+      "queryLab": false,
       "statementTimeout": false
     }
   },
@@ -524,6 +554,18 @@
     },
     "sqlScript": {
       "summary": "Plain/gzipped SQL scripts can run on a dedicated native connection.",
+      "detail": []
+    },
+    "migrationCockpit": {
+      "summary": "Reviewed, rehearsed and verified table migrations.",
+      "detail": []
+    },
+    "environmentRefresh": {
+      "summary": "Relationally complete, masked same-engine environment refreshes.",
+      "detail": []
+    },
+    "queryLab": {
+      "summary": "Estimated and measured query/index experiments.",
       "detail": []
     },
     "sqlQuality": {
@@ -814,6 +856,24 @@
       "inMenu": true
     },
     {
+      "id": "migration",
+      "label": "Migration Cockpit",
+      "menuLabel": "Migration Cockpit",
+      "group": "Schema",
+      "tip": "Migration Cockpit — rehearse, review, deploy and verify table migrations",
+      "when": "migrationCockpit",
+      "inMenu": true
+    },
+    {
+      "id": "refresh",
+      "label": "Safe Environment Refresh",
+      "menuLabel": "Safe Environment Refresh",
+      "group": "Data",
+      "tip": "Safe Environment Refresh — relationally complete subsets with deterministic masking",
+      "when": "environmentRefresh",
+      "inMenu": true
+    },
+    {
       "id": "playground",
       "label": "Playground",
       "menuLabel": "Playground",
@@ -829,6 +889,15 @@
       "group": "SQL",
       "tip": "SQL Quality — deep query analysis",
       "when": "sqlQuality",
+      "inMenu": true
+    },
+    {
+      "id": "querylab",
+      "label": "Query Optimization Lab",
+      "menuLabel": "Query Optimization Lab",
+      "group": "SQL",
+      "tip": "Query Optimization Lab — prove query and index changes with estimated or measured evidence",
+      "when": "queryLab",
       "inMenu": true
     },
     {
@@ -2983,10 +3052,10 @@
     }
   },
   "counts": {
-    "panels": 38,
+    "panels": 41,
     "commands": 70,
     "engines": 9,
-    "capabilities": 34,
+    "capabilities": 37,
     "prefs": 48,
     "dbaViews": 234
   }

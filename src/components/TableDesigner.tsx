@@ -28,6 +28,7 @@ import {
 } from '../utils/tableDesign';
 import { chDiffTable, chParseType, CH_ENGINES } from '../utils/chTableDesign';
 import { sqliteDiffTable, sqliteParseTableSql } from '../utils/sqliteTableDesign';
+import { OPEN_MIGRATION_EVENT } from '../utils/operationHandoff';
 
 /** The dialects the designer speaks. Redis and Parquet get a refusal, not a coercion. */
 type Dialect = 'mysql' | 'postgres' | 'clickhouse' | 'sqlite' | 'sqlserver';
@@ -1001,6 +1002,16 @@ function TableDesignerInner({ session, schema: schemaProp, table, dialect, onClo
                 </label>
               )}
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {(engine === 'mysql' || engine === 'postgres') && (
+                  <button className="toolbar-btn" disabled={applying || blockedCount > 0}
+                    onClick={() => window.dispatchEvent(new CustomEvent(OPEN_MIGRATION_EVENT, { detail: {
+                      version: 1, engine, database: schema || null, sql: script,
+                      origin: 'table-designer', targetConnectionId: session.connectionId,
+                    } }))}
+                    title="Open this exact target and script in Migration Cockpit at Review; no proof or execution is transferred">
+                    Review in Migration Cockpit
+                  </button>
+                )}
                 <button className="toolbar-btn" disabled={applying || blockedCount > 0}
                   onClick={() => {
                     window.dispatchEvent(new CustomEvent('dbgui:insert-sql', { detail: { sql: script } }));

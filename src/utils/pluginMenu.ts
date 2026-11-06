@@ -98,6 +98,7 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
       // No engine gate, same as the native Tools menu (no PANEL_ENGINE_CAP
       // entry): the designer refuses gracefully on engines it cannot serve.
       { panel: 'designer', label: 'Table designer', tip: 'Table designer — create or alter a table’s structure' },
+      { panel: 'migration', label: 'Migration Cockpit', tip: 'Migration Cockpit — rehearse, review, deploy and verify table migrations', when: 'migrationCockpit' },
       { panel: 'routines', label: 'Routines', tip: 'Routines — edit procedures, functions, triggers and events', when: 'routines' },
       { panel: 'views', label: 'Views', tip: 'Views — create, replace, refresh, drop', when: 'sql' },
       { panel: 'sequences', label: 'Sequences', tip: 'Sequences — create, alter, restart', when: 'sequences' },
@@ -115,6 +116,7 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
       { panel: 'datagen', label: 'Data generator', tip: 'Data generator (objects + rows)', when: 'dataGen' },
       { panel: 'csvimport', label: 'CSV import', tip: 'CSV import', when: 'csvImport' },
       { panel: 'sqlscript', label: 'SQL script', tip: 'SQL script — validate and run a local .sql or .sql.gz on this session, without external client tools', when: 'sqlScript' },
+      { panel: 'refresh', label: 'Safe Environment Refresh', tip: 'Safe Environment Refresh — relationally complete subsets with deterministic masking', when: 'environmentRefresh' },
       { panel: 'colprofile', label: 'Column profile', tip: 'Column profile — what is actually in each column', when: 'columnProfile' },
     ],
   },
@@ -140,6 +142,7 @@ export const PLUGIN_MENU: PluginMenuGroup[] = [
     items: [
       { panel: 'txshell', label: 'TxShell', tip: 'TxShell — SQL command line (\\help for commands)', when: 'sql' },
       { panel: 'quality', label: 'SQL Quality', tip: 'SQL Quality — deep query analysis', when: 'sqlQuality' },
+      { panel: 'querylab', label: 'Query Optimization Lab', tip: 'Query Optimization Lab — prove query and index changes with estimated or measured evidence', when: 'queryLab' },
       { panel: 'saved', label: 'Saved queries', tip: 'Saved queries' },
     ],
   },

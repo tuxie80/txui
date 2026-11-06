@@ -237,7 +237,10 @@ ORDER BY t.relname, index_name, u.ord`,
             WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS delete_rule,
        CASE con.confupdtype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL'
             WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS update_rule,
-       con.convalidated AS is_valid
+       con.convalidated AS is_valid,
+       CASE con.confmatchtype WHEN 'f' THEN 'full' WHEN 'p' THEN 'partial' ELSE 'simple' END AS match_type,
+       con.condeferrable AS is_deferrable,
+       con.condeferred AS is_deferred
 FROM pg_catalog.pg_constraint con
 JOIN pg_catalog.pg_class src ON src.oid = con.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = src.relnamespace
@@ -359,19 +362,22 @@ export function statsAge(grid: Grid, now: Date, engine?: string): string | undef
 
 export function mapColumns(grid: Grid): CatalogColumn[] {
   const get = reader(grid);
-  return grid.rows.map(r => ({
-    table: s(get(r, 'TABLE_NAME')),
-    name: s(get(r, 'COLUMN_NAME')),
-    dataType: s(get(r, 'DATA_TYPE')),
-    columnType: s(get(r, 'COLUMN_TYPE')),
-    nullable: yes(get(r, 'IS_NULLABLE')),
-    defaultValue: get(r, 'COLUMN_DEFAULT') == null ? null : s(get(r, 'COLUMN_DEFAULT')),
-    extra: s(get(r, 'EXTRA')),
-    charset: s(get(r, 'CHARACTER_SET_NAME')) || null,
-    collation: s(get(r, 'COLLATION_NAME')) || null,
-    charMaxLen: n(get(r, 'CHARACTER_MAXIMUM_LENGTH')),
-    comment: s(get(r, 'COLUMN_COMMENT')),
-  }));
+  return grid.rows.map(r => {
+    const rawDefault = get(r, 'COLUMN_DEFAULT');
+    return {
+      table: s(get(r, 'TABLE_NAME')),
+      name: s(get(r, 'COLUMN_NAME')),
+      dataType: s(get(r, 'DATA_TYPE')),
+      columnType: s(get(r, 'COLUMN_TYPE')),
+      nullable: yes(get(r, 'IS_NULLABLE')),
+      defaultValue: rawDefault == null || s(rawDefault).toUpperCase() === 'NULL' ? null : s(rawDefault),
+      extra: s(get(r, 'EXTRA')),
+      charset: s(get(r, 'CHARACTER_SET_NAME')) || null,
+      collation: s(get(r, 'COLLATION_NAME')) || null,
+      charMaxLen: n(get(r, 'CHARACTER_MAXIMUM_LENGTH')),
+      comment: s(get(r, 'COLUMN_COMMENT')),
+    };
+  });
 }
 
 /**
@@ -424,6 +430,10 @@ export function mapForeignKeys(grid: Grid): CatalogFk[] {
     // Only PG's convalidated feeds IS_VALID; a grid without the column (MySQL,
     // where NOT VALID does not exist) must read as valid, not as false.
     validated: get(r, 'IS_VALID') == null ? true : yes(get(r, 'IS_VALID')),
+    matchType: ['full', 'partial', 'simple'].includes(s(get(r, 'MATCH_TYPE')))
+      ? s(get(r, 'MATCH_TYPE')) as 'full' | 'partial' | 'simple' : 'simple',
+    deferrable: get(r, 'IS_DEFERRABLE') == null ? undefined : yes(get(r, 'IS_DEFERRABLE')),
+    deferred: get(r, 'IS_DEFERRED') == null ? undefined : yes(get(r, 'IS_DEFERRED')),
   }));
 }
 

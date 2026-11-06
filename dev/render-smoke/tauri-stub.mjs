@@ -101,8 +101,14 @@ export async function getName() { return 'TxUI'; }
 export async function getTauriVersion() { return '2.0.0'; }
 
 // plugin-dialog
-export async function open() { return null; }
-export async function save() { return null; }
+export async function open(options) {
+  const m = hub().mock.open;
+  return typeof m === 'function' ? m(options) : m ?? null;
+}
+export async function save(options) {
+  const m = hub().mock.save;
+  return typeof m === 'function' ? m(options) : m ?? null;
+}
 export async function message() {}
 export async function ask() { return false; }
 export async function confirm() { return false; }

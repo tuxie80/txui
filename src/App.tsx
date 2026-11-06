@@ -35,6 +35,8 @@ import { stopSessionRuns } from './store/playgroundRuns';
 import { forgetKillPickerState } from './store/killPickerState';
 import { runUpdateCheck } from './store/updater';
 import { withDeadline, connectDeadlineMs } from './utils/withDeadline';
+import { OPEN_MIGRATION_EVENT, parseMigrationHandoff } from './utils/operationHandoff';
+import type { MigrationHandoff } from './utils/operationHandoff';
 
 // Engine-specific panels split out of the initial bundle — cold start stays lean
 const RedisBrowser = lazy(() =>
@@ -117,6 +119,9 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: 'welcome' });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [migrationDelivery, setMigrationDelivery] = useState<{
+    id: number; targetSessionId: string; handoff: MigrationHandoff;
+  } | null>(null);
   // Mirror for mount-only listeners (dbgui:conn-log) that must read the
   // CURRENT active session without re-subscribing on every tab switch.
   const activeSessionRef = useRef<string | null>(null);
@@ -414,6 +419,8 @@ export default function App() {
     setActiveSessionId(session.sessionId);
     setView({ kind: 'query', session });
   }
+  const sessionHandoffRef = useRef({ open: handleOpenSession, focus: handleTabClick });
+  useEffect(() => { sessionHandoffRef.current = { open: handleOpenSession, focus: handleTabClick }; });
 
   useEffect(() => installTooltips(), []);
   // The joined 📓 Log's tail from the previous run, restored once at startup
@@ -985,6 +992,53 @@ export default function App() {
    */
   const sessionsRef = useRef(sessions);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  useEffect(() => {
+    const onOpenMigration = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      void (async () => {
+        try {
+          const handoff = parseMigrationHandoff(detail);
+          if (!handoff.targetConnectionId) return;
+          const deliver = (targetSessionId: string) => {
+            const { targetConnectionId: _targetConnectionId, ...payload } = handoff;
+            setMigrationDelivery(current => ({
+              id: (current?.id ?? 0) + 1, targetSessionId, handoff: payload,
+            }));
+          };
+          const existing = sessionsRef.current.find(item => item.connectionId === handoff.targetConnectionId);
+          if (existing) {
+            if (existing.engine !== handoff.engine) throw new Error('migration handoff engine does not match its target session');
+            sessionHandoffRef.current.focus(existing);
+            deliver(existing.sessionId);
+            return;
+          }
+          const configs = await ConnectionsStore.list();
+          const config = configs.find(item => item.id === handoff.targetConnectionId);
+          if (!config) throw new Error('migration target connection is not saved; open it explicitly before reviewing');
+          if (config.engine !== handoff.engine) throw new Error('migration handoff engine does not match its target connection');
+          if (config.environment === 'prod' && !isProdAcked(config.id)) {
+            await alertDialog('Open and acknowledge the production target before reviewing this migration. No SQL or proof was transferred.');
+            return;
+          }
+          const sessionId = await ConnectionsStore.open(config.id);
+          sessionHandoffRef.current.open({
+            connectionId: config.id,
+            sessionId,
+            connectionName: config.name,
+            engine: config.engine,
+            environment: config.environment,
+            readOnly: config.read_only,
+            color: config.color,
+          });
+          deliver(sessionId);
+        } catch (error) {
+          await alertDialog(`Could not open migration review: ${errorDisplay(error)}`);
+        }
+      })();
+    };
+    window.addEventListener(OPEN_MIGRATION_EVENT, onOpenMigration);
+    return () => window.removeEventListener(OPEN_MIGRATION_EVENT, onOpenMigration);
+  }, []);
   async function openScratch() {
     try {
       const sessionId = await ConnectionsStore.openScratch();
@@ -1517,6 +1571,7 @@ export default function App() {
                         session={s}
                         openSessions={sessions}
                         isActive={s.sessionId === activeSessionId}
+                        externalMigrationHandoff={migrationDelivery?.targetSessionId === s.sessionId ? migrationDelivery : undefined}
                         insertTextRef={s.sessionId === activeSessionId ? insertTextRef : undefined}
                       />
                     </div>

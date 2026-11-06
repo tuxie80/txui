@@ -73,6 +73,9 @@ import type { KillContext, StatementRun } from './SqlEditor';
 const CsvImportPanel = lazy(() => import('./CsvImportPanel').then(m => ({ default: m.CsvImportPanel })));
 const SqlScriptPanel = lazy(() => import('./SqlScriptPanel').then(m => ({ default: m.SqlScriptPanel })));
 const SqlQualityPanel = lazy(() => import('./SqlQualityPanel').then(m => ({ default: m.SqlQualityPanel })));
+const MigrationPanel = lazy(() => import('./MigrationPanel').then(m => ({ default: m.MigrationPanel })));
+const EnvironmentRefreshPanel = lazy(() => import('./EnvironmentRefreshPanel').then(m => ({ default: m.EnvironmentRefreshPanel })));
+const QueryLabPanel = lazy(() => import('./QueryLabPanel').then(m => ({ default: m.QueryLabPanel })));
 const DataBrowser = lazy(() => import('./DataBrowser').then(m => ({ default: m.DataBrowser })));
 import { SchemaStore } from '../store/schema';
 import { DdlModal } from './DdlModal';
@@ -99,6 +102,8 @@ import { can } from '../utils/engineCaps';
 import { PLUGIN_MENU } from '../utils/pluginMenu';
 import type { PluginMenuItem } from '../utils/pluginMenu';
 import { errorDisplay } from '../utils/appError';
+import { OPEN_MIGRATION_EVENT, parseMigrationHandoff } from '../utils/operationHandoff';
+import type { MigrationHandoff } from '../utils/operationHandoff';
 import { errorGuidance } from '../utils/errorActions';
 import { aiHasKey } from '../utils/aiClient';
 import { aiKeyRequired } from '../utils/aiProviders';
@@ -367,7 +372,10 @@ const PANEL_ENGINE_CAP: Record<string, Parameters<typeof can>[1] | undefined> = 
   datagen:     'dataGen',
   csvimport:   'csvImport',
   sqlscript:   'sqlScript',
+  migration:   'migrationCockpit',
+  refresh:     'environmentRefresh',
   quality:     'sqlQuality',
+  querylab:    'queryLab',
   txshell:     'sql',
   views:       'sql',
 };
@@ -586,6 +594,7 @@ interface PanelCtx {
   clearFindScope: () => void;
   compareScope: CompareScope | null;
   clearCompareScope: () => void;
+  migrationHandoff: { id: number; handoff: MigrationHandoff } | null;
 }
 
 /**
@@ -808,6 +817,17 @@ const PANEL_META: Record<string, {
       <SqlScriptPanel session={c.session} schema={c.currentDb || null} onClose={close}
         onSchemaChanged={() => window.dispatchEvent(new CustomEvent('dbgui:schema-changed'))} />),
   },
+  migration: {
+    label: 'Migration Cockpit',
+    render: (c, close) => withDbScope(c,
+      <MigrationPanel key={c.migrationHandoff?.id ?? 'manual'} session={c.session} openSessions={c.openSessions ?? [c.session]}
+        schema={c.currentDb || null} initialSql={c.migrationHandoff?.handoff.sql ?? ''}
+        initialOrigin={c.migrationHandoff?.handoff.origin ?? 'editor'} onClose={close} />),
+  },
+  refresh: {
+    label: 'Safe Environment Refresh',
+    render: (c, close) => <EnvironmentRefreshPanel session={c.session} openSessions={c.openSessions ?? [c.session]} onClose={close} />,
+  },
   playground: {
     label: 'Playground',
     render: (c, close) =>
@@ -817,6 +837,10 @@ const PANEL_META: Record<string, {
     label: 'SQL Quality',
     render: (c, close) =>
       <SqlQualityPanel session={c.session} onClose={close} />,
+  },
+  querylab: {
+    label: 'Query Optimization Lab',
+    render: (c, close) => <QueryLabPanel session={c.session} onClose={close} />,
   },
   serverinfo: {
     label: 'Server',
@@ -912,10 +936,11 @@ interface Props {
   /** Every open session — TxShell writes to another one by name. */
   openSessions?: Session[];
   isActive?: boolean;
+  externalMigrationHandoff?: { id: number; handoff: MigrationHandoff };
   insertTextRef?: React.MutableRefObject<((text: string) => void) | null>;
 }
 
-export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Props) {
+export function QueryTabs({ session, openSessions, isActive, externalMigrationHandoff, insertTextRef }: Props) {
   // Restore whatever you were writing last time on this connection (utils/bufferStore).
   // One read, used by both initialisers below (it was parsed twice).
   const restoredRef = useRef<StoredBuffer[] | null>(null);
@@ -950,6 +975,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   const [refreshedPanels, setRefreshedPanels] = useState<Set<number>>(() => new Set());
   // One tab id per panel name, allocated on first use and reused afterwards.
   const panelIds = useRef(new Map<string, number>());
+  const [migrationHandoff, setMigrationHandoff] = useState<{ id: number; handoff: MigrationHandoff } | null>(null);
   const [tabs, setTabs] = useState<QueryTab[]>(() => {
     const saved = restoredRef.current ?? [];
     if (saved.length === 0) return [newTab('01')];
@@ -1587,8 +1613,10 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     try {
       await invoke('set_session_db', { sessionId: session.sessionId, db: db || null });
       setCurrentDb(db);
+      return true;
     } catch (e) {
       await alertDialog(errorDisplay(e));
+      return false;
     }
   }, [session.sessionId]);
 
@@ -2209,6 +2237,23 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       id);
   }, [flushSql, closeTabById, commitTabs, idForPanel]);
   useEffect(() => { togglePanelRef.current = togglePanel; }, [togglePanel]);
+  const focusPanel = useCallback((panel: string) => {
+    flushSql();
+    const reveal = (id: number) => {
+      restoredPanelIds.current.delete(id);
+      setRefreshedPanels(current => new Set(current).add(id));
+      activeIdRef.current = id;
+      setActiveId(id);
+    };
+    const decision = tabModel.panelToggle(tabsRef.current, activeIdRef.current, panel);
+    if (decision.action === 'create') {
+      const id = idForPanel(panel);
+      commitTabs(prev => prev.some(t => t.id === id) ? prev : tabModel.addTab(prev, newPanelTab(panel, id)).tabs, id);
+      reveal(id);
+      return;
+    }
+    reveal(decision.id);
+  }, [flushSql, commitTabs, idForPanel]);
 
   /**
    * Why this panel is unusable for *this* role, or null when it is usable.
@@ -2237,7 +2282,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   // effect below keeps an empty dependency list.
   const listenerEnvRef = useRef({
     isActive: !!isActive, activeId, closeTabById, addTab, commitTabs, flushSql,
-    togglePanel, focusSqlTab, insertIntoEditor, supportsProcesses,
+    togglePanel, focusPanel, changeDb, focusSqlTab, insertIntoEditor, supportsProcesses,
     supportsSqlDba, supportsServerInfo, panelBlocked,
     engine: session.engine, sessionId: session.sessionId,
     serverFlavor,
@@ -2245,7 +2290,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
   useEffect(() => {
     listenerEnvRef.current = {
       isActive: !!isActive, activeId, closeTabById, addTab, commitTabs, flushSql,
-      togglePanel, focusSqlTab, insertIntoEditor, supportsProcesses,
+      togglePanel, focusPanel, changeDb, focusSqlTab, insertIntoEditor, supportsProcesses,
       supportsSqlDba, supportsServerInfo, panelBlocked,
       engine: session.engine, sessionId: session.sessionId,
       serverFlavor,
@@ -2270,6 +2315,26 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     const onNewTab = () => env().addTab();
     // No tabs → nothing to close (activeId is null); ⌘W is a no-op then.
     const onCloseTab = () => { const id = env().activeId; if (id !== null) env().closeTabById(id); };
+    const onMigration = (event: Event) => {
+      try {
+        const handoff = parseMigrationHandoff((event as CustomEvent<unknown>).detail);
+        if (handoff.targetConnectionId) return;
+        if (handoff.engine !== env().engine) throw new Error(`handoff is for ${handoff.engine}, not this ${env().engine} session`);
+        void (async () => {
+          if (handoff.database && !await env().changeDb(handoff.database)) return;
+          setMigrationHandoff(current => ({ id: (current?.id ?? 0) + 1, handoff }));
+          env().focusPanel('migration');
+        })();
+      } catch (error) {
+        const message = errorDisplay(error);
+        addLog(env().sessionId, {
+          level: 'err', action: 'MIGRATION', detail: message,
+          line: `Migration handoff refused: ${message}`,
+        });
+      }
+    };
+    on(OPEN_MIGRATION_EVENT, onMigration);
+    on('dbgui:migration-handoff', onMigration);
 
     /**
      * File → Open SQL File…
@@ -2738,6 +2803,15 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     }).catch(() => {});
   }
 
+  const deliveredMigrationRef = useRef(0);
+  useEffect(() => {
+    if (!externalMigrationHandoff || externalMigrationHandoff.id === deliveredMigrationRef.current) return;
+    deliveredMigrationRef.current = externalMigrationHandoff.id;
+    window.dispatchEvent(new CustomEvent('dbgui:migration-handoff', {
+      detail: externalMigrationHandoff.handoff,
+    }));
+  }, [externalMigrationHandoff]);
+
   /**
    * A plugin tab handing SQL to the editor: focus a SQL tab (create one if the
    * user closed them all) and push the text into THAT editor. The plugin tab
@@ -2792,7 +2866,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
     const deps: unknown[] = [
       tab.panel, session, openSessions, currentDb, dbList,
       routineTarget, sequenceTarget, typeTarget, viewTarget, dictionaryTarget, designTarget,
-      findScope, compareScope,
+      findScope, compareScope, migrationHandoff,
       (tab.panel === 'saved' || tab.panel === 'compare' || tab.panel === 'find') ? tabs : null,
     ];
     const hit = panelElemCache.current.get(tab.id);
@@ -2826,7 +2900,7 @@ export function QueryTabs({ session, openSessions, isActive, insertTextRef }: Pr
       routineTarget, clearRoutineTarget, designTarget,
       sequenceTarget, clearSequenceTarget, typeTarget, clearTypeTarget,
       viewTarget, clearViewTarget, dictionaryTarget, clearDictionaryTarget,
-      findScope, clearFindScope, compareScope, clearCompareScope,
+      findScope, clearFindScope, compareScope, clearCompareScope, migrationHandoff,
     };
     return meta.render(c, close);
   }

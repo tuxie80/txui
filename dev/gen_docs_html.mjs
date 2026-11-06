@@ -263,6 +263,8 @@ function engineMatrixSection() {
     columnProfile: 'Column profiling', routines: 'Stored routines', sequences: 'Sequences',
     tableDesigner: 'Table designer', namespaceDdl: 'Create / drop schemas',
     dataGen: 'Data generator', csvImport: 'CSV import', sqlScript: 'Native SQL script runner',
+    migrationCockpit: 'Migration Cockpit', environmentRefresh: 'Safe Environment Refresh',
+    queryLab: 'Query Optimization Lab',
     dataCompare: 'Data compare & reconcile', userAdmin: 'Users & permissions',
   };
 
@@ -273,11 +275,11 @@ function engineMatrixSection() {
     ['Watching a live server', 'Who is running what, and what is stuck behind what.',
       ['processList', 'longQueryWatch', 'lockWaits', 'replication', 'serverInfo']],
     ['DBA & performance', 'The diagnostic tooling — why it is slow, and what to change.',
-      ['sqlDba', 'tuner', 'stmtStats', 'pgWorkload', 'queryStore', 'sqlQuality', 'maintenance', 'fleet', 'playground']],
+      ['sqlDba', 'tuner', 'stmtStats', 'pgWorkload', 'queryStore', 'sqlQuality', 'queryLab', 'maintenance', 'fleet', 'playground']],
     ['Understanding a schema', 'Reading a database you did not write.',
       ['erDiagram', 'documenter', 'dbSearch', 'findUsages', 'columnProfile', 'routines', 'sequences']],
     ['Changing a schema & its data', 'The write-capable tooling.',
-      ['tableDesigner', 'namespaceDdl', 'dataGen', 'csvImport', 'sqlScript', 'dataCompare', 'userAdmin']],
+      ['tableDesigner', 'migrationCockpit', 'namespaceDdl', 'dataGen', 'csvImport', 'sqlScript', 'environmentRefresh', 'dataCompare', 'userAdmin']],
   ];
 
   // Neither map may silently lose a capability: a flag missing from CAP_LABEL
@@ -412,12 +414,12 @@ function panelsSection() {
   ${d.caveats ? `<p class="caveat"><b>Note:</b> ${esc(d.caveats)}</p>` : ''}
   ${shot
     ? `<figure><img src="${shot}" alt="${esc(p.label)} panel" loading="lazy"><figcaption>${esc(p.label)} <span class="cap-mac">— captured on macOS</span></figcaption></figure>`
-    : `<div class="na-shot">📷 <b>Screenshot: NA.</b> This panel needs a live ${engs.map(e=>ENGINE_LABEL[e]).join('/')} connection with real data to render meaningfully, so it isn't captured in this offline build. The description above is complete and taken from the current source.</div>`}
+    : `<div class="na-shot">📷 <b>Screenshot: NA.</b> ${esc(d.naReason ?? `This panel needs a live ${engs.map(e=>ENGINE_LABEL[e]).join('/')} connection with real data to render meaningfully, so it isn't captured in this offline build. The description above is complete and taken from the current source.`)}</div>`}
 </div>`;
     }
   }
   html += `</section>`;
-  return html;
+  return html.replace(/[ \t]+$/gm, '');
 }
 
 function dbaViewsSection() {

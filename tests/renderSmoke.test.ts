@@ -29,7 +29,7 @@ const named = namedTargets(fixtures);
 // One bundling pass for every target this file runs (content-hashed cache in
 // node_modules/.cache — a src/ edit re-bundles).
 const sweepFix = await sweepFixtures(fixtures);
-const defaultMock = { ...fixtures.mockFor('mysql'), audit_list: [] };
+const defaultMock = { ...fixtures.mockFor('mysql'), audit_list: [], migration_scratch_list: [] };
 const sweep = sweepTargets(sweepFix)
   .filter(s => !named.some(n => n.file === s.file && n.name === s.name))
   .map(s => ({ ...s, mock: { ...defaultMock, ...(s.mock ?? {}) } }));
@@ -55,7 +55,18 @@ const NAMED_MOUNTED = [
   'SeriesChart',       // the chart sub-renderer
   'FastGrid',          // the grid everything sits on
   'PgWorkloadPanel',   // manual baseline/after + waits + incidents
+  'MigrationPanel_review',
+  'MigrationPanel_catalog_denied',
+  'MigrationPanel_preflight_denied',
+  'MigrationPanel_scratch_lifecycle',
+  'MigrationPanel_target_verification_mismatch',
+  'MigrationPanel_verification_mismatch',
+  'MigrationPanel_scratch_cancelled',
   'App',               // whole app chrome + File/Help menu event translation
+  'App_migration_handoff',
+  'App_migration_prod_handoff',
+  'App_migration_handoff_tampered',
+  'EnvironmentRefreshPanel_spec_journey',
 ];
 
 for (const name of NAMED_MOUNTED) {
@@ -66,6 +77,18 @@ for (const name of NAMED_MOUNTED) {
     assert.equal(r.consoleErrors?.length ?? 0, 0,
       `${name} logged console errors: ${(r.consoleErrors ?? [])[0] ?? ''}`);
   });
+}
+
+for (const panel of ['MigrationPanel', 'EnvironmentRefreshPanel', 'QueryLabPanel']) {
+  for (const engine of ['mysql', 'postgres', 'redis', 'clickhouse', 'sqlite', 'parquet', 'duckdb', 'mongodb', 'sqlserver']) {
+    test(`render-smoke safe operations: ${panel} on ${engine}`, () => {
+      const name = `${panel}_${engine}`;
+      const r = results.get(name);
+      assert.ok(r, `target ${name} did not run`);
+      assert.equal(r.status, 'mounted', `${name}: ${r.error ?? r.status}`);
+      assert.equal(r.consoleErrors?.length ?? 0, 0);
+    });
+  }
 }
 
 // The menu assertions deserve their own line in the output: File menu events

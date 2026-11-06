@@ -24,6 +24,8 @@ pub mod quality;
 pub mod audit;
 pub mod dump;
 pub mod sqlscript;
+pub mod migration;
+pub mod refresh;
 pub mod datagen;
 pub mod datagen_fk;
 pub mod datagen_formula;

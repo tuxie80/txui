@@ -89,6 +89,27 @@ const GAPS: Record<string, string> = {
     + 'default-DB plumbing (set_session_db refuses the engine).',
 };
 
+const SAFE_OPERATION_GAPS = [
+  {
+    panel: 'migration', capability: 'migrationCockpit', gapEngines: ['sqlserver'], label: 'Migration Cockpit',
+    reason: 'Migration Cockpit currently models table migrations on MySQL/MariaDB and PostgreSQL only.',
+  },
+  {
+    panel: 'refresh', capability: 'environmentRefresh', gapEngines: ['postgres', 'sqlserver'], label: 'Safe Environment Refresh',
+    reason: 'Safe Environment Refresh currently plans same-engine MySQL/MariaDB transfers only.',
+  },
+  {
+    panel: 'querylab', capability: 'queryLab', gapEngines: ['sqlserver'], label: 'Query Optimization Lab',
+    reason: 'Query Optimization Lab currently supports MySQL/MariaDB and PostgreSQL experiments only.',
+  },
+] as const;
+
+for (const feature of SAFE_OPERATION_GAPS) {
+  for (const engine of feature.gapEngines) {
+    GAPS[`${engine}::${feature.panel}`] = `${feature.label} — not available for ${engine}. ${feature.reason}`;
+  }
+}
+
 /**
  * Why this engine does not offer this panel — or `null` to keep the default
  * behaviour (hidden when the capability is false, shown when it is true).
@@ -98,9 +119,10 @@ export function engineGapReason(engine: string, panel: string): string | null {
 }
 
 /** Every registered gap, for tests and for the generated documentation. */
-export function registeredGaps(): Array<{ engine: string; panel: string; reason: string }> {
+export function registeredGaps(): Array<{ engine: string; panel: string; capability?: string; reason: string }> {
   return Object.entries(GAPS).map(([key, reason]) => {
     const [engine, panel] = key.split('::');
-    return { engine, panel, reason };
+    const capability = SAFE_OPERATION_GAPS.find(feature => feature.panel === panel)?.capability;
+    return { engine, panel, ...(capability ? { capability } : {}), reason };
   });
 }

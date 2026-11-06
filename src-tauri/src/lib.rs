@@ -17,7 +17,7 @@ pub mod tuner;
 pub mod sqlscript;
 mod commands;
 
-use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, sqlscript::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, sqlscript::*, migration::*, refresh::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -506,6 +506,18 @@ pub fn run() {
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/sqlscript.png"))?)
                 .build(app)?;
+            let t_migration = IconMenuItemBuilder::with_id("tool:migration", "Migration Cockpit")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/migration.png"))?)
+                .build(app)?;
+            let t_refresh = IconMenuItemBuilder::with_id("tool:refresh", "Safe Environment Refresh")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/refresh.png"))?)
+                .build(app)?;
+            let t_querylab = IconMenuItemBuilder::with_id("tool:querylab", "Query Optimization Lab")
+                .icon(tauri::image::Image::from_bytes(
+                    include_bytes!("../../src/assets/icons/plugins/querylab.png"))?)
+                .build(app)?;
             let t_playground = IconMenuItemBuilder::with_id("tool:playground", "Playground")
                 .icon(tauri::image::Image::from_bytes(
                     include_bytes!("../../src/assets/icons/plugins/playground.png"))?)
@@ -569,6 +581,7 @@ pub fn run() {
             let m_schema = SubmenuBuilder::new(app, "Schema")
                 .item(&t_erdiagram)
                 .item(&t_designer)
+                .item(&t_migration)
                 .item(&t_routines)
                 .item(&t_views)
                 .item(&t_sequences)
@@ -580,6 +593,7 @@ pub fn run() {
                 .item(&t_datagen)
                 .item(&t_csvimport)
                 .item(&t_sqlscript)
+                .item(&t_refresh)
                 .item(&t_colprofile)
                 .build()?;
             let m_findcompare = SubmenuBuilder::new(app, "Find & Compare")
@@ -589,6 +603,7 @@ pub fn run() {
             let m_sql = SubmenuBuilder::new(app, "SQL")
                 .item(&t_txshell)
                 .item(&t_quality)
+                .item(&t_querylab)
                 .item(&t_saved)
                 .build()?;
 
@@ -887,6 +902,16 @@ pub fn run() {
             explain_with_warnings,
             column_map,
             explain_analyze_guarded,
+            migration_preflight,
+            migration_rehearsal_create,
+            migration_rehearsal_clone,
+            migration_rehearsal_execute,
+            migration_deploy_execute,
+            migration_rehearsal_cleanup,
+            migration_scratch_list,
+            // safe environment refresh specifications
+            refresh_spec_load,
+            refresh_spec_save,
             // audit log
             audit_insert,
             audit_list,

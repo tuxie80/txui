@@ -393,6 +393,45 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(&mut *tx).await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS migration_scratch (
+            run_key       TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL,
+            connection_id TEXT NOT NULL,
+            engine        TEXT NOT NULL,
+            name          TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            error         TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        )"
+    )
+    .execute(&mut *tx).await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_migration_scratch_status
+         ON migration_scratch(status, updated_at DESC)"
+    )
+    .execute(&mut *tx).await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS migration_deployment (
+            run_key            TEXT PRIMARY KEY,
+            session_id         TEXT NOT NULL,
+            connection_id      TEXT NOT NULL,
+            source_connection_id TEXT NOT NULL,
+            rehearsal_run_key  TEXT NOT NULL,
+            database_name      TEXT NOT NULL,
+            engine             TEXT NOT NULL,
+            sql_sha256         TEXT NOT NULL,
+            status             TEXT NOT NULL,
+            error              TEXT,
+            created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        )"
+    )
+    .execute(&mut *tx).await?;
+
     tx.commit().await?;
 
     seed_sql_templates(pool).await?;
@@ -515,9 +554,9 @@ const AUDIT_PRUNE_EVERY: i64 = 256;
 /// The audit retention trigger's SQL, parameterized so the store test can
 /// exercise the mechanism without inserting 100 001 rows.
 ///
-/// A trigger rather than a call in the insert paths: audit rows arrive from
-/// three places (the frontend's `audit_insert`, the backend lifecycle rows),
-/// and a cap every caller must remember to apply is a cap that eventually
+/// A trigger rather than a call in the insert paths: frontend actions and
+/// backend lifecycle/rehearsal work all share the same store, and a cap every
+/// caller must remember to apply is a cap that eventually
 /// isn't. The WHEN clause is the amortization — NEW.id is the fresh rowid, so
 /// the prune fires on a fixed cadence with no shared state.
 fn audit_retention_trigger_sql(cap: i64, every: i64) -> String {

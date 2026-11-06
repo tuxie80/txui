@@ -464,12 +464,14 @@ function typeInfo(raw: string, engine: ChangeReviewEngine): TypeInfo {
     .replace(/\[\]/g, '').replace(/\s+/g, ' ').trim();
   const aliases: Record<string, string> = engine === 'postgres' ? {
     int: 'integer', int4: 'integer', int8: 'bigint', int2: 'smallint',
+    serial: 'integer', bigserial: 'bigint', smallserial: 'smallint',
     'character varying': 'varchar', 'double precision': 'double',
     'timestamp without time zone': 'timestamp', 'timestamp with time zone': 'timestamptz',
     'time without time zone': 'time', 'time with time zone': 'timetz',
   } : { integer: 'int', dec: 'decimal', numeric: 'decimal', 'double precision': 'double' };
   base = aliases[base] ?? base;
-  return { base, args, unsigned, array };
+  const displayWidthOnly = ['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint'].includes(base);
+  return { base, args: displayWidthOnly ? [] : args, unsigned, array };
 }
 
 function compareTypes(before: string, after: string, engine: ChangeReviewEngine): {
@@ -508,6 +510,10 @@ function compareTypes(before: string, after: string, engine: ChangeReviewEngine)
     return { narrowing: false, changed, reason: `type modifiers change from ${before} to ${after}` };
   }
   return { narrowing: true, changed, reason: `${before} → ${after} is a cross-type conversion that may reject or lose values` };
+}
+
+export function reviewTypesEqual(before: string, after: string, engine: ChangeReviewEngine): boolean {
+  return !compareTypes(before, after, engine).changed;
 }
 
 function catalogTables(catalog: SchemaSnapshot | undefined): Map<string, ReviewTable> {

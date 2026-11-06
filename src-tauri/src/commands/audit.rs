@@ -82,7 +82,13 @@ pub struct AuditEntry {
 
 #[tauri::command]
 pub async fn audit_insert(entry: AuditInsert, state: State<'_, AppState>) -> Result<(), crate::apperror::AppError> {
-    let pool = &state.history;
+    insert(&state.history, &entry).await
+}
+
+pub(crate) async fn insert(
+    pool: &crate::history::HistoryStore,
+    entry: &AuditInsert,
+) -> Result<(), crate::apperror::AppError> {
     sqlx::query(
         "INSERT INTO audit_log \
          (run_id, stmt_index, stmt_total, session_id, tab_title, database, source, \
@@ -117,7 +123,7 @@ pub async fn audit_insert(entry: AuditInsert, state: State<'_, AppState>) -> Res
 
 // ── Session lifecycle events (connect / disconnect) ─────────────────────────
 //
-// The only audit rows written by the backend rather than the frontend: a
+// Lifecycle rows are written by the backend rather than the frontend: a
 // disconnect must be recorded even when the window is already gone (app exit
 // runs close_all), so the write lives next to the session teardown. The row
 // reuses the statement schema instead of growing a parallel table for two

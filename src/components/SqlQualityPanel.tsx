@@ -25,8 +25,7 @@ import { useServerFlavor } from '../store/serverFlavors';
 import type { Severity } from '../utils/sqlLint';
 import { ASSUMPTIONS } from '../utils/ddlCost';
 import { reviewSchema } from '../utils/schemaRules';
-import type { SchemaSnapshot } from '../utils/schemaRules';
-import { reviewChanges } from '../utils/changeReview';
+import { reviewMigrationWithCatalog } from '../utils/migrationReview';
 import { MYSQL_SNAPSHOT_SQL, PG_SNAPSHOT_SQL, buildSnapshot } from '../utils/schemaCollect';
 import type { Grid } from '../utils/schemaCollect';
 import { saveTextAs, copyToClipboard } from '../utils/exportersIo';
@@ -325,58 +324,30 @@ export function SqlQualityPanel({ session, onClose }: Props) {
     setLog([]);
     const schema = dbOverride.trim();
     try {
-      let catalog: SchemaSnapshot | undefined;
-      if (schema) {
-        say(`Reading the before-state catalog of \`${schema}\`…`);
-        const grid = async (query: string): Promise<Grid | null> => {
-          try {
-            const r = await invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql: query });
-            return { columns: r.columns.map(c => c.name), rows: r.rows };
-          } catch {
-            return null;
-          }
-        };
-        const SNAP = isMysql ? MYSQL_SNAPSHOT_SQL : PG_SNAPSHOT_SQL;
-        const [defaults, tables, columns, indexes, foreignKeys, sequences] = await Promise.all([
-          grid(SNAP.defaults(schema)), grid(SNAP.tables(schema)), grid(SNAP.columns(schema)),
-          grid(SNAP.indexes(schema)), grid(SNAP.foreignKeys(schema)),
-          isMysql ? Promise.resolve(null) : grid(PG_SNAPSHOT_SQL.sequences(schema)),
-        ]);
-        // A partial catalog is not a before-state: using it would make absent
-        // columns/tables look absent on the server rather than merely unreadable.
-        if (tables && columns && indexes && foreignKeys) {
-          let stats = await grid(SNAP.stats(schema));
-          let statsSource = isMysql ? 'mysql.innodb_table_stats' : 'pg_stat_user_tables + pg_relation_size';
-          if (!stats) {
-            stats = await grid(SNAP.statsFallback(schema));
-            statsSource = isMysql ? 'information_schema.TABLES (estimated)' : 'pg_class.reltuples (estimated)';
-          }
-          catalog = buildSnapshot({
-            schema, engine: session.engine, defaults, tables, columns, indexes, foreignKeys,
-            stats, statsSource, sequences,
-          });
-          say(`Seeded ${catalog.tables.length} live tables; applying migration statements in order.`);
-        } else {
-          say('Core catalog reads were incomplete — falling back to migration-only analysis, not a complete live before-state.');
+      const runGrid = async (query: string): Promise<Grid | null> => {
+        try {
+          const r = await invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql: query });
+          return { columns: r.columns.map(c => c.name), rows: r.rows };
+        } catch {
+          return null;
         }
-      } else {
-        say('No DB selected — migration-only analysis. ALTER targets need an earlier CREATE or their model stays partial.');
-      }
-      const out = reviewChanges({ sql, engine: isMysql ? 'mysql' : 'postgres', catalog, mariaDb: isMariaDb });
+      };
+      const out = await reviewMigrationWithCatalog({
+        sql, engine: isMysql ? 'mysql' : 'postgres', mariaDb: isMariaDb,
+        schema, runGrid, onLog: say,
+      });
       setReport({
-        findings: out.findings,
-        sections: out.sections,
+        findings: out.review.findings,
+        sections: out.review.sections,
         meta: {
           connectionName: session.connectionName,
           engine: session.engine,
           date: reportTimestamp(),
           sql,
         },
-        txt: buildFindingsTxt(out.findings),
+        txt: buildFindingsTxt(out.review.findings),
       });
       setRawBlocks([]);
-      say(`Done — ${out.summary.supported}/${out.summary.statements} statements modeled, `
-        + `${out.summary.unsupported} unsupported, ${out.findings.length} findings.`);
     } catch (e) {
       say(`Aborted: ${errorDisplay(e)}`);
     } finally {
