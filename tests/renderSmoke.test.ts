@@ -70,6 +70,7 @@ const NAMED_MOUNTED = [
   'EnvironmentRefreshPanel_catalog_journey',
   'EnvironmentRefreshPanel_catalog_blocked',
   'EnvironmentRefreshPanel_rust_mask_journey',
+  'EnvironmentRefreshPanel_activity_survives_close',
 ];
 
 for (const name of NAMED_MOUNTED) {

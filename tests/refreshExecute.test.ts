@@ -128,3 +128,35 @@ test('progress keeps committed, in-flight and remaining rows distinct through un
   assert.equal(state.elapsedMs, 1250);
   assert.equal(state.error, 'commit outcome uncertain');
 });
+
+test('chunk progress exposes outcomes, measured throughput and hashes without raw keys', () => {
+  let state = initialRefreshProgress();
+  state = applyRefreshExecutionEvent(state, {
+    type: 'chunk', run_key: 'run', table: 'source.children', table_index: 2, table_count: 2,
+    chunk_index: 5, outcome: 'inserted_uncommitted', rows: 10,
+    requested_rows: 80, closure_rows: 20, planned_rows: 100,
+    committed_rows: 40, rows_inserted: 50, in_flight_rows: 10, remaining_rows: 60,
+    chunks_committed: 4, rows_per_second: 12.5, eta_seconds: 5, elapsed_ms: 3200,
+    source_backend_id: 41, target_backend_id: 42,
+    current_key_range: { start_sha256: 'a'.repeat(64), end_sha256: 'b'.repeat(64) },
+  });
+  assert.equal(state.phase, 'copying');
+  assert.equal(state.chunkIndex, 5);
+  assert.equal(state.chunkOutcome, 'inserted_uncommitted');
+  assert.equal(state.chunkRows, 10);
+  assert.equal(state.rowsInserted, 50);
+  assert.equal(state.committedRows, 40);
+  assert.equal(state.rowsPerSecond, 12.5);
+  assert.equal(state.etaSeconds, 5);
+  assert.equal(state.currentKeyRange?.startSha256, 'a'.repeat(64));
+  assert.equal(state.currentKeyRange?.endSha256, 'b'.repeat(64));
+  assert.equal(JSON.stringify(state).includes('private-key'), false);
+  state = applyRefreshExecutionEvent(state, {
+    type: 'done', run_key: 'run', status: 'uncertain', committed_rows: 40,
+    rows_inserted: 50, in_flight_rows: 10, remaining_rows: 60, eta_seconds: null,
+  });
+  assert.equal(state.status, 'uncertain');
+  assert.equal(state.etaSeconds, null);
+  assert.equal(state.rowsInserted, 50);
+  assert.equal(state.inFlightRows, 10);
+});

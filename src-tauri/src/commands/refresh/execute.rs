@@ -101,6 +101,26 @@ pub struct ExecuteInput {
     mask: RefreshMaskBatchInput,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct RefreshKeyRange {
+    start_sha256: String,
+    end_sha256: String,
+}
+
+impl RefreshKeyRange {
+    fn from_keys(keys: &[Vec<Value>]) -> Result<Option<Self>, AppError> {
+        let Some(first) = keys.first() else {
+            return Ok(None);
+        };
+        let last = keys.last().expect("nonempty key chunk");
+        Ok(Some(Self {
+            start_sha256: format!("{:x}", Sha256::digest(canonical_values(first)?.as_bytes())),
+            end_sha256: format!("{:x}", Sha256::digest(canonical_values(last)?.as_bytes())),
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RefreshRunCounts {
@@ -111,12 +131,18 @@ pub struct RefreshRunCounts {
     closure_rows: Option<u64>,
     planned_rows: Option<u64>,
     committed_rows: u64,
+    rows_inserted: u64,
     in_flight_rows: u64,
     remaining_rows: Option<u64>,
     chunks_committed: u64,
     source_bytes_read: u64,
     target_bytes_written: u64,
+    rows_per_second: Option<f64>,
+    eta_seconds: Option<u64>,
     elapsed_ms: u64,
+    source_backend_id: Option<u64>,
+    target_backend_id: Option<u64>,
+    current_key_range: Option<RefreshKeyRange>,
     execution_row_set_sha256: Option<String>,
 }
 
@@ -134,6 +160,17 @@ pub enum RefreshExecutionEvent {
         table: Option<String>,
         table_index: usize,
         table_count: usize,
+        #[serde(flatten)]
+        counts: RefreshRunCounts,
+    },
+    Chunk {
+        run_key: String,
+        table: Option<String>,
+        table_index: usize,
+        table_count: usize,
+        chunk_index: u64,
+        outcome: String,
+        rows: u64,
         #[serde(flatten)]
         counts: RefreshRunCounts,
     },
@@ -162,10 +199,14 @@ struct RunState {
     closure_rows: Option<u64>,
     planned_rows: Option<u64>,
     committed_rows: u64,
+    rows_inserted: u64,
     in_flight_rows: u64,
     chunks_committed: u64,
     source_bytes_read: u64,
     target_bytes_written: u64,
+    source_backend_id: Option<u64>,
+    target_backend_id: Option<u64>,
+    current_key_range: Option<RefreshKeyRange>,
     execution_row_set_sha256: Option<String>,
     uncertain: bool,
 }
@@ -185,16 +226,37 @@ impl RunState {
             closure_rows: None,
             planned_rows: None,
             committed_rows: 0,
+            rows_inserted: 0,
             in_flight_rows: 0,
             chunks_committed: 0,
             source_bytes_read: 0,
             target_bytes_written: 0,
+            source_backend_id: None,
+            target_backend_id: None,
+            current_key_range: None,
             execution_row_set_sha256: None,
             uncertain: false,
         }
     }
 
     fn counts(&self, _table_count: usize) -> RefreshRunCounts {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        let remaining_rows = self
+            .planned_rows
+            .map(|rows| rows.saturating_sub(self.committed_rows));
+        let rows_per_second = (self.committed_rows > 0)
+            .then(|| self.committed_rows as f64 / (elapsed_ms.max(1) as f64 / 1000.0));
+        let eta_seconds = if self.status == "running" {
+            match remaining_rows {
+                Some(0) => Some(0),
+                Some(remaining) => {
+                    rows_per_second.map(|rate| (remaining as f64 / rate).ceil() as u64)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         RefreshRunCounts {
             status: self.status.into(),
             key_rows_read: self.key_rows_read,
@@ -203,14 +265,18 @@ impl RunState {
             closure_rows: self.closure_rows,
             planned_rows: self.planned_rows,
             committed_rows: self.committed_rows,
+            rows_inserted: self.rows_inserted,
             in_flight_rows: self.in_flight_rows,
-            remaining_rows: self
-                .planned_rows
-                .map(|rows| rows.saturating_sub(self.committed_rows)),
+            remaining_rows,
             chunks_committed: self.chunks_committed,
             source_bytes_read: self.source_bytes_read,
             target_bytes_written: self.target_bytes_written,
-            elapsed_ms: self.started.elapsed().as_millis() as u64,
+            rows_per_second,
+            eta_seconds,
+            elapsed_ms,
+            source_backend_id: self.source_backend_id,
+            target_backend_id: self.target_backend_id,
+            current_key_range: self.current_key_range.clone(),
             execution_row_set_sha256: self.execution_row_set_sha256.clone(),
         }
     }
@@ -222,6 +288,25 @@ impl RunState {
             table: self.table.clone(),
             table_index: self.table_index,
             table_count,
+            counts: self.counts(table_count),
+        });
+    }
+
+    fn chunk(
+        &self,
+        on_event: &Channel<RefreshExecutionEvent>,
+        table_count: usize,
+        outcome: &str,
+        rows: u64,
+    ) {
+        let _ = on_event.send(RefreshExecutionEvent::Chunk {
+            run_key: self.run_key.clone(),
+            table: self.table.clone(),
+            table_index: self.table_index,
+            table_count,
+            chunk_index: self.chunks_committed + 1,
+            outcome: outcome.into(),
+            rows,
             counts: self.counts(table_count),
         });
     }
@@ -354,26 +439,71 @@ fn canonical_values(values: &[Value]) -> Result<String, AppError> {
     Ok(out)
 }
 
-fn check_cancel(cancel_rx: &mut tokio::sync::oneshot::Receiver<()>) -> Result<(), AppError> {
-    if cancel_rx.try_recv().is_ok() {
-        Err(cancelled(
-            "Refresh cancelled; committed chunks remain and no new chunk was started",
-        ))
-    } else {
-        Ok(())
+struct RefreshCancel {
+    receivers: Vec<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl RefreshCancel {
+    #[cfg(test)]
+    fn one(receiver: tokio::sync::oneshot::Receiver<()>) -> Self {
+        Self {
+            receivers: vec![receiver],
+        }
     }
+
+    fn pair(
+        source: tokio::sync::oneshot::Receiver<()>,
+        target: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            receivers: vec![source, target],
+        }
+    }
+
+    fn check(&mut self) -> Result<(), AppError> {
+        if self
+            .receivers
+            .iter_mut()
+            .any(|receiver| receiver.try_recv().is_ok())
+        {
+            Err(cancelled(
+                "Refresh cancelled; committed chunks remain and no new chunk was started",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn wait(&mut self) {
+        match self.receivers.as_mut_slice() {
+            [receiver] => {
+                let _ = receiver.await;
+            }
+            [source, target] => {
+                tokio::select! {
+                    _ = source => {},
+                    _ = target => {},
+                }
+            }
+            _ => std::future::pending::<()>().await,
+        }
+    }
+}
+
+fn check_cancel(cancel_rx: &mut RefreshCancel) -> Result<(), AppError> {
+    cancel_rx.check()
 }
 
 async fn source_grid(
     conn: &mut sqlx::MySqlConnection,
     sql: &str,
     row_cap: usize,
-    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    cancel_rx: &mut RefreshCancel,
 ) -> Result<GridData, AppError> {
     let query = sqlx::query(AssertSqlSafe(sql.to_owned()).into_sql_str()).fetch_all(&mut *conn);
     let rows = tokio::select! {
         result = query => result.map_err(|_| failed("Refresh source read failed; database details are omitted to protect row values"))?,
-        _ = &mut *cancel_rx => return Err(cancelled("Refresh cancelled during a source read; no target commit was attempted for this read")),
+        _ = cancel_rx.wait() => return Err(cancelled("Refresh cancelled during a source read; no target commit was attempted for this read")),
     };
     if rows.len() > row_cap {
         return Err(failed(format!(
@@ -918,7 +1048,7 @@ async fn plan_snapshot(
     states: &mut BTreeMap<String, TableState>,
     run: &mut RunState,
     on_event: &Channel<RefreshExecutionEvent>,
-    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    cancel_rx: &mut RefreshCancel,
 ) -> Result<(), AppError> {
     let tables = &input.tables;
     let foreign_keys = &input.foreign_keys;
@@ -1067,7 +1197,7 @@ async fn process_closure(
     identity_count: &mut usize,
     run: &mut RunState,
     on_event: &Channel<RefreshExecutionEvent>,
-    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    cancel_rx: &mut RefreshCancel,
 ) -> Result<(), AppError> {
     while !frontier.is_empty() {
         check_cancel(cancel_rx)?;
@@ -1254,7 +1384,7 @@ async fn copy_tables(
     states: &BTreeMap<String, TableState>,
     run: &mut RunState,
     on_event: &Channel<RefreshExecutionEvent>,
-    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    cancel_rx: &mut RefreshCancel,
     collision_keys: &mut HashSet<String>,
 ) -> Result<(), AppError> {
     for (table_index, table) in input.tables.iter().enumerate() {
@@ -1270,6 +1400,13 @@ async fn copy_tables(
             .collect::<Vec<_>>();
         for key_chunk in keys.chunks(table.batch_rows) {
             check_cancel(cancel_rx)?;
+            run.current_key_range = RefreshKeyRange::from_keys(key_chunk)?;
+            run.chunk(
+                on_event,
+                input.tables.len(),
+                "reading",
+                key_chunk.len() as u64,
+            );
             let predicate = tuple_in(&table.key_columns, key_chunk)?;
             let columns = table
                 .columns
@@ -1291,7 +1428,22 @@ async fn copy_tables(
                 "SELECT {selected} FROM {} WHERE {predicate} ORDER BY {order}",
                 relation(&table.source_schema, &table.table)
             );
-            let grid = source_grid(source, &sql, key_chunk.len(), cancel_rx).await?;
+            let grid = match source_grid(source, &sql, key_chunk.len(), cancel_rx).await {
+                Ok(grid) => grid,
+                Err(error) => {
+                    run.chunk(
+                        on_event,
+                        input.tables.len(),
+                        if error.code == ErrorCode::Cancelled {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        0,
+                    );
+                    return Err(error);
+                }
+            };
             if grid.rows.len() != key_chunk.len() {
                 return Err(failed(format!("{} snapshot data page did not match its planned identities; no new chunk was committed", source_key(table))));
             }
@@ -1375,31 +1527,63 @@ async fn copy_tables(
                 }
                 execute_raw(target, "START TRANSACTION", true).await?;
                 run.in_flight_rows = batch.len() as u64;
-                run.progress(on_event, "copying", input.tables.len());
+                run.chunk(
+                    on_event,
+                    input.tables.len(),
+                    "inserting",
+                    batch.len() as u64,
+                );
                 let inserted = tokio::select! {
                     result = execute_raw(target, &insert_sql, true) => result,
-                    _ = &mut *cancel_rx => {
+                    _ = cancel_rx.wait() => {
                         run.uncertain = true;
+                        run.chunk(on_event, input.tables.len(), "uncertain", batch.len() as u64);
                         return Err(cancelled("Refresh was cancelled during a target INSERT; that uncommitted chunk's outcome is uncertain and is not counted as committed"));
                     }
                 };
                 if let Err(error) = inserted {
                     if execute_raw(target, "ROLLBACK", true).await.is_err() {
                         run.uncertain = true;
+                        run.chunk(
+                            on_event,
+                            input.tables.len(),
+                            "uncertain",
+                            batch.len() as u64,
+                        );
                         return Err(failed("Refresh INSERT failed and rollback could not be confirmed; the in-flight chunk remains separately reported"));
                     }
                     run.in_flight_rows = 0;
+                    run.chunk(
+                        on_event,
+                        input.tables.len(),
+                        "rolled_back",
+                        batch.len() as u64,
+                    );
                     return Err(error);
                 }
+                run.rows_inserted += batch.len() as u64;
+                run.chunk(
+                    on_event,
+                    input.tables.len(),
+                    "inserted_uncommitted",
+                    batch.len() as u64,
+                );
                 let committed = tokio::select! {
                     result = execute_raw(target, "COMMIT", true) => result,
-                    _ = &mut *cancel_rx => {
+                    _ = cancel_rx.wait() => {
                         run.uncertain = true;
+                        run.chunk(on_event, input.tables.len(), "uncertain", batch.len() as u64);
                         return Err(cancelled("Refresh was cancelled during COMMIT; the chunk outcome is uncertain and is not counted as committed"));
                     }
                 };
                 if committed.is_err() {
                     run.uncertain = true;
+                    run.chunk(
+                        on_event,
+                        input.tables.len(),
+                        "uncertain",
+                        batch.len() as u64,
+                    );
                     return Err(failed("Refresh COMMIT outcome is uncertain; the in-flight chunk is not counted as committed or rolled back"));
                 }
                 run.committed_rows += batch.len() as u64;
@@ -1408,7 +1592,12 @@ async fn copy_tables(
                 run.target_bytes_written = run
                     .target_bytes_written
                     .saturating_add(insert_sql.len() as u64);
-                run.progress(on_event, "copying", input.tables.len());
+                run.chunk(
+                    on_event,
+                    input.tables.len(),
+                    "committed",
+                    batch.len() as u64,
+                );
                 offset = end;
             }
         }
@@ -1421,7 +1610,7 @@ async fn execute_inner(
     state: &crate::state::AppState,
     on_event: Channel<RefreshExecutionEvent>,
     run: &mut RunState,
-    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    cancel_rx: &mut RefreshCancel,
 ) -> Result<RefreshRunCounts, AppError> {
     let order = validate_input(&input)?;
     if order.len() != input.tables.len() || !input.mask.rows.is_empty() {
@@ -1473,6 +1662,8 @@ async fn execute_inner(
                 "Refresh target connection is not in autocommit mode",
             ));
         }
+        run.source_backend_id = Some(source_backend_id);
+        run.target_backend_id = Some(target_backend_id);
         let _ = on_event.send(RefreshExecutionEvent::Started {
             run_key: input.run_key.clone(),
             source_backend_id,
@@ -1567,6 +1758,50 @@ async fn audit_refresh_run(
     }
 }
 
+struct RefreshJobs {
+    keys: [String; 2],
+    cancel: RefreshCancel,
+}
+
+async fn register_refresh_jobs(
+    state: &crate::state::AppState,
+    source_session_id: Uuid,
+    target_session_id: Uuid,
+    run_key: &str,
+) -> Result<RefreshJobs, AppError> {
+    let source_key = crate::state::ext_job_key(source_session_id, run_key);
+    let target_key = crate::state::ext_job_key(target_session_id, run_key);
+    let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+    let (target_tx, target_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut jobs = state.ext_jobs.write().await;
+        if jobs.contains_key(&source_key) || jobs.contains_key(&target_key) {
+            return Err(AppError::bad_request("This Refresh run is already active"));
+        }
+        jobs.insert(source_key.clone(), source_tx);
+        jobs.insert(target_key.clone(), target_tx);
+    }
+    Ok(RefreshJobs {
+        keys: [source_key, target_key],
+        cancel: RefreshCancel::pair(source_rx, target_rx),
+    })
+}
+
+async fn unregister_refresh_jobs(state: &crate::state::AppState, keys: &[String; 2]) {
+    let mut jobs = state.ext_jobs.write().await;
+    for key in keys {
+        jobs.remove(key);
+    }
+}
+
+async fn cancel_registered_refresh(state: &crate::state::AppState, run_key: &str) {
+    for _ in 0..2 {
+        if let Some(tx) = crate::state::take_ext_job(&state.ext_jobs, run_key).await {
+            let _ = tx.send(());
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn refresh_execute(
     input: ExecuteInput,
@@ -1574,6 +1809,7 @@ pub async fn refresh_execute(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<RefreshRunCounts, AppError> {
     let run_key = input.run_key.clone();
+    let source_session_id = input.preflight.source_session_id;
     let target_session_id = input.preflight.target_session_id;
     let database = input
         .tables
@@ -1586,18 +1822,15 @@ pub async fn refresh_execute(
     let table_count = input.tables.len();
     Uuid::parse_str(&run_key)
         .map_err(|_| AppError::bad_request("Refresh run key must be a UUID"))?;
-    let job_key = crate::state::ext_job_key(target_session_id, &run_key);
-    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-    {
-        let mut jobs = state.ext_jobs.write().await;
-        if jobs.contains_key(&job_key) {
-            return Err(AppError::bad_request("This Refresh run is already active"));
-        }
-        jobs.insert(job_key.clone(), cancel_tx);
-    }
+    let jobs =
+        register_refresh_jobs(&state, source_session_id, target_session_id, &run_key).await?;
+    let RefreshJobs {
+        keys: job_keys,
+        cancel: mut cancel_rx,
+    } = jobs;
     let mut run = RunState::new(run_key.clone());
     let result = execute_inner(input, &state, on_event.clone(), &mut run, &mut cancel_rx).await;
-    state.ext_jobs.write().await.remove(&job_key);
+    unregister_refresh_jobs(&state, &job_keys).await;
     match result {
         Ok(counts) => {
             audit_refresh_run(&state, target_session_id, database, &run, &counts, None, "").await;
@@ -1659,9 +1892,7 @@ pub async fn refresh_cancel(
     run_key: String,
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), AppError> {
-    if let Some(tx) = crate::state::take_ext_job(&state.ext_jobs, &run_key).await {
-        let _ = tx.send(());
-    }
+    cancel_registered_refresh(&state, &run_key).await;
     Ok(())
 }
 
@@ -1696,6 +1927,71 @@ mod tests {
         assert_eq!(counts.status, "uncertain");
     }
 
+    #[test]
+    fn progress_metrics_are_denominated_and_key_ranges_are_hash_only() {
+        let mut run = RunState::new(Uuid::new_v4().to_string());
+        run.planned_rows = Some(100);
+        run.committed_rows = 40;
+        run.rows_inserted = 50;
+        run.in_flight_rows = 10;
+        run.source_backend_id = Some(41);
+        run.target_backend_id = Some(42);
+        run.current_key_range = RefreshKeyRange::from_keys(&[
+            vec![Value::String("private-start".into())],
+            vec![Value::String("private-end".into())],
+        ])
+        .unwrap();
+        let counts = run.counts(2);
+        assert_eq!(counts.rows_inserted, 50);
+        assert!(counts.rows_per_second.is_some_and(|rate| rate > 0.0));
+        assert!(counts.eta_seconds.is_some());
+        assert_eq!(counts.source_backend_id, Some(41));
+        assert_eq!(counts.target_backend_id, Some(42));
+        let range = counts.current_key_range.as_ref().unwrap();
+        assert_eq!(range.start_sha256.len(), 64);
+        assert_eq!(range.end_sha256.len(), 64);
+        assert_ne!(range.start_sha256, range.end_sha256);
+        let serialized = serde_json::to_string(&counts).unwrap();
+        assert!(!serialized.contains("private-start"));
+        assert!(!serialized.contains("private-end"));
+        run.status = "uncertain";
+        assert_eq!(run.counts(2).eta_seconds, None);
+    }
+
+    #[tokio::test]
+    async fn paired_cancel_and_either_session_disconnect_are_cleaned_up() {
+        let history = crate::history::open_in_memory().await.unwrap();
+        let state = crate::state::AppState::new(
+            history,
+            std::env::temp_dir(),
+            std::collections::HashMap::new(),
+        );
+        let source = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let run_key = Uuid::new_v4().to_string();
+        let jobs = register_refresh_jobs(&state, source, target, &run_key)
+            .await
+            .unwrap();
+        assert_eq!(state.ext_jobs.read().await.len(), 2);
+        cancel_registered_refresh(&state, &run_key).await;
+        let mut cancel = jobs.cancel;
+        assert_eq!(cancel.check().unwrap_err().code, ErrorCode::Cancelled);
+        assert_eq!(cancel.check().unwrap_err().code, ErrorCode::Cancelled);
+        assert!(state.ext_jobs.read().await.is_empty());
+        unregister_refresh_jobs(&state, &jobs.keys).await;
+
+        for disconnected in [source, target] {
+            let run_key = Uuid::new_v4().to_string();
+            let mut jobs = register_refresh_jobs(&state, source, target, &run_key)
+                .await
+                .unwrap();
+            state.cancel_session_work(disconnected).await;
+            assert_eq!(jobs.cancel.check().unwrap_err().code, ErrorCode::Cancelled);
+            unregister_refresh_jobs(&state, &jobs.keys).await;
+            assert!(state.ext_jobs.read().await.is_empty());
+        }
+    }
+
     fn recorder() -> (
         Channel<RefreshExecutionEvent>,
         std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
@@ -1716,7 +2012,7 @@ mod tests {
     fn cancellation_recorder() -> (
         Channel<RefreshExecutionEvent>,
         std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
-        tokio::sync::oneshot::Receiver<()>,
+        RefreshCancel,
     ) {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
@@ -1740,7 +2036,59 @@ mod tests {
             }
             Ok(())
         });
-        (channel, seen, cancel_rx)
+        (channel, seen, RefreshCancel::one(cancel_rx))
+    }
+
+    fn insert_cancellation_recorder() -> (
+        Channel<RefreshExecutionEvent>,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        RefreshCancel,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let cancel = std::sync::Arc::new(std::sync::Mutex::new(Some(cancel_tx)));
+        let trigger = cancel.clone();
+        let channel = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    if value["outcome"].as_str() == Some("inserting") {
+                        if let Some(tx) = trigger.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    sink.lock().unwrap().push(value);
+                }
+            }
+            Ok(())
+        });
+        (channel, seen, RefreshCancel::one(cancel_rx))
+    }
+
+    fn read_cancellation_recorder() -> (
+        Channel<RefreshExecutionEvent>,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        RefreshCancel,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let cancel = std::sync::Arc::new(std::sync::Mutex::new(Some(cancel_tx)));
+        let trigger = cancel.clone();
+        let channel = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    if value["outcome"].as_str() == Some("reading") {
+                        if let Some(tx) = trigger.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    sink.lock().unwrap().push(value);
+                }
+            }
+            Ok(())
+        });
+        (channel, seen, RefreshCancel::one(cancel_rx))
     }
 
     async fn refresh_execute_node(
@@ -2147,11 +2495,17 @@ mod tests {
         let (state, source_session, target_session) = live_state(&pool).await;
         bind_live_input(&mut input, &state, source_session, target_session).await;
         let (channel, events) = recorder();
-        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let mut run = RunState::new(input.run_key.clone());
         let counts = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            execute_inner(input, &state, channel, &mut run, &mut cancel_rx),
+            execute_inner(
+                input,
+                &state,
+                channel,
+                &mut run,
+                &mut RefreshCancel::one(cancel_rx),
+            ),
         )
         .await
         .unwrap()
@@ -2184,11 +2538,17 @@ mod tests {
             let (state, source_session, target_session) = live_state(&pool).await;
             bind_live_input(&mut input, &state, source_session, target_session).await;
             let (channel, _events) = recorder();
-            let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+            let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
             let mut run = RunState::new(input.run_key.clone());
-            let error = execute_inner(input, &state, channel, &mut run, &mut cancel_rx)
-                .await
-                .unwrap_err();
+            let error = execute_inner(
+                input,
+                &state,
+                channel,
+                &mut run,
+                &mut RefreshCancel::one(cancel_rx),
+            )
+            .await
+            .unwrap_err();
             assert!(error.message.contains("self/cyclic"), "{error}");
             assert_eq!(run.committed_rows, 0);
             assert_eq!(graph_target_rows(&pool, &target, shape).await, 0);
@@ -2216,7 +2576,10 @@ mod tests {
         let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let mut task = tokio::spawn(async move {
             let mut run = RunState::new(input.run_key.clone());
-            let result = execute_inner(input, &state, channel, &mut run, &mut { cancel_rx }).await;
+            let result = execute_inner(input, &state, channel, &mut run, &mut {
+                RefreshCancel::one(cancel_rx)
+            })
+            .await;
             (result, run)
         });
         let waiting = wait_for_event(&events, |event| {
@@ -2283,7 +2646,22 @@ mod tests {
         assert_eq!(inserted_after_snapshot, 0);
         let unmasked: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM `{target}`.`parents` WHERE email LIKE '%example.test' OR LENGTH(email) <> 64 OR computed <> CONCAT(email,'!')")).into_sql_str()).fetch_one(&pool).await.unwrap();
         assert_eq!(unmasked, 0);
-        let event_text = serde_json::to_string(&*events.lock().unwrap()).unwrap();
+        let recorded = events.lock().unwrap().clone();
+        assert!(recorded
+            .iter()
+            .any(|event| event["outcome"].as_str() == Some("committed")));
+        assert!(recorded
+            .iter()
+            .any(|event| event["current_key_range"]["start_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)));
+        assert!(recorded
+            .iter()
+            .any(|event| event["target_backend_id"].as_u64().is_some_and(|id| id > 0)));
+        assert!(recorded.iter().any(|event| event["rows_per_second"]
+            .as_f64()
+            .is_some_and(|rate| rate > 0.0)));
+        let event_text = serde_json::to_string(&recorded).unwrap();
         assert!(!event_text.contains("private-note"));
         assert!(!event_text.contains("example.test"));
         assert!(!event_text.contains("post-snapshot"));
@@ -2294,10 +2672,10 @@ mod tests {
         input.run_key = Uuid::new_v4().to_string();
         let (state, source_session, target_session) = live_state(&pool).await;
         bind_live_input(&mut input, &state, source_session, target_session).await;
-        let (channel, _events, cancel_rx) = cancellation_recorder();
+        let (channel, _events, mut cancel_rx) = cancellation_recorder();
         let task = tokio::spawn(async move {
             let mut run = RunState::new(input.run_key.clone());
-            let result = execute_inner(input, &state, channel, &mut run, &mut { cancel_rx }).await;
+            let result = execute_inner(input, &state, channel, &mut run, &mut cancel_rx).await;
             (result, run)
         });
         let (result, mut run) = tokio::time::timeout(std::time::Duration::from_secs(30), task)
@@ -2333,6 +2711,79 @@ mod tests {
         }
         drop_live_schemas(&pool, &source, &target).await;
 
+        let (source, target) = create_live_schemas(&pool, suffix, 2).await;
+        let (mut input, expected) = live_input(&pool, &source, &target, 2).await;
+        input.run_key = Uuid::new_v4().to_string();
+        let (state, source_session, target_session) = live_state(&pool).await;
+        bind_live_input(&mut input, &state, source_session, target_session).await;
+        let (channel, events, mut cancel_rx) = read_cancellation_recorder();
+        let task = tokio::spawn(async move {
+            let mut run = RunState::new(input.run_key.clone());
+            let result = execute_inner(input, &state, channel, &mut run, &mut cancel_rx).await;
+            (result, run)
+        });
+        let (result, run) = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+        let counts = run.counts(2);
+        assert!(!run.uncertain);
+        assert_eq!(counts.committed_rows, 0);
+        assert_eq!(counts.in_flight_rows, 0);
+        assert_eq!(counts.planned_rows, Some(expected));
+        assert_eq!(counts.remaining_rows, Some(expected));
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event["outcome"].as_str() == Some("cancelled")));
+        let actual: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT (SELECT COUNT(*) FROM `{target}`.`parents`) + (SELECT COUNT(*) FROM `{target}`.`children`)")).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(actual, 0);
+        drop_live_schemas(&pool, &source, &target).await;
+
+        let (source, target) = create_live_schemas(&pool, suffix, 2).await;
+        let (mut input, expected) = live_input(&pool, &source, &target, 2).await;
+        input.run_key = Uuid::new_v4().to_string();
+        let (state, source_session, target_session) = live_state(&pool).await;
+        bind_live_input(&mut input, &state, source_session, target_session).await;
+        let (channel, events, mut cancel_rx) = insert_cancellation_recorder();
+        let task = tokio::spawn(async move {
+            let mut run = RunState::new(input.run_key.clone());
+            let result = execute_inner(input, &state, channel, &mut run, &mut cancel_rx).await;
+            (result, run)
+        });
+        let (result, mut run) = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(run.uncertain);
+        run.status = "uncertain";
+        let counts = run.counts(2);
+        assert!(counts.in_flight_rows > 0);
+        assert_eq!(counts.committed_rows, 0);
+        assert_eq!(counts.planned_rows, Some(expected));
+        assert_eq!(counts.remaining_rows, Some(expected));
+        let actual: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT (SELECT COUNT(*) FROM `{target}`.`parents`) + (SELECT COUNT(*) FROM `{target}`.`children`)")).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert!(actual >= 0 && actual <= counts.in_flight_rows as i64);
+        let recorded = events.lock().unwrap().clone();
+        assert!(recorded
+            .iter()
+            .any(|event| event["outcome"].as_str() == Some("uncertain")));
+        assert!(recorded
+            .iter()
+            .any(|event| event["target_backend_id"].as_u64().is_some_and(|id| id > 0)));
+        assert!(recorded
+            .iter()
+            .any(|event| event["current_key_range"]["start_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)));
+        assert!(!serde_json::to_string(&recorded)
+            .unwrap()
+            .contains("private-note"));
+        drop_live_schemas(&pool, &source, &target).await;
+
         let (source, target) = create_live_schemas(&pool, suffix, 1).await;
         let (mut input, _) = live_input(&pool, &source, &target, 1).await;
         input.run_key = Uuid::new_v4().to_string();
@@ -2345,11 +2796,17 @@ mod tests {
         .await
         .unwrap();
         let (channel, _events) = recorder();
-        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let mut run = RunState::new(input.run_key.clone());
-        let error = execute_inner(input, &state, channel, &mut run, &mut cancel_rx)
-            .await
-            .unwrap_err();
+        let error = execute_inner(
+            input,
+            &state,
+            channel,
+            &mut run,
+            &mut RefreshCancel::one(cancel_rx),
+        )
+        .await
+        .unwrap_err();
         assert!(error.message.contains("column count changed"), "{error}");
         let actual: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT (SELECT COUNT(*) FROM `{target}`.`parents`) + (SELECT COUNT(*) FROM `{target}`.`children`)")).into_sql_str()).fetch_one(&pool).await.unwrap();
         assert_eq!(actual, 0);

@@ -348,7 +348,9 @@
     "Verify a bounded first-page batch through refresh_mask_apply in Rust; see accepted/masked/unique counts and elapsed time without displaying row values",
     "Run refresh_preflight: exact session identities, source read-only, writable autocommit target, production confirmation and all selected target tables empty",
     "Run Refresh with one consistent source snapshot, fresh FK closure, bounded parent-first chunk commits and persistent cancellation",
-    "Watch requested/closure/planned, source-read, committed, in-flight, remaining, chunk, byte, elapsed and backend counters without row values or fake ETA",
+    "Watch requested/closure/planned, source-read, inserted/committed/in-flight/remaining, per-chunk outcome, bytes, measured rows/s, denominated ETA and backend counters",
+    "Inspect SHA-256-only current key-boundary fingerprints; raw keys and row values never enter progress",
+    "Close the panel without hiding running work; cancel through persistent activity or disconnect either session to stop and clean both registrations",
     "Inspect uncertain target outcomes without assuming rollback; already committed chunks remain and a terminal audit row records counts/status only"
    ],
    "engines": "The specification and snapshot executor are same-engine MySQL/MariaDB only. PostgreSQL and SQL Server have registered, explained gaps; other unsupported engines fail closed.",

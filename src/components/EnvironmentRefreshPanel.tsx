@@ -107,7 +107,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     setActivity(activityKey, {
       id: 'refresh-execute',
       label: cancelling ? 'Cancelling environment refresh' : `Environment refresh · ${progress.phase}`,
-      detail: `${progress.table ?? 'preparing snapshot'} · ${progress.committedRows.toLocaleString()} committed · ${progress.inFlightRows.toLocaleString()} in flight · ${progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining`,
+      detail: `${progress.table ?? 'preparing snapshot'} · ${progress.chunkOutcome ?? progress.phase} · ${progress.committedRows.toLocaleString()} committed · ${progress.inFlightRows.toLocaleString()} in flight · ${progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining · ${progress.rowsPerSecond?.toFixed(1) ?? '—'} rows/s`,
       threads: progress.targetBackendId === null ? undefined : [progress.targetBackendId],
       survives: true,
       kill: () => {
@@ -737,9 +737,11 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
               {progress.phase !== 'idle' && (
                 <section aria-label="Refresh execution progress">
                   <h3>Snapshot execution · {progress.status ?? progress.phase}</h3>
-                  <p className="dv-desc">Table {progress.tableIndex}/{progress.tableCount || '—'} · {progress.table ?? 'preparing dedicated connections'} · elapsed {progress.elapsedMs.toLocaleString()} ms. No fake ETA.</p>
+                  <p className="dv-desc">Table {progress.tableIndex}/{progress.tableCount || '—'} · {progress.table ?? 'preparing dedicated connections'} · elapsed {progress.elapsedMs.toLocaleString()} ms.</p>
                   <p className="dv-desc">Requested {progress.requestedRows?.toLocaleString() ?? 'unknown'} + closure {progress.closureRows?.toLocaleString() ?? 'unknown'} = planned {progress.plannedRows?.toLocaleString() ?? 'unknown'} · key rows read {progress.keyRowsRead.toLocaleString()} · full rows read {progress.sourceRowsRead.toLocaleString()}.</p>
-                  <p className="dv-desc"><b>{progress.committedRows.toLocaleString()} committed</b> · {progress.inFlightRows.toLocaleString()} in flight · {progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining · {progress.chunksCommitted.toLocaleString()} committed chunks.</p>
+                  <p className="dv-desc"><b>{progress.committedRows.toLocaleString()} committed</b> · {progress.rowsInserted.toLocaleString()} inserted including uncommitted · {progress.inFlightRows.toLocaleString()} in flight · {progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining · {progress.chunksCommitted.toLocaleString()} committed chunks.</p>
+                  <p className="dv-desc">Chunk {progress.chunkOutcome ? `${progress.chunkIndex} · ${progress.chunkOutcome} · ${progress.chunkRows.toLocaleString()} rows` : 'not started'} · {progress.rowsPerSecond === null ? '—' : progress.rowsPerSecond.toFixed(1)} committed rows/s · ETA {progress.etaSeconds === null ? 'unavailable until exact planning and committed progress' : `≈ ${progress.etaSeconds.toLocaleString()} s (estimated from measured committed rows/s)`}.</p>
+                  {progress.currentKeyRange && <p className="dv-desc">Current hashed key range · start {progress.currentKeyRange.startSha256.slice(0, 16)}… · end {progress.currentKeyRange.endSha256.slice(0, 16)}… · SHA-256 fingerprints only, never key values.</p>}
                   <p className="dv-desc">Source bytes read {progress.sourceBytesRead.toLocaleString()} · committed outbound SQL bytes {progress.targetBytesWritten.toLocaleString()} · source backend {progress.sourceBackendId ?? 'pending'} · target backend {progress.targetBackendId ?? 'pending'}.</p>
                   {progress.status && <div className={progress.status === 'completed' ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}><StatusIcon kind={progress.status === 'completed' ? 'ok' : 'error'} /><span>{progress.status === 'completed' ? 'Copy completed. Exact count, orphan and content-hash verification are not part of this phase.' : progress.status === 'uncertain' ? 'A target outcome is uncertain. In-flight rows are not counted as committed or rolled back; inspect the target before any retry.' : 'The run stopped. Already committed chunks remain; no whole-run rollback is claimed.'}</span></div>}
                 </section>

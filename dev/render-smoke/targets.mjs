@@ -504,8 +504,9 @@ export function namedTargets(fixtures) {
       { name: 'EnvironmentRefreshPanel_catalog_journey', missingTarget: false },
       { name: 'EnvironmentRefreshPanel_catalog_blocked', missingTarget: true },
       { name: 'EnvironmentRefreshPanel_rust_mask_journey', rustMask: true },
+      { name: 'EnvironmentRefreshPanel_activity_survives_close', rustMask: true, activity: true },
     ].map(testCase => ({
-      name: testCase.name, file: 'src/components/EnvironmentRefreshPanel.tsx', tier: 'mount', settleMs: 30,
+      name: testCase.name, file: testCase.activity ? 'dev/refresh_activity_smoke.tsx' : 'src/components/EnvironmentRefreshPanel.tsx', tier: 'mount', settleMs: 30,
       mock: {
         monitor_query: ({ sessionId, sql }) => {
           const target = sessionId === 's-target';
@@ -550,17 +551,24 @@ export function namedTargets(fixtures) {
           const runKey = args.input.run_key;
           args.onEvent.onmessage?.({ type: 'started', run_key: runKey, source_backend_id: 41, target_backend_id: 42 });
           args.onEvent.onmessage?.({
-            type: 'progress', run_key: runKey, phase: 'copying', table_index: 3, table_count: 3,
+            type: 'chunk', run_key: runKey, table: 'shop.events', table_index: 3, table_count: 3,
+            chunk_index: 1, outcome: 'committed', rows: 0,
             requested_rows: 0, closure_rows: 0, planned_rows: 0, committed_rows: 0,
-            in_flight_rows: 0, remaining_rows: 0, chunks_committed: 0, elapsed_ms: 2,
+            rows_inserted: 0, in_flight_rows: 0, remaining_rows: 0, chunks_committed: 1,
+            rows_per_second: 0, eta_seconds: 0, elapsed_ms: 2,
+            current_key_range: { start_sha256: 'a'.repeat(64), end_sha256: 'b'.repeat(64) },
           });
+          if (testCase.activity) return new Promise(() => {});
           args.onEvent.onmessage?.({
             type: 'done', run_key: runKey, status: 'completed', table_index: 3, table_count: 3,
             requested_rows: 0, closure_rows: 0, planned_rows: 0, committed_rows: 0,
-            in_flight_rows: 0, remaining_rows: 0, chunks_committed: 0, elapsed_ms: 2,
+            rows_inserted: 0, in_flight_rows: 0, remaining_rows: 0, chunks_committed: 1,
+            rows_per_second: 0, eta_seconds: 0, elapsed_ms: 2,
+            current_key_range: { start_sha256: 'a'.repeat(64), end_sha256: 'b'.repeat(64) },
           });
           return { status: 'completed', committed_rows: 0, in_flight_rows: 0, remaining_rows: 0 };
         },
+        refresh_cancel: () => null,
       },
       props: {
         session: { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
@@ -591,6 +599,10 @@ export function namedTargets(fixtures) {
           await click('Verify Rust masking');
           await click('Check target empty');
           await click('Run Refresh');
+          if (testCase.activity) {
+            await click('×');
+            await click('Cancel hidden work');
+          }
         }
       },
       assert: ({ html, calls }) => {
@@ -598,6 +610,16 @@ export function namedTargets(fixtures) {
         const expectedQueries = testCase.missingTarget ? 12 : testCase.rustMask ? 18 : 15;
         if (queries.length !== expectedQueries) return `expected ${expectedQueries} catalog/key reads, got ${queries.length}`;
         if (queries.slice(0, 12).some(call => !/information_schema|innodb_table_stats/.test(call.args.sql))) return 'catalog analysis read application rows';
+        if (testCase.activity) {
+          const executeCall = calls.find(call => call.cmd === 'refresh_execute');
+          if (!executeCall) return 'Refresh executor was not invoked before close';
+          if (!html.includes('refresh-execute') || !html.includes('Environment refresh · copying')) return 'closing the panel hid its running activity';
+          if (!html.includes('committed') || !html.includes('rows/s')) return 'surviving activity lost its progress detail';
+          if (!calls.some(call => call.cmd === 'refresh_cancel')) return 'surviving activity could not cancel the hidden run';
+          if (html.includes('No running Refresh activity')) return 'running activity was cleared on unmount';
+          if (JSON.stringify(executeCall.args).includes('private-row')) return 'activity payload contains a planted row value';
+          return undefined;
+        }
         if (testCase.missingTarget) {
           if (!html.includes('Catalog compatibility is blocked')) return 'missing target did not block analysis';
           if (!html.includes('target table shop.events does not exist')) return 'missing target table was not named';
@@ -629,9 +651,20 @@ export function namedTargets(fixtures) {
             const executeCall = calls.find(call => call.cmd === 'refresh_execute');
             if (!executeCall) return 'Refresh executor was not invoked after preflight';
             if (JSON.stringify(executeCall.args).includes('private-row')) return 'execution payload contains a planted row value';
-            if (!html.includes('Snapshot execution · completed')) return 'terminal execution progress was not rendered';
-            if (!html.includes('0 committed') || !html.includes('0 in flight') || !html.includes('0 remaining')) return 'honest execution counters were not rendered';
-            if (!html.includes('target backend 42')) return 'target backend identity was not rendered';
+            if (testCase.activity) {
+              if (!html.includes('refresh-execute') || !html.includes('Environment refresh · copying')) return 'closing the panel hid its running activity';
+              if (!html.includes('committed') || !html.includes('rows/s')) return 'surviving activity lost its progress detail';
+              if (!calls.some(call => call.cmd === 'refresh_cancel')) return 'surviving activity could not cancel the hidden run';
+              if (html.includes('No running Refresh activity')) return 'running activity was cleared on unmount';
+            } else {
+              if (!html.includes('Snapshot execution · completed')) return 'terminal execution progress was not rendered';
+              if (!html.includes('0 committed') || !html.includes('0 in flight') || !html.includes('0 remaining')) return 'honest execution counters were not rendered';
+              if (!html.includes('target backend 42')) return 'target backend identity was not rendered';
+              if (!html.includes('Chunk 1 · committed')) return 'per-chunk outcome was not rendered';
+              if (!html.includes('committed rows/s')) return 'measured throughput was not rendered';
+              if (!html.includes('Current hashed key range')) return 'safe key-range evidence was not rendered';
+              if (!html.includes('inserted including uncommitted')) return 'inserted/committed distinction was not rendered';
+            }
           }
           if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id`'))) return 'row-set planning did not use source key-only queries';
         }

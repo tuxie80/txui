@@ -18,11 +18,18 @@ export interface RefreshProgressState {
   sourceRowsRead: number;
   plannedRows: number | null;
   committedRows: number;
+  rowsInserted: number;
   inFlightRows: number;
   remainingRows: number | null;
   chunksCommitted: number;
   sourceBytesRead: number;
   targetBytesWritten: number;
+  rowsPerSecond: number | null;
+  etaSeconds: number | null;
+  chunkIndex: number;
+  chunkOutcome: string | null;
+  chunkRows: number;
+  currentKeyRange: { startSha256: string; endSha256: string } | null;
   sourceBackendId: number | null;
   targetBackendId: number | null;
   requestedRows: number | null;
@@ -34,15 +41,16 @@ export interface RefreshProgressState {
 export function initialRefreshProgress(): RefreshProgressState {
   return {
     runKey: null, phase: 'idle', status: null, table: null, tableIndex: 0, tableCount: 0,
-    keyRowsRead: 0, sourceRowsRead: 0, plannedRows: null, committedRows: 0, inFlightRows: 0,
-    remainingRows: null, chunksCommitted: 0, sourceBytesRead: 0, targetBytesWritten: 0,
-    sourceBackendId: null, targetBackendId: null, requestedRows: null, closureRows: null,
-    elapsedMs: 0, error: null,
+    keyRowsRead: 0, sourceRowsRead: 0, plannedRows: null, committedRows: 0, rowsInserted: 0,
+    inFlightRows: 0, remainingRows: null, chunksCommitted: 0, sourceBytesRead: 0, targetBytesWritten: 0,
+    rowsPerSecond: null, etaSeconds: null, chunkIndex: 0, chunkOutcome: null, chunkRows: 0,
+    currentKeyRange: null, sourceBackendId: null, targetBackendId: null,
+    requestedRows: null, closureRows: null, elapsedMs: 0, error: null,
   };
 }
 
 export interface RefreshExecutionEvent {
-  type: 'started' | 'progress' | 'done';
+  type: 'started' | 'progress' | 'chunk' | 'done';
   run_key: string;
   phase?: 'starting' | 'planning' | 'copying';
   status?: RefreshRunStatus;
@@ -53,11 +61,18 @@ export interface RefreshExecutionEvent {
   source_rows_read?: number;
   planned_rows?: number | null;
   committed_rows?: number;
+  rows_inserted?: number;
   in_flight_rows?: number;
   remaining_rows?: number | null;
   chunks_committed?: number;
   source_bytes_read?: number;
   target_bytes_written?: number;
+  rows_per_second?: number | null;
+  eta_seconds?: number | null;
+  chunk_index?: number;
+  outcome?: string;
+  rows?: number;
+  current_key_range?: { start_sha256: string; end_sha256: string } | null;
   source_backend_id?: number;
   target_backend_id?: number;
   requested_rows?: number | null;
@@ -70,6 +85,11 @@ export function applyRefreshExecutionEvent(
   state: RefreshProgressState, event: RefreshExecutionEvent,
 ): RefreshProgressState {
   const next = { ...state, runKey: event.run_key };
+  const currentKeyRange = event.current_key_range === undefined ? next.currentKeyRange
+    : event.current_key_range ? {
+      startSha256: event.current_key_range.start_sha256,
+      endSha256: event.current_key_range.end_sha256,
+    } : null;
   if (event.type === 'done') {
     return {
       ...next, phase: 'done', status: event.status ?? 'failed',
@@ -79,11 +99,18 @@ export function applyRefreshExecutionEvent(
       sourceRowsRead: event.source_rows_read ?? next.sourceRowsRead,
       plannedRows: event.planned_rows ?? next.plannedRows,
       committedRows: event.committed_rows ?? next.committedRows,
+      rowsInserted: event.rows_inserted ?? next.rowsInserted,
       inFlightRows: event.in_flight_rows ?? 0,
       remainingRows: event.remaining_rows ?? next.remainingRows,
       chunksCommitted: event.chunks_committed ?? next.chunksCommitted,
       sourceBytesRead: event.source_bytes_read ?? next.sourceBytesRead,
       targetBytesWritten: event.target_bytes_written ?? next.targetBytesWritten,
+      rowsPerSecond: event.rows_per_second ?? next.rowsPerSecond,
+      etaSeconds: event.eta_seconds ?? null,
+      chunkIndex: event.chunk_index ?? next.chunkIndex,
+      chunkOutcome: event.outcome ?? next.chunkOutcome,
+      chunkRows: event.rows ?? next.chunkRows,
+      currentKeyRange,
       requestedRows: event.requested_rows ?? next.requestedRows,
       closureRows: event.closure_rows ?? next.closureRows,
       elapsedMs: event.elapsed_ms ?? next.elapsedMs,
@@ -92,7 +119,7 @@ export function applyRefreshExecutionEvent(
   }
   return {
     ...next,
-    phase: event.type === 'started' ? 'starting' : event.phase ?? next.phase,
+    phase: event.type === 'started' ? 'starting' : event.type === 'chunk' ? 'copying' : event.phase ?? next.phase,
     table: event.table === undefined ? next.table : event.table,
     tableIndex: event.table_index ?? next.tableIndex,
     tableCount: event.table_count ?? next.tableCount,
@@ -100,11 +127,18 @@ export function applyRefreshExecutionEvent(
     sourceRowsRead: event.source_rows_read ?? next.sourceRowsRead,
     plannedRows: event.planned_rows === undefined ? next.plannedRows : event.planned_rows,
     committedRows: event.committed_rows ?? next.committedRows,
+    rowsInserted: event.rows_inserted ?? next.rowsInserted,
     inFlightRows: event.in_flight_rows ?? next.inFlightRows,
     remainingRows: event.remaining_rows === undefined ? next.remainingRows : event.remaining_rows,
     chunksCommitted: event.chunks_committed ?? next.chunksCommitted,
     sourceBytesRead: event.source_bytes_read ?? next.sourceBytesRead,
     targetBytesWritten: event.target_bytes_written ?? next.targetBytesWritten,
+    rowsPerSecond: event.rows_per_second === undefined ? next.rowsPerSecond : event.rows_per_second,
+    etaSeconds: event.eta_seconds === undefined ? next.etaSeconds : event.eta_seconds,
+    chunkIndex: event.chunk_index ?? next.chunkIndex,
+    chunkOutcome: event.outcome ?? next.chunkOutcome,
+    chunkRows: event.rows ?? next.chunkRows,
+    currentKeyRange,
     sourceBackendId: event.source_backend_id ?? next.sourceBackendId,
     targetBackendId: event.target_backend_id ?? next.targetBackendId,
     requestedRows: event.requested_rows === undefined ? next.requestedRows : event.requested_rows,

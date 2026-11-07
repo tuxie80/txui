@@ -76,4 +76,4 @@ const executionInput = buildRefreshExecutionInput({
   spec: input.spec, catalog, executionPlan, maskPlan,
   runKey: '00000000-0000-4000-8000-000000000000', productionConfirmation: null,
 });
-console.log(JSON.stringify({ input: executionInput, expectedRows: input.rows + 3 }));
+console.log(JSON.stringify({ input: executionInput, expectedRows: input.rows + Math.min(input.rows, 3) }));
