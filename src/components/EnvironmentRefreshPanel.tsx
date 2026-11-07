@@ -12,7 +12,7 @@ import type {
   RefreshMaskRule, RefreshSpec, RefreshTablePolicy,
 } from '../utils/refreshSpec';
 import { buildRefreshPlan } from '../utils/refreshPlan';
-import { planRefreshRowSets } from '../utils/refreshRowSets';
+import { planRefreshRowSets, buildRefreshRootPageSql } from '../utils/refreshRowSets';
 import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
 import { buildRefreshExecutionPlan } from '../utils/refreshExecution';
 import { buildRefreshMaskPlan } from '../utils/refreshMask';
@@ -77,6 +77,8 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const [rowSetPlan, setRowSetPlan] = useState<RefreshRowSetPlan | null>(null);
   const [planningRows, setPlanningRows] = useState(false);
   const [rowProgress, setRowProgress] = useState<{ phase: string; table: string; queries: number; rowsRead: number } | null>(null);
+  const [planningRust, setPlanningRust] = useState(false);
+  const [rustMaskReport, setRustMaskReport] = useState<{ acceptedRows: number; maskedCells: number; uniqueKeys: number; elapsedMs: number } | null>(null);
   const analysisGeneration = useRef(0);
   const [logs, setLogs] = useState<string[]>(['Specification only — no catalog reads or database writes have run.']);
 
@@ -114,6 +116,8 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     setRowSetPlan(null);
     setPlanningRows(false);
     setRowProgress(null);
+    setPlanningRust(false);
+    setRustMaskReport(null);
     setFileError(null);
   };
   const selectEndpoint = (side: 'source' | 'target', sessionId: string) => {
@@ -181,6 +185,8 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     setRowSetPlan(null);
     setPlanningRows(false);
     setRowProgress(null);
+    setPlanningRust(false);
+    setRustMaskReport(null);
     setFileError(null);
     try {
       const result = await readRefreshCatalogAnalysis({
@@ -234,6 +240,79 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     }
   };
 
+  const verifyRustMasking = async () => {
+    if (!analysis || !maskPlan || !maskSafety?.complete || !executionPlan?.executable) return;
+    const catalog = analysis;
+    const generation = ++analysisGeneration.current;
+    setPlanningRust(true);
+    setRustMaskReport(null);
+    setFileError(null);
+    try {
+      const tables = catalog.graph.tables.map(table => ({
+        name: table.key,
+        columns: table.columns.map(column => ({
+          name: column.name, data_type: column.dataType, collation: column.collation,
+          char_max_len: column.charMaxLen, generation_expression: column.generationExpression ?? null,
+          extra: column.extra,
+        })),
+        indexes: table.indexes.filter(index => index.unique || index.name === 'PRIMARY').map(index => ({
+          name: index.name, unique: index.unique || index.name === 'PRIMARY',
+          columns: [...index.columns].sort((a, b) => a.seq - b.seq).map(column => column.name),
+        })),
+      }));
+      const relations = catalog.graph.foreignKeys.flatMap(edge => edge.parts.flatMap(part => [
+        { relation: `${edge.key}:${part.ordinal}`, table: `${edge.schema}.${edge.table}`, column: part.column },
+        { relation: `${edge.key}:${part.ordinal}`, table: `${edge.refSchema}.${edge.refTable}`, column: part.refColumn },
+      ]));
+      const rules = maskPlan.rules.map(rule => {
+        const source = spec.masks.find(mask => {
+          if (mask.column !== rule.column) return false;
+          const parts = mask.table.split('.');
+          const schema = spec.schemaMappings.length === 1 ? spec.schemaMappings[0].source : parts[0];
+          return `${schema}.${parts[parts.length - 1]}` === rule.table;
+        });
+        return {
+          table: rule.table, column: rule.column, rule: rule.rule, generator: rule.generator,
+          value: source?.rule === 'constant' ? source.value : null, relation: rule.relation,
+        };
+      });
+      const rows: { table: string; values: Record<string, unknown> }[] = [];
+      for (const policy of spec.tables) {
+        if (policy.policy === 'exclude' || policy.policy === 'generate') continue;
+        const parts = policy.table.split('.');
+        const sourceSchema = spec.schemaMappings.length === 1 ? spec.schemaMappings[0].source : parts[0];
+        const tableName = parts[parts.length - 1];
+        const source = catalog.graph.tables.find(table => table.schema === sourceSchema && table.name === tableName);
+        if (!source) continue;
+        const sql = buildRefreshRootPageSql({ spec, policy, table: source, graph: catalog, after: null, batch: Math.min(100, spec.limits.planningKeyBatch) });
+        const result = await invoke<QueryResult>('monitor_query', { sessionId: spec.source.sessionId, sql });
+        if (result.truncated) throw new Error(`${source.key} Rust mask verification was truncated`);
+        result.rows.forEach(row => {
+          const values: Record<string, unknown> = {};
+          result.columns.forEach((column, at) => { values[column.name] = row[at]; });
+          rows.push({ table: source.key, values });
+        });
+      }
+      const response = await invoke<{ accepted_rows: number; masked_cells: number; unique_keys: number; elapsed_ms: number }>('refresh_mask_apply', {
+        input: {
+          seed: spec.seed, rules, tables, relations, rows,
+          allow_fk_breaking: spec.allowFkBreaking,
+          acknowledge_unmasked_sensitive: spec.acknowledgeUnmaskedSensitive ?? false,
+          committed_scope: { committed_rows: 0, in_flight_rows: 0 },
+          max_unique_keys: spec.limits.maxPlanningKeys,
+        },
+      });
+      if (analysisGeneration.current !== generation) return;
+      setRustMaskReport({ acceptedRows: response.accepted_rows, maskedCells: response.masked_cells, uniqueKeys: response.unique_keys, elapsedMs: response.elapsed_ms });
+      setLogs(current => [...current,
+        `Rust masking verified for the requested first-page batch: ${response.accepted_rows} accepted rows, ${response.masked_cells} masked cells, ${response.unique_keys} unique keys, ${response.elapsed_ms} ms. No target writes and no row values displayed.`]);
+    } catch (error) {
+      if (analysisGeneration.current === generation) setFileError(errorDisplay(error));
+    } finally {
+      if (analysisGeneration.current === generation) setPlanningRust(false);
+    }
+  };
+
   return (
     <div className="proc-panel">
       <div className="proc-toolbar">
@@ -273,8 +352,11 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   <button className="toolbar-btn" disabled={!confirmed || !!validationError || analyzing || planningRows} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
                     {analyzing ? 'Analyzing catalogs…' : 'Analyze catalogs'}
                   </button>
-                  <button className="toolbar-btn" disabled={!analysis?.complete || analyzing || planningRows} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
+                  <button className="toolbar-btn" disabled={!analysis?.complete || analyzing || planningRows || planningRust} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
                     {planningRows ? 'Planning row sets…' : 'Plan row sets'}
+                  </button>
+                  <button className="toolbar-btn" disabled={!maskSafety?.complete || !executionPlan?.executable || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Apply masks in Rust to a bounded first-page batch; no target writes and no row values displayed'} onClick={() => void verifyRustMasking()}>
+                    {planningRust ? 'Verifying Rust masking…' : 'Verify Rust masking'}
                   </button>
                 </div>
                 {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? 'Catalog proof is current for this specification; no execution is available.' : 'No catalog read or write has run.'}</p>}
@@ -407,6 +489,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                     {maskSafety.sensitiveMasked.length > 0 && <div className="sqp-f-evidence"><b>Sensitive columns with mask rules:</b> {maskSafety.sensitiveMasked.slice(0, 100).join(', ')}{maskSafety.sensitiveMasked.length > 100 ? ` · +${maskSafety.sensitiveMasked.length - 100} more` : ''}</div>}
                     {maskSafety.generatedColumns.length > 0 && <div className="sqp-f-evidence"><b>Omitted from inserts, recomputed by target:</b> {maskSafety.generatedColumns.slice(0, 100).join(', ')}{maskSafety.generatedColumns.length > 100 ? ` · +${maskSafety.generatedColumns.length - 100} more` : ''}</div>}
                     {maskSafety.notes.map(note => <div key={note} className="sqp-f-evidence">{note}</div>)}
+                    {rustMaskReport && <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Rust masking verified: {rustMaskReport.acceptedRows} accepted rows · {rustMaskReport.maskedCells} masked cells · {rustMaskReport.uniqueKeys} unique keys · {rustMaskReport.elapsedMs} ms. Requested first-page batch; no target writes or full-refresh claim.</span></div>}
                   </div>
                 )}
               </section>

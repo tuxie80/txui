@@ -1708,6 +1708,12 @@ pub async fn generate_preview(
         .collect())
 }
 
+pub(crate) fn generate_value_at(spec: ColumnSpec, seed: u32, row_index: u64) -> serde_json::Value {
+    let mut rng = Rng(seed);
+    let empty = FkPools::none(1);
+    gen_row(&[spec], &mut rng, row_index, 1, "default", &empty, 1, seed, 0)[0].to_json()
+}
+
 /// `SELECT COUNT(*)` — the cross-run continuation base for unique columns on a
 /// fill-existing run: the scramble/tag start at row index `i + count`, past
 /// the permutation slots the previous same-seed runs occupied (see the

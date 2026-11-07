@@ -503,12 +503,13 @@ export function namedTargets(fixtures) {
     ...[
       { name: 'EnvironmentRefreshPanel_catalog_journey', missingTarget: false },
       { name: 'EnvironmentRefreshPanel_catalog_blocked', missingTarget: true },
+      { name: 'EnvironmentRefreshPanel_rust_mask_journey', rustMask: true },
     ].map(testCase => ({
       name: testCase.name, file: 'src/components/EnvironmentRefreshPanel.tsx', tier: 'mount', settleMs: 30,
       mock: {
         monitor_query: ({ sessionId, sql }) => {
           const target = sessionId === 's-target';
-          const names = ['countries', 'orders', 'events'].filter(name => !(target && testCase.missingTarget && name === 'events'));
+          const names = [...(testCase.rustMask ? ['customers'] : []), 'countries', 'orders', 'events'].filter(name => !(target && testCase.missingTarget && name === 'events'));
           if (sql.includes('information_schema.SCHEMATA')) return fixtures.queryResult(
             ['server_charset', 'server_collation', 'server_version', 'schema_charset', 'schema_collation'],
             [['utf8mb4', 'utf8mb4_0900_ai_ci', '8.4.0', 'utf8mb4', 'utf8mb4_0900_ai_ci']]);
@@ -523,18 +524,23 @@ export function namedTargets(fixtures) {
             for (const name of names) {
               rows.push([name, 'id', 'int', 'int', 'NO', null, '', null, null, null, null, '']);
               if (name !== 'countries') rows.push([name, 'created_at', 'datetime', 'datetime', 'NO', null, '', null, null, null, null, '']);
+              if (name === 'customers') rows.push([name, 'email', 'varchar', 'varchar(64)', 'NO', null, '', 'utf8mb4', 'utf8mb4_0900_ai_ci', 64, null, '']);
             }
             return fixtures.queryResult(
               ['TABLE_NAME', 'COLUMN_NAME', 'DATA_TYPE', 'COLUMN_TYPE', 'IS_NULLABLE', 'COLUMN_DEFAULT', 'EXTRA', 'CHARACTER_SET_NAME', 'COLLATION_NAME', 'CHARACTER_MAXIMUM_LENGTH', 'GENERATION_EXPRESSION', 'COLUMN_COMMENT'], rows);
           }
           if (sql.includes('information_schema.STATISTICS')) return fixtures.queryResult(
             ['TABLE_NAME', 'INDEX_NAME', 'NON_UNIQUE', 'SEQ_IN_INDEX', 'COLUMN_NAME', 'SUB_PART', 'CARDINALITY', 'INDEX_TYPE'],
-            names.map(name => [name, 'PRIMARY', 0, 1, 'id', null, 0, 'BTREE']));
+            names.flatMap(name => [
+              [name, 'PRIMARY', 0, 1, 'id', null, 0, 'BTREE'],
+              ...(name === 'customers' ? [[name, 'uq_email', 0, 1, 'email', null, 0, 'BTREE']] : []),
+            ]));
           if (sql.includes('KEY_COLUMN_USAGE')) return fixtures.queryResult(
             ['CONSTRAINT_NAME', 'TABLE_SCHEMA', 'TABLE_NAME', 'COLUMN_NAME', 'REFERENCED_TABLE_SCHEMA', 'REFERENCED_TABLE_NAME', 'REFERENCED_COLUMN_NAME', 'ORDINAL_POSITION', 'DELETE_RULE', 'UPDATE_RULE'], []);
           if (sql.startsWith('SELECT `id`') && sql.includes('FROM `shop`.')) return fixtures.queryResult(['id'], []);
           throw new Error(`unexpected Refresh query: ${sql}`);
         },
+        refresh_mask_apply: () => ({ rows: [], accepted_rows: 0, masked_cells: 0, unique_keys: 0, elapsed_ms: 1 }),
       },
       props: {
         session: { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
@@ -561,10 +567,11 @@ export function namedTargets(fixtures) {
         await click('Reconfirm source and target');
         await click('Analyze catalogs');
         if (!testCase.missingTarget) await click('Plan row sets');
+        if (testCase.rustMask) await click('Verify Rust masking');
       },
       assert: ({ html, calls }) => {
         const queries = calls.filter(call => call.cmd === 'monitor_query');
-        const expectedQueries = testCase.missingTarget ? 12 : 15;
+        const expectedQueries = testCase.missingTarget ? 12 : testCase.rustMask ? 18 : 15;
         if (queries.length !== expectedQueries) return `expected ${expectedQueries} catalog/key reads, got ${queries.length}`;
         if (queries.slice(0, 12).some(call => !/information_schema|innodb_table_stats/.test(call.args.sql))) return 'catalog analysis read application rows';
         if (testCase.missingTarget) {
@@ -573,17 +580,28 @@ export function namedTargets(fixtures) {
           if (html.includes('Catalog compatibility proven')) return 'missing target produced a success badge';
         } else {
           if (!html.includes('Catalog compatibility proven')) return 'clean catalogs did not produce compatibility proof';
-          if (!html.includes('3 source tables · 3 target tables · 0 FKs')) return 'catalog counts are missing or wrong';
+          const tableCount = testCase.rustMask ? 4 : 3;
+          if (!html.includes(`${tableCount} source tables · ${tableCount} target tables · 0 FKs`)) return 'catalog counts are missing or wrong';
           if (!html.includes('Requested 0 + closure 0 = final 0')) return 'row-set totals were not rendered';
           if (!html.includes('Fixed-point row-set plan complete')) return 'fixed-point proof was not rendered';
           if (!html.includes('Execution plan is deterministic and schema-bound')) return 'deterministic execution proof was not rendered';
-          if (!html.includes('Insertion order: 1. shop.countries · 2. shop.events · 3. shop.orders')) return 'parent/insertion order was not rendered';
+          const order = '1. shop.countries · 2. shop.events · 3. shop.orders';
+          if (!html.includes(`Insertion order: ${order}`)) return 'parent/insertion order was not rendered';
           if (!html.includes('full-root keys retained 0')) return 'memory counters were not rendered';
-          if (!html.includes('Mask contract blocked: 1 blockers')) return 'missing mask column was not reported';
-          if (!html.includes('shop.customers.email has no source catalog column')) return 'mask blocker did not name the missing column';
-          if (!html.includes('Mask safety blocked: 1 blockers')) return 'mask safety blockers were not rendered';
+          if (!testCase.rustMask) {
+            if (!html.includes('Mask contract blocked: 1 blockers')) return 'missing mask column was not reported';
+            if (!html.includes('shop.customers.email has no source catalog column')) return 'mask blocker did not name the missing column';
+            if (!html.includes('Mask safety blocked: 1 blockers')) return 'mask safety blockers were not rendered';
+          }
           if (!html.includes('Acknowledge listed unmasked sensitive columns')) return 'sensitive acknowledgment control is missing';
-          if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id` FROM'))) return 'row-set planning did not use source key-only queries';
+          if (testCase.rustMask) {
+            const rustCall = calls.find(call => call.cmd === 'refresh_mask_apply');
+            if (!rustCall) return 'Rust mask command was not invoked';
+            if (!html.includes('Rust masking verified: 0 accepted rows')) return 'Rust count-only result was not rendered';
+            if (!html.includes('Mask safety valid: 1 unique indexes require runtime checks')) return 'valid unique-email mask safety was not rendered';
+            if (JSON.stringify(rustCall.args).includes('private-row')) return 'Rust payload contains a planted row value';
+          }
+          if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id`'))) return 'row-set planning did not use source key-only queries';
         }
       },
     })),
