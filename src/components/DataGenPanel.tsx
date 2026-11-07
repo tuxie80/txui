@@ -52,6 +52,7 @@ import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivi
 import { addLog } from '../store/logStore';
 import { fmtDuration } from '../utils/fmtDuration';
 import { validateFormula } from '../utils/datagenFormula';
+import type { GenerateInsteadHandoff } from '../utils/refreshGenerate';
 import { FastGrid } from './FastGrid';
 
 /**
@@ -109,6 +110,7 @@ interface Props {
   schema?: string | null;
   onClose: () => void;
   onSchemaChanged?: () => void;   // refresh schema tree after CREATE TABLE
+  generateInstead?: { id: number; handoff: GenerateInsteadHandoff } | null;
 }
 
 interface NewCol { name: string; typeName: string; pk: boolean; nullable: boolean }
@@ -143,7 +145,7 @@ const MAX_ROWS_ROW_BY_ROW = 10_000_000;
  */
 const MAX_ROWS = 1e15;
 
-export function DataGenPanel({ sessionId, engine, environment, readOnly, connectionName, schema, onClose, onSchemaChanged }: Props) {
+export function DataGenPanel({ sessionId, engine, environment, readOnly, connectionName, schema, onClose, onSchemaChanged, generateInstead }: Props) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [mode, setMode] = useState<'database' | 'existing' | 'new'>('database');
   const [tableName, setTableName] = useState('');
@@ -175,6 +177,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; rps: number; chunk?: number; chunks?: number } | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
+  const [handoffNote, setHandoffNote] = useState<string | null>(null);
   // The typed confirmation for runs past a billion rows: the user types the
   // exact row count back (the house pattern, as in data compare's APPLY).
   const [confirmText, setConfirmText] = useState('');
@@ -208,6 +211,35 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
   /** The server-side chunk currently in flight, so Cancel can kill it. */
   const chunkTokenRef = useRef<string | null>(null);
   const runKeyRef = useRef<string | null>(null);
+  const appliedGenerateInstead = useRef(0);
+  useEffect(() => {
+    if (!generateInstead || appliedGenerateInstead.current === generateInstead.id) return;
+    const { id, handoff } = generateInstead;
+    appliedGenerateInstead.current = id;
+    if (loading) {
+      setError('A generator run is active; this Refresh handoff was not applied. Retry after the run finishes.');
+      return;
+    }
+    const { generate } = handoff;
+    setMode('existing');
+    setTableName(generate.table);
+    setTargetDb(generate.table.includes('.') ? generate.table.split('.')[0] : (schema ?? ''));
+    setSpecs(generate.specs.map(spec => ({ ...spec, params: { ...spec.params } })));
+    setRowCount(generate.rowCount);
+    setSeed(generate.seed);
+    setLocale(generate.locale);
+    setUseCopy(generate.useCopy);
+    setSeqStart(1);
+    setUniqueOffset(0);
+    setUniqueProbeFailed(false);
+    setPreviewRows(null);
+    setProgress(null);
+    setSummary(null);
+    setConfirmText('');
+    setError(null);
+    setHandoffNote(`Environment Refresh handoff · spec ${handoff.specSha256} · ${generate.rowCount.toLocaleString()} rows. Source rows were not copied; generated columns were omitted. Preserved FK columns use target parent lookups. Review generators and preview — nothing has generated or inserted.`);
+    setStep(2);
+  }, [generateInstead, loading, schema]);
 
   // The DB-qualified reference the generator needs, and a plain (unquoted)
   // "db.table" for `get_table_meta`, which parses the dotted form itself.
@@ -1227,6 +1259,7 @@ export function DataGenPanel({ sessionId, engine, environment, readOnly, connect
         {/* ── Step 2: generators ── */}
         {step === 2 && mode !== 'database' && (
           <div className="dg-generators">
+            {handoffNote && <div className="mnt-bulk-cost c-metadata" aria-label="Environment Refresh datagen handoff">{handoffNote}</div>}
             <div className="dg-genrow-head">
               <label className="dg-field-inline">
                 <span>Rows</span>

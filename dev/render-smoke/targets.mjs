@@ -482,6 +482,7 @@ export function namedTargets(fixtures) {
         }
         await click('Reconfirm source and target');
         await click('Export JSON');
+        await click('Export report .md');
       },
       assert: ({ html, calls, container }) => {
         if (!calls.some(call => call.cmd === 'refresh_spec_load')) return 'specification was not loaded';
@@ -494,10 +495,52 @@ export function namedTargets(fixtures) {
         for (const forbidden of ['confirmed', 'password', 'connectionUrl', 'queryResult', 'private-row']) {
           if (saved.args.contents.includes(forbidden)) return `exported specification contains ${forbidden}`;
         }
+        const report = calls.find(call => call.cmd === 'write_text_file');
+        if (!report) return 'Refresh Markdown report was not written';
+        if (!report.args.contents.includes('# Safe Environment Refresh report') || !report.args.contents.includes('Specification SHA-256')) return 'Refresh report lacks its identity';
+        if (report.args.contents.includes('imported-seed') || report.args.contents.includes('private-row')) return 'Refresh report leaked a seed or row value';
+        if (!report.args.contents.includes('Refresh execution has not run')) return 'pre-execution report did not lead with incomplete evidence';
         if (!html.includes('Read-only plan preview')) return 'compiled plan preview is missing';
         if (!html.includes('SELECT * FROM `shop`.`countries`')) return 'full-table plan SQL is missing';
         if (!html.includes('3 reads · 0 generate · 0 excluded · 0 blockers')) return 'plan action counts are missing or wrong';
         if (calls.some(call => call.cmd === 'monitor_query')) return 'specification editing unexpectedly queried a database';
+      },
+    },
+    {
+      name: 'QueryTabs_refresh_generate_handoff', file: 'src/components/QueryTabs.tsx', tier: 'mount', settleMs: 50,
+      props: {
+        session: { connectionId: 'c-target', sessionId: 's-target', connectionName: 'target fixture', engine: 'mysql', environment: 'dev', readOnly: false },
+        openSessions: [{ connectionId: 'c-target', sessionId: 's-target', connectionName: 'target fixture', engine: 'mysql', environment: 'dev', readOnly: false }],
+        isActive: true, externalMigrationHandoff: null,
+      },
+      interact: async ({ container, act }) => {
+        const handoff = {
+          version: 1, origin: 'environment-refresh', targetSessionId: 's-target', targetConnectionId: 'c-target',
+          specSha256: 'a'.repeat(64),
+          generate: {
+            table: 'stage.customers', rowCount: 25, seed: 42, locale: 'default', useCopy: false, createDdl: null,
+            specs: [
+              { name: 'id', typeName: 'int', generator: 'sequence', unique: true, params: {} },
+              { name: 'email', typeName: 'varchar(64)', generator: 'fullName', params: {} },
+            ],
+          },
+        };
+        await act(async () => {
+          window.dispatchEvent(new CustomEvent('dbgui:generate-instead', { detail: { ...handoff, targetSessionId: 's-other' } }));
+          window.dispatchEvent(new CustomEvent('dbgui:generate-instead', { detail: { ...handoff, autoRun: true } }));
+          await new Promise(resolve => setTimeout(resolve, 50));
+        });
+        container.__beforeValidHandoff = container.textContent;
+        await act(async () => {
+          window.dispatchEvent(new CustomEvent('dbgui:generate-instead', { detail: handoff }));
+          await new Promise(resolve => setTimeout(resolve, 300));
+        });
+      },
+      assert: ({ html, calls, container }) => {
+        if (container.__beforeValidHandoff.includes('Environment Refresh handoff')) return 'wrong-session or tampered handoff populated datagen';
+        if (!html.includes('Environment Refresh handoff') || !html.includes('25 rows')) return 'valid handoff did not populate datagen';
+        if (!html.includes('nothing has generated or inserted')) return 'handoff does not explain its review-only state';
+        if (calls.some(call => ['generate_data', 'generate_database', 'preview_datagen'].includes(call.cmd))) return 'handoff generated data without a user action';
       },
     },
     ...[

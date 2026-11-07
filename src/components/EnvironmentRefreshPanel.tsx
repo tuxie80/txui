@@ -23,6 +23,9 @@ import {
 } from '../utils/refreshExecute';
 import type { RefreshExecutionEvent } from '../utils/refreshExecute';
 import { errorDisplay } from '../utils/appError';
+import { saveTextAs } from '../utils/exportersIo';
+import { renderRefreshReport } from '../utils/refreshReport';
+import { buildGenerateInsteadHandoff, OPEN_GENERATE_INSTEAD_EVENT } from '../utils/refreshGenerate';
 import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity';
 import { StatusIcon } from './StatusIcon';
 
@@ -200,6 +203,35 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     } catch (error) {
       setFileError(errorDisplay(error));
     }
+  };
+
+  const exportReport = async () => {
+    setFileError(null);
+    try {
+      const sourceName = candidates.find(candidate => candidate.sessionId === spec.source.sessionId)?.connectionName ?? session.connectionName;
+      const targetName = candidates.find(candidate => candidate.sessionId === spec.target.sessionId)?.connectionName ?? 'unselected target';
+      const report = renderRefreshReport({
+        spec, sourceName, targetName, executionPlan, rowSetPlan, maskPlan,
+        preflight: preflightReport, progress,
+      });
+      const path = await saveTextAs(report, 'environment-refresh-report.md', 'Markdown', ['md']);
+      if (path) setLogs(current => [...current, `Refresh report saved to ${path}; no credentials, row values, constant masks or terminal error prose included.`]);
+    } catch (error) {
+      setFileError(errorDisplay(error));
+    }
+  };
+
+  const generateInstead = (policy: Extract<RefreshTablePolicy, { policy: 'generate' }>) => {
+    setFileError(null);
+    if (!analysis || !maskPlan) return;
+    const result = buildGenerateInsteadHandoff({ spec, catalog: analysis, maskPlan, policy });
+    if (!result.ok) {
+      setFileError(result.errors.join(' · '));
+      return;
+    }
+    window.dispatchEvent(new CustomEvent(OPEN_GENERATE_INSTEAD_EVENT, { detail: result.handoff }));
+    setLogs(current => [...current,
+      `Generate instead handed ${result.handoff.generate.table} (${result.handoff.generate.rowCount} rows) to the target session's datagen editor. Spec ${result.handoff.specSha256}; review is required and nothing has generated or inserted.`]);
   };
 
   const confirmEndpoints = () => {
@@ -468,6 +500,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         <div style={{ flex: 1 }} />
         <button className="toolbar-btn" disabled={running || !!unavailable} onClick={() => void importSpec()}>Import JSON…</button>
         <button className="toolbar-btn" disabled={running || !!unavailable || !!validationError} title={validationError ?? 'Export deterministic, secret-free JSON'} onClick={() => void exportSpec()}>Export JSON…</button>
+        <button className="toolbar-btn" disabled={!!unavailable || !!validationError} title={validationError ?? 'Export a deterministic report with committed scope, verification coverage and no row values'} onClick={() => void exportReport()}>Export report .md</button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
       <div className="dg-body">
@@ -594,6 +627,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                       <div className="sqp-f-evidence">
                         <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
                         <label>Seed offset <input type="number" value={table.seedOffset} onChange={event => updatePolicy(index, { ...table, seedOffset: numberValue(event.target.value) })} /></label>
+                        <button className="toolbar-btn" disabled={running || !analysis?.complete || !maskPlan?.complete} title={!analysis?.complete || !maskPlan?.complete ? 'Complete catalog and mask analysis first' : 'Open a populated datagen editor on the exact target session; review is required and nothing runs automatically'} onClick={() => generateInstead(table)}>Generate instead…</button>
                       </div>
                     )}
                   </div>

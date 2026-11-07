@@ -104,6 +104,8 @@ import type { PluginMenuItem } from '../utils/pluginMenu';
 import { errorDisplay } from '../utils/appError';
 import { OPEN_MIGRATION_EVENT, parseMigrationHandoff } from '../utils/operationHandoff';
 import type { MigrationHandoff } from '../utils/operationHandoff';
+import { OPEN_GENERATE_INSTEAD_EVENT, parseGenerateInsteadHandoff } from '../utils/refreshGenerate';
+import type { GenerateInsteadHandoff } from '../utils/refreshGenerate';
 import { errorGuidance } from '../utils/errorActions';
 import { aiHasKey } from '../utils/aiClient';
 import { aiKeyRequired } from '../utils/aiProviders';
@@ -595,6 +597,7 @@ interface PanelCtx {
   compareScope: CompareScope | null;
   clearCompareScope: () => void;
   migrationHandoff: { id: number; handoff: MigrationHandoff } | null;
+  datagenHandoff: { id: number; handoff: GenerateInsteadHandoff } | null;
 }
 
 /**
@@ -802,6 +805,7 @@ const PANEL_META: Record<string, {
       <DataGenPanel key={c.currentDb} sessionId={c.session.sessionId} engine={c.session.engine}
           environment={c.session.environment} readOnly={c.session.readOnly}
           connectionName={c.session.connectionName} schema={c.currentDb || null} onClose={close}
+          generateInstead={c.datagenHandoff}
           onSchemaChanged={() => window.dispatchEvent(new CustomEvent('dbgui:schema-changed'))} />),
   },
   csvimport: {
@@ -976,6 +980,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
   // One tab id per panel name, allocated on first use and reused afterwards.
   const panelIds = useRef(new Map<string, number>());
   const [migrationHandoff, setMigrationHandoff] = useState<{ id: number; handoff: MigrationHandoff } | null>(null);
+  const [datagenHandoff, setDatagenHandoff] = useState<{ id: number; handoff: GenerateInsteadHandoff } | null>(null);
   const [tabs, setTabs] = useState<QueryTab[]>(() => {
     const saved = restoredRef.current ?? [];
     if (saved.length === 0) return [newTab('01')];
@@ -2440,6 +2445,15 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     const onToggleTuner = () => { if (can(env().engine, 'tuner') && !env().panelBlocked('tuner')) env().togglePanel('tuner'); };
     const onToggleErDiagram = () => { if (can(env().engine, 'erDiagram')) env().togglePanel('erdiagram'); };
     const onToggleDataGen = () => { if (can(env().engine, 'dataGen')) env().togglePanel('datagen'); };
+    const onGenerateInstead = (e: Event) => {
+      let handoff: GenerateInsteadHandoff;
+      try { handoff = parseGenerateInsteadHandoff((e as CustomEvent<unknown>).detail); }
+      catch { return; }
+      if (handoff.targetSessionId !== session.sessionId || handoff.targetConnectionId !== session.connectionId) return;
+      if (!can(env().engine, 'dataGen') || env().panelBlocked('datagen')) return;
+      setDatagenHandoff(current => ({ id: (current?.id ?? 0) + 1, handoff }));
+      openOrFocusPanel('datagen');
+    };
     const onToggleSaved = () => env().togglePanel('saved');
     const onToggleCsvImport = () => { if (can(env().engine, 'csvImport')) env().togglePanel('csvimport'); };
     const onToggleQuality = () => { if (can(env().engine, 'sqlQuality')) env().togglePanel('quality'); };
@@ -2555,6 +2569,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     on('dbgui:toggle-tuner', onToggleTuner);
     on('dbgui:toggle-erdiagram', onToggleErDiagram);
     on('dbgui:toggle-datagen', onToggleDataGen);
+    on(OPEN_GENERATE_INSTEAD_EVENT, onGenerateInstead);
     on('dbgui:toggle-saved', onToggleSaved);
     on('dbgui:toggle-csvimport', onToggleCsvImport);
     on('dbgui:toggle-quality', onToggleQuality);
@@ -2562,7 +2577,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     on('dbgui:insert-sql', onInsertSql);
     on('dbgui:browse-table', onBrowseTable);
     return () => { un.forEach(f => f()); };
-  }, [openOrFocusPanel]);
+  }, [openOrFocusPanel, session.connectionId, session.sessionId]);
 
   // Connected DB user — captured once per session, stamped into the audit log.
   // A ref (not state): only read at execution time, never rendered.
@@ -2866,7 +2881,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     const deps: unknown[] = [
       tab.panel, session, openSessions, currentDb, dbList,
       routineTarget, sequenceTarget, typeTarget, viewTarget, dictionaryTarget, designTarget,
-      findScope, compareScope, migrationHandoff,
+      findScope, compareScope, migrationHandoff, datagenHandoff,
       (tab.panel === 'saved' || tab.panel === 'compare' || tab.panel === 'find') ? tabs : null,
     ];
     const hit = panelElemCache.current.get(tab.id);
@@ -2900,7 +2915,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
       routineTarget, clearRoutineTarget, designTarget,
       sequenceTarget, clearSequenceTarget, typeTarget, clearTypeTarget,
       viewTarget, clearViewTarget, dictionaryTarget, clearDictionaryTarget,
-      findScope, clearFindScope, compareScope, clearCompareScope, migrationHandoff,
+      findScope, clearFindScope, compareScope, clearCompareScope, migrationHandoff, datagenHandoff,
     };
     return meta.render(c, close);
   }
