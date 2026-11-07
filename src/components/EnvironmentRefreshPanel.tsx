@@ -11,7 +11,8 @@ import {
 import type {
   RefreshMaskRule, RefreshSpec, RefreshTablePolicy,
 } from '../utils/refreshSpec';
-import { buildRefreshPlan } from '../utils/refreshPlan';
+import { buildRefreshPlan, resolveRefreshTable } from '../utils/refreshPlan';
+import { isProdAcked } from '../store/prodAck';
 import { planRefreshRowSets, buildRefreshRootPageSql } from '../utils/refreshRowSets';
 import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
 import { buildRefreshExecutionPlan } from '../utils/refreshExecution';
@@ -79,6 +80,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const [rowProgress, setRowProgress] = useState<{ phase: string; table: string; queries: number; rowsRead: number } | null>(null);
   const [planningRust, setPlanningRust] = useState(false);
   const [rustMaskReport, setRustMaskReport] = useState<{ acceptedRows: number; maskedCells: number; uniqueKeys: number; elapsedMs: number } | null>(null);
+  const [planningPreflight, setPlanningPreflight] = useState(false);
+  const [preflightReport, setPreflightReport] = useState<{ preflightSha256: string; emptyTables: number } | null>(null);
+  const [productionConfirmation, setProductionConfirmation] = useState('');
   const analysisGeneration = useRef(0);
   const [logs, setLogs] = useState<string[]>(['Specification only — no catalog reads or database writes have run.']);
 
@@ -118,6 +122,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     setRowProgress(null);
     setPlanningRust(false);
     setRustMaskReport(null);
+    setPlanningPreflight(false);
+    setPreflightReport(null);
+    setProductionConfirmation('');
     setFileError(null);
   };
   const selectEndpoint = (side: 'source' | 'target', sessionId: string) => {
@@ -187,6 +194,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     setRowProgress(null);
     setPlanningRust(false);
     setRustMaskReport(null);
+    setPlanningPreflight(false);
+    setPreflightReport(null);
+    setProductionConfirmation('');
     setFileError(null);
     try {
       const result = await readRefreshCatalogAnalysis({
@@ -313,6 +323,48 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     }
   };
 
+  const checkTargetEmpty = async () => {
+    if (!executionPlan?.executable || !maskSafety?.complete) return;
+    const targetSession = candidates.find(candidate => candidate.sessionId === spec.target.sessionId);
+    const generation = ++analysisGeneration.current;
+    setPlanningPreflight(true);
+    setPreflightReport(null);
+    setFileError(null);
+    try {
+      if (targetSession?.environment === 'prod' && !isProdAcked(targetSession.connectionId)) {
+        throw new Error('open and acknowledge the production target before Refresh preflight');
+      }
+      if (targetSession?.environment === 'prod' && productionConfirmation !== 'I understand — production') {
+        throw new Error('type exactly: I understand — production');
+      }
+      const tables = spec.tables.filter(table => table.policy !== 'exclude' && table.policy !== 'generate').map(table => {
+        const resolved = resolveRefreshTable(spec, table.table);
+        if (typeof resolved === 'string') throw new Error(resolved);
+        return { source_schema: resolved.sourceSchema, target_schema: resolved.targetSchema, table: resolved.tableName };
+      });
+      const response = await invoke<{ ok: boolean; preflight_sha256: string; tables: { empty: boolean }[] }>('refresh_preflight', {
+        input: {
+          source_session_id: spec.source.sessionId,
+          target_session_id: spec.target.sessionId,
+          source_connection_id: spec.source.connectionId,
+          target_connection_id: spec.target.connectionId,
+          spec_sha256: executionPlan.specSha256,
+          production_confirmation: targetSession?.environment === 'prod' ? productionConfirmation : null,
+          tables,
+        },
+      });
+      if (analysisGeneration.current !== generation) return;
+      if (!response.ok || response.tables.some(table => !table.empty)) throw new Error('target preflight returned incomplete evidence');
+      setPreflightReport({ preflightSha256: response.preflight_sha256, emptyTables: response.tables.length });
+      setLogs(current => [...current,
+        `Target preflight passed: ${response.tables.length} selected tables are empty. Hash ${response.preflight_sha256}. No target writes occurred.`]);
+    } catch (error) {
+      if (analysisGeneration.current === generation) setFileError(errorDisplay(error));
+    } finally {
+      if (analysisGeneration.current === generation) setPlanningPreflight(false);
+    }
+  };
+
   return (
     <div className="proc-panel">
       <div className="proc-toolbar">
@@ -358,8 +410,17 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   <button className="toolbar-btn" disabled={!maskSafety?.complete || !executionPlan?.executable || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Apply masks in Rust to a bounded first-page batch; no target writes and no row values displayed'} onClick={() => void verifyRustMasking()}>
                     {planningRust ? 'Verifying Rust masking…' : 'Verify Rust masking'}
                   </button>
+                  <button className="toolbar-btn" disabled={!maskSafety?.complete || !executionPlan?.executable || planningPreflight || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Run backend target safety and emptiness checks; no writes'} onClick={() => void checkTargetEmpty()}>
+                    {planningPreflight ? 'Checking target…' : 'Check target empty'}
+                  </button>
                 </div>
                 {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? 'Catalog proof is current for this specification; no execution is available.' : 'No catalog read or write has run.'}</p>}
+                {candidates.find(candidate => candidate.sessionId === spec.target.sessionId)?.environment === 'prod' && (
+                  <label className="dg-field-inline"><span>Type exactly: I understand — production</span>
+                    <input value={productionConfirmation} onChange={event => { setProductionConfirmation(event.target.value); setPreflightReport(null); }} placeholder="I understand — production" />
+                  </label>
+                )}
+                {preflightReport && <p className="dv-desc">Target preflight passed: {preflightReport.emptyTables} selected tables are empty · {preflightReport.preflightSha256}</p>}
               </section>
 
               <section>

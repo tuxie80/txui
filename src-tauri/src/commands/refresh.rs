@@ -46,9 +46,147 @@ pub async fn refresh_spec_save(path: PathBuf, contents: String) -> Result<u64, c
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use sqlx::{AssertSqlSafe, SqlSafeStr};
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Instant;
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RefreshPreflightTable {
+    pub source_schema: String,
+    pub target_schema: String,
+    pub table: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct RefreshPreflightInput {
+    pub source_session_id: Uuid,
+    pub target_session_id: Uuid,
+    pub source_connection_id: Uuid,
+    pub target_connection_id: Uuid,
+    pub spec_sha256: String,
+    pub production_confirmation: Option<String>,
+    pub tables: Vec<RefreshPreflightTable>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RefreshPreflightResponse {
+    pub ok: bool,
+    pub preflight_sha256: String,
+    pub tables: Vec<RefreshEmptyTable>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RefreshEmptyTable {
+    pub source_schema: String,
+    pub target_schema: String,
+    pub table: String,
+    pub empty: bool,
+}
+
+#[tauri::command]
+pub async fn refresh_preflight(
+    input: RefreshPreflightInput,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<RefreshPreflightResponse, crate::apperror::AppError> {
+    preflight_inner(input, &state).await
+}
+
+async fn preflight_inner(
+    input: RefreshPreflightInput,
+    state: &crate::state::AppState,
+) -> Result<RefreshPreflightResponse, crate::apperror::AppError> {
+    if input.source_session_id == input.target_session_id {
+        return Err(bad_request("source and target must be different sessions"));
+    }
+    if input.spec_sha256.len() != 64 || !input.spec_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(bad_request("refresh spec hash must be 64 hexadecimal characters"));
+    }
+    if input.tables.is_empty() {
+        return Err(bad_request("at least one selected table is required"));
+    }
+    for table in &input.tables {
+        for name in [&table.source_schema, &table.target_schema, &table.table] {
+            if name.is_empty() || name.len() > 64 || name.contains('\0') {
+                return Err(bad_request("refresh table/schema identifiers are empty or invalid"));
+            }
+        }
+    }
+    let guards = state.session_meta.read().await;
+    let source_guard = guards.get(&input.source_session_id)
+        .ok_or_else(|| bad_request("source session is not open"))?;
+    let target_guard = guards.get(&input.target_session_id)
+        .ok_or_else(|| bad_request("target session is not open"))?;
+    if source_guard.engine != crate::db::types::Engine::Mysql || target_guard.engine != crate::db::types::Engine::Mysql {
+        return Err(bad_request("refresh currently supports same-engine MySQL/MariaDB sessions only"));
+    }
+    if !source_guard.read_only {
+        return Err(crate::apperror::AppError::guard("source session must be read-only for Refresh"));
+    }
+    if target_guard.read_only {
+        return Err(crate::apperror::AppError::guard("target connection is read-only — environment refresh is blocked"));
+    }
+    if !target_guard.autocommit {
+        return Err(crate::apperror::AppError::guard("target must use autocommit for Refresh"));
+    }
+    if target_guard.environment.as_deref() == Some("prod")
+        && input.production_confirmation.as_deref() != Some("I understand — production")
+    {
+        return Err(crate::apperror::AppError::guard("production target requires the exact typed confirmation: I understand — production"));
+    }
+    let starts = state.session_starts.read().await;
+    let source_start = starts.get(&input.source_session_id)
+        .ok_or_else(|| bad_request("source session identity is unavailable"))?;
+    let target_start = starts.get(&input.target_session_id)
+        .ok_or_else(|| bad_request("target session identity is unavailable"))?;
+    if source_start.connection_id != input.source_connection_id || target_start.connection_id != input.target_connection_id {
+        return Err(crate::apperror::AppError::guard("source/target connection IDs do not match the open sessions"));
+    }
+    drop(starts);
+    drop(guards);
+    if state.has_open_transaction(&input.target_session_id).await {
+        return Err(crate::apperror::AppError::guard("target has an open transaction — commit or roll back before Refresh"));
+    }
+    state.check_prod_bulk(&input.target_session_id, "environment refresh").await?;
+    let session = crate::db::connection::get_session_pub(input.target_session_id, &state.sessions).await?;
+    let pool = match session.as_ref() {
+        crate::db::types::LiveSession::Mysql(pool) => pool,
+        _ => return Err(bad_request("refresh currently supports MySQL/MariaDB only")),
+    };
+    let mut empty_tables = Vec::with_capacity(input.tables.len());
+    for table in &input.tables {
+        let exists: Option<String> = sqlx::query_scalar(
+            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+        ).bind(&table.target_schema).bind(&table.table).fetch_optional(pool).await?;
+        if exists.is_none() {
+            return Err(bad_request(format!("target table {}.{} does not exist", table.target_schema, table.table)));
+        }
+        let quoted_schema = format!("`{}`", table.target_schema.replace('`', "``"));
+        let quoted_table = format!("`{}`", table.table.replace('`', "``"));
+        let nonempty = sqlx::query(AssertSqlSafe(format!("SELECT 1 FROM {quoted_schema}.{quoted_table} LIMIT 1")).into_sql_str())
+            .fetch_optional(pool).await?;
+        if nonempty.is_some() {
+            return Err(crate::apperror::AppError::guard(format!("target table {}.{} is not empty", table.target_schema, table.table)));
+        }
+        empty_tables.push(RefreshEmptyTable {
+            source_schema: table.source_schema.clone(), target_schema: table.target_schema.clone(),
+            table: table.table.clone(), empty: true,
+        });
+    }
+    let preflight_sha256 = format!("{:x}", Sha256::digest(serde_json::json!({
+        "spec_sha256": input.spec_sha256,
+        "source_session_id": input.source_session_id,
+        "target_session_id": input.target_session_id,
+        "source_connection_id": input.source_connection_id,
+        "target_connection_id": input.target_connection_id,
+        "tables": input.tables,
+    }).to_string().as_bytes()));
+    Ok(RefreshPreflightResponse { ok: true, preflight_sha256, tables: empty_tables })
+}
 
 const MAX_MASK_BATCH_ROWS: usize = 10_000;
 const MAX_MASK_TEXT_BYTES: usize = 1024 * 1024;
@@ -666,6 +804,122 @@ mod tests {
         sensitive.acknowledge_unmasked_sensitive = false;
         let error = refresh_mask_apply(sensitive).await.expect_err("unacknowledged sensitive columns");
         assert!(error.message.contains("explicit acknowledgment"));
+    }
+
+    fn preflight_input(source: Uuid, target: Uuid, source_connection: Uuid, target_connection: Uuid) -> RefreshPreflightInput {
+        RefreshPreflightInput {
+            source_session_id: source, target_session_id: target,
+            source_connection_id: source_connection, target_connection_id: target_connection,
+            spec_sha256: "a".repeat(64), production_confirmation: None,
+            tables: vec![RefreshPreflightTable { source_schema: "source".into(), target_schema: "target".into(), table: "items".into() }],
+        }
+    }
+
+    async fn preflight_state(source_read_only: bool, target_read_only: bool, production: bool) -> (crate::state::AppState, RefreshPreflightInput) {
+        let history = crate::history::open_in_memory().await.unwrap();
+        let state = crate::state::AppState::new(history, std::env::temp_dir(), std::collections::HashMap::new());
+        let source = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let source_connection = Uuid::new_v4();
+        let target_connection = Uuid::new_v4();
+        let pool = sqlx::mysql::MySqlPoolOptions::new().connect_lazy("mysql://127.0.0.1:1/unused").unwrap();
+        let mut source_config = crate::db::types::ConnectionConfig::new(crate::db::types::Engine::Mysql, "source");
+        source_config.id = source_connection;
+        source_config.read_only = source_read_only;
+        let mut target_config = crate::db::types::ConnectionConfig::new(crate::db::types::Engine::Mysql, "target");
+        target_config.id = target_connection;
+        target_config.read_only = target_read_only;
+        if production {
+            target_config.environment = Some("prod".into());
+            target_config.prod_allow_ddl = true;
+        }
+        state.sessions.write().await.insert(source, std::sync::Arc::new(crate::db::types::LiveSession::Mysql(pool.clone())));
+        state.sessions.write().await.insert(target, std::sync::Arc::new(crate::db::types::LiveSession::Mysql(pool)));
+        state.session_meta.write().await.insert(source, crate::state::SessionGuard::from_config(&source_config));
+        state.session_meta.write().await.insert(target, crate::state::SessionGuard::from_config(&target_config));
+        state.session_starts.write().await.insert(source, crate::commands::audit::session_start(&source_config));
+        state.session_starts.write().await.insert(target, crate::commands::audit::session_start(&target_config));
+        (state, preflight_input(source, target, source_connection, target_connection))
+    }
+
+    #[tokio::test]
+    async fn preflight_refuses_unsafe_sessions_before_any_table_read() {
+        let (state, input) = preflight_state(true, false, false).await;
+        let mut same = input.clone();
+        same.target_session_id = same.source_session_id;
+        assert!(preflight_inner(same, &state).await.is_err());
+
+        let mut source_write = input.clone();
+        source_write.source_session_id = Uuid::new_v4();
+        assert!(preflight_inner(source_write, &state).await.is_err());
+
+        let mut wrong_connection = input.clone();
+        wrong_connection.target_connection_id = Uuid::new_v4();
+        assert!(preflight_inner(wrong_connection, &state).await.is_err());
+
+        let (state, input) = preflight_state(false, true, false).await;
+        assert!(preflight_inner(input, &state).await.is_err());
+
+        let (state, input) = preflight_state(false, false, false).await;
+        assert!(preflight_inner(input, &state).await.is_err());
+
+        let (state, mut input) = preflight_state(true, false, true).await;
+        assert!(preflight_inner(input.clone(), &state).await.is_err());
+        input.production_confirmation = Some("I understand — production".into());
+        let error = preflight_inner(input, &state).await.expect_err("no database");
+        assert!(!error.message.contains("production"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_mysql_refresh_preflight_empty_and_refusals() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(2).connect(&url).await.unwrap();
+        let source_schema = format!("txui_refresh_source_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let target_schema = format!("txui_refresh_target_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        for schema in [&source_schema, &target_schema] {
+            crate::db::mysql::execute(&pool, &format!("CREATE DATABASE `{schema}`")).await.unwrap();
+            crate::db::mysql::execute(&pool, &format!("CREATE TABLE `{schema}`.`items` (id INT PRIMARY KEY)")).await.unwrap();
+        }
+        let history = crate::history::open_in_memory().await.unwrap();
+        let state = crate::state::AppState::new(history, std::env::temp_dir(), std::collections::HashMap::new());
+        let source = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let source_connection = Uuid::new_v4();
+        let target_connection = Uuid::new_v4();
+        let mut source_config = crate::db::types::ConnectionConfig::new(crate::db::types::Engine::Mysql, "source");
+        source_config.id = source_connection;
+        source_config.read_only = true;
+        let mut target_config = crate::db::types::ConnectionConfig::new(crate::db::types::Engine::Mysql, "target");
+        target_config.id = target_connection;
+        target_config.environment = Some("prod".into());
+        target_config.prod_allow_ddl = true;
+        state.sessions.write().await.insert(source, std::sync::Arc::new(crate::db::types::LiveSession::Mysql(pool.clone())));
+        state.sessions.write().await.insert(target, std::sync::Arc::new(crate::db::types::LiveSession::Mysql(pool.clone())));
+        state.session_meta.write().await.insert(source, crate::state::SessionGuard::from_config(&source_config));
+        state.session_meta.write().await.insert(target, crate::state::SessionGuard::from_config(&target_config));
+        state.session_starts.write().await.insert(source, crate::commands::audit::session_start(&source_config));
+        state.session_starts.write().await.insert(target, crate::commands::audit::session_start(&target_config));
+        let mut input = preflight_input(source, target, source_connection, target_connection);
+        input.tables = vec![RefreshPreflightTable { source_schema: source_schema.clone(), target_schema: target_schema.clone(), table: "items".into() }];
+        input.production_confirmation = Some("I understand — production".into());
+        let response = preflight_inner(input.clone(), &state).await.unwrap();
+        assert!(response.ok);
+        assert!(response.tables[0].empty);
+
+        crate::db::mysql::execute(&pool, &format!("INSERT INTO `{target_schema}`.`items` VALUES (1)")).await.unwrap();
+        let error = preflight_inner(input.clone(), &state).await.expect_err("non-empty target");
+        assert!(error.message.contains("not empty"));
+        crate::db::mysql::execute(&pool, &format!("DELETE FROM `{target_schema}`.`items`")).await.unwrap();
+        assert!(preflight_inner(input.clone(), &state).await.is_ok());
+
+        let remaining: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM `{target_schema}`.`items`")).into_sql_str())
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
+        for schema in [&source_schema, &target_schema] {
+            crate::db::mysql::execute(&pool, &format!("DROP DATABASE `{schema}`")).await.unwrap();
+        }
+        pool.close().await;
     }
 
     async fn refresh_live_node(args: &[String], input: Option<serde_json::Value>) -> serde_json::Value {

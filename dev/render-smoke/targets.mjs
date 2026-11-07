@@ -541,6 +541,11 @@ export function namedTargets(fixtures) {
           throw new Error(`unexpected Refresh query: ${sql}`);
         },
         refresh_mask_apply: () => ({ rows: [], accepted_rows: 0, masked_cells: 0, unique_keys: 0, elapsed_ms: 1 }),
+        refresh_preflight: () => ({ ok: true, preflight_sha256: 'preflight-smoke', tables: [
+          { source_schema: 'shop', target_schema: 'shop', table: 'countries', empty: true },
+          { source_schema: 'shop', target_schema: 'shop', table: 'orders', empty: true },
+          { source_schema: 'shop', target_schema: 'shop', table: 'events', empty: true },
+        ] }),
       },
       props: {
         session: { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
@@ -567,7 +572,10 @@ export function namedTargets(fixtures) {
         await click('Reconfirm source and target');
         await click('Analyze catalogs');
         if (!testCase.missingTarget) await click('Plan row sets');
-        if (testCase.rustMask) await click('Verify Rust masking');
+        if (testCase.rustMask) {
+          await click('Verify Rust masking');
+          await click('Check target empty');
+        }
       },
       assert: ({ html, calls }) => {
         const queries = calls.filter(call => call.cmd === 'monitor_query');
@@ -600,6 +608,8 @@ export function namedTargets(fixtures) {
             if (!html.includes('Rust masking verified: 0 accepted rows')) return 'Rust count-only result was not rendered';
             if (!html.includes('Mask safety valid: 1 unique indexes require runtime checks')) return 'valid unique-email mask safety was not rendered';
             if (JSON.stringify(rustCall.args).includes('private-row')) return 'Rust payload contains a planted row value';
+            if (!calls.some(call => call.cmd === 'refresh_preflight')) return 'target preflight was not invoked';
+            if (!html.includes('Target preflight passed: 3 selected tables are empty')) return 'target-empty result was not rendered';
           }
           if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id`'))) return 'row-set planning did not use source key-only queries';
         }

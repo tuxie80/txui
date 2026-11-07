@@ -912,6 +912,7 @@ pub fn run() {
             // safe environment refresh specifications
             refresh_spec_load,
             refresh_spec_save,
+            refresh_preflight,
             refresh_mask_apply,
             // audit log
             audit_insert,
