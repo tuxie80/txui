@@ -578,6 +578,8 @@ export function namedTargets(fixtures) {
           if (!html.includes('Execution plan is deterministic and schema-bound')) return 'deterministic execution proof was not rendered';
           if (!html.includes('Insertion order: 1. shop.countries · 2. shop.events · 3. shop.orders')) return 'parent/insertion order was not rendered';
           if (!html.includes('full-root keys retained 0')) return 'memory counters were not rendered';
+          if (!html.includes('Mask contract blocked: 1 blockers')) return 'missing mask column was not reported';
+          if (!html.includes('shop.customers.email has no source catalog column')) return 'mask blocker did not name the missing column';
           if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id` FROM'))) return 'row-set planning did not use source key-only queries';
         }
       },

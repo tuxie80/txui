@@ -15,6 +15,7 @@ import { buildRefreshPlan } from '../utils/refreshPlan';
 import { planRefreshRowSets } from '../utils/refreshRowSets';
 import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
 import { buildRefreshExecutionPlan } from '../utils/refreshExecution';
+import { buildRefreshMaskPlan } from '../utils/refreshMask';
 import { errorDisplay } from '../utils/appError';
 import { StatusIcon } from './StatusIcon';
 
@@ -91,6 +92,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const executionPlan = useMemo(() => analysis && rowSetPlan
     ? buildRefreshExecutionPlan({ spec, catalog: analysis, rowSets: rowSetPlan })
     : null, [spec, analysis, rowSetPlan]);
+  const maskPlan = useMemo(() => analysis ? buildRefreshMaskPlan({ spec, catalog: analysis }) : null, [spec, analysis]);
   const json = useMemo(() => {
     try {
       return serializeRefreshSpec(spec);
@@ -371,6 +373,21 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   </div>
                 ))}
                 <button className="toolbar-btn" onClick={() => patch(current => ({ ...current, masks: [...current.masks, { table: 'customers', column: 'email', rule: 'hash' }] }))}>+ Add mask</button>
+                {maskPlan && (
+                  <div className="sqp-finding">
+                    <div className={maskPlan.complete ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
+                      <StatusIcon kind={maskPlan.complete ? 'ok' : 'error'} />
+                      <span>{maskPlan.complete ? `Mask contract valid: ${maskPlan.rules.length} rules. No values have been transformed.` : `Mask contract blocked: ${maskPlan.blockers.length} blockers.`}</span>
+                    </div>
+                    {maskPlan.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                    {maskPlan.rules.map(rule => (
+                      <div key={`${rule.table}.${rule.column}`} className="sqp-f-evidence">
+                        <b>{rule.table}.{rule.column}</b> · {rule.rule}{rule.generator ? ` · ${rule.generator}` : ''}{rule.relation ? ' · relational seed shared' : ' · column seed'}
+                        {rule.notes.map(note => <div key={note}>{note}</div>)}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </section>
 
               <section>
