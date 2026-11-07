@@ -1931,6 +1931,272 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
+    enum GraphShape {
+        Deep(usize),
+        SelfReference,
+        TwoCycle,
+    }
+
+    fn graph_names(shape: GraphShape) -> Vec<String> {
+        let count = match shape {
+            GraphShape::Deep(count) => count,
+            GraphShape::SelfReference => 1,
+            GraphShape::TwoCycle => 2,
+        };
+        (0..count)
+            .map(|index| format!("chain_{index:03}"))
+            .collect()
+    }
+
+    fn graph_parent(shape: GraphShape, index: usize) -> Option<usize> {
+        match shape {
+            GraphShape::Deep(_) if index > 0 => Some(index - 1),
+            GraphShape::SelfReference => Some(0),
+            GraphShape::TwoCycle => Some((index + 1) % 2),
+            _ => None,
+        }
+    }
+
+    fn graph_input(source: &str, target: &str, shape: GraphShape) -> ExecuteInput {
+        let names = graph_names(shape);
+        let last = names.len() - 1;
+        let tables = names.iter().enumerate().map(|(index, name)| {
+            let parent = graph_parent(shape, index);
+            let mut columns = vec![serde_json::json!({
+                "name": "id", "data_type": "int", "column_type": "int", "nullable": false,
+                "collation": null, "charset": null, "char_max_len": null,
+                "generation_expression": null, "extra": "",
+            })];
+            if parent.is_some() {
+                columns.push(serde_json::json!({
+                    "name": "parent_id", "data_type": "int", "column_type": "int", "nullable": true,
+                    "collation": null, "charset": null, "char_max_len": null,
+                    "generation_expression": null, "extra": "",
+                }));
+            }
+            let mut indexes = vec![serde_json::json!({
+                "name": "PRIMARY", "unique": true,
+                "columns": [{"name": "id", "seq": 1, "sub_part": null}],
+            })];
+            if parent.is_some() {
+                indexes.push(serde_json::json!({
+                    "name": format!("fk_{name}"), "unique": false,
+                    "columns": [{"name": "parent_id", "seq": 1, "sub_part": null}],
+                }));
+            }
+            serde_json::json!({
+                "source_schema": source, "target_schema": target, "table": name,
+                "action": if index == last { "full" } else { "dependency" },
+                "root_sql": (index == last).then(|| format!("SELECT `id`, `parent_id` FROM {}", relation(source, name))),
+                "policy": if index == last { "full" } else { "dependency" },
+                "hard_limit": null, "key_columns": ["id"],
+                "unique_keys": [{"name": "PRIMARY", "columns": ["id"]}],
+                "batch_rows": 2, "columns": columns, "indexes": indexes,
+            })
+        }).collect::<Vec<_>>();
+        let foreign_keys = names.iter().enumerate().filter_map(|(index, name)| {
+            let parent = graph_parent(shape, index)?;
+            Some(serde_json::json!({
+                "key": format!("{source}.{name}.fk_{name}"), "name": format!("fk_{name}"),
+                "schema": source, "table": name, "ref_schema": source, "ref_table": names[parent],
+                "parts": [{"ordinal": 1, "column": "parent_id", "ref_column": "id", "nullable": true}],
+            }))
+        }).collect::<Vec<_>>();
+        let mask_tables = tables
+            .iter()
+            .map(|table| {
+                let columns = table["columns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|column| {
+                        serde_json::json!({
+                            "name": column["name"], "data_type": "int", "collation": null,
+                            "char_max_len": null, "generation_expression": null, "extra": "",
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "name": format!("{source}.{}", table["table"].as_str().unwrap()),
+                    "columns": columns,
+                    "indexes": [{"name": "PRIMARY", "unique": true, "columns": ["id"]}],
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "run_key": Uuid::new_v4(), "expected_catalog_sha256": "a".repeat(64),
+            "expected_row_set_sha256": "b".repeat(64), "max_chunk_bytes": 65536,
+            "planning_key_batch": 2, "max_planning_keys": 10000,
+            "preflight": {
+                "source_session_id": Uuid::nil(), "target_session_id": Uuid::nil(),
+                "source_connection_id": Uuid::nil(), "target_connection_id": Uuid::nil(),
+                "spec_sha256": "c".repeat(64), "production_confirmation": null,
+                "tables": [{"source_schema": source, "target_schema": target, "table": names[last]}],
+            },
+            "tables": tables, "foreign_keys": foreign_keys,
+            "mask": {
+                "seed": "graph-test", "rules": [], "tables": mask_tables, "relations": [], "rows": [],
+                "allow_fk_breaking": false, "acknowledge_unmasked_sensitive": true,
+                "committed_scope": {"committed_rows": 0, "in_flight_rows": 0},
+                "max_unique_keys": 10000,
+            },
+        })).unwrap()
+    }
+
+    async fn create_graph_schemas(
+        pool: &sqlx::MySqlPool,
+        suffix: &str,
+        shape: GraphShape,
+    ) -> (String, String) {
+        let names = graph_names(shape);
+        let source = format!("txui_refresh_graph_source_{suffix}");
+        let target = format!("txui_refresh_graph_target_{suffix}");
+        for schema in [&source, &target] {
+            crate::db::mysql::execute(pool, &format!("CREATE DATABASE `{schema}`"))
+                .await
+                .unwrap();
+            for (index, name) in names.iter().enumerate() {
+                let parent_column = if graph_parent(shape, index).is_some() {
+                    ", parent_id INT NULL"
+                } else {
+                    ""
+                };
+                crate::db::mysql::execute(pool, &format!(
+                    "CREATE TABLE `{schema}`.`{name}` (id INT PRIMARY KEY{parent_column}) ENGINE=InnoDB",
+                )).await.unwrap();
+            }
+            for (index, name) in names.iter().enumerate() {
+                if let Some(parent) = graph_parent(shape, index) {
+                    crate::db::mysql::execute(pool, &format!(
+                        "ALTER TABLE `{schema}`.`{name}` ADD CONSTRAINT `fk_{name}` FOREIGN KEY(parent_id) REFERENCES `{schema}`.`{}`(id)",
+                        names[parent],
+                    )).await.unwrap();
+                }
+            }
+        }
+        for (index, name) in names.iter().enumerate() {
+            let values = if graph_parent(shape, index).is_some() {
+                "1,NULL"
+            } else {
+                "1"
+            };
+            crate::db::mysql::execute(
+                pool,
+                &format!(
+                    "INSERT INTO `{source}`.`{name}` (id{}) VALUES ({values})",
+                    if graph_parent(shape, index).is_some() {
+                        ",parent_id"
+                    } else {
+                        ""
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        for (index, name) in names.iter().enumerate() {
+            if graph_parent(shape, index).is_some() {
+                crate::db::mysql::execute(
+                    pool,
+                    &format!("UPDATE `{source}`.`{name}` SET parent_id=1"),
+                )
+                .await
+                .unwrap();
+            }
+        }
+        (source, target)
+    }
+
+    async fn graph_target_rows(pool: &sqlx::MySqlPool, target: &str, shape: GraphShape) -> i64 {
+        let mut total = 0;
+        for name in graph_names(shape) {
+            total += sqlx::query_scalar::<_, i64>(
+                AssertSqlSafe(format!("SELECT COUNT(*) FROM `{target}`.`{name}`")).into_sql_str(),
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        }
+        total
+    }
+
+    #[test]
+    fn self_and_two_table_cycles_are_refused_before_session_or_target_access() {
+        for shape in [GraphShape::SelfReference, GraphShape::TwoCycle] {
+            let input = graph_input("source", "target", shape);
+            let error = validate_input(&input).unwrap_err();
+            assert!(error.message.contains("self/cyclic"), "{error}");
+            assert!(error.message.contains("before writing"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_deep_chain_copies_without_orphans_and_cycles_write_nothing() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(12)
+            .connect(&url)
+            .await
+            .unwrap();
+        let suffix = &Uuid::new_v4().simple().to_string()[..8];
+        let shape = GraphShape::Deep(64);
+        let (source, target) = create_graph_schemas(&pool, suffix, shape).await;
+        let mut input = graph_input(&source, &target, shape);
+        let (state, source_session, target_session) = live_state(&pool).await;
+        bind_live_input(&mut input, &state, source_session, target_session).await;
+        let (channel, events) = recorder();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let mut run = RunState::new(input.run_key.clone());
+        let counts = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            execute_inner(input, &state, channel, &mut run, &mut cancel_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(counts.status, "completed");
+        assert_eq!(counts.requested_rows, Some(1));
+        assert_eq!(counts.closure_rows, Some(63));
+        assert_eq!(counts.planned_rows, Some(64));
+        assert_eq!(counts.committed_rows, 64);
+        assert_eq!(counts.remaining_rows, Some(0));
+        assert_eq!(counts.in_flight_rows, 0);
+        assert_eq!(counts.chunks_committed, 64);
+        assert_eq!(graph_target_rows(&pool, &target, shape).await, 64);
+        for index in 1..64 {
+            let name = format!("chain_{index:03}");
+            let parent = format!("chain_{:03}", index - 1);
+            let orphans: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM `{target}`.`{name}` child LEFT JOIN `{target}`.`{parent}` parent ON child.parent_id=parent.id WHERE child.parent_id IS NOT NULL AND parent.id IS NULL",
+            )).into_sql_str()).fetch_one(&pool).await.unwrap();
+            assert_eq!(orphans, 0, "orphans in {name}");
+        }
+        assert!(!serde_json::to_string(&*events.lock().unwrap())
+            .unwrap()
+            .contains("FOREIGN_KEY_CHECKS"));
+        drop_live_schemas(&pool, &source, &target).await;
+
+        for shape in [GraphShape::SelfReference, GraphShape::TwoCycle] {
+            let (source, target) = create_graph_schemas(&pool, suffix, shape).await;
+            let mut input = graph_input(&source, &target, shape);
+            let (state, source_session, target_session) = live_state(&pool).await;
+            bind_live_input(&mut input, &state, source_session, target_session).await;
+            let (channel, _events) = recorder();
+            let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+            let mut run = RunState::new(input.run_key.clone());
+            let error = execute_inner(input, &state, channel, &mut run, &mut cancel_rx)
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("self/cyclic"), "{error}");
+            assert_eq!(run.committed_rows, 0);
+            assert_eq!(graph_target_rows(&pool, &target, shape).await, 0);
+            drop_live_schemas(&pool, &source, &target).await;
+        }
+        pool.close().await;
+    }
+
     #[tokio::test]
     #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8 and node"]
     async fn dbctl_snapshot_copy_concurrent_mutation_cancel_and_refusal() {

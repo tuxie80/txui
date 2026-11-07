@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeRefreshCatalog } from '../src/utils/refreshCatalog.ts';
 import { buildRefreshExecutionPlan, refreshCatalogSha256, refreshRowSetSha256, validateRefreshExecutionPlan } from '../src/utils/refreshExecution.ts';
+import { buildRefreshPlan } from '../src/utils/refreshPlan.ts';
+import type { RefreshRowSetPlan } from '../src/utils/refreshRowSets.ts';
 import { planRefreshRowSets } from '../src/utils/refreshRowSets.ts';
 import { createDefaultRefreshSpec } from '../src/utils/refreshSpec.ts';
 import type { CatalogColumn, CatalogFk, CatalogIndex, CatalogTable, SchemaSnapshot } from '../src/utils/schemaRules.ts';
@@ -129,4 +131,51 @@ test('incomplete row-set proof cannot become an executable plan', async () => {
   const plan = buildRefreshExecutionPlan({ ...current, rowSets });
   assert.equal(plan.executable, false);
   assert.ok(plan.blockers.includes('row-set planning has not reached a clean fixed point'));
+});
+
+test('a 64-table dependency chain has deterministic parent-before-child insertion order', () => {
+  const depth = 64;
+  const names = Array.from({ length: depth }, (_, index) => `chain_${String(index).padStart(3, '0')}`);
+  const deepSnapshot = (schema: string): SchemaSnapshot => ({
+    engine: 'mysql', schema, serverCharset: null, serverCollation: null, schemaCharset: null, schemaCollation: null,
+    tables: names.map(table),
+    columns: names.flatMap((name, index) => [
+      column(name, 'id'),
+      ...(index === 0 ? [] : [column(name, 'parent_id')]),
+    ]),
+    indexes: names.map(index),
+    foreignKeys: names.slice(1).map((name, offset) => ({
+      ...fk(name, 'parent_id', names[offset], `fk_${name}`), schema, refSchema: schema,
+    })),
+  });
+  const value = spec();
+  value.tables = [{ table: names[depth - 1], policy: 'full' }];
+  const catalog = analyzeRefreshCatalog({ spec: value, source: [deepSnapshot('source')], target: [deepSnapshot('target')] });
+  assert.equal(catalog.complete, true);
+  const tables = catalog.tables.map(table => ({
+    table: table.table, action: table.action,
+    requested: table.action === 'full' ? 1 : 0,
+    closureAdded: table.action === 'dependency' ? 1 : 0,
+    final: 1, notes: [],
+  }));
+  const rowSets: RefreshRowSetPlan = {
+    readOnly: true, specSha256: buildRefreshPlan(value).specSha256, fixedPoint: true,
+    iterations: depth, sourceQueries: depth, sourceRowsRead: depth, tables,
+    totals: { requested: 1, closureAdded: depth - 1, final: depth },
+    memory: {
+      maxPlanningKeys: 10000, planningKeyBatch: 10, closureIdentities: depth,
+      recentRequestedIdentities: 1, peakRetainedKeys: depth, peakFrontierRows: 1,
+      peakBufferedRows: 1, fullRootKeysRetained: 0,
+    },
+    blockers: [],
+  };
+  const plan = buildRefreshExecutionPlan({ spec: value, catalog, rowSets });
+  assert.equal(plan.executable, true, plan.blockers.join('\n'));
+  assert.equal(plan.insertionOrder.length, depth);
+  assert.deepEqual(plan.insertionOrder, names.map(name => `source.${name}`));
+  const positions = new Map(plan.insertionOrder.map((name, index) => [name, index]));
+  for (const edge of catalog.graph.foreignKeys) {
+    assert.ok(positions.get(`${edge.refSchema}.${edge.refTable}`)! < positions.get(`${edge.schema}.${edge.table}`)!);
+  }
+  assert.equal(plan.tables.reduce((sum, table) => sum + table.selectedRows, 0), depth);
 });
