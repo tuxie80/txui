@@ -8,10 +8,15 @@ this project follows semantic versioning.
 ### Added
 
 - **Native, session-scoped SQL runner for MySQL/MariaDB** — Data → SQL script accepts `.sql`, `.sql.gz`, `.sql.zst`, `.sql.xz`, `.sql.bz2`, `.sql.lz4`, `.zip`, `.tar.gz`, `.tar.xz` and `.tar.zst`, with exactly one SQL member required inside archives. It validates the complete local source before any write (compression/checksums/frame structure, incremental UTF-8, MySQL statement boundaries and `DELIMITER`, client-command rejection, statement limits and read-only/prod guards), then executes a second bounded streaming pass sequentially on one dedicated physical connection. XZ and Zstd decoder memory is capped, and LZ4 receives independent truncation/end-marker validation. No external client, shell, decompressed temporary file or second SSH tunnel is used on macOS, Windows or Linux; an already connected SSH-backed session reuses its existing tunnel. The panel exposes source/uncompressed bytes, statement counts and source lines, per-statement timing/outcome, rows affected, backend id and final status. Cancellation reaches the running statement; failures and cancellation state plainly that committed work is not rolled back.
+- **Exact Safe Environment Refresh verification** — the existing MySQL/MariaDB executor verifies selected/committed/target counts and explicit FK orphans, then re-reads each committed batch and compares canonical key-ordered masked rows with typed, length-delimited SHA-256 chunk/final hashes. NULL, empty, decimal scale and raw binary remain distinct; duplicate keys and non-exact JSON numbers fail closed. Generated/float/unknown columns are reported unverified, and the panel separates verified, partial, disabled and failed coverage. Live MySQL 8.4 and MariaDB 11.8 tests include clean copies and deliberate content/count/FK mutations.
 
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
+
+### Fixed
+
+- **Refresh preserves DECIMAL values and raw binary bytes** — verification exposed MySQL interpreting a hexadecimal DECIMAL string as its integer byte value (for example, synthetic `1.00` becoming `825110576.00`). Refresh now validates and emits exact numeric DECIMAL literals, and binary values carry an internal raw-byte envelope so non-UTF-8 payloads are copied and compared as bytes rather than ambiguous text. Clean and planted-mutation live tests pass on MySQL 8.4 and MariaDB 11.8.
 
 ### Security
 

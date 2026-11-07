@@ -11,6 +11,10 @@ use uuid::Uuid;
 use super::{RefreshMaskBatchInput, RefreshPreflightInput};
 use crate::apperror::{AppError, ErrorCode};
 
+mod verify;
+
+pub(super) const REFRESH_BINARY_KEY: &str = "__txui_refresh_binary_hex_v1";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct ExecuteTable {
@@ -86,7 +90,7 @@ struct ExecuteForeignKeyPart {
     nullable: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecuteInput {
     run_key: String,
@@ -99,6 +103,8 @@ pub struct ExecuteInput {
     tables: Vec<ExecuteTable>,
     foreign_keys: Vec<ExecuteForeignKey>,
     mask: RefreshMaskBatchInput,
+    #[serde(default)]
+    verification: verify::RefreshVerificationOptions,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -144,6 +150,8 @@ pub struct RefreshRunCounts {
     target_backend_id: Option<u64>,
     current_key_range: Option<RefreshKeyRange>,
     execution_row_set_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<verify::RefreshVerificationReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,6 +216,7 @@ struct RunState {
     target_backend_id: Option<u64>,
     current_key_range: Option<RefreshKeyRange>,
     execution_row_set_sha256: Option<String>,
+    verification: verify::RefreshVerificationReport,
     uncertain: bool,
 }
 
@@ -235,6 +244,7 @@ impl RunState {
             target_backend_id: None,
             current_key_range: None,
             execution_row_set_sha256: None,
+            verification: verify::RefreshVerificationReport::default(),
             uncertain: false,
         }
     }
@@ -278,6 +288,7 @@ impl RunState {
             target_backend_id: self.target_backend_id,
             current_key_range: self.current_key_range.clone(),
             execution_row_set_sha256: self.execution_row_set_sha256.clone(),
+            verification: (self.status != "running").then(|| self.verification.clone()),
         }
     }
 
@@ -381,6 +392,13 @@ fn sql_value(value: &Value) -> Result<String, AppError> {
             }
         }
         Value::String(value) => Ok(format!("X'{}'", hex::encode(value.as_bytes()))),
+        Value::Object(value) if value.len() == 1 && value.contains_key(REFRESH_BINARY_KEY) => {
+            let encoded = value[REFRESH_BINARY_KEY].as_str()
+                .ok_or_else(|| failed("Refresh binary value has an invalid raw-byte envelope"))?;
+            let bytes = hex::decode(encoded)
+                .map_err(|_| failed("Refresh binary value is not valid hexadecimal"))?;
+            Ok(format!("X'{}'", hex::encode(bytes)))
+        }
         Value::Array(_) | Value::Object(_) => Ok(format!(
             "X'{}'",
             hex::encode(
@@ -390,6 +408,39 @@ fn sql_value(value: &Value) -> Result<String, AppError> {
             )
         )),
     }
+}
+
+fn sql_column_value(column: &ExecuteColumn, value: &Value) -> Result<String, AppError> {
+    let data_type = column.data_type.to_ascii_lowercase();
+    if matches!(data_type.as_str(), "decimal" | "numeric" | "dec" | "fixed") && !value.is_null() {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            _ => return Err(failed("Refresh decimal outbound value is not an exact scalar; no insert was attempted")),
+        };
+        let decimal = text.parse::<rust_decimal::Decimal>()
+            .map_err(|_| failed("Refresh decimal outbound value is not exact; no insert was attempted"))?;
+        return Ok(decimal.to_string());
+    }
+    let binary = matches!(data_type.as_str(),
+        "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob");
+    if binary && !value.is_null() {
+        let valid = value.as_object().is_some_and(|object| {
+            object.len() == 1 && object.get(REFRESH_BINARY_KEY).and_then(Value::as_str)
+                .is_some_and(|encoded| hex::decode(encoded).is_ok())
+        });
+        if !valid {
+            return Err(failed("Refresh binary outbound value has no exact raw-byte envelope; no insert was attempted"));
+        }
+    }
+    if !binary && value.is_object() {
+        return Ok(format!("X'{}'", hex::encode(
+            serde_json::to_string(value)
+                .map_err(|_| failed("Refresh JSON value could not be serialized"))?
+                .as_bytes()
+        )));
+    }
+    sql_value(value)
 }
 
 fn sql_values(values: &[Value]) -> Result<String, AppError> {
@@ -428,6 +479,13 @@ fn canonical_values(values: &[Value]) -> Result<String, AppError> {
             }
             Value::String(text) if !text.contains('\0') => {
                 out.push_str(&format!("s{}:{}|", text.len(), text))
+            }
+            Value::Object(object) if object.len() == 1 && object.contains_key(REFRESH_BINARY_KEY) => {
+                let encoded = object[REFRESH_BINARY_KEY].as_str()
+                    .ok_or_else(|| failed("Refresh binary key has an invalid raw-byte envelope"))?;
+                let bytes = hex::decode(encoded)
+                    .map_err(|_| failed("Refresh binary key is not valid hexadecimal"))?;
+                out.push_str(&format!("b{}:{}|", bytes.len(), hex::encode(bytes)));
             }
             _ => {
                 return Err(failed(
@@ -494,20 +552,30 @@ fn check_cancel(cancel_rx: &mut RefreshCancel) -> Result<(), AppError> {
     cancel_rx.check()
 }
 
-async fn source_grid(
+async fn read_grid(
     conn: &mut sqlx::MySqlConnection,
     sql: &str,
     row_cap: usize,
     cancel_rx: &mut RefreshCancel,
+    target: bool,
 ) -> Result<GridData, AppError> {
     let query = sqlx::query(AssertSqlSafe(sql.to_owned()).into_sql_str()).fetch_all(&mut *conn);
     let rows = tokio::select! {
-        result = query => result.map_err(|_| failed("Refresh source read failed; database details are omitted to protect row values"))?,
-        _ = cancel_rx.wait() => return Err(cancelled("Refresh cancelled during a source read; no target commit was attempted for this read")),
+        result = query => result.map_err(|_| failed(if target {
+            "Refresh target verification read failed; database details are omitted to protect row values"
+        } else {
+            "Refresh source read failed; database details are omitted to protect row values"
+        }))?,
+        _ = cancel_rx.wait() => return Err(cancelled(if target {
+            "Refresh cancelled during target verification; committed chunks remain and verification is incomplete"
+        } else {
+            "Refresh cancelled during a source read; no target commit was attempted for this read"
+        })),
     };
     if rows.len() > row_cap {
         return Err(failed(format!(
-            "Refresh source page exceeded its {row_cap}-row cap"
+            "Refresh {} page exceeded its {row_cap}-row cap",
+            if target { "target verification" } else { "source" }
         )));
     }
     let columns = rows
@@ -531,9 +599,23 @@ async fn source_grid(
     let mut decoded = Vec::with_capacity(rows.len());
     let mut bytes = 0usize;
     for row in &rows {
-        let values = (0..row.columns().len())
-            .map(|index| crate::db::mysql::json_value_from_row_pub(row, index, &types[index]))
-            .collect::<Vec<_>>();
+        let mut values = Vec::with_capacity(row.columns().len());
+        for index in 0..row.columns().len() {
+            let class = crate::db::mysql::classify_mysql_type(&types[index]);
+            let raw_null = row.try_get_raw(index)
+                .map_err(|_| failed("Refresh value metadata could not be inspected"))?
+                .is_null();
+            let decoded = if class == crate::db::mysql::MySqlTypeClass::Binary && !raw_null {
+                let bytes = row.try_get::<Vec<u8>, _>(index)
+                    .map_err(|_| failed("Refresh binary value could not be decoded exactly"))?;
+                let mut envelope = Map::new();
+                envelope.insert(REFRESH_BINARY_KEY.into(), Value::String(hex::encode(bytes)));
+                Value::Object(envelope)
+            } else {
+                crate::db::mysql::json_value_from_row_class(row, index, class)
+            };
+            values.push(decoded);
+        }
         bytes = bytes.saturating_add(crate::db::types::row_bytes(&values));
         decoded.push(values);
     }
@@ -542,6 +624,24 @@ async fn source_grid(
         rows: decoded,
         bytes,
     })
+}
+
+async fn source_grid(
+    conn: &mut sqlx::MySqlConnection,
+    sql: &str,
+    row_cap: usize,
+    cancel_rx: &mut RefreshCancel,
+) -> Result<GridData, AppError> {
+    read_grid(conn, sql, row_cap, cancel_rx, false).await
+}
+
+async fn target_grid(
+    conn: &mut sqlx::MySqlConnection,
+    sql: &str,
+    row_cap: usize,
+    cancel_rx: &mut RefreshCancel,
+) -> Result<GridData, AppError> {
+    read_grid(conn, sql, row_cap, cancel_rx, true).await
 }
 
 fn value(grid: &GridData, row: &[Value], column: &str) -> Result<Value, AppError> {
@@ -794,6 +894,7 @@ fn validate_input(input: &ExecuteInput) -> Result<BTreeMap<String, usize>, AppEr
             return Err(AppError::bad_request(format!("{child} has a self/cyclic or non-parent-first dependency on {parent}; execution is refused before writing")));
         }
     }
+    verify::validate_content_keys(input)?;
     Ok(order)
 }
 
@@ -1392,6 +1493,8 @@ async fn copy_tables(
         run.table_index = table_index + 1;
         run.progress(on_event, "copying", input.tables.len());
         target_empty(target, table).await?;
+        let mut content = input.verification.content_sha256
+            .then(|| verify::TableContentState::new(table));
         let state = states.get(&source_key(table)).expect("state initialized");
         let keys = state
             .rows
@@ -1501,9 +1604,9 @@ async fn copy_tables(
                     .collect::<Vec<_>>();
                 let mut tuples = Vec::with_capacity(masked.rows.len());
                 for row in &masked.rows {
-                    let values = column_names
+                    let values = columns
                         .iter()
-                        .map(|name| sql_value(row.values.get(name).unwrap_or(&Value::Null)))
+                        .map(|column| sql_column_value(column, row.values.get(&column.name).unwrap_or(&Value::Null)))
                         .collect::<Result<Vec<_>, _>>()?;
                     tuples.push(format!("({})", values.join(", ")));
                 }
@@ -1598,8 +1701,21 @@ async fn copy_tables(
                     "committed",
                     batch.len() as u64,
                 );
+                if let Some(content) = content.as_mut() {
+                    run.progress(on_event, "verifying", input.tables.len());
+                    if let Err(error) = verify::verify_committed_batch(
+                        table, &masked.rows, target, content, run, cancel_rx,
+                    ).await {
+                        run.chunk(on_event, input.tables.len(), "verification_failed", batch.len() as u64);
+                        return Err(error);
+                    }
+                    run.progress(on_event, "copying", input.tables.len());
+                }
                 offset = end;
             }
+        }
+        if let Some(content) = content {
+            verify::finish_table_content(table, content, run);
         }
     }
     Ok(())
@@ -1693,6 +1809,7 @@ async fn execute_inner(
             validate_indexes(&mut target, table, &table.target_schema).await?;
             target_empty(&mut target, table).await?;
         }
+        verify::initialize(&input, &states, run);
         let mut collision_keys = HashSet::new();
         copy_tables(
             &input,
@@ -1705,6 +1822,8 @@ async fn execute_inner(
             &mut collision_keys,
         )
         .await?;
+        run.progress(&on_event, "verifying", input.tables.len());
+        verify::finish_verification(&input, &mut target, run, cancel_rx).await?;
         run.status = "completed";
         run.in_flight_rows = 0;
         Ok(run.counts(input.tables.len()))
@@ -1910,6 +2029,16 @@ mod tests {
             sql_value(&serde_json::json!({"private": [1, 2]})).unwrap(),
             "X'7b2270726976617465223a5b312c325d7d'"
         );
+        let input = verification_live_input("source", "target");
+        let decimal = &input.tables[0].columns[2];
+        assert_eq!(sql_column_value(decimal, &Value::String("1.00".into())).unwrap(), "1.00");
+        assert_ne!(sql_column_value(decimal, &Value::String("1.00".into())).unwrap(), sql_value(&Value::String("1.00".into())).unwrap());
+        let mut json = decimal.clone();
+        json.data_type = "json".into();
+        let document = serde_json::json!({REFRESH_BINARY_KEY: "00ff"});
+        let expected = format!("X'{}'", hex::encode(serde_json::to_string(&document).unwrap().as_bytes()));
+        assert_eq!(sql_column_value(&json, &document).unwrap(), expected);
+        assert_ne!(sql_column_value(&json, &document).unwrap(), sql_value(&document).unwrap());
     }
 
     #[test]
@@ -2557,6 +2686,156 @@ mod tests {
         pool.close().await;
     }
 
+    fn verification_live_input(source: &str, target: &str) -> ExecuteInput {
+        let mut input = graph_input(source, target, GraphShape::Deep(1));
+        input.tables[0].table = "items".into();
+        input.tables[0].root_sql = Some(format!(
+            "SELECT `id`, `nullable_text`, `amount`, `payload`, `note` FROM {}",
+            relation(source, "items")
+        ));
+        input.tables[0].batch_rows = 2;
+        input.tables[0].columns = vec![
+            ("id", "int"), ("nullable_text", "varchar"), ("amount", "decimal"),
+            ("payload", "varbinary"), ("note", "varchar"),
+        ].into_iter().map(|(name, data_type)| ExecuteColumn {
+            name: name.into(), data_type: data_type.into(),
+            column_type: match data_type {
+                "varchar" => "varchar(80)".into(),
+                "decimal" => "decimal(12,2)".into(),
+                "varbinary" => "varbinary(16)".into(),
+                _ => "int".into(),
+            },
+            nullable: name != "id", collation: None, charset: None,
+            char_max_len: None, generation_expression: None, extra: String::new(),
+        }).collect();
+        input.preflight.tables[0].table = "items".into();
+        input.mask.tables[0].name = format!("{source}.items");
+        input.mask.tables[0].columns = input.tables[0].columns.iter().map(|column| {
+            super::super::RefreshMaskColumnInput {
+                name: column.name.clone(), data_type: column.data_type.clone(),
+                collation: None, char_max_len: None, generation_expression: None, extra: String::new(),
+            }
+        }).collect();
+        input
+    }
+
+    fn verification_outbound_rows() -> Vec<super::super::RefreshMaskRowInput> {
+        [
+            (1, Value::Null, "1.00", vec![0, 1, 255], "first-masked-value"),
+            (2, Value::String(String::new()), "2.00", vec![0, 255], "second-masked-value"),
+        ].into_iter().map(|(id, text, amount, payload, note)| {
+            let mut values = Map::new();
+            values.insert("id".into(), Value::from(id));
+            values.insert("nullable_text".into(), text);
+            values.insert("amount".into(), Value::String(amount.into()));
+            values.insert("payload".into(), serde_json::json!({REFRESH_BINARY_KEY: hex::encode(payload)}));
+            values.insert("note".into(), Value::String(note.into()));
+            super::super::RefreshMaskRowInput { table: "unused.items".into(), values }
+        }).collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_content_count_and_fk_verification_catch_planted_mutations() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(12).connect(&url).await.unwrap();
+        let suffix = &Uuid::new_v4().simple().to_string()[..8];
+        let source = format!("txui_refresh_verify_source_{suffix}");
+        let target = format!("txui_refresh_verify_target_{suffix}");
+        for schema in [&source, &target] {
+            crate::db::mysql::execute(&pool, &format!("CREATE DATABASE `{schema}`")).await.unwrap();
+            crate::db::mysql::execute(&pool, &format!(
+                "CREATE TABLE `{schema}`.`items` (id INT PRIMARY KEY, nullable_text VARCHAR(80) NULL, amount DECIMAL(12,2) NULL, payload VARBINARY(16) NULL, note VARCHAR(80) NULL) ENGINE=InnoDB",
+            )).await.unwrap();
+        }
+        crate::db::mysql::execute(&pool, &format!(
+            "INSERT INTO `{source}`.`items` VALUES (1,NULL,1.00,X'0001FF','first-masked-value'),(2,'',2.00,X'00FF','second-masked-value')",
+        )).await.unwrap();
+        let mut input = verification_live_input(&source, &target);
+        for column in &mut input.tables[0].columns {
+            let metadata = sqlx::query(
+                "SELECT CHARACTER_SET_NAME, COLLATION_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'items' AND COLUMN_NAME = ?",
+            ).bind(&source).bind(&column.name).fetch_one(&pool).await.unwrap();
+            column.charset = metadata.try_get(0).unwrap();
+            column.collation = metadata.try_get(1).unwrap();
+            column.char_max_len = metadata_u64(&metadata, 2).unwrap();
+        }
+        let verification_input = input.clone();
+        let (state, source_session, target_session) = live_state(&pool).await;
+        bind_live_input(&mut input, &state, source_session, target_session).await;
+        let (channel, events) = recorder();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let mut run = RunState::new(input.run_key.clone());
+        let counts = execute_inner(
+            input.clone(), &state, channel, &mut run, &mut RefreshCancel::one(cancel_rx),
+        ).await.unwrap();
+        assert_eq!(counts.status, "completed");
+        let verification = counts.verification.as_ref().unwrap();
+        assert_eq!(verification.status, "verified");
+        assert_eq!(verification.tables[0].selected_rows, 2);
+        assert_eq!(verification.tables[0].committed_rows, 2);
+        assert_eq!(verification.tables[0].target_rows, Some(2));
+        assert_eq!(verification.tables[0].count_status, "verified");
+        assert_eq!(verification.tables[0].content_status, "verified");
+        assert_eq!(verification.tables[0].chunks_checked, 1);
+        assert!(verification.tables[0].chunk_hashes.iter().all(|chunk| {
+            chunk.matched && chunk.outbound_sha256 == chunk.target_sha256
+        }));
+        assert_eq!(verification.comparable_content_sha256.as_ref().map(String::len), Some(64));
+        let binary: String = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT HEX(payload) FROM `{target}`.`items` WHERE id=1",
+        )).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(binary, "0001FF");
+
+        let reset = format!(
+            "UPDATE `{target}`.`items` SET nullable_text=IF(id=1,NULL,''), amount=CAST(id AS DECIMAL(12,2)), payload=IF(id=1,X'0001FF',X'00FF'), note=CONCAT(IF(id=1,'first','second'),'-masked-value')",
+        );
+        for (mutation, planted) in [
+            ("UPDATE `{target}`.`items` SET nullable_text='' WHERE id=1", "first-masked-value"),
+            ("ALTER TABLE `{target}`.`items` MODIFY amount DECIMAL(12,3) NULL", "1.000"),
+            ("UPDATE `{target}`.`items` SET payload=X'0001FE' WHERE id=1", "0001FE"),
+            ("UPDATE `{target}`.`items` SET note='deliberate-mask-mutation' WHERE id=1", "deliberate-mask-mutation"),
+        ] {
+            crate::db::mysql::execute(&pool, &reset).await.unwrap();
+            crate::db::mysql::execute(&pool, &mutation.replace("{target}", &target)).await.unwrap();
+            let mut connection = pool.acquire().await.unwrap().detach();
+            let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            let mut check_run = RunState::new(Uuid::new_v4().to_string());
+            verify::initialize(&verification_input, &BTreeMap::from([
+                (format!("{source}.items"), TableState::default()),
+            ]), &mut check_run);
+            let error = verify::verify_committed_batch(
+                &verification_input.tables[0], &verification_outbound_rows(), &mut connection,
+                &mut verify::TableContentState::new(&verification_input.tables[0]),
+                &mut check_run, &mut RefreshCancel::one(cancel_rx),
+            ).await.unwrap_err();
+            assert!(error.message.contains("mismatch"), "{error}");
+            assert!(!error.message.contains(planted));
+            assert_eq!(check_run.verification.tables[0].content_status, "failed");
+            assert_eq!(check_run.verification.tables[0].committed_rows, 2);
+            connection.close().await.unwrap();
+            if mutation.starts_with("ALTER TABLE") {
+                crate::db::mysql::execute(&pool, &format!(
+                    "ALTER TABLE `{target}`.`items` MODIFY amount DECIMAL(12,2) NULL",
+                )).await.unwrap();
+            }
+        }
+        crate::db::mysql::execute(&pool, &reset).await.unwrap();
+        crate::db::mysql::execute(&pool, &format!("DELETE FROM `{target}`.`items` WHERE id=2")).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap().detach();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let error = verify::finish_verification(
+            &verification_input, &mut connection, &mut run, &mut RefreshCancel::one(cancel_rx),
+        ).await.unwrap_err();
+        assert!(error.message.contains("exact count mismatch"));
+        assert_eq!(run.verification.tables[0].count_status, "failed");
+        assert!(!error.message.contains("second-masked-value"));
+        connection.close().await.unwrap();
+        assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("masked-value"));
+        drop_live_schemas(&pool, &source, &target).await;
+        pool.close().await;
+    }
+
     #[tokio::test]
     #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8 and node"]
     async fn dbctl_snapshot_copy_concurrent_mutation_cancel_and_refusal() {
@@ -2572,6 +2851,7 @@ mod tests {
         input.run_key = Uuid::new_v4().to_string();
         let (state, source_session, target_session) = live_state(&pool).await;
         bind_live_input(&mut input, &state, source_session, target_session).await;
+        let verification_input = input.clone();
         let (channel, events) = recorder();
         let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let mut task = tokio::spawn(async move {
@@ -2601,7 +2881,7 @@ mod tests {
         crate::db::mysql::execute(&pool, &format!(
             "INSERT INTO `{source}`.`children` (id,parent_id,note) VALUES (99,1,'post-snapshot-insert')",
         )).await.unwrap();
-        let (result, run) = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+        let (result, mut run) = tokio::time::timeout(std::time::Duration::from_secs(30), task)
             .await
             .unwrap()
             .unwrap();
@@ -2665,6 +2945,25 @@ mod tests {
         assert!(!event_text.contains("private-note"));
         assert!(!event_text.contains("example.test"));
         assert!(!event_text.contains("post-snapshot"));
+        let verification = counts.verification.as_ref().unwrap();
+        assert_eq!(verification.status, "partial");
+        assert!(verification.tables.iter().all(|table| table.count_status == "verified"));
+        assert!(verification.foreign_keys.iter().all(|edge| edge.status == "verified" && edge.orphan_rows == Some(0)));
+        assert_eq!(verification.unverified_columns.len(), 1);
+        assert_eq!(verification.unverified_columns[0].column, "computed");
+        crate::db::mysql::execute(&pool, &format!(
+            "ALTER TABLE `{target}`.`children` DROP FOREIGN KEY `fk_parent`",
+        )).await.unwrap();
+        crate::db::mysql::execute(&pool, &format!("DELETE FROM `{target}`.`parents` WHERE id=3")).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap().detach();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let error = verify::finish_verification(
+            &verification_input, &mut connection, &mut run, &mut RefreshCancel::one(cancel_rx),
+        ).await.unwrap_err();
+        assert!(error.message.contains("exact count mismatch"));
+        assert!(run.verification.foreign_keys.iter().any(|edge| edge.status == "failed" && edge.orphan_rows.is_some_and(|rows| rows > 0)));
+        assert!(!error.message.contains("private-note"));
+        connection.close().await.unwrap();
         drop_live_schemas(&pool, &source, &target).await;
 
         let (source, target) = create_live_schemas(&pool, suffix, 80).await;

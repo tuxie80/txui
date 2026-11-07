@@ -77,6 +77,7 @@ test('execution input carries qualified dependency mappings and no application r
       columns: { name: string; generation_expression: string | null }[];
     }[];
     mask: { rows: unknown[] }; preflight: { spec_sha256: string }; expected_row_set_sha256: string;
+    verification: { exact_counts: boolean; foreign_key_orphans: boolean; content_sha256: boolean };
   };
   assert.equal(input.tables.length, 2);
   assert.deepEqual(input.tables.map(table => `${table.source_schema}.${table.table}`), ['source.parents', 'source.children']);
@@ -88,6 +89,7 @@ test('execution input carries qualified dependency mappings and no application r
   assert.deepEqual(input.mask.rows, []);
   assert.equal(input.preflight.spec_sha256, current.executionPlan.specSha256);
   assert.equal(input.expected_row_set_sha256, current.executionPlan.rowSetSha256);
+  assert.deepEqual(input.verification, { exact_counts: true, foreign_key_orphans: true, content_sha256: true });
   assert.equal(JSON.stringify(input).includes('private@example.test'), false);
 });
 
@@ -159,4 +161,33 @@ test('chunk progress exposes outcomes, measured throughput and hashes without ra
   assert.equal(state.etaSeconds, null);
   assert.equal(state.rowsInserted, 50);
   assert.equal(state.inFlightRows, 10);
+});
+
+test('terminal verification retains coverage and hashes without row values', () => {
+  const verification = {
+    status: 'partial' as const,
+    tables: [{
+      table: 'source.children', target: 'target.children', selected_rows: 2, committed_rows: 2,
+      target_rows: 2, count_status: 'verified', content_status: 'verified', content_sha256: 'c'.repeat(64),
+      chunks_checked: 1, chunk_hashes: [{
+        chunk_index: 1, rows: 2, outbound_sha256: 'a'.repeat(64), target_sha256: 'a'.repeat(64), matched: true,
+      }], chunk_hashes_omitted: 0,
+    }],
+    foreign_keys: [{ name: 'fk_parent', child: 'source.children', parent: 'source.parents', status: 'verified', orphan_rows: 0 }],
+    unverified_columns: [{ table: 'source.parents', column: 'computed', data_type: 'varchar', reason: 'target-generated' }],
+    comparable_content_sha256: 'd'.repeat(64),
+  };
+  let state = applyRefreshExecutionEvent(initialRefreshProgress(), {
+    type: 'progress', run_key: 'run', phase: 'verifying', committed_rows: 2,
+  });
+  assert.equal(state.phase, 'verifying');
+  assert.equal(state.verification, null);
+  state = applyRefreshExecutionEvent(state, {
+    type: 'done', run_key: 'run', status: 'completed', committed_rows: 2, verification,
+  });
+  assert.equal(state.verification?.status, 'partial');
+  assert.equal(state.verification?.tables[0].target_rows, 2);
+  assert.equal(state.verification?.foreign_keys[0].orphan_rows, 0);
+  assert.equal(state.verification?.unverified_columns.length, 1);
+  assert.equal(JSON.stringify(state).includes('private-note'), false);
 });

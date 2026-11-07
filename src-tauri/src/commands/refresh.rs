@@ -428,6 +428,14 @@ fn canonical_column(column: &RefreshMaskColumnInput, value: &Value) -> Result<St
         return Ok("null".into());
     }
     let data_type = column.data_type.to_lowercase();
+    if matches!(data_type.as_str(), "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob") {
+        let object = value.as_object().ok_or_else(|| bad_request("binary unique value has no exact raw-byte envelope"))?;
+        let encoded = object.get(execute::REFRESH_BINARY_KEY).and_then(Value::as_str)
+            .filter(|_| object.len() == 1)
+            .ok_or_else(|| bad_request("binary unique value has no exact raw-byte envelope"))?;
+        let bytes = hex::decode(encoded).map_err(|_| bad_request("binary unique value is not valid hexadecimal"))?;
+        return Ok(format!("bytes:{}:{}", bytes.len(), hex::encode(bytes)));
+    }
     if data_type.contains("int") || data_type.contains("decimal") || data_type.contains("numeric")
         || data_type.contains("float") || data_type.contains("double") || data_type.contains("year")
     {

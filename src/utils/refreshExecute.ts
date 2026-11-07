@@ -7,9 +7,31 @@ import type { RefreshSpec, RefreshTablePolicy } from './refreshSpec.ts';
 
 export type RefreshRunStatus = 'completed' | 'cancelled' | 'failed' | 'uncertain';
 
+export interface RefreshVerificationReport {
+  status: 'pending' | 'verified' | 'partial' | 'disabled' | 'failed';
+  tables: {
+    table: string;
+    target: string;
+    selected_rows: number;
+    committed_rows: number;
+    target_rows: number | null;
+    count_status: string;
+    content_status: string;
+    content_sha256: string | null;
+    chunks_checked: number;
+    chunk_hashes: {
+      chunk_index: number; rows: number; outbound_sha256: string; target_sha256: string; matched: boolean;
+    }[];
+    chunk_hashes_omitted: number;
+  }[];
+  foreign_keys: { name: string; child: string; parent: string; status: string; orphan_rows: number | null }[];
+  unverified_columns: { table: string; column: string; data_type: string; reason: string }[];
+  comparable_content_sha256: string | null;
+}
+
 export interface RefreshProgressState {
   runKey: string | null;
-  phase: 'idle' | 'starting' | 'planning' | 'copying' | 'done';
+  phase: 'idle' | 'starting' | 'planning' | 'copying' | 'verifying' | 'done';
   status: RefreshRunStatus | null;
   table: string | null;
   tableIndex: number;
@@ -36,6 +58,7 @@ export interface RefreshProgressState {
   closureRows: number | null;
   elapsedMs: number;
   error: string | null;
+  verification: RefreshVerificationReport | null;
 }
 
 export function initialRefreshProgress(): RefreshProgressState {
@@ -45,14 +68,14 @@ export function initialRefreshProgress(): RefreshProgressState {
     inFlightRows: 0, remainingRows: null, chunksCommitted: 0, sourceBytesRead: 0, targetBytesWritten: 0,
     rowsPerSecond: null, etaSeconds: null, chunkIndex: 0, chunkOutcome: null, chunkRows: 0,
     currentKeyRange: null, sourceBackendId: null, targetBackendId: null,
-    requestedRows: null, closureRows: null, elapsedMs: 0, error: null,
+    requestedRows: null, closureRows: null, elapsedMs: 0, error: null, verification: null,
   };
 }
 
 export interface RefreshExecutionEvent {
   type: 'started' | 'progress' | 'chunk' | 'done';
   run_key: string;
-  phase?: 'starting' | 'planning' | 'copying';
+  phase?: 'starting' | 'planning' | 'copying' | 'verifying';
   status?: RefreshRunStatus;
   table?: string | null;
   table_index?: number;
@@ -79,6 +102,7 @@ export interface RefreshExecutionEvent {
   closure_rows?: number | null;
   elapsed_ms?: number;
   error?: string | null;
+  verification?: RefreshVerificationReport | null;
 }
 
 export function applyRefreshExecutionEvent(
@@ -115,6 +139,7 @@ export function applyRefreshExecutionEvent(
       closureRows: event.closure_rows ?? next.closureRows,
       elapsedMs: event.elapsed_ms ?? next.elapsedMs,
       error: event.error ?? null,
+      verification: event.verification ?? null,
     };
   }
   return {
@@ -263,6 +288,11 @@ export function buildRefreshExecutionInput(input: {
     max_chunk_bytes: spec.limits.maxBytesPerChunk,
     planning_key_batch: spec.limits.planningKeyBatch,
     max_planning_keys: spec.limits.maxPlanningKeys,
+    verification: {
+      exact_counts: spec.verification.exactCounts,
+      foreign_key_orphans: spec.verification.foreignKeyOrphans,
+      content_sha256: spec.verification.contentSha256,
+    },
     preflight: {
       source_session_id: spec.source.sessionId, target_session_id: spec.target.sessionId,
       source_connection_id: spec.source.connectionId, target_connection_id: spec.target.connectionId,
