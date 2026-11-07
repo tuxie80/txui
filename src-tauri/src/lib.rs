@@ -914,6 +914,8 @@ pub fn run() {
             refresh_spec_save,
             refresh_preflight,
             refresh_mask_apply,
+            commands::refresh::execute::refresh_execute,
+            commands::refresh::execute::refresh_cancel,
             // audit log
             audit_insert,
             audit_list,

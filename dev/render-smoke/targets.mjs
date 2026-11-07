@@ -546,6 +546,21 @@ export function namedTargets(fixtures) {
           { source_schema: 'shop', target_schema: 'shop', table: 'orders', empty: true },
           { source_schema: 'shop', target_schema: 'shop', table: 'events', empty: true },
         ] }),
+        refresh_execute: args => {
+          const runKey = args.input.run_key;
+          args.onEvent.onmessage?.({ type: 'started', run_key: runKey, source_backend_id: 41, target_backend_id: 42 });
+          args.onEvent.onmessage?.({
+            type: 'progress', run_key: runKey, phase: 'copying', table_index: 3, table_count: 3,
+            requested_rows: 0, closure_rows: 0, planned_rows: 0, committed_rows: 0,
+            in_flight_rows: 0, remaining_rows: 0, chunks_committed: 0, elapsed_ms: 2,
+          });
+          args.onEvent.onmessage?.({
+            type: 'done', run_key: runKey, status: 'completed', table_index: 3, table_count: 3,
+            requested_rows: 0, closure_rows: 0, planned_rows: 0, committed_rows: 0,
+            in_flight_rows: 0, remaining_rows: 0, chunks_committed: 0, elapsed_ms: 2,
+          });
+          return { status: 'completed', committed_rows: 0, in_flight_rows: 0, remaining_rows: 0 };
+        },
       },
       props: {
         session: { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
@@ -575,6 +590,7 @@ export function namedTargets(fixtures) {
         if (testCase.rustMask) {
           await click('Verify Rust masking');
           await click('Check target empty');
+          await click('Run Refresh');
         }
       },
       assert: ({ html, calls }) => {
@@ -610,6 +626,12 @@ export function namedTargets(fixtures) {
             if (JSON.stringify(rustCall.args).includes('private-row')) return 'Rust payload contains a planted row value';
             if (!calls.some(call => call.cmd === 'refresh_preflight')) return 'target preflight was not invoked';
             if (!html.includes('Target preflight passed: 3 selected tables are empty')) return 'target-empty result was not rendered';
+            const executeCall = calls.find(call => call.cmd === 'refresh_execute');
+            if (!executeCall) return 'Refresh executor was not invoked after preflight';
+            if (JSON.stringify(executeCall.args).includes('private-row')) return 'execution payload contains a planted row value';
+            if (!html.includes('Snapshot execution · completed')) return 'terminal execution progress was not rendered';
+            if (!html.includes('0 committed') || !html.includes('0 in flight') || !html.includes('0 remaining')) return 'honest execution counters were not rendered';
+            if (!html.includes('target backend 42')) return 'target backend identity was not rendered';
           }
           if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id`'))) return 'row-set planning did not use source key-only queries';
         }

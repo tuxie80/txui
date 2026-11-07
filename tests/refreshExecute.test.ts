@@ -1,0 +1,130 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { analyzeRefreshCatalog } from '../src/utils/refreshCatalog.ts';
+import { buildRefreshExecutionPlan } from '../src/utils/refreshExecution.ts';
+import { applyRefreshExecutionEvent, buildRefreshExecutionInput, initialRefreshProgress } from '../src/utils/refreshExecute.ts';
+import { buildRefreshMaskPlan } from '../src/utils/refreshMask.ts';
+import { planRefreshRowSets } from '../src/utils/refreshRowSets.ts';
+import { createDefaultRefreshSpec } from '../src/utils/refreshSpec.ts';
+import type { CatalogColumn, CatalogFk, CatalogIndex, CatalogTable, SchemaSnapshot } from '../src/utils/schemaRules.ts';
+
+function column(table: string, name: string, generated = false): CatalogColumn {
+  return {
+    table, name, dataType: name === 'email' ? 'varchar' : 'int', columnType: name === 'email' ? 'varchar(64)' : 'int',
+    nullable: false, defaultValue: null, extra: generated ? 'STORED GENERATED' : '',
+    charset: name === 'email' ? 'utf8mb4' : null, collation: name === 'email' ? 'utf8mb4_0900_ai_ci' : null,
+    charMaxLen: name === 'email' ? 64 : null, generationExpression: generated ? "concat(`email`,'!')" : null, comment: '',
+  };
+}
+
+function table(name: string): CatalogTable {
+  return { name, engine: 'InnoDB', collation: null, rows: 10, dataBytes: 1000, indexBytes: 100, autoIncrement: null, comment: '' };
+}
+
+function index(table: string, name = 'PRIMARY', columnName = 'id'): CatalogIndex {
+  return { table, name, unique: true, type: 'BTREE', columns: [{ name: columnName, seq: 1, subPart: null, cardinality: 10 }] };
+}
+
+function snapshot(schema: string): SchemaSnapshot {
+  return {
+    engine: 'mysql', schema, serverCharset: null, serverCollation: null, schemaCharset: null, schemaCollation: null,
+    tables: [table('parents'), table('children')],
+    columns: [
+      column('parents', 'id'), column('parents', 'email'), column('parents', 'computed', true),
+      column('children', 'id'), column('children', 'parent_id'),
+    ],
+    indexes: [index('parents'), index('parents', 'uq_email', 'email'), index('children')],
+    foreignKeys: [{
+      name: 'fk_parent', schema, table: 'children', column: 'parent_id', refSchema: schema,
+      refTable: 'parents', refColumn: 'id', ordinal: 1, onDelete: 'NO ACTION', onUpdate: 'NO ACTION',
+    } satisfies CatalogFk],
+  };
+}
+
+async function fixture() {
+  const spec = createDefaultRefreshSpec({
+    source: { connectionId: '00000000-0000-4000-8000-000000000011', sessionId: '00000000-0000-4000-8000-000000000001' },
+    schema: 'source', cutoffUtc: '2026-11-06T12:00:00.000Z',
+  });
+  spec.target = { connectionId: '00000000-0000-4000-8000-000000000022', sessionId: '00000000-0000-4000-8000-000000000002' };
+  spec.schemaMappings = [{ source: 'source', target: 'target' }];
+  spec.tables = [{ table: 'children', policy: 'full' }];
+  spec.masks = [{ table: 'parents', column: 'email', rule: 'hash' }];
+  spec.acknowledgeUnmaskedSensitive = true;
+  const catalog = analyzeRefreshCatalog({ spec, source: [snapshot('source')], target: [snapshot('target')] });
+  assert.equal(catalog.complete, true);
+  const rowSets = await planRefreshRowSets({
+    spec, catalog,
+    runGrid: async (_sessionId, sql) => sql.includes('__txui_refresh_selection')
+      ? { columns: ['id', 'parent_id'], rows: [[2, 1]], truncated: false }
+      : { columns: ['id', 'email'], rows: [[1, 'private@example.test']], truncated: false },
+  });
+  assert.equal(rowSets.fixedPoint, true);
+  const executionPlan = buildRefreshExecutionPlan({ spec, catalog, rowSets });
+  assert.equal(executionPlan.executable, true);
+  const maskPlan = buildRefreshMaskPlan({ spec, catalog });
+  assert.equal(maskPlan.complete, true);
+  return { spec, catalog, executionPlan, maskPlan };
+}
+
+test('execution input carries qualified dependency mappings and no application rows', async () => {
+  const current = await fixture();
+  const input = buildRefreshExecutionInput({
+    ...current, runKey: '00000000-0000-4000-8000-000000000099', productionConfirmation: null,
+  }) as unknown as {
+    tables: {
+      source_schema: string; target_schema: string; table: string; action: string; root_sql: string | null;
+      columns: { name: string; generation_expression: string | null }[];
+    }[];
+    mask: { rows: unknown[] }; preflight: { spec_sha256: string }; expected_row_set_sha256: string;
+  };
+  assert.equal(input.tables.length, 2);
+  assert.deepEqual(input.tables.map(table => `${table.source_schema}.${table.table}`), ['source.parents', 'source.children']);
+  assert.equal(input.tables[0].target_schema, 'target');
+  assert.equal(input.tables[0].root_sql, null);
+  assert.equal(input.tables[0].action, 'dependency');
+  assert.equal(input.tables[1].root_sql, 'SELECT `id`, `parent_id` FROM `source`.`children`');
+  assert.equal(input.tables[0].columns.find(column => column.name === 'computed')?.generation_expression, "concat(`email`,'!')");
+  assert.deepEqual(input.mask.rows, []);
+  assert.equal(input.preflight.spec_sha256, current.executionPlan.specSha256);
+  assert.equal(input.expected_row_set_sha256, current.executionPlan.rowSetSha256);
+  assert.equal(JSON.stringify(input).includes('private@example.test'), false);
+});
+
+test('execution input refuses mismatched evidence before invoking a backend', async () => {
+  const current = await fixture();
+  const maskPlan = { ...current.maskPlan, catalogSha256: '0'.repeat(64) };
+  assert.throws(() => buildRefreshExecutionInput({
+    ...current, maskPlan, runKey: '00000000-0000-4000-8000-000000000099', productionConfirmation: null,
+  }), /different specification or catalog hashes/);
+});
+
+test('progress keeps committed, in-flight and remaining rows distinct through uncertain completion', () => {
+  let state = initialRefreshProgress();
+  state = applyRefreshExecutionEvent(state, { type: 'started', run_key: 'run', source_backend_id: 10, target_backend_id: 20 });
+  state = applyRefreshExecutionEvent(state, {
+    type: 'progress', run_key: 'run', phase: 'copying', table: 'source.children', table_index: 2, table_count: 2,
+    requested_rows: 80, closure_rows: 20, planned_rows: 100, key_rows_read: 100,
+    source_rows_read: 40, committed_rows: 40, in_flight_rows: 10, remaining_rows: 60,
+    chunks_committed: 4, source_bytes_read: 5000, target_bytes_written: 3000, elapsed_ms: 1200,
+  });
+  assert.equal(state.phase, 'copying');
+  assert.equal(state.sourceBackendId, 10);
+  assert.equal(state.targetBackendId, 20);
+  assert.equal(state.committedRows, 40);
+  assert.equal(state.inFlightRows, 10);
+  assert.equal(state.remainingRows, 60);
+  state = applyRefreshExecutionEvent(state, {
+    type: 'done', run_key: 'run', status: 'uncertain', table_index: 2, table_count: 2,
+    requested_rows: 80, closure_rows: 20, planned_rows: 100, committed_rows: 40,
+    in_flight_rows: 10, remaining_rows: 60, chunks_committed: 4, elapsed_ms: 1250,
+    error: 'commit outcome uncertain',
+  });
+  assert.equal(state.phase, 'done');
+  assert.equal(state.status, 'uncertain');
+  assert.equal(state.committedRows, 40);
+  assert.equal(state.inFlightRows, 10);
+  assert.equal(state.remainingRows, 60);
+  assert.equal(state.elapsedMs, 1250);
+  assert.equal(state.error, 'commit outcome uncertain');
+});

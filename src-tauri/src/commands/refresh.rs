@@ -1,5 +1,6 @@
-//! Safe Environment Refresh specification files. No database connection is used:
-//! JSON validation lives in the pure frontend `refreshSpec.ts` contract.
+//! Safe Environment Refresh specifications, masking, preflight and snapshot execution.
+//! JSON validation lives in the pure frontend `refreshSpec.ts` contract; target writes
+//! exist only in the dedicated guarded `execute` submodule.
 
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -462,8 +463,18 @@ fn sensitive(name: &str) -> bool {
     ].iter().any(|part| name.contains(part))
 }
 
+pub mod execute;
+
 #[tauri::command]
 pub async fn refresh_mask_apply(input: RefreshMaskBatchInput) -> Result<RefreshMaskBatchResponse, crate::apperror::AppError> {
+    let mut seen = HashSet::new();
+    refresh_mask_apply_tracked(input, &mut seen).await
+}
+
+async fn refresh_mask_apply_tracked(
+    input: RefreshMaskBatchInput,
+    seen: &mut HashSet<String>,
+) -> Result<RefreshMaskBatchResponse, crate::apperror::AppError> {
     let started = Instant::now();
     if input.rows.len() > MAX_MASK_BATCH_ROWS {
         return Err(bad_request("refresh mask batch exceeds the 10000-row limit"));
@@ -538,7 +549,6 @@ pub async fn refresh_mask_apply(input: RefreshMaskBatchInput) -> Result<RefreshM
         }
     }
     let mut output = Vec::with_capacity(input.rows.len());
-    let mut seen = HashSet::new();
     let mut masked_cells = 0_u64;
     for row in &input.rows {
         let table = tables.get(&row.table).ok_or_else(|| bad_request(format!("{} has no catalog table", row.table)))?;
@@ -922,7 +932,7 @@ mod tests {
         pool.close().await;
     }
 
-    async fn refresh_live_node(args: &[String], input: Option<serde_json::Value>) -> serde_json::Value {
+    pub(super) async fn refresh_live_node(args: &[String], input: Option<serde_json::Value>) -> serde_json::Value {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let mut command = tokio::process::Command::new("node");
         command

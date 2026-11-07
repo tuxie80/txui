@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import type { QueryResult, Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
@@ -18,7 +18,12 @@ import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
 import { buildRefreshExecutionPlan } from '../utils/refreshExecution';
 import { buildRefreshMaskPlan } from '../utils/refreshMask';
 import { analyzeRefreshMaskSafety } from '../utils/refreshMaskSafety';
+import {
+  applyRefreshExecutionEvent, buildRefreshExecutionInput, initialRefreshProgress,
+} from '../utils/refreshExecute';
+import type { RefreshExecutionEvent } from '../utils/refreshExecute';
 import { errorDisplay } from '../utils/appError';
+import { clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity';
 import { StatusIcon } from './StatusIcon';
 
 interface Props {
@@ -85,6 +90,31 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const [productionConfirmation, setProductionConfirmation] = useState('');
   const analysisGeneration = useRef(0);
   const [logs, setLogs] = useState<string[]>(['Specification only — no catalog reads or database writes have run.']);
+  const [running, setRunning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [progress, setProgress] = useState(initialRefreshProgress);
+  const runKeyRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const activityKey = panelTabKey(session.sessionId, 'refresh');
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!running) { clearTabActivities(activityKey); return; }
+    setActivity(activityKey, {
+      id: 'refresh-execute',
+      label: cancelling ? 'Cancelling environment refresh' : `Environment refresh · ${progress.phase}`,
+      detail: `${progress.table ?? 'preparing snapshot'} · ${progress.committedRows.toLocaleString()} committed · ${progress.inFlightRows.toLocaleString()} in flight · ${progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining`,
+      threads: progress.targetBackendId === null ? undefined : [progress.targetBackendId],
+      survives: true,
+      kill: () => {
+        if (runKeyRef.current) void invoke('refresh_cancel', { runKey: runKeyRef.current }).catch(() => {});
+      },
+    });
+  }, [activityKey, running, cancelling, progress]);
 
   const validationError = useMemo(() => {
     try {
@@ -112,6 +142,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   }, [spec]);
 
   const patch = (change: (current: RefreshSpec) => RefreshSpec) => {
+    if (running) return;
     analysisGeneration.current += 1;
     setSpec(change);
     setConfirmed(false);
@@ -365,6 +396,69 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     }
   };
 
+  const runRefresh = async () => {
+    if (!analysis || !executionPlan?.executable || !maskPlan?.complete || !maskSafety?.complete || !preflightReport || running) return;
+    const targetSession = candidates.find(candidate => candidate.sessionId === spec.target.sessionId);
+    const runKey = crypto.randomUUID();
+    let finished = false;
+    try {
+      if (targetSession?.environment === 'prod' && (!isProdAcked(targetSession.connectionId) || productionConfirmation !== 'I understand — production')) {
+        throw new Error('production target requires its current acknowledgment and exact typed confirmation');
+      }
+      const input = buildRefreshExecutionInput({
+        spec, catalog: analysis, executionPlan, maskPlan, runKey,
+        productionConfirmation: targetSession?.environment === 'prod' ? productionConfirmation : null,
+      });
+      runKeyRef.current = runKey;
+      finished = false;
+      setRunning(true);
+      setCancelling(false);
+      setFileError(null);
+      setProgress({ ...initialRefreshProgress(), runKey, phase: 'starting' });
+      setLogs(current => [...current, 'Refresh starting: one consistent source snapshot, a separate target connection, bounded chunk commits. Committed target chunks cannot be rolled back as one operation.']);
+      const channel = new Channel<RefreshExecutionEvent>();
+      channel.onmessage = event => {
+        if (runKeyRef.current !== runKey) return;
+        if (mountedRef.current) setProgress(current => applyRefreshExecutionEvent(current, event));
+        if (event.type === 'done') {
+          finished = true;
+          clearTabActivities(activityKey);
+          if (!mountedRef.current) return;
+          setRunning(false);
+          setCancelling(false);
+          const status = event.status ?? 'failed';
+          if (event.error) setFileError(event.error);
+          setLogs(current => [...current,
+            `Refresh ${status}: ${event.requested_rows ?? 'unknown'} requested + ${event.closure_rows ?? 'unknown'} closure = ${event.planned_rows ?? 'unknown'} planned; ${event.committed_rows ?? 0} committed, ${event.in_flight_rows ?? 0} in flight, ${event.remaining_rows ?? 'unknown'} remaining; ${event.chunks_committed ?? 0} committed chunks. ${status === 'completed' ? 'Target writes completed; post-copy verification is a separate later phase.' : 'No whole-run rollback or success is claimed.'}`]);
+        }
+      };
+      await invoke('refresh_execute', { input, onEvent: channel });
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setRunning(false);
+      setCancelling(false);
+      if (!finished) {
+        const message = errorDisplay(error);
+        setFileError(message);
+        setProgress(current => applyRefreshExecutionEvent(current, {
+          type: 'done', run_key: runKey, status: current.inFlightRows > 0 ? 'uncertain' : 'failed', error: message,
+        }));
+        setLogs(current => [...current, `Refresh failed before a terminal backend event: ${message}`]);
+      }
+    }
+  };
+
+  const cancelRefresh = async () => {
+    if (!runKeyRef.current || !running || cancelling) return;
+    setCancelling(true);
+    try {
+      await invoke('refresh_cancel', { runKey: runKeyRef.current });
+    } catch (error) {
+      setCancelling(false);
+      setFileError(errorDisplay(error));
+    }
+  };
+
   return (
     <div className="proc-panel">
       <div className="proc-toolbar">
@@ -372,8 +466,8 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         <span className="dv-desc">{session.connectionName}</span>
         <span className="dv-desc">Specification v1</span>
         <div style={{ flex: 1 }} />
-        <button className="toolbar-btn" disabled={!!unavailable} onClick={() => void importSpec()}>Import JSON…</button>
-        <button className="toolbar-btn" disabled={!!unavailable || !!validationError} title={validationError ?? 'Export deterministic, secret-free JSON'} onClick={() => void exportSpec()}>Export JSON…</button>
+        <button className="toolbar-btn" disabled={running || !!unavailable} onClick={() => void importSpec()}>Import JSON…</button>
+        <button className="toolbar-btn" disabled={running || !!unavailable || !!validationError} title={validationError ?? 'Export deterministic, secret-free JSON'} onClick={() => void exportSpec()}>Export JSON…</button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
       <div className="dg-body">
@@ -386,35 +480,39 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 <h3>Endpoint hints and reconfirmation</h3>
                 <p className="dv-desc">Source and target must be different open MySQL/MariaDB sessions. Imported IDs are hints only. Confirmation belongs to this editor and is never exported.</p>
                 <label className="dg-field-inline"><span>Source session</span>
-                  <select className="toolbar-select" value={spec.source.sessionId ?? ''} onChange={event => selectEndpoint('source', event.target.value)}>
+                  <select className="toolbar-select" disabled={running} value={spec.source.sessionId ?? ''} onChange={event => selectEndpoint('source', event.target.value)}>
                     <option value="">— choose source —</option>
                     {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'}</option>)}
                   </select>
                 </label>
                 <label className="dg-field-inline"><span>Target session</span>
-                  <select className="toolbar-select" value={spec.target.sessionId ?? ''} onChange={event => selectEndpoint('target', event.target.value)}>
+                  <select className="toolbar-select" disabled={running} value={spec.target.sessionId ?? ''} onChange={event => selectEndpoint('target', event.target.value)}>
                     <option value="">— choose target —</option>
                     {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'}</option>)}
                   </select>
                 </label>
                 <div className="row-actions">
-                  <button className="primary" disabled={confirmed || !!validationError || analyzing} title={validationError ?? 'Reconfirm both endpoints for this editor only'} onClick={confirmEndpoints}>
+                  <button className="primary" disabled={running || confirmed || !!validationError || analyzing} title={validationError ?? 'Reconfirm both endpoints for this editor only'} onClick={confirmEndpoints}>
                     {confirmed ? '✓ Endpoints reconfirmed' : 'Reconfirm source and target'}
                   </button>
-                  <button className="toolbar-btn" disabled={!confirmed || !!validationError || analyzing || planningRows} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
+                  <button className="toolbar-btn" disabled={running || !confirmed || !!validationError || analyzing || planningRows} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
                     {analyzing ? 'Analyzing catalogs…' : 'Analyze catalogs'}
                   </button>
-                  <button className="toolbar-btn" disabled={!analysis?.complete || analyzing || planningRows || planningRust} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
+                  <button className="toolbar-btn" disabled={running || !analysis?.complete || analyzing || planningRows || planningRust} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
                     {planningRows ? 'Planning row sets…' : 'Plan row sets'}
                   </button>
-                  <button className="toolbar-btn" disabled={!maskSafety?.complete || !executionPlan?.executable || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Apply masks in Rust to a bounded first-page batch; no target writes and no row values displayed'} onClick={() => void verifyRustMasking()}>
+                  <button className="toolbar-btn" disabled={running || !maskSafety?.complete || !executionPlan?.executable || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Apply masks in Rust to a bounded first-page batch; no target writes and no row values displayed'} onClick={() => void verifyRustMasking()}>
                     {planningRust ? 'Verifying Rust masking…' : 'Verify Rust masking'}
                   </button>
-                  <button className="toolbar-btn" disabled={!maskSafety?.complete || !executionPlan?.executable || planningPreflight || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Run backend target safety and emptiness checks; no writes'} onClick={() => void checkTargetEmpty()}>
+                  <button className="toolbar-btn" disabled={running || !maskSafety?.complete || !executionPlan?.executable || planningPreflight || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Run backend target safety and emptiness checks; no writes'} onClick={() => void checkTargetEmpty()}>
                     {planningPreflight ? 'Checking target…' : 'Check target empty'}
                   </button>
+                  <button className="primary" disabled={running || !preflightReport || !maskSafety?.complete || !executionPlan?.executable} title={!preflightReport ? 'Run target-empty preflight first' : 'Recompute closure in one consistent source snapshot, then commit bounded target chunks'} onClick={() => void runRefresh()}>
+                    {running ? 'Refresh running…' : 'Run Refresh'}
+                  </button>
+                  {running && <button className="toolbar-btn" disabled={cancelling} onClick={() => void cancelRefresh()}>{cancelling ? 'Cancelling…' : 'Cancel Refresh'}</button>}
                 </div>
-                {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? 'Catalog proof is current for this specification; no execution is available.' : 'No catalog read or write has run.'}</p>}
+                {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? running ? 'Specification is locked while the snapshot executor is running.' : 'Catalog proof is current for this specification; execution still requires fresh preflight.' : 'No catalog read or write has run.'}</p>}
                 {candidates.find(candidate => candidate.sessionId === spec.target.sessionId)?.environment === 'prod' && (
                   <label className="dg-field-inline"><span>Type exactly: I understand — production</span>
                     <input value={productionConfirmation} onChange={event => { setProductionConfirmation(event.target.value); setPreflightReport(null); }} placeholder="I understand — production" />
@@ -636,13 +734,24 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 </section>
               )}
 
+              {progress.phase !== 'idle' && (
+                <section aria-label="Refresh execution progress">
+                  <h3>Snapshot execution · {progress.status ?? progress.phase}</h3>
+                  <p className="dv-desc">Table {progress.tableIndex}/{progress.tableCount || '—'} · {progress.table ?? 'preparing dedicated connections'} · elapsed {progress.elapsedMs.toLocaleString()} ms. No fake ETA.</p>
+                  <p className="dv-desc">Requested {progress.requestedRows?.toLocaleString() ?? 'unknown'} + closure {progress.closureRows?.toLocaleString() ?? 'unknown'} = planned {progress.plannedRows?.toLocaleString() ?? 'unknown'} · key rows read {progress.keyRowsRead.toLocaleString()} · full rows read {progress.sourceRowsRead.toLocaleString()}.</p>
+                  <p className="dv-desc"><b>{progress.committedRows.toLocaleString()} committed</b> · {progress.inFlightRows.toLocaleString()} in flight · {progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining · {progress.chunksCommitted.toLocaleString()} committed chunks.</p>
+                  <p className="dv-desc">Source bytes read {progress.sourceBytesRead.toLocaleString()} · committed outbound SQL bytes {progress.targetBytesWritten.toLocaleString()} · source backend {progress.sourceBackendId ?? 'pending'} · target backend {progress.targetBackendId ?? 'pending'}.</p>
+                  {progress.status && <div className={progress.status === 'completed' ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}><StatusIcon kind={progress.status === 'completed' ? 'ok' : 'error'} /><span>{progress.status === 'completed' ? 'Copy completed. Exact count, orphan and content-hash verification are not part of this phase.' : progress.status === 'uncertain' ? 'A target outcome is uncertain. In-flight rows are not counted as committed or rolled back; inspect the target before any retry.' : 'The run stopped. Already committed chunks remain; no whole-run rollback is claimed.'}</span></div>}
+                </section>
+              )}
+
               {executionPlan && (
                 <section>
                   <h3>Deterministic execution plan</h3>
                   <p className="dv-desc">Catalog SHA-256: {executionPlan.catalogSha256} · row-set SHA-256: {executionPlan.rowSetSha256} · {executionPlan.blockers.length} blockers. Exact first-page SQL and unique keyset boundaries; OFFSET is never used.</p>
                   <div className={executionPlan.executable ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
                     <StatusIcon kind={executionPlan.executable ? 'ok' : 'error'} />
-                    <span>{executionPlan.executable ? 'Execution plan is deterministic and schema-bound. Execution remains unavailable.' : 'Execution plan is blocked by incomplete proof or insertion-order constraints.'}</span>
+                    <span>{executionPlan.executable ? 'Execution plan is deterministic and schema-bound. Run requires current mask safety and target-empty preflight.' : 'Execution plan is blocked by incomplete proof or insertion-order constraints.'}</span>
                   </div>
                   {executionPlan.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
                   {executionPlan.insertionOrder.length > 0 && <p className="dv-desc">Insertion order: {executionPlan.insertionOrder.map((table, index) => `${index + 1}. ${table}`).join(' · ')}</p>}
@@ -678,7 +787,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 <h3>Specification status</h3>
                 {validationError
                   ? <div className="mnt-warn"><StatusIcon kind="error" /><span>{validationError}</span></div>
-                  : <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Valid secret-free specification. Execution is not available yet.</span></div>}
+                  : <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Valid secret-free specification. Execution requires current catalog, closure, mask and target-empty proofs.</span></div>}
                 {fileError && <div className="proc-error-bar">{fileError}</div>}
                 <div className="sqp-log">{logs.map((line, index) => <div key={index} className="sqp-log-line">{line}</div>)}</div>
                 <textarea className="sqp-sql" readOnly value={json} aria-label="Refresh specification JSON" spellCheck={false} />
