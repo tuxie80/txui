@@ -431,6 +431,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   {rowSetPlan && (
                     <>
                       <p className="dv-desc">Requested {rowSetPlan.totals.requested ?? 'unknown'} + closure {rowSetPlan.totals.closureAdded ?? 'unknown'} = final {rowSetPlan.totals.final ?? 'unknown'} · {rowSetPlan.sourceQueries} key-only queries · {rowSetPlan.sourceRowsRead} key rows read · {rowSetPlan.iterations} closure iterations · {rowSetPlan.blockers.length} blockers. Keys and FK values are not shown or logged.</p>
+                      <p className="dv-desc">Memory: peak retained keys {rowSetPlan.memory.peakRetainedKeys.toLocaleString()} / {rowSetPlan.memory.maxPlanningKeys.toLocaleString()} · peak frontier rows {rowSetPlan.memory.peakFrontierRows.toLocaleString()} / {rowSetPlan.memory.planningKeyBatch.toLocaleString()} · peak query buffer {rowSetPlan.memory.peakBufferedRows.toLocaleString()} / {rowSetPlan.memory.planningKeyBatch.toLocaleString()} · full-root keys retained 0.</p>
                       <div className={rowSetPlan.fixedPoint ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
                         <StatusIcon kind={rowSetPlan.fixedPoint ? 'ok' : 'error'} />
                         <span>{rowSetPlan.fixedPoint ? 'Fixed-point row-set plan complete. No target writes or execution have occurred.' : 'Row-set plan is incomplete or blocked; totals are not executable.'}</span>

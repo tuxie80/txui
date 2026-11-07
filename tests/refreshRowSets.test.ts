@@ -96,8 +96,17 @@ function gridRunner(
       if (!match) throw new Error(`unrecognized parent query ${sql}`);
       const refs = [...match[1].matchAll(/`([^`]+)`/g)].map(item => item[1]);
       const wanted = [...match[2].matchAll(/\(([^)]*)\)/g)].map(item => item[1].split(', ').map(literal));
-      rows = datasets[relation].filter(row => wanted.some(values => refs.every((ref, at) => row[ref] === values[at])));
+      const sourceRows = sql.includes('__txui_refresh_membership') ? rootRows[relation] : datasets[relation];
+      rows = sourceRows.filter(row => wanted.some(values => refs.every((ref, at) => row[ref] === values[at])));
     }
+    const after = /WHERE \(([^)]+)\) > \((.*)\) ORDER BY/.exec(sql);
+    if (after) {
+      const refs = [...after[1].matchAll(/`([^`]+)`/g)].map(item => item[1]);
+      const values = after[2].split(', ').map(literal);
+      rows = rows.filter(row => refs.every((ref, at) => (row[ref] ?? 0) > (values[at] ?? 0)));
+    }
+    const limit = / LIMIT (\d+)$/.exec(sql);
+    if (limit) rows = rows.slice(0, Number(limit[1]));
     return { columns, rows: rows.map(row => columns.map(name => row[name] ?? null)) };
   };
   return { queries, runGrid };
@@ -141,8 +150,11 @@ test('last-7-day child + limited parent + last-1-day sibling reaches exact expla
   ]);
   assert.ok(result.tables[1].notes[0].includes("outside this table's own selection"));
   assert.ok(result.tables[1].notes.some(note => note.includes('exceeds the soft selection limit 1 by 1')));
-  assert.equal(result.sourceQueries, 4);
-  assert.equal(result.sourceRowsRead, 4);
+  assert.equal(result.sourceQueries, 7);
+  assert.equal(result.sourceRowsRead, 6);
+  assert.equal(result.memory.fullRootKeysRetained, 0);
+  assert.ok(result.memory.peakRetainedKeys <= result.memory.maxPlanningKeys);
+  assert.ok(result.memory.peakBufferedRows <= result.memory.planningKeyBatch);
   assert.deepEqual([...sessions], ['source-session']);
   assert.ok(runner.queries.every(sql => !sql.includes('SELECT *')));
   assert.ok(!JSON.stringify(result).includes('2026-11-05'));
@@ -206,8 +218,8 @@ test('two-table cycles terminate at a fixed point with bounded parent batches', 
   const result = await planRefreshRowSets({ spec: value, catalog: catalogWithSpec(source, value), runGrid: runner.runGrid });
   assert.deepEqual(result.blockers, []);
   assert.deepEqual(result.totals, { requested: 1, closureAdded: 3, final: 4 });
-  assert.equal(result.iterations, 3);
-  assert.equal(result.sourceQueries, 4);
+  assert.equal(result.iterations, 5);
+  assert.equal(result.sourceQueries, 8);
   assert.equal(result.fixedPoint, true);
 });
 
@@ -220,7 +232,38 @@ test('self references add their ancestors and stop at NULL', async () => {
   const result = await planRefreshRowSets({ spec: spec(policies), catalog: catalog(source, policies), runGrid: runner.runGrid });
   assert.deepEqual(result.blockers, []);
   assert.deepEqual(result.totals, { requested: 1, closureAdded: 1, final: 2 });
-  assert.equal(result.sourceQueries, 2);
+  assert.equal(result.sourceQueries, 3);
+});
+
+test('full roots stream bounded keyset pages without consuming the retained-key cap', async () => {
+  const policies: RefreshTablePolicy[] = [{ table: 'parents', policy: 'full' }];
+  const value = spec(policies);
+  value.limits.planningKeyBatch = 2;
+  value.limits.maxPlanningKeys = 1;
+  const source = snapshot('source', [{ name: 'parents', columns: ['id'], key: ['id'] }]);
+  const runner = gridRunner({ parents: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }] });
+  const result = await planRefreshRowSets({ spec: value, catalog: catalogWithSpec(source, value), runGrid: runner.runGrid });
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(result.totals, { requested: 5, closureAdded: 0, final: 5 });
+  assert.equal(result.sourceQueries, 3);
+  assert.equal(result.memory.fullRootKeysRetained, 0);
+  assert.equal(result.memory.peakBufferedRows, 2);
+  assert.equal(result.memory.peakRetainedKeys, 0);
+});
+
+test('a repeated keyset page is blocked instead of looping without a bound', async () => {
+  const policies: RefreshTablePolicy[] = [{ table: 'parents', policy: 'full' }];
+  const value = spec(policies);
+  value.limits.planningKeyBatch = 1;
+  const source = snapshot('source', [{ name: 'parents', columns: ['id'], key: ['id'] }]);
+  let queries = 0;
+  const result = await planRefreshRowSets({
+    spec: value, catalog: catalogWithSpec(source, value),
+    runGrid: async () => { queries += 1; return { columns: ['id'], rows: [[1]] }; },
+  });
+  assert.equal(queries, 2);
+  assert.equal(result.fixedPoint, false);
+  assert.ok(result.blockers[0].includes('repeated a keyset page'));
 });
 
 test('missing parents, key caps and generate policies never produce an executable plan', async () => {
@@ -243,7 +286,7 @@ test('missing parents, key caps and generate policies never produce an executabl
   capped.limits.maxPlanningKeys = 1;
   const overCap = await planRefreshRowSets({
     spec: capped, catalog: catalogWithSpec(source, capped),
-    runGrid: gridRunner({ parents: [{ id: 2 }], children: [{ id: 1, parent_id: 2 }, { id: 2, parent_id: null }] }).runGrid,
+    runGrid: gridRunner({ parents: [{ id: 2 }, { id: 3 }], children: [{ id: 1, parent_id: 2 }, { id: 2, parent_id: 3 }] }).runGrid,
   });
   assert.ok(overCap.blockers[0].includes('key cap'));
   assert.equal(overCap.fixedPoint, false);

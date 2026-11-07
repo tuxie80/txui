@@ -531,7 +531,7 @@ export function namedTargets(fixtures) {
             names.map(name => [name, 'PRIMARY', 0, 1, 'id', null, 0, 'BTREE']));
           if (sql.includes('KEY_COLUMN_USAGE')) return fixtures.queryResult(
             ['CONSTRAINT_NAME', 'TABLE_SCHEMA', 'TABLE_NAME', 'COLUMN_NAME', 'REFERENCED_TABLE_SCHEMA', 'REFERENCED_TABLE_NAME', 'REFERENCED_COLUMN_NAME', 'ORDINAL_POSITION', 'DELETE_RULE', 'UPDATE_RULE'], []);
-          if (/^SELECT `id` FROM `shop`\./.test(sql)) return fixtures.queryResult(['id'], []);
+          if (sql.startsWith('SELECT `id`') && sql.includes('FROM `shop`.')) return fixtures.queryResult(['id'], []);
           throw new Error(`unexpected Refresh query: ${sql}`);
         },
       },

@@ -340,10 +340,11 @@
     "Inspect the read-only plan: exact SQL, schema targets, action counts, spec hash, blockers and explicitly unavailable row estimates",
     "Analyze source and target metadata: composite/nullable/self/cyclic FKs, required parents, source and target unique keys, generated expressions, exact columns/types/collations and target foreign keys",
     "Plan row sets with source unique-key/FK-column reads only; review exact requested + closure-added = final counts, iterations and blockers without exposing key values",
-    "Choose soft limits that allow reported FK-closure overflow or hard maximums that reject overflow without pruning dependent rows"
+    "Choose soft limits that allow reported FK-closure overflow or hard maximums that reject overflow without pruning dependent rows",
+    "Inspect bounded planning memory: keyset root pages, zero retained full-root keys, capped closure identities, recent-parent cache, frontier rows and query buffers"
    ],
    "engines": "The specification and initial transfer contract are same-engine MySQL/MariaDB only. PostgreSQL and SQL Server have registered, explained gaps; other unsupported engines fail closed.",
-   "caveats": "Catalog analysis reads metadata only. Row-set planning reads source unique keys and FK columns only; target sessions are not queried and no rows are written. No refresh specification is executed and compatibility or fixed-point closure is not row-copy, masking or verification proof. Imported IDs are hints only. Files are limited to 2 MiB of UTF-8 JSON. Missing/truncated catalogs, missing parents, excess planning keys, hard-limit closure overflow and generate policies fail closed; target schemas/tables are never created and dependent selections are not pruned.",
+   "caveats": "Catalog analysis reads metadata only. Row-set planning reads source unique keys and FK columns only; target sessions are not queried and no rows are written. No refresh specification is executed and compatibility or fixed-point closure is not row-copy, masking or verification proof. Imported IDs are hints only. Files are limited to 2 MiB of UTF-8 JSON. Missing/truncated catalogs, missing parents, excess planning keys/frontier rows, repeated keyset pages, hard-limit closure overflow and generate policies fail closed; target schemas/tables are never created, dependent selections are not pruned and raw keys never spill to temporary files.",
    "naReason": "Not captured for the generated help set yet: the specification editor and catalog analysis have pure tests, mounted clean/blocked journeys and live MySQL/MariaDB graph verification, but no generated screenshot."
   },
   "querylab": {
