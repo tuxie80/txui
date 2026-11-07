@@ -73,6 +73,8 @@ export interface CatalogColumn {
   charset: string | null;
   collation: string | null;
   charMaxLen: number | null;
+  /** MySQL generation expression; null for an ordinary column or an old grid. */
+  generationExpression?: string | null;
   comment: string;
 }
 
@@ -116,8 +118,12 @@ export interface CatalogTable {
 
 export interface CatalogFk {
   name: string;
+  /** Child schema, needed when several mapped snapshots form one graph. */
+  schema?: string;
   table: string;
   column: string;
+  /** Referenced schema; absent in legacy single-schema grids means schema. */
+  refSchema?: string;
   refTable: string;
   refColumn: string;
   /** Position within a composite key, 1-based. */

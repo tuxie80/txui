@@ -1,14 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import type { Session } from '../types';
+import type { QueryResult, Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
+import { readRefreshCatalogAnalysis } from '../utils/refreshCatalog';
+import type { RefreshCatalogAnalysis } from '../utils/refreshCatalog';
 import {
   createDefaultRefreshSpec, parseRefreshSpecText, refreshSpecHints, serializeRefreshSpec,
 } from '../utils/refreshSpec';
 import type {
   RefreshMaskRule, RefreshSpec, RefreshTablePolicy,
 } from '../utils/refreshSpec';
+import { buildRefreshPlan } from '../utils/refreshPlan';
 import { errorDisplay } from '../utils/appError';
 import { StatusIcon } from './StatusIcon';
 
@@ -31,7 +34,7 @@ function policyFor(kind: RefreshTablePolicy['policy'], table: string, previous?:
       unit: 'days', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: new Date().toISOString(),
     };
     case 'row_limit': return { table, policy: kind, rows: 1000, orderBy: ['created_at'], direction: 'desc', tieBreaker: ['id'] };
-    case 'sample': return { table, policy: kind, rows: 1000, sampleSeed: 1 };
+    case 'sample': return { table, policy: kind, rows: 1000, sampleSeed: 1, tieBreaker: ['id'] };
     case 'predicate': return { table, policy: kind, where: 'tenant_id = 1' };
     case 'generate': return { table, policy: kind, rows: 1000, seedOffset: 0 };
   }
@@ -64,16 +67,21 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   });
   const [confirmed, setConfirmed] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [analysis, setAnalysis] = useState<RefreshCatalogAnalysis | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const analysisGeneration = useRef(0);
   const [logs, setLogs] = useState<string[]>(['Specification only — no catalog reads or database writes have run.']);
 
   const validationError = useMemo(() => {
     try {
       serializeRefreshSpec(spec);
+      buildRefreshPlan(spec);
       return null;
     } catch (error) {
       return errorDisplay(error);
     }
   }, [spec]);
+  const plan = useMemo(() => validationError ? null : analysis?.plan ?? buildRefreshPlan(spec), [spec, validationError, analysis]);
   const json = useMemo(() => {
     try {
       return serializeRefreshSpec(spec);
@@ -83,8 +91,11 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   }, [spec]);
 
   const patch = (change: (current: RefreshSpec) => RefreshSpec) => {
+    analysisGeneration.current += 1;
     setSpec(change);
     setConfirmed(false);
+    setAnalysis(null);
+    setAnalyzing(false);
     setFileError(null);
   };
   const selectEndpoint = (side: 'source' | 'target', sessionId: string) => {
@@ -110,8 +121,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
       if (!path) return;
       const text = await invoke<string>('refresh_spec_load', { path });
       const imported = refreshSpecHints(parseRefreshSpecText(text));
-      setSpec(imported);
-      setConfirmed(false);
+      patch(() => imported);
       setLogs(current => [...current,
         `Loaded ${path}. Connection IDs are hints only; both session selections were cleared. Reconfirm source and target before any future planning.`]);
     } catch (error) {
@@ -143,6 +153,33 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         `Endpoints reconfirmed for this editor only: ${spec.source.sessionId} → ${spec.target.sessionId}. Confirmation is not exported and is not execution proof.`]);
     } catch (error) {
       setFileError(errorDisplay(error));
+    }
+  };
+
+  const analyzeCatalogs = async () => {
+    const generation = ++analysisGeneration.current;
+    setAnalyzing(true);
+    setAnalysis(null);
+    setFileError(null);
+    try {
+      const result = await readRefreshCatalogAnalysis({
+        spec,
+        runGrid: async (sessionId, sql) => {
+          const query = await invoke<QueryResult>('monitor_query', { sessionId, sql });
+          return { columns: query.columns.map(column => column.name), rows: query.rows, truncated: query.truncated };
+        },
+        onLog: line => {
+          if (analysisGeneration.current === generation) setLogs(current => [...current, line]);
+        },
+      });
+      if (analysisGeneration.current !== generation) return;
+      setAnalysis(result);
+      setLogs(current => [...current,
+        `${result.complete ? 'Catalog compatibility proven' : 'Catalog analysis found blockers'}: ${result.scanned.sourceTables} source tables, ${result.scanned.targetTables} target tables, ${result.scanned.foreignKeys} foreign keys, ${result.blockers.length} blockers. No table rows were read or written.`]);
+    } catch (error) {
+      if (analysisGeneration.current === generation) setFileError(errorDisplay(error));
+    } finally {
+      if (analysisGeneration.current === generation) setAnalyzing(false);
     }
   };
 
@@ -179,11 +216,14 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   </select>
                 </label>
                 <div className="row-actions">
-                  <button className="primary" disabled={confirmed || !!validationError} title={validationError ?? 'Reconfirm both endpoints for this editor only'} onClick={confirmEndpoints}>
+                  <button className="primary" disabled={confirmed || !!validationError || analyzing} title={validationError ?? 'Reconfirm both endpoints for this editor only'} onClick={confirmEndpoints}>
                     {confirmed ? '✓ Endpoints reconfirmed' : 'Reconfirm source and target'}
                   </button>
+                  <button className="toolbar-btn" disabled={!confirmed || !!validationError || analyzing} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
+                    {analyzing ? 'Analyzing catalogs…' : 'Analyze catalogs'}
+                  </button>
                 </div>
-                {confirmed && <p className="dv-desc">Confirmed for this editor only. No catalog read, plan or write has run.</p>}
+                {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? 'Catalog proof is current for this specification; no execution is available.' : 'No catalog read or write has run.'}</p>}
               </section>
 
               <section>
@@ -244,6 +284,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                       <div className="sqp-f-evidence">
                         <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
                         <label>Sample seed <input type="number" value={table.sampleSeed} onChange={event => updatePolicy(index, { ...table, sampleSeed: numberValue(event.target.value) })} /></label>
+                        <label>Unique tie-breaker <input value={table.tieBreaker.join(',')} onChange={event => updatePolicy(index, { ...table, tieBreaker: event.target.value.split(',').map(value => value.trim()) })} /></label>
                       </div>
                     )}
                     {table.policy === 'predicate' && (
@@ -308,6 +349,50 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   </label>
                 ))}
               </section>
+
+              {analysis && (
+                <section>
+                  <h3>Catalog graph &amp; target compatibility</h3>
+                  <p className="dv-desc">{analysis.scanned.sourceSchemas} source schemas · {analysis.scanned.sourceTables} source tables · {analysis.scanned.targetTables} target tables · {analysis.scanned.foreignKeys} FKs · {analysis.scanned.selfReferences} self references · {analysis.scanned.cycles} cycles including self references · {analysis.blockers.length} blockers. Metadata only; no application rows read or written.</p>
+                  <div className={analysis.complete ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
+                    <StatusIcon kind={analysis.complete ? 'ok' : 'error'} />
+                    <span>{analysis.complete ? 'Catalog compatibility proven. This is not row-copy, masking or execution proof.' : 'Catalog compatibility is blocked; no row planning or execution may proceed.'}</span>
+                  </div>
+                  {analysis.blockers.slice(0, 200).map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                  {analysis.blockers.length > 200 && <p className="dv-desc">Showing 200 of {analysis.blockers.length} blockers; all remain blocking.</p>}
+                  {analysis.graph.foreignKeys.slice(0, 100).map(edge => (
+                    <div key={edge.key} className="sqp-f-evidence">
+                      <b>{edge.schema}.{edge.table}.{edge.name}</b> → {edge.refSchema}.{edge.refTable} · {edge.parts.map(part => `${part.column}${part.nullable ? ' NULL' : ' NOT NULL'} → ${part.refColumn}`).join(', ')}{edge.selfReference ? ' · self reference' : ''}{edge.external ? ' · parent outside loaded schemas' : ''}
+                    </div>
+                  ))}
+                  {analysis.graph.foreignKeys.length > 100 && <p className="dv-desc">Showing 100 of {analysis.graph.foreignKeys.length} foreign keys.</p>}
+                  {analysis.tables.slice(0, 200).map(table => (
+                    <div key={table.table} className="sqp-finding">
+                      <div className="sqp-f-title"><b>{table.table}</b> · {table.action}</div>
+                      <div className="sqp-f-detail">{table.source ?? 'no source'} → {table.target ?? 'no target'} · key {table.key ? `${table.key.name} (${table.key.columns.join(', ')})` : 'not proven'}</div>
+                      {table.notes.map(note => <div key={note} className="sqp-f-evidence">{note}</div>)}
+                      {table.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                    </div>
+                  ))}
+                  {analysis.tables.length > 200 && <p className="dv-desc">Showing 200 of {analysis.tables.length} selected/dependent tables.</p>}
+                </section>
+              )}
+
+              {plan && (
+                <section>
+                  <h3>Read-only plan preview</h3>
+                  <p className="dv-desc">Spec SHA-256: {plan.specSha256} · {plan.tables.filter(table => table.action === 'read').length} reads · {plan.tables.filter(table => table.action === 'generate').length} generate · {plan.tables.filter(table => table.action === 'exclude').length} excluded · {plan.blockers.length} blockers. No SQL is executed and row estimates are not available.</p>
+                  {plan.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                  {plan.tables.map(table => (
+                    <div key={table.table} className="sqp-finding">
+                      <div className="sqp-f-title"><b>{table.table}</b> · {table.action}</div>
+                      <div className="sqp-f-detail">{table.sourceSchema ?? 'unmapped'} → {table.targetSchema ?? 'unmapped'} · estimate not available</div>
+                      {table.sourceSql && <code className="sqp-f-snippet">{table.sourceSql}</code>}
+                      {table.notes.map(note => <div key={note} className="sqp-f-evidence">{note}</div>)}
+                    </div>
+                  ))}
+                </section>
+              )}
 
               <section>
                 <h3>Specification status</h3>

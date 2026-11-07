@@ -64,7 +64,7 @@ test('row limits, samples, predicates and generators validate deterministic inpu
   const spec = targeted();
   spec.tables = [
     { table: 'a', policy: 'row_limit', rows: 20, orderBy: ['created_at'], direction: 'desc', tieBreaker: ['id'] },
-    { table: 'b', policy: 'sample', rows: 10, sampleSeed: 42 },
+    { table: 'b', policy: 'sample', rows: 10, sampleSeed: 42, tieBreaker: ['id'] },
     { table: 'c', policy: 'predicate', where: 'tenant_id = 7 AND deleted_at IS NULL' },
     { table: 'd', policy: 'generate', rows: 100, seedOffset: 3 },
     { table: 'e', policy: 'exclude' },

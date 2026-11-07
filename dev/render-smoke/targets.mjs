@@ -493,9 +493,86 @@ export function namedTargets(fixtures) {
         for (const forbidden of ['confirmed', 'password', 'connectionUrl', 'queryResult', 'private-row']) {
           if (saved.args.contents.includes(forbidden)) return `exported specification contains ${forbidden}`;
         }
+        if (!html.includes('Read-only plan preview')) return 'compiled plan preview is missing';
+        if (!html.includes('SELECT * FROM `shop`.`countries`')) return 'full-table plan SQL is missing';
+        if (!html.includes('3 reads · 0 generate · 0 excluded · 0 blockers')) return 'plan action counts are missing or wrong';
         if (calls.some(call => call.cmd === 'monitor_query')) return 'specification editing unexpectedly queried a database';
       },
     },
+    ...[
+      { name: 'EnvironmentRefreshPanel_catalog_journey', missingTarget: false },
+      { name: 'EnvironmentRefreshPanel_catalog_blocked', missingTarget: true },
+    ].map(testCase => ({
+      name: testCase.name, file: 'src/components/EnvironmentRefreshPanel.tsx', tier: 'mount', settleMs: 30,
+      mock: {
+        monitor_query: ({ sessionId, sql }) => {
+          const target = sessionId === 's-target';
+          const names = ['countries', 'orders', 'events'].filter(name => !(target && testCase.missingTarget && name === 'events'));
+          if (sql.includes('information_schema.SCHEMATA')) return fixtures.queryResult(
+            ['server_charset', 'server_collation', 'server_version', 'schema_charset', 'schema_collation'],
+            [['utf8mb4', 'utf8mb4_0900_ai_ci', '8.4.0', 'utf8mb4', 'utf8mb4_0900_ai_ci']]);
+          if (sql.includes('mysql.innodb_table_stats')) return fixtures.queryResult(
+            ['table_name', 'n_rows', 'data_bytes', 'index_bytes', 'last_update'],
+            names.map(name => [name, 0, 0, 0, null]));
+          if (sql.includes('information_schema.TABLES')) return fixtures.queryResult(
+            ['TABLE_NAME', 'ENGINE', 'TABLE_COLLATION', 'AUTO_INCREMENT', 'TABLE_COMMENT'],
+            names.map(name => [name, 'InnoDB', 'utf8mb4_0900_ai_ci', null, '']));
+          if (sql.includes('information_schema.COLUMNS')) {
+            const rows = [];
+            for (const name of names) {
+              rows.push([name, 'id', 'int', 'int', 'NO', null, '', null, null, null, null, '']);
+              if (name !== 'countries') rows.push([name, 'created_at', 'datetime', 'datetime', 'NO', null, '', null, null, null, null, '']);
+            }
+            return fixtures.queryResult(
+              ['TABLE_NAME', 'COLUMN_NAME', 'DATA_TYPE', 'COLUMN_TYPE', 'IS_NULLABLE', 'COLUMN_DEFAULT', 'EXTRA', 'CHARACTER_SET_NAME', 'COLLATION_NAME', 'CHARACTER_MAXIMUM_LENGTH', 'GENERATION_EXPRESSION', 'COLUMN_COMMENT'], rows);
+          }
+          if (sql.includes('information_schema.STATISTICS')) return fixtures.queryResult(
+            ['TABLE_NAME', 'INDEX_NAME', 'NON_UNIQUE', 'SEQ_IN_INDEX', 'COLUMN_NAME', 'SUB_PART', 'CARDINALITY', 'INDEX_TYPE'],
+            names.map(name => [name, 'PRIMARY', 0, 1, 'id', null, 0, 'BTREE']));
+          if (sql.includes('KEY_COLUMN_USAGE')) return fixtures.queryResult(
+            ['CONSTRAINT_NAME', 'TABLE_SCHEMA', 'TABLE_NAME', 'COLUMN_NAME', 'REFERENCED_TABLE_SCHEMA', 'REFERENCED_TABLE_NAME', 'REFERENCED_COLUMN_NAME', 'ORDINAL_POSITION', 'DELETE_RULE', 'UPDATE_RULE'], []);
+          throw new Error(`unexpected Refresh query: ${sql}`);
+        },
+      },
+      props: {
+        session: { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
+        openSessions: [
+          { connectionId: 'c-source', sessionId: 's-source', connectionName: 'source fixture', engine: 'mysql', environment: 'dev', readOnly: true },
+          { connectionId: 'c-target', sessionId: 's-target', connectionName: 'target fixture', engine: 'mysql', environment: 'dev', readOnly: false },
+        ],
+        onClose: () => {},
+      },
+      interact: async ({ container, act }) => {
+        const click = async text => {
+          const buttons = [];
+          const walk = node => {
+            if (node.nodeName === 'BUTTON' && node.textContent.includes(text)) buttons.push(node);
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          walk(container);
+          if (!buttons[0]) throw new Error(`button not found: ${text}`);
+          await act(async () => {
+            buttons[0].dispatchEvent(new Event('click', { bubbles: true }));
+            await new Promise(resolve => setTimeout(resolve, 20));
+          });
+        };
+        await click('Reconfirm source and target');
+        await click('Analyze catalogs');
+      },
+      assert: ({ html, calls }) => {
+        const queries = calls.filter(call => call.cmd === 'monitor_query');
+        if (queries.length !== 12) return `expected 12 catalog reads, got ${queries.length}`;
+        if (queries.some(call => !/information_schema|innodb_table_stats/.test(call.args.sql))) return 'catalog analysis read application rows';
+        if (testCase.missingTarget) {
+          if (!html.includes('Catalog compatibility is blocked')) return 'missing target did not block analysis';
+          if (!html.includes('target table shop.events does not exist')) return 'missing target table was not named';
+          if (html.includes('Catalog compatibility proven')) return 'missing target produced a success badge';
+        } else {
+          if (!html.includes('Catalog compatibility proven')) return 'clean catalogs did not produce compatibility proof';
+          if (!html.includes('3 source tables · 3 target tables · 0 FKs')) return 'catalog counts are missing or wrong';
+        }
+      },
+    })),
     ...[
       { name: 'MigrationPanel', file: 'src/components/MigrationPanel.tsx', supported: ['mysql', 'postgres'], readyText: 'Review migration' },
       { name: 'EnvironmentRefreshPanel', file: 'src/components/EnvironmentRefreshPanel.tsx', supported: ['mysql'], readyText: 'Specification only' },

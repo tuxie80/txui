@@ -67,6 +67,8 @@ const NAMED_MOUNTED = [
   'App_migration_prod_handoff',
   'App_migration_handoff_tampered',
   'EnvironmentRefreshPanel_spec_journey',
+  'EnvironmentRefreshPanel_catalog_journey',
+  'EnvironmentRefreshPanel_catalog_blocked',
 ];
 
 for (const name of NAMED_MOUNTED) {

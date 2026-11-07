@@ -327,20 +327,23 @@
    "naReason": "Not captured for the generated help set yet. The complete workflow has mounted tests, disposable live-engine verification and a real-Chromium visual matrix in both themes at 1600x1000 and 1100x760 under dev/verify-shots, including full reload, long names, 316 findings, progress/cancel and production/read-only states."
   },
   "refresh": {
-   "summary": "Edit, import and export a strict, versioned, secret-free Environment Refresh specification. Configure independent table policies, frozen cutoffs, schema mappings, masks, bounded chunks and verification options. Endpoint confirmation and all planning/copying/verification remain separate from this editor checkpoint.",
-   "howToOpen": "Data menu -> Safe Environment Refresh (also native Tools -> Data). Choose two different open MySQL/MariaDB sessions as source and target.",
+   "summary": "Edit, import and export a strict, versioned, secret-free Environment Refresh specification, inspect its deterministic read-only plan, then prove the source graph and target catalog compatibility. Composite/nullable/self/cyclic foreign keys, unique keys, generated columns and exact target types are checked through metadata only. Execution remains unavailable.",
+   "howToOpen": "Data menu -> Safe Environment Refresh (also native Tools -> Data). Choose two different open MySQL/MariaDB sessions as source and target, reconfirm them, then choose Analyze catalogs.",
    "keyActions": [
-    "Choose and reconfirm different source and target sessions; any edit or import revokes confirmation",
+    "Choose and reconfirm different source and target sessions; any edit or import revokes confirmation and prior catalog analysis",
     "Map source schemas to target schemas and set a deterministic seed",
     "Configure independent full, time-window, row-limit, sample, predicate, exclude and generate table policies",
     "Set time-window column, rolling/calendar mode, amount/unit, timezone, NULL policy and exact frozen UTC cutoff",
     "Configure preserve, constant, hash and seeded fake masks plus bounded chunks/key planning and count/FK/content verification",
     "Import strict JSON with connection IDs as hints only; both session selections are cleared",
-    "Export deterministic JSON without credentials, rows or confirmation state through the atomic refresh_spec_save command"
+    "Export deterministic JSON without credentials, rows or confirmation state through the atomic refresh_spec_save command",
+    "Inspect the read-only plan: exact SQL, schema targets, action counts, spec hash, blockers and explicitly unavailable row estimates",
+    "Analyze source and target metadata: composite/nullable/self/cyclic FKs, required parents, source and target unique keys, generated expressions, exact columns/types/collations and target foreign keys",
+    "Review named compatibility blockers and catalog/FK/cycle counts; no application rows are queried"
    ],
    "engines": "The specification and initial transfer contract are same-engine MySQL/MariaDB only. PostgreSQL and SQL Server have registered, explained gaps; other unsupported engines fail closed.",
-   "caveats": "This checkpoint edits specifications only. No rows are read or written, no refresh specification is executed, and no verification result is implied. Imported IDs are hints only. Files are limited to 2 MiB of UTF-8 JSON.",
-   "naReason": "Not captured for the generated help set yet: the specification editor has pure validation tests and a mounted import/reconfirm/export journey, but no generated screenshot."
+   "caveats": "Catalog analysis reads metadata only. No application rows are read or written, no refresh specification is executed, and compatibility is not row-copy, masking or verification proof. Imported IDs are hints only. Files are limited to 2 MiB of UTF-8 JSON. Missing or truncated core catalogs fail closed; target schemas/tables are never created and row-level FK closure is not computed yet.",
+   "naReason": "Not captured for the generated help set yet: the specification editor and catalog analysis have pure tests, mounted clean/blocked journeys and live MySQL/MariaDB graph verification, but no generated screenshot."
   },
   "querylab": {
    "summary": "Query Optimization Lab is the planned query/index experiment workflow. It will distinguish HypoPG estimates from real scratch measurements and reject different query results or inconclusive benchmarks; experiments are not operational yet.",

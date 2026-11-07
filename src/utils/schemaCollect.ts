@@ -31,6 +31,8 @@ import type {
 export interface Grid {
   columns: string[];
   rows: unknown[][];
+  /** A truncated catalog is incomplete proof and must not authorize Refresh. */
+  truncated?: boolean;
 }
 
 const s = (v: unknown): string => (v == null ? '' : String(v));
@@ -92,7 +94,7 @@ WHERE TABLE_SCHEMA = ${sqlLiteral(schema, 'mysql')} AND TABLE_TYPE = 'BASE TABLE
 
   columns: (schema: string) => `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE,
        COLUMN_DEFAULT, EXTRA, CHARACTER_SET_NAME, COLLATION_NAME,
-       CHARACTER_MAXIMUM_LENGTH, COLUMN_COMMENT
+       CHARACTER_MAXIMUM_LENGTH, GENERATION_EXPRESSION, COLUMN_COMMENT
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA = ${sqlLiteral(schema, 'mysql')}
 ORDER BY TABLE_NAME, ORDINAL_POSITION`,
@@ -103,8 +105,8 @@ FROM information_schema.STATISTICS
 WHERE TABLE_SCHEMA = ${sqlLiteral(schema, 'mysql')}
 ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`,
 
-  foreignKeys: (schema: string) => `SELECT k.CONSTRAINT_NAME, k.TABLE_NAME, k.COLUMN_NAME,
-       k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, k.ORDINAL_POSITION,
+  foreignKeys: (schema: string) => `SELECT k.CONSTRAINT_NAME, k.TABLE_SCHEMA, k.TABLE_NAME, k.COLUMN_NAME,
+       k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, k.ORDINAL_POSITION,
        r.DELETE_RULE, r.UPDATE_RULE
 FROM information_schema.KEY_COLUMN_USAGE k
 JOIN information_schema.REFERENTIAL_CONSTRAINTS r
@@ -194,6 +196,7 @@ WHERE n.nspname = ${sqlLiteral(schema, 'postgres')} AND c.relkind IN ('r', 'p')`
        NULL AS character_set_name,
        CASE WHEN a.attcollation <> t.typcollation THEN coll.collname END AS collation_name,
        CASE WHEN a.atttypmod > 4 AND t.typname IN ('varchar', 'bpchar') THEN a.atttypmod - 4 END AS character_maximum_length,
+       NULL AS generation_expression,
        COALESCE(col_description(a.attrelid, a.attnum), '') AS column_comment
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
@@ -230,8 +233,8 @@ ORDER BY t.relname, index_name, u.ord`,
   // convalidated rides along as is_valid: a NOT VALID foreign key is a
   // constraint the planner cannot trust, and the review says so.
   foreignKeys: (schema: string) => `SELECT con.conname AS constraint_name,
-       src.relname AS table_name, sa.attname AS column_name,
-       tgt.relname AS referenced_table_name, ta.attname AS referenced_column_name,
+       n.nspname AS table_schema, src.relname AS table_name, sa.attname AS column_name,
+       tn.nspname AS referenced_table_schema, tgt.relname AS referenced_table_name, ta.attname AS referenced_column_name,
        u.ord AS ordinal_position,
        CASE con.confdeltype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL'
             WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS delete_rule,
@@ -245,6 +248,7 @@ FROM pg_catalog.pg_constraint con
 JOIN pg_catalog.pg_class src ON src.oid = con.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = src.relnamespace
 JOIN pg_catalog.pg_class tgt ON tgt.oid = con.confrelid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = tgt.relnamespace
 CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS u(satt, tatt, ord)
 JOIN pg_catalog.pg_attribute sa ON sa.attrelid = src.oid AND sa.attnum = u.satt
 JOIN pg_catalog.pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = u.tatt
@@ -375,6 +379,7 @@ export function mapColumns(grid: Grid): CatalogColumn[] {
       charset: s(get(r, 'CHARACTER_SET_NAME')) || null,
       collation: s(get(r, 'COLLATION_NAME')) || null,
       charMaxLen: n(get(r, 'CHARACTER_MAXIMUM_LENGTH')),
+      generationExpression: s(get(r, 'GENERATION_EXPRESSION')) || null,
       comment: s(get(r, 'COLUMN_COMMENT')),
     };
   });
@@ -420,8 +425,10 @@ export function mapForeignKeys(grid: Grid): CatalogFk[] {
   const get = reader(grid);
   return grid.rows.map(r => ({
     name: s(get(r, 'CONSTRAINT_NAME')),
+    schema: s(get(r, 'TABLE_SCHEMA')) || undefined,
     table: s(get(r, 'TABLE_NAME')),
     column: s(get(r, 'COLUMN_NAME')),
+    refSchema: s(get(r, 'REFERENCED_TABLE_SCHEMA')) || undefined,
     refTable: s(get(r, 'REFERENCED_TABLE_NAME')),
     refColumn: s(get(r, 'REFERENCED_COLUMN_NAME')),
     ordinal: n(get(r, 'ORDINAL_POSITION')) ?? 1,

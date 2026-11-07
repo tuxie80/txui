@@ -316,3 +316,20 @@ test('PG: buildSnapshot applies sequences after statistics', () => {
   assert.equal(f.severity, 'red', 'a 98%-used int4 identity range is red');
   assert.match(f.fix!, /TYPE bigint/);
 });
+
+test('Refresh metadata keeps generation expressions and both FK schemas', () => {
+  const columns = mapColumns(grid(
+    ['TABLE_NAME', 'COLUMN_NAME', 'DATA_TYPE', 'COLUMN_TYPE', 'IS_NULLABLE', 'COLUMN_DEFAULT', 'EXTRA',
+      'CHARACTER_SET_NAME', 'COLLATION_NAME', 'CHARACTER_MAXIMUM_LENGTH', 'GENERATION_EXPRESSION', 'COLUMN_COMMENT'],
+    [['parents', 'computed', 'varchar', 'varchar(21)', 'YES', null, 'STORED GENERATED', 'utf8mb4',
+      'utf8mb4_0900_ai_ci', 21, "concat(`code`,'!')", '']]));
+  assert.equal(columns[0].generationExpression, "concat(`code`,'!')");
+  assert.match(MYSQL_SNAPSHOT_SQL.columns('source'), /GENERATION_EXPRESSION/);
+  assert.match(MYSQL_SNAPSHOT_SQL.foreignKeys('source'), /REFERENCED_TABLE_SCHEMA/);
+  const foreignKeys = mapForeignKeys(grid(
+    ['CONSTRAINT_NAME', 'TABLE_SCHEMA', 'TABLE_NAME', 'COLUMN_NAME', 'REFERENCED_TABLE_SCHEMA',
+      'REFERENCED_TABLE_NAME', 'REFERENCED_COLUMN_NAME', 'ORDINAL_POSITION', 'DELETE_RULE', 'UPDATE_RULE'],
+    [['fk_cross', 'child_schema', 'children', 'parent_id', 'parent_schema', 'parents', 'id', 1, 'CASCADE', 'NO ACTION']]));
+  assert.equal(foreignKeys[0].schema, 'child_schema');
+  assert.equal(foreignKeys[0].refSchema, 'parent_schema');
+});

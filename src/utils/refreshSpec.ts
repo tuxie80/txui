@@ -34,7 +34,7 @@ export type RefreshTablePolicy = PolicyBase & (
       direction: 'asc' | 'desc';
       tieBreaker: string[];
     }
-  | { policy: 'sample'; rows: number; sampleSeed: number }
+  | { policy: 'sample'; rows: number; sampleSeed: number; tieBreaker: string[] }
   | { policy: 'predicate'; where: string }
   | { policy: 'generate'; rows: number; seedOffset: number }
 );
@@ -150,7 +150,7 @@ function policy(value: unknown, index: number): RefreshTablePolicy {
     exclude: common,
     time_window: [...common, 'column', 'mode', 'amount', 'unit', 'timeZone', 'nullPolicy', 'cutoffUtc'],
     row_limit: [...common, 'rows', 'orderBy', 'direction', 'tieBreaker'],
-    sample: [...common, 'rows', 'sampleSeed'],
+    sample: [...common, 'rows', 'sampleSeed', 'tieBreaker'],
     predicate: [...common, 'where'],
     generate: [...common, 'rows', 'seedOffset'],
   };
@@ -188,6 +188,7 @@ function policy(value: unknown, index: number): RefreshTablePolicy {
       table, policy: kind,
       rows: integer(input.rows, `${label}.rows`, 1, 1_000_000_000),
       sampleSeed: integer(input.sampleSeed, `${label}.sampleSeed`, 0, Number.MAX_SAFE_INTEGER),
+      tieBreaker: strings(input.tieBreaker, `${label}.tieBreaker`),
     };
   }
   if (kind === 'predicate') {
