@@ -59,6 +59,8 @@ export interface RefreshSpec {
   schemaMappings: RefreshSchemaMapping[];
   seed: string;
   allowFkBreaking: boolean;
+  /** Optional in early v1 specs; false means unmasked sensitive columns block. */
+  acknowledgeUnmaskedSensitive?: boolean;
   tables: RefreshTablePolicy[];
   masks: RefreshMaskRule[];
   limits: {
@@ -237,9 +239,12 @@ function mask(value: unknown, index: number): RefreshMaskRule {
 
 export function parseRefreshSpec(value: unknown): RefreshSpec {
   const input = object(value, 'refresh spec');
-  keys(input, [
+  keys({
+    ...input,
+    acknowledgeUnmaskedSensitive: input.acknowledgeUnmaskedSensitive === undefined ? false : input.acknowledgeUnmaskedSensitive,
+  }, [
     'version', 'engine', 'source', 'target', 'schemaMappings', 'seed', 'allowFkBreaking',
-    'tables', 'masks', 'limits', 'verification',
+    'acknowledgeUnmaskedSensitive', 'tables', 'masks', 'limits', 'verification',
   ], 'refresh spec');
   if (input.version !== REFRESH_SPEC_VERSION) throw new Error(`refresh spec has unsupported version ${String(input.version)}`);
   if (input.engine !== 'mysql') throw new Error('refresh spec currently supports MySQL/MariaDB only');
@@ -288,6 +293,8 @@ export function parseRefreshSpec(value: unknown): RefreshSpec {
     schemaMappings,
     seed: text(input.seed, 'seed', 256),
     allowFkBreaking: boolean(input.allowFkBreaking, 'allowFkBreaking'),
+    acknowledgeUnmaskedSensitive: input.acknowledgeUnmaskedSensitive === undefined
+      ? false : boolean(input.acknowledgeUnmaskedSensitive, 'acknowledgeUnmaskedSensitive'),
     tables,
     masks,
     limits: {
@@ -344,6 +351,7 @@ export function createDefaultRefreshSpec(input: {
     schemaMappings: [{ source: input.schema, target: input.schema }],
     seed: 'refresh-v1',
     allowFkBreaking: false,
+    acknowledgeUnmaskedSensitive: false,
     tables: [
       { table: 'countries', policy: 'full' },
       {

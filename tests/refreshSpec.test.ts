@@ -102,3 +102,12 @@ test('imports expose connection hints but clear both session selections', () => 
   assert.equal(hints.target.sessionId, null);
   assert.equal('confirmed' in hints, false);
 });
+
+test('sensitive acknowledgment defaults to false and round-trips explicitly', () => {
+  const spec = targeted();
+  delete spec.acknowledgeUnmaskedSensitive;
+  assert.equal(parseRefreshSpec(spec).acknowledgeUnmaskedSensitive, false);
+  spec.acknowledgeUnmaskedSensitive = true;
+  assert.equal(parseRefreshSpecText(serializeRefreshSpec(spec)).acknowledgeUnmaskedSensitive, true);
+  assert.throws(() => parseRefreshSpec({ ...spec, acknowledgeUnmaskedSensitive: 'yes' }), /must be boolean/);
+});

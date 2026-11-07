@@ -16,6 +16,7 @@ import { planRefreshRowSets } from '../utils/refreshRowSets';
 import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
 import { buildRefreshExecutionPlan } from '../utils/refreshExecution';
 import { buildRefreshMaskPlan } from '../utils/refreshMask';
+import { analyzeRefreshMaskSafety } from '../utils/refreshMaskSafety';
 import { errorDisplay } from '../utils/appError';
 import { StatusIcon } from './StatusIcon';
 
@@ -93,6 +94,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     ? buildRefreshExecutionPlan({ spec, catalog: analysis, rowSets: rowSetPlan })
     : null, [spec, analysis, rowSetPlan]);
   const maskPlan = useMemo(() => analysis ? buildRefreshMaskPlan({ spec, catalog: analysis }) : null, [spec, analysis]);
+  const maskSafety = useMemo(() => analysis && rowSetPlan
+    ? analyzeRefreshMaskSafety({ spec, catalog: analysis, rowSets: rowSetPlan })
+    : null, [spec, analysis, rowSetPlan]);
   const json = useMemo(() => {
     try {
       return serializeRefreshSpec(spec);
@@ -284,6 +288,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 <label className="dg-field-inline"><span>Allow explicit FK-breaking masks</span>
                   <input type="checkbox" checked={spec.allowFkBreaking} onChange={event => patch(current => ({ ...current, allowFkBreaking: event.target.checked }))} />
                 </label>
+                <label className="dg-field-inline"><span>Acknowledge listed unmasked sensitive columns</span>
+                  <input type="checkbox" checked={spec.acknowledgeUnmaskedSensitive ?? false} onChange={event => patch(current => ({ ...current, acknowledgeUnmaskedSensitive: event.target.checked }))} />
+                </label>
                 <label className="dg-field-inline" style={{ display: 'block' }}><span>Mappings (source =&gt; target, one per line)</span>
                   <textarea
                     className="sqp-sql"
@@ -386,6 +393,20 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                         {rule.notes.map(note => <div key={note}>{note}</div>)}
                       </div>
                     ))}
+                  </div>
+                )}
+                {maskSafety && (
+                  <div className="sqp-finding">
+                    <div className={maskSafety.complete ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
+                      <StatusIcon kind={maskSafety.complete ? 'ok' : 'error'} />
+                      <span>{maskSafety.complete ? `Mask safety valid: ${maskSafety.uniqueChecks.length} unique indexes require runtime checks.` : `Mask safety blocked: ${maskSafety.blockers.length} blockers.`}</span>
+                    </div>
+                    {maskSafety.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                    {maskSafety.uniqueChecks.slice(0, 100).map(check => <div key={`${check.table}.${check.index}`} className="sqp-f-evidence">{check.table} · {check.index} ({check.columns.join(', ')}) · {check.note}</div>)}
+                    {maskSafety.sensitiveUnmasked.length > 0 && <div className="sqp-f-evidence"><b>Unmasked sensitive-looking columns:</b> {maskSafety.sensitiveUnmasked.slice(0, 100).join(', ')}{maskSafety.sensitiveUnmasked.length > 100 ? ` · +${maskSafety.sensitiveUnmasked.length - 100} more` : ''}</div>}
+                    {maskSafety.sensitiveMasked.length > 0 && <div className="sqp-f-evidence"><b>Sensitive columns with mask rules:</b> {maskSafety.sensitiveMasked.slice(0, 100).join(', ')}{maskSafety.sensitiveMasked.length > 100 ? ` · +${maskSafety.sensitiveMasked.length - 100} more` : ''}</div>}
+                    {maskSafety.generatedColumns.length > 0 && <div className="sqp-f-evidence"><b>Omitted from inserts, recomputed by target:</b> {maskSafety.generatedColumns.slice(0, 100).join(', ')}{maskSafety.generatedColumns.length > 100 ? ` · +${maskSafety.generatedColumns.length - 100} more` : ''}</div>}
+                    {maskSafety.notes.map(note => <div key={note} className="sqp-f-evidence">{note}</div>)}
                   </div>
                 )}
               </section>

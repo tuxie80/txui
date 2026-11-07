@@ -453,7 +453,7 @@ export function namedTargets(fixtures) {
         onClose: () => {},
       },
       interact: async ({ container, act }) => {
-        const click = async text => {
+        const click = async (text, waitMs = 20) => {
           const buttons = [];
           const walk = node => {
             if (node.nodeName === 'BUTTON' && node.textContent.includes(text)) buttons.push(node);
@@ -462,10 +462,11 @@ export function namedTargets(fixtures) {
           walk(container);
           await act(async () => {
             buttons[0]?.dispatchEvent(new Event('click', { bubbles: true }));
-            await new Promise(resolve => setTimeout(resolve, 15));
+            await new Promise(resolve => setTimeout(resolve, waitMs));
           });
         };
-        await click('Import JSON');
+        await click('Import JSON', 80);
+        container.__afterImport = container.textContent;
         const selects = [];
         const walk = node => {
           if (node.nodeName === 'SELECT') selects.push(node);
@@ -482,13 +483,13 @@ export function namedTargets(fixtures) {
         await click('Reconfirm source and target');
         await click('Export JSON');
       },
-      assert: ({ html, calls }) => {
+      assert: ({ html, calls, container }) => {
         if (!calls.some(call => call.cmd === 'refresh_spec_load')) return 'specification was not loaded';
         if (!calls.some(call => call.cmd === 'refresh_spec_save')) return 'specification was not saved atomically';
         if (!html.includes('Endpoints reconfirmed')) return 'endpoint reconfirmation was not visible';
         const saved = calls.find(call => call.cmd === 'refresh_spec_save');
         for (const needle of ['"sessionId": "s-source"', '"sessionId": "s-target"', '"seed": "imported-seed"']) {
-          if (!saved.args.contents.includes(needle)) return `exported specification lacks ${needle}`;
+          if (!saved.args.contents.includes(needle)) return `exported specification lacks ${needle}: ${container.__afterImport}`;
         }
         for (const forbidden of ['confirmed', 'password', 'connectionUrl', 'queryResult', 'private-row']) {
           if (saved.args.contents.includes(forbidden)) return `exported specification contains ${forbidden}`;
@@ -580,6 +581,8 @@ export function namedTargets(fixtures) {
           if (!html.includes('full-root keys retained 0')) return 'memory counters were not rendered';
           if (!html.includes('Mask contract blocked: 1 blockers')) return 'missing mask column was not reported';
           if (!html.includes('shop.customers.email has no source catalog column')) return 'mask blocker did not name the missing column';
+          if (!html.includes('Mask safety blocked: 1 blockers')) return 'mask safety blockers were not rendered';
+          if (!html.includes('Acknowledge listed unmasked sensitive columns')) return 'sensitive acknowledgment control is missing';
           if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id` FROM'))) return 'row-set planning did not use source key-only queries';
         }
       },
