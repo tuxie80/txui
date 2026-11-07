@@ -69,7 +69,13 @@ test('row limits, samples, predicates and generators validate deterministic inpu
     { table: 'd', policy: 'generate', rows: 100, seedOffset: 3 },
     { table: 'e', policy: 'exclude' },
   ];
-  assert.equal(parseRefreshSpecText(serializeRefreshSpec(spec)).tables.length, 5);
+  const parsed = parseRefreshSpecText(serializeRefreshSpec(spec));
+  assert.equal(parsed.tables.length, 5);
+  assert.deepEqual(parsed.tables.slice(0, 2).map(table => table.policy === 'row_limit' || table.policy === 'sample' ? table.limitKind : null), ['soft', 'soft']);
+  spec.tables[1] = { table: 'b', policy: 'sample', rows: 10, sampleSeed: 42, tieBreaker: ['id'], limitKind: 'hard' };
+  const hard = parseRefreshSpecText(serializeRefreshSpec(spec));
+  assert.equal(hard.tables[1].policy === 'sample' ? hard.tables[1].limitKind : null, 'hard');
+  assert.throws(() => parseRefreshSpec({ ...spec, tables: [{ table: 'x', policy: 'sample', rows: 5, sampleSeed: 1, tieBreaker: ['id'], limitKind: 'unlimited' }] }), /limitKind/);
   assert.throws(() => parseRefreshSpec({ ...spec, tables: [{ table: 'x', policy: 'row_limit', rows: 5, orderBy: [], direction: 'desc', tieBreaker: ['id'] }] }), /orderBy/);
   assert.throws(() => parseRefreshSpec({ ...spec, tables: [{ table: 'x', policy: 'predicate', where: 'x = 1; DROP TABLE x' }] }), /terminator/);
 });

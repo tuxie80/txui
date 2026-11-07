@@ -35,8 +35,8 @@ function policyFor(kind: RefreshTablePolicy['policy'], table: string, previous?:
       table, policy: kind, column: 'created_at', mode: 'rolling', amount: 7,
       unit: 'days', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: new Date().toISOString(),
     };
-    case 'row_limit': return { table, policy: kind, rows: 1000, orderBy: ['created_at'], direction: 'desc', tieBreaker: ['id'] };
-    case 'sample': return { table, policy: kind, rows: 1000, sampleSeed: 1, tieBreaker: ['id'] };
+    case 'row_limit': return { table, policy: kind, rows: 1000, orderBy: ['created_at'], direction: 'desc', tieBreaker: ['id'], limitKind: 'soft' };
+    case 'sample': return { table, policy: kind, rows: 1000, sampleSeed: 1, tieBreaker: ['id'], limitKind: 'soft' };
     case 'predicate': return { table, policy: kind, where: 'tenant_id = 1' };
     case 'generate': return { table, policy: kind, rows: 1000, seedOffset: 0 };
   }
@@ -319,6 +319,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                     {table.policy === 'row_limit' && (
                       <div className="sqp-f-evidence">
                         <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
+                        <label>Limit behavior <select value={table.limitKind ?? 'soft'} onChange={event => updatePolicy(index, { ...table, limitKind: event.target.value as 'soft' | 'hard' })}><option value="soft">Soft — closure may exceed</option><option value="hard">Hard — reject overflow</option></select></label>
                         <label>Order columns <input value={table.orderBy.join(',')} onChange={event => updatePolicy(index, { ...table, orderBy: event.target.value.split(',').map(value => value.trim()) })} /></label>
                         <label>Direction <select value={table.direction} onChange={event => updatePolicy(index, { ...table, direction: event.target.value as 'asc' | 'desc' })}><option value="desc">desc</option><option value="asc">asc</option></select></label>
                         <label>Unique tie-breaker <input value={table.tieBreaker.join(',')} onChange={event => updatePolicy(index, { ...table, tieBreaker: event.target.value.split(',').map(value => value.trim()) })} /></label>
@@ -327,6 +328,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                     {table.policy === 'sample' && (
                       <div className="sqp-f-evidence">
                         <label>Rows <input type="number" value={table.rows} onChange={event => updatePolicy(index, { ...table, rows: numberValue(event.target.value) })} /></label>
+                        <label>Limit behavior <select value={table.limitKind ?? 'soft'} onChange={event => updatePolicy(index, { ...table, limitKind: event.target.value as 'soft' | 'hard' })}><option value="soft">Soft — closure may exceed</option><option value="hard">Hard — reject overflow</option></select></label>
                         <label>Sample seed <input type="number" value={table.sampleSeed} onChange={event => updatePolicy(index, { ...table, sampleSeed: numberValue(event.target.value) })} /></label>
                         <label>Unique tie-breaker <input value={table.tieBreaker.join(',')} onChange={event => updatePolicy(index, { ...table, tieBreaker: event.target.value.split(',').map(value => value.trim()) })} /></label>
                       </div>

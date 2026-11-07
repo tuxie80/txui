@@ -109,14 +109,14 @@ const temporalPolicies: RefreshTablePolicy[] = [
   { table: 'siblings', policy: 'time_window', column: 'created_on', mode: 'rolling', amount: 1, unit: 'days', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: '2026-11-06T12:00:00.000Z' },
 ];
 
-function temporalCatalog() {
+function temporalCatalog(value = spec(temporalPolicies)) {
   const edges = [...foreign('children', ['parent_id'], 'parents', ['id']), ...foreign('siblings', ['parent_id'], 'parents', ['id'])];
   const source = snapshot('source', [
     { name: 'parents', columns: ['id'], key: ['id'] },
     { name: 'children', columns: ['id', 'parent_id', 'created_on'], key: ['id'], dates: ['created_on'] },
     { name: 'siblings', columns: ['id', 'parent_id', 'created_on'], key: ['id'], dates: ['created_on'] },
   ], edges);
-  return catalog(source, temporalPolicies);
+  return catalogWithSpec(source, value);
 }
 
 test('last-7-day child + limited parent + last-1-day sibling reaches exact explained closure', async () => {
@@ -140,11 +140,34 @@ test('last-7-day child + limited parent + last-1-day sibling reaches exact expla
     ['source.children', 1, 0, 1], ['source.parents', 1, 1, 2], ['source.siblings', 1, 0, 1],
   ]);
   assert.ok(result.tables[1].notes[0].includes("outside this table's own selection"));
+  assert.ok(result.tables[1].notes.some(note => note.includes('exceeds the soft selection limit 1 by 1')));
   assert.equal(result.sourceQueries, 4);
   assert.equal(result.sourceRowsRead, 4);
   assert.deepEqual([...sessions], ['source-session']);
   assert.ok(runner.queries.every(sql => !sql.includes('SELECT *')));
   assert.ok(!JSON.stringify(result).includes('2026-11-05'));
+});
+
+test('hard maximums reject closure overflow instead of pruning dependent selections', async () => {
+  const policies = structuredClone(temporalPolicies);
+  if (policies[0].policy === 'sample') policies[0].limitKind = 'hard';
+  const value = spec(policies);
+  const runner = gridRunner({
+    parents: [{ id: 1 }, { id: 2 }],
+    children: [{ id: 11, parent_id: 1, created_on: '2026-11-05' }],
+    siblings: [{ id: 21, parent_id: 2, created_on: '2026-11-06' }],
+  }, {
+    parents: [{ id: 2 }],
+    children: [{ id: 11, parent_id: 1, created_on: '2026-11-05' }],
+    siblings: [{ id: 21, parent_id: 2, created_on: '2026-11-06' }],
+  });
+  const result = await planRefreshRowSets({ spec: value, catalog: temporalCatalog(value), runGrid: runner.runGrid });
+  assert.equal(result.fixedPoint, false);
+  assert.deepEqual(result.totals, { requested: null, closureAdded: null, final: null });
+  assert.ok(result.blockers.some(blocker => blocker.includes('hard maximum 1 is exceeded by FK closure')));
+  const parent = result.tables.find(row => row.table === 'source.parents')!;
+  assert.equal(parent.final, 2);
+  assert.ok(parent.notes.some(note => note.includes('dependent selections were not pruned')));
 });
 
 test('composite FKs with any NULL part skip parents and non-NULL tuples close exactly', async () => {

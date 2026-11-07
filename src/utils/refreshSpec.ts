@@ -33,8 +33,10 @@ export type RefreshTablePolicy = PolicyBase & (
       orderBy: string[];
       direction: 'asc' | 'desc';
       tieBreaker: string[];
+      /** Absent in early v1 specs means a soft selection limit. */
+      limitKind?: 'soft' | 'hard';
     }
-  | { policy: 'sample'; rows: number; sampleSeed: number; tieBreaker: string[] }
+  | { policy: 'sample'; rows: number; sampleSeed: number; tieBreaker: string[]; limitKind?: 'soft' | 'hard' }
   | { policy: 'predicate'; where: string }
   | { policy: 'generate'; rows: number; seedOffset: number }
 );
@@ -149,13 +151,16 @@ function policy(value: unknown, index: number): RefreshTablePolicy {
     full: common,
     exclude: common,
     time_window: [...common, 'column', 'mode', 'amount', 'unit', 'timeZone', 'nullPolicy', 'cutoffUtc'],
-    row_limit: [...common, 'rows', 'orderBy', 'direction', 'tieBreaker'],
-    sample: [...common, 'rows', 'sampleSeed', 'tieBreaker'],
+    row_limit: [...common, 'rows', 'orderBy', 'direction', 'tieBreaker', 'limitKind'],
+    sample: [...common, 'rows', 'sampleSeed', 'tieBreaker', 'limitKind'],
     predicate: [...common, 'where'],
     generate: [...common, 'rows', 'seedOffset'],
   };
   if (typeof kind !== 'string' || !(kind in fields)) throw new Error(`${label}.policy is unsupported`);
-  keys(input, fields[kind], label);
+  const limited = kind === 'row_limit' || kind === 'sample';
+  const limitKind = limited ? input.limitKind ?? 'soft' : undefined;
+  if (limited && limitKind !== 'soft' && limitKind !== 'hard') throw new Error(`${label}.limitKind must be soft or hard`);
+  keys(limited ? { ...input, limitKind } : input, fields[kind], label);
   const table = text(input.table, `${label}.table`, 128);
   if (kind === 'full' || kind === 'exclude') return { table, policy: kind };
   if (kind === 'time_window') {
@@ -181,6 +186,7 @@ function policy(value: unknown, index: number): RefreshTablePolicy {
       orderBy: strings(input.orderBy, `${label}.orderBy`),
       direction: input.direction,
       tieBreaker: strings(input.tieBreaker, `${label}.tieBreaker`),
+      limitKind: limitKind as 'soft' | 'hard',
     };
   }
   if (kind === 'sample') {
@@ -189,6 +195,7 @@ function policy(value: unknown, index: number): RefreshTablePolicy {
       rows: integer(input.rows, `${label}.rows`, 1, 1_000_000_000),
       sampleSeed: integer(input.sampleSeed, `${label}.sampleSeed`, 0, Number.MAX_SAFE_INTEGER),
       tieBreaker: strings(input.tieBreaker, `${label}.tieBreaker`),
+      limitKind: limitKind as 'soft' | 'hard',
     };
   }
   if (kind === 'predicate') {

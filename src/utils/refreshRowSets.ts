@@ -301,6 +301,15 @@ export async function planRefreshRowSets(input: {
         }
       }
     }
+    for (const [tableName, policy] of policies) {
+      if (policy.policy !== 'row_limit' && policy.policy !== 'sample') continue;
+      if (policy.limitKind !== 'hard') continue;
+      const state = states.get(tableName);
+      const final = (state?.requested.size ?? 0) + (state?.closure.size ?? 0);
+      if (final > policy.rows) {
+        blockers.add(`${tableName} hard maximum ${policy.rows.toLocaleString()} is exceeded by FK closure: ${final.toLocaleString()} rows would be required; refusing to orphan dependent selections`);
+      }
+    }
     const tables = input.catalog.tables.map(compatibility => {
       const state = compatibility.source ? states.get(compatibility.source) : undefined;
       if (compatibility.action === 'generate') {
@@ -308,18 +317,25 @@ export async function planRefreshRowSets(input: {
       }
       const requested = state?.requested.size ?? 0;
       const closureAdded = state?.closure.size ?? 0;
+      const final = requested + closureAdded;
+      const policy = policies.get(compatibility.table);
+      const limited = policy && (policy.policy === 'row_limit' || policy.policy === 'sample') ? policy : null;
       const notes = compatibility.action === 'exclude'
         ? ['Excluded by policy']
         : closureAdded > 0
           ? [`${closureAdded} parent rows were added by FK closure outside this table's own selection`]
           : ['No closure rows required beyond the requested set'];
+      if (limited && final > limited.rows) {
+        if (limited.limitKind === 'hard') notes.push(`Hard maximum ${limited.rows.toLocaleString()} rejected; dependent selections were not pruned`);
+        else notes.push(`FK closure exceeds the soft selection limit ${limited.rows.toLocaleString()} by ${(final - limited.rows).toLocaleString()}; this is allowed and reported`);
+      }
       return {
         table: compatibility.table, action: compatibility.action,
-        requested, closureAdded, final: requested + closureAdded, notes,
+        requested, closureAdded, final, notes,
       };
     });
     const finalIterations = iterations;
-    const sum = (field: 'requested' | 'closureAdded' | 'final') => tables.some(table => table[field] === null)
+    const sum = (field: 'requested' | 'closureAdded' | 'final') => blockers.size > 0 || tables.some(table => table[field] === null)
       ? null : tables.reduce((total, table) => total + (table[field] ?? 0), 0);
     return {
       readOnly: true, specSha256: expectedHash, fixedPoint: blockers.size === 0, iterations: finalIterations,
