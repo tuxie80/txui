@@ -24,6 +24,7 @@ export interface RefreshGraphTable {
   uniqueKeys: RefreshUniqueKey[];
   generatedColumns: string[];
   estimatedRows: number | null;
+  dataBytes: number | null;
 }
 
 export interface RefreshForeignKeyPart {
@@ -167,6 +168,7 @@ export function buildRefreshGraph(snapshots: SchemaSnapshot[]): RefreshCatalogGr
       const value: RefreshGraphTable = {
         key: tableKey(snapshot.schema, table.name), schema: snapshot.schema, name: table.name,
         columns: [], indexes: [], primaryKey: null, uniqueKeys: [], generatedColumns: [], estimatedRows: table.rows,
+        dataBytes: table.dataBytes,
       };
       byKey.set(key, value);
       tables.push(value);

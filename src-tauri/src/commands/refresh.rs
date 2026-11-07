@@ -156,6 +156,11 @@ mod tests {
         assert_eq!(evidence["missingKeyBlocked"], true);
         assert_eq!(evidence["incompatibleTargetBlocked"], true);
         assert_eq!(evidence["metadataQueries"], 12);
+        assert_eq!(evidence["executionPlanExecutable"], true);
+        let explain_sql = evidence["explainSql"].as_str().unwrap();
+        assert!(!explain_sql.contains("OFFSET"));
+        let explain = crate::db::mysql::execute(&pool, &format!("EXPLAIN {explain_sql}")).await.unwrap();
+        assert!(!explain.rows.is_empty(), "EXPLAIN returned no plan rows");
         for schema in [&source, &target] {
             crate::db::mysql::execute(&pool, &format!("DROP DATABASE `{schema}`")).await.unwrap();
         }

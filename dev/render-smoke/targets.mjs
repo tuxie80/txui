@@ -575,6 +575,9 @@ export function namedTargets(fixtures) {
           if (!html.includes('3 source tables · 3 target tables · 0 FKs')) return 'catalog counts are missing or wrong';
           if (!html.includes('Requested 0 + closure 0 = final 0')) return 'row-set totals were not rendered';
           if (!html.includes('Fixed-point row-set plan complete')) return 'fixed-point proof was not rendered';
+          if (!html.includes('Execution plan is deterministic and schema-bound')) return 'deterministic execution proof was not rendered';
+          if (!html.includes('Insertion order: 1. shop.countries · 2. shop.events · 3. shop.orders')) return 'parent/insertion order was not rendered';
+          if (!html.includes('full-root keys retained 0')) return 'memory counters were not rendered';
           if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id` FROM'))) return 'row-set planning did not use source key-only queries';
         }
       },

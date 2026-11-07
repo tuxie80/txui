@@ -14,6 +14,7 @@ import type {
 import { buildRefreshPlan } from '../utils/refreshPlan';
 import { planRefreshRowSets } from '../utils/refreshRowSets';
 import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
+import { buildRefreshExecutionPlan } from '../utils/refreshExecution';
 import { errorDisplay } from '../utils/appError';
 import { StatusIcon } from './StatusIcon';
 
@@ -87,6 +88,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     }
   }, [spec]);
   const plan = useMemo(() => validationError ? null : analysis?.plan ?? buildRefreshPlan(spec), [spec, validationError, analysis]);
+  const executionPlan = useMemo(() => analysis && rowSetPlan
+    ? buildRefreshExecutionPlan({ spec, catalog: analysis, rowSets: rowSetPlan })
+    : null, [spec, analysis, rowSetPlan]);
   const json = useMemo(() => {
     try {
       return serializeRefreshSpec(spec);
@@ -447,6 +451,28 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                       {rowSetPlan.tables.length > 200 && <p className="dv-desc">Showing 200 of {rowSetPlan.tables.length} tables; all blockers remain in force.</p>}
                     </>
                   )}
+                </section>
+              )}
+
+              {executionPlan && (
+                <section>
+                  <h3>Deterministic execution plan</h3>
+                  <p className="dv-desc">Catalog SHA-256: {executionPlan.catalogSha256} · row-set SHA-256: {executionPlan.rowSetSha256} · {executionPlan.blockers.length} blockers. Exact first-page SQL and unique keyset boundaries; OFFSET is never used.</p>
+                  <div className={executionPlan.executable ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
+                    <StatusIcon kind={executionPlan.executable ? 'ok' : 'error'} />
+                    <span>{executionPlan.executable ? 'Execution plan is deterministic and schema-bound. Execution remains unavailable.' : 'Execution plan is blocked by incomplete proof or insertion-order constraints.'}</span>
+                  </div>
+                  {executionPlan.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                  {executionPlan.insertionOrder.length > 0 && <p className="dv-desc">Insertion order: {executionPlan.insertionOrder.map((table, index) => `${index + 1}. ${table}`).join(' · ')}</p>}
+                  {executionPlan.tables.slice(0, 200).map(table => (
+                    <div key={table.table} className="sqp-finding">
+                      <div className="sqp-f-title"><b>{table.table}</b> · {table.action}</div>
+                      <div className="sqp-f-detail">{table.sourceSchema} → {table.targetSchema} · {table.keySource} ({table.keyColumns.join(', ')}) · batch {table.batchRows.toLocaleString()} · selected {table.selectedRows.toLocaleString()} · estimated data batches {table.estimatedDataBatches.toLocaleString()} · source stats {table.sourceStatsRows?.toLocaleString() ?? 'unknown'} rows</div>
+                      {table.firstPageSql && <code className="sqp-f-snippet">{table.firstPageSql}</code>}
+                      {table.notes.map(note => <div key={note} className="sqp-f-evidence">{note}</div>)}
+                    </div>
+                  ))}
+                  {executionPlan.tables.length > 200 && <p className="dv-desc">Showing 200 of {executionPlan.tables.length} tables.</p>}
                 </section>
               )}
 

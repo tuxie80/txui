@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { readRefreshCatalogAnalysis } from '../src/utils/refreshCatalog.ts';
+import { buildRefreshExecutionPlan } from '../src/utils/refreshExecution.ts';
+import { planRefreshRowSets } from '../src/utils/refreshRowSets.ts';
 import { createDefaultRefreshSpec } from '../src/utils/refreshSpec.ts';
 import { MYSQL_SNAPSHOT_SQL } from '../src/utils/schemaCollect.ts';
 
@@ -78,6 +80,25 @@ const incompatible = await readRefreshCatalogAnalysis({
 assert.ok(incompatible.blockers.some(error => error.includes('type varchar(20) is incompatible')));
 assert.equal(incompatible.complete, false);
 
+const executionSpec = structuredClone(input.spec);
+executionSpec.tables = [{ table: 'parents', policy: 'full' }];
+const executionCatalog = await readRefreshCatalogAnalysis({ spec: executionSpec, runGrid });
+const executionRows = await planRefreshRowSets({
+  spec: executionSpec,
+  catalog: executionCatalog,
+  runGrid: async (_sessionId, sql) => {
+    assert.ok(sql.includes('__txui_refresh_selection'));
+    return { columns: ['id', 'seq', 'code', 'computed'], rows: [] };
+  },
+});
+assert.equal(executionRows.fixedPoint, true);
+const executionPlan = buildRefreshExecutionPlan({ spec: executionSpec, catalog: executionCatalog, rowSets: executionRows });
+assert.equal(executionPlan.executable, true);
+assert.deepEqual(executionPlan.insertionOrder, [`${executionSpec.schemaMappings[0].source}.parents`]);
+const explainSql = executionPlan.tables[0].firstPageSql;
+assert.ok(explainSql.includes('ORDER BY `id`, `seq`'));
+assert.ok(!explainSql.includes('OFFSET'));
+
 console.log(JSON.stringify({
   sourceTables: clean.scanned.sourceTables,
   targetTables: clean.scanned.targetTables,
@@ -88,4 +109,6 @@ console.log(JSON.stringify({
   missingKeyBlocked: true,
   incompatibleTargetBlocked: true,
   metadataQueries: input.grids.length,
+  executionPlanExecutable: executionPlan.executable,
+  explainSql,
 }));
