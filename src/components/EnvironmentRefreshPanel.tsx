@@ -12,6 +12,8 @@ import type {
   RefreshMaskRule, RefreshSpec, RefreshTablePolicy,
 } from '../utils/refreshSpec';
 import { buildRefreshPlan } from '../utils/refreshPlan';
+import { planRefreshRowSets } from '../utils/refreshRowSets';
+import type { RefreshRowSetPlan } from '../utils/refreshRowSets';
 import { errorDisplay } from '../utils/appError';
 import { StatusIcon } from './StatusIcon';
 
@@ -69,6 +71,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const [fileError, setFileError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<RefreshCatalogAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [rowSetPlan, setRowSetPlan] = useState<RefreshRowSetPlan | null>(null);
+  const [planningRows, setPlanningRows] = useState(false);
+  const [rowProgress, setRowProgress] = useState<{ phase: string; table: string; queries: number; rowsRead: number } | null>(null);
   const analysisGeneration = useRef(0);
   const [logs, setLogs] = useState<string[]>(['Specification only — no catalog reads or database writes have run.']);
 
@@ -96,6 +101,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     setConfirmed(false);
     setAnalysis(null);
     setAnalyzing(false);
+    setRowSetPlan(null);
+    setPlanningRows(false);
+    setRowProgress(null);
     setFileError(null);
   };
   const selectEndpoint = (side: 'source' | 'target', sessionId: string) => {
@@ -160,6 +168,9 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     const generation = ++analysisGeneration.current;
     setAnalyzing(true);
     setAnalysis(null);
+    setRowSetPlan(null);
+    setPlanningRows(false);
+    setRowProgress(null);
     setFileError(null);
     try {
       const result = await readRefreshCatalogAnalysis({
@@ -180,6 +191,36 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
       if (analysisGeneration.current === generation) setFileError(errorDisplay(error));
     } finally {
       if (analysisGeneration.current === generation) setAnalyzing(false);
+    }
+  };
+
+  const planRowSets = async () => {
+    if (!analysis?.complete) return;
+    const catalog = analysis;
+    const generation = ++analysisGeneration.current;
+    setPlanningRows(true);
+    setRowSetPlan(null);
+    setRowProgress(null);
+    setFileError(null);
+    try {
+      const result = await planRefreshRowSets({
+        spec, catalog,
+        runGrid: async (sessionId, sql) => {
+          const query = await invoke<QueryResult>('monitor_query', { sessionId, sql });
+          return { columns: query.columns.map(column => column.name), rows: query.rows, truncated: query.truncated };
+        },
+        onProgress: event => {
+          if (analysisGeneration.current === generation) setRowProgress(event);
+        },
+      });
+      if (analysisGeneration.current !== generation) return;
+      setRowSetPlan(result);
+      setLogs(current => [...current,
+        `${result.fixedPoint ? 'Row-set closure reached a fixed point' : 'Row-set planning is blocked'}: ${result.totals.requested ?? 'unknown'} requested + ${result.totals.closureAdded ?? 'unknown'} closure = ${result.totals.final ?? 'unknown'} final across ${result.tables.length} tables; ${result.sourceQueries} key-only queries, ${result.sourceRowsRead} key rows read, ${result.blockers.length} blockers. No target writes.`]);
+    } catch (error) {
+      if (analysisGeneration.current === generation) setFileError(errorDisplay(error));
+    } finally {
+      if (analysisGeneration.current === generation) setPlanningRows(false);
     }
   };
 
@@ -219,8 +260,11 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   <button className="primary" disabled={confirmed || !!validationError || analyzing} title={validationError ?? 'Reconfirm both endpoints for this editor only'} onClick={confirmEndpoints}>
                     {confirmed ? '✓ Endpoints reconfirmed' : 'Reconfirm source and target'}
                   </button>
-                  <button className="toolbar-btn" disabled={!confirmed || !!validationError || analyzing} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
+                  <button className="toolbar-btn" disabled={!confirmed || !!validationError || analyzing || planningRows} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
                     {analyzing ? 'Analyzing catalogs…' : 'Analyze catalogs'}
+                  </button>
+                  <button className="toolbar-btn" disabled={!analysis?.complete || analyzing || planningRows} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
+                    {planningRows ? 'Planning row sets…' : 'Plan row sets'}
                   </button>
                 </div>
                 {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? 'Catalog proof is current for this specification; no execution is available.' : 'No catalog read or write has run.'}</p>}
@@ -375,6 +419,31 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                     </div>
                   ))}
                   {analysis.tables.length > 200 && <p className="dv-desc">Showing 200 of {analysis.tables.length} selected/dependent tables.</p>}
+                </section>
+              )}
+
+              {(planningRows || rowSetPlan) && (
+                <section>
+                  <h3>Requested rows + FK closure</h3>
+                  {planningRows && <p className="dv-desc">Reading only source unique keys and FK columns{rowProgress ? ` · ${rowProgress.phase} · ${rowProgress.table} · ${rowProgress.queries} queries · ${rowProgress.rowsRead} key rows` : '…'}. No target reads or writes.</p>}
+                  {rowSetPlan && (
+                    <>
+                      <p className="dv-desc">Requested {rowSetPlan.totals.requested ?? 'unknown'} + closure {rowSetPlan.totals.closureAdded ?? 'unknown'} = final {rowSetPlan.totals.final ?? 'unknown'} · {rowSetPlan.sourceQueries} key-only queries · {rowSetPlan.sourceRowsRead} key rows read · {rowSetPlan.iterations} closure iterations · {rowSetPlan.blockers.length} blockers. Keys and FK values are not shown or logged.</p>
+                      <div className={rowSetPlan.fixedPoint ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}>
+                        <StatusIcon kind={rowSetPlan.fixedPoint ? 'ok' : 'error'} />
+                        <span>{rowSetPlan.fixedPoint ? 'Fixed-point row-set plan complete. No target writes or execution have occurred.' : 'Row-set plan is incomplete or blocked; totals are not executable.'}</span>
+                      </div>
+                      {rowSetPlan.blockers.map(blocker => <div key={blocker} className="mnt-warn"><StatusIcon kind="error" /><span>{blocker}</span></div>)}
+                      {rowSetPlan.tables.slice(0, 200).map(table => (
+                        <div key={table.table} className="sqp-finding">
+                          <div className="sqp-f-title"><b>{table.table}</b> · {table.action}</div>
+                          <div className="sqp-f-detail">requested {table.requested ?? 'unknown'} + closure {table.closureAdded ?? 'unknown'} = final {table.final ?? 'unknown'}</div>
+                          {table.notes.map(note => <div key={note} className="sqp-f-evidence">{note}</div>)}
+                        </div>
+                      ))}
+                      {rowSetPlan.tables.length > 200 && <p className="dv-desc">Showing 200 of {rowSetPlan.tables.length} tables; all blockers remain in force.</p>}
+                    </>
+                  )}
                 </section>
               )}
 

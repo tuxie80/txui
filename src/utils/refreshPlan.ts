@@ -162,24 +162,36 @@ function readSql(
   table: RefreshTablePolicy,
   sourceSchema: string,
   timeColumnType: RefreshTimeColumn = 'datetime',
+  projection?: string[],
 ): string {
   const relation = qualified(sourceSchema, table.table.split('.').pop()!);
-  if (table.policy === 'full') return `SELECT * FROM ${relation}`;
-  if (table.policy === 'predicate') return `SELECT * FROM ${relation} WHERE ${table.where}`;
+  const selected = projection?.length ? columns(projection) : '*';
+  if (table.policy === 'full') return `SELECT ${selected} FROM ${relation}`;
+  if (table.policy === 'predicate') return `SELECT ${selected} FROM ${relation} WHERE ${table.where}`;
   if (table.policy === 'time_window') {
     const predicate = refreshTimePredicate(table, timeColumnType);
     const column = quoteIdent(table.column, 'mysql');
     const nullRule = table.nullPolicy === 'exclude' ? ` AND ${column} IS NOT NULL` : '';
-    return `SELECT * FROM ${relation} WHERE ${column} ${predicate.sql}${nullRule}`;
+    return `SELECT ${selected} FROM ${relation} WHERE ${column} ${predicate.sql}${nullRule}`;
   }
   if (table.policy === 'row_limit') {
-    return `SELECT * FROM ${relation} ORDER BY ${order([...table.orderBy, ...table.tieBreaker], table.direction)} LIMIT ${table.rows}`;
+    return `SELECT ${selected} FROM ${relation} ORDER BY ${order([...table.orderBy, ...table.tieBreaker], table.direction)} LIMIT ${table.rows}`;
   }
   if (table.policy === 'sample') {
     const parts = [sqlLiteral(spec.seed), sqlLiteral(String(table.sampleSeed)), ...table.tieBreaker.map(column => quoteIdent(column, 'mysql'))];
-    return `SELECT * FROM ${relation} ORDER BY MD5(CONCAT(${parts.join(`, ':', `)})), ${columns(table.tieBreaker)} LIMIT ${table.rows}`;
+    return `SELECT ${selected} FROM ${relation} ORDER BY MD5(CONCAT(${parts.join(`, ':', `)})), ${columns(table.tieBreaker)} LIMIT ${table.rows}`;
   }
   throw new Error(`${table.table} does not have a source query`);
+}
+
+export function buildRefreshPolicySql(
+  spec: RefreshSpec,
+  table: RefreshTablePolicy,
+  sourceSchema: string,
+  timeColumnType: RefreshTimeColumn = 'datetime',
+  projection?: string[],
+): string {
+  return readSql(spec, table, sourceSchema, timeColumnType, projection);
 }
 
 export function buildRefreshPlan(

@@ -531,6 +531,7 @@ export function namedTargets(fixtures) {
             names.map(name => [name, 'PRIMARY', 0, 1, 'id', null, 0, 'BTREE']));
           if (sql.includes('KEY_COLUMN_USAGE')) return fixtures.queryResult(
             ['CONSTRAINT_NAME', 'TABLE_SCHEMA', 'TABLE_NAME', 'COLUMN_NAME', 'REFERENCED_TABLE_SCHEMA', 'REFERENCED_TABLE_NAME', 'REFERENCED_COLUMN_NAME', 'ORDINAL_POSITION', 'DELETE_RULE', 'UPDATE_RULE'], []);
+          if (/^SELECT `id` FROM `shop`\./.test(sql)) return fixtures.queryResult(['id'], []);
           throw new Error(`unexpected Refresh query: ${sql}`);
         },
       },
@@ -558,11 +559,13 @@ export function namedTargets(fixtures) {
         };
         await click('Reconfirm source and target');
         await click('Analyze catalogs');
+        if (!testCase.missingTarget) await click('Plan row sets');
       },
       assert: ({ html, calls }) => {
         const queries = calls.filter(call => call.cmd === 'monitor_query');
-        if (queries.length !== 12) return `expected 12 catalog reads, got ${queries.length}`;
-        if (queries.some(call => !/information_schema|innodb_table_stats/.test(call.args.sql))) return 'catalog analysis read application rows';
+        const expectedQueries = testCase.missingTarget ? 12 : 15;
+        if (queries.length !== expectedQueries) return `expected ${expectedQueries} catalog/key reads, got ${queries.length}`;
+        if (queries.slice(0, 12).some(call => !/information_schema|innodb_table_stats/.test(call.args.sql))) return 'catalog analysis read application rows';
         if (testCase.missingTarget) {
           if (!html.includes('Catalog compatibility is blocked')) return 'missing target did not block analysis';
           if (!html.includes('target table shop.events does not exist')) return 'missing target table was not named';
@@ -570,6 +573,9 @@ export function namedTargets(fixtures) {
         } else {
           if (!html.includes('Catalog compatibility proven')) return 'clean catalogs did not produce compatibility proof';
           if (!html.includes('3 source tables · 3 target tables · 0 FKs')) return 'catalog counts are missing or wrong';
+          if (!html.includes('Requested 0 + closure 0 = final 0')) return 'row-set totals were not rendered';
+          if (!html.includes('Fixed-point row-set plan complete')) return 'fixed-point proof was not rendered';
+          if (queries.slice(12).some(call => call.args.sessionId !== 's-source' || !call.args.sql.startsWith('SELECT `id` FROM'))) return 'row-set planning did not use source key-only queries';
         }
       },
     })),
