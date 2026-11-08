@@ -99,6 +99,31 @@ interface QueryLabRewriteEvidence {
   unverified_reason: string | null;
 }
 
+interface QueryLabBenchmarkResponse {
+  run_key: string;
+  spec_sha256: string;
+  candidate_id: string;
+  backend_id: number;
+  warmup_runs: number;
+  repetitions: number;
+  pairs: { repetition: number; order: 'baseline_first' | 'candidate_first'; baseline_ms: number; candidate_ms: number }[];
+  baseline_ms: number[];
+  candidate_ms: number[];
+  baseline: QueryLabTimingSummary;
+  candidate: QueryLabTimingSummary;
+  baseline_sha256: string | null;
+  candidate_sha256: string | null;
+  cleanup: { timeout_restored: boolean; connection_closed: boolean };
+}
+
+interface QueryLabTimingSummary {
+  count: number;
+  min_ms: number;
+  median_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
 interface Props {
   session: Session;
   schema?: string | null;
@@ -132,6 +157,11 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const [rewriteRunning, setRewriteRunning] = useState(false);
   const [rewriteCancelling, setRewriteCancelling] = useState(false);
   const [rewriteError, setRewriteError] = useState<string | null>(null);
+  const [benchmark, setBenchmark] = useState<QueryLabBenchmarkResponse | null>(null);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [benchmarkCancelling, setBenchmarkCancelling] = useState(false);
+  const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
+  const benchmarkRunKey = useRef<string | null>(null);
   const realRunKey = useRef<string | null>(null);
   const rewriteRunKey = useRef<string | null>(null);
   const errors = useMemo(() => validateQueryLabExperiment(experiment), [experiment]);
@@ -159,6 +189,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setRealIndexError(null);
     setRewrite(null);
     setRewriteError(null);
+    setBenchmark(null);
+    setBenchmarkError(null);
   };
   const updateCandidate = (index: number, change: Partial<QueryLabCandidate>) => {
     patch(current => ({
@@ -190,6 +222,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setRealIndexError(null);
     setRewrite(null);
     setRewriteError(null);
+    setBenchmark(null);
+    setBenchmarkError(null);
   };
   const baselinePayload = (normalized: NormalizedQueryLabExperiment, runKey: string) => ({
     session_id: normalized.scratch?.sessionId ?? session.sessionId,
@@ -319,6 +353,42 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       if (rewriteRunKey.current === runKey) rewriteRunKey.current = null;
       setRewriteRunning(false);
       setRewriteCancelling(false);
+    }
+  };
+  const captureBenchmark = async () => {
+    const candidate = validated?.candidates.find(candidate => candidate.kind === 'rewrite');
+    if (!validated || validated.executionMode !== 'measured' || !candidate || benchmarkRunning) return;
+    const runKey = crypto.randomUUID();
+    benchmarkRunKey.current = runKey;
+    setBenchmarkRunning(true);
+    setBenchmarkCancelling(false);
+    setBenchmarkError(null);
+    setBenchmark(null);
+    try {
+      const response = await invoke<QueryLabBenchmarkResponse>('query_lab_benchmark', {
+        input: {
+          rewrite: {
+            baseline: baselinePayload(validated, runKey),
+            candidate: { id: candidate.id, name: candidate.name, sql: candidate.sql },
+            row_order_policy: validated.resultRowOrder,
+            max_rows: validated.resultMaxRows,
+            max_bytes: validated.resultMaxBytes,
+          },
+          warmup_runs: validated.warmupRuns,
+          repetitions: validated.repetitions,
+        },
+      });
+      if (response.spec_sha256 !== specHashRef.current) {
+        setBenchmarkError('The experiment changed during benchmarking; the stale result was discarded after connection cleanup.');
+      } else {
+        setBenchmark(response);
+      }
+    } catch (error) {
+      setBenchmarkError(errorDisplay(error));
+    } finally {
+      if (benchmarkRunKey.current === runKey) benchmarkRunKey.current = null;
+      setBenchmarkRunning(false);
+      setBenchmarkCancelling(false);
     }
   };
   const cleanupScratch = async (record: MigrationScratchRecord) => {
@@ -534,12 +604,21 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                       }
                     }}>{rewriteCancelling ? 'Cancelling…' : '■ Cancel rewrite'}</button>}
                     <p className="dv-desc">Both read-only queries execute within the declared row/byte budgets. Only complete canonical typed hashes can be equal; different results are invalid, never a winner.</p>
+                    <button className="toolbar-btn" disabled={benchmarkRunning} onClick={() => void captureBenchmark()}>{benchmarkRunning ? 'Benchmarking…' : 'Benchmark rewrite'}</button>
+                    {benchmarkRunning && <button className="cancel-btn" onClick={() => {
+                      if (benchmarkRunKey.current) {
+                        setBenchmarkCancelling(true);
+                        void invoke('cancel_watched', { runKey: benchmarkRunKey.current }).catch(() => {});
+                      }
+                    }}>{benchmarkCancelling ? 'Cancelling…' : '■ Cancel benchmark'}</button>}
+                    {benchmarkRunning && <p className="dv-desc">Running up to {2 * (validated.warmupRuns + validated.repetitions)} full-drain steps with alternating order. Rows are discarded one at a time, never queued.</p>}
                   </>}
                 </div>}
                 {baselineError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{baselineError}</span></div>}
                 {hypopgError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{hypopgError}</span></div>}
                 {realIndexError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{realIndexError}</span></div>}
                 {rewriteError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{rewriteError}</span></div>}
+                {benchmarkError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{benchmarkError}</span></div>}
               </section>
 
               {baseline && <section aria-label="Query Lab baseline evidence">
@@ -592,6 +671,22 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                   </div>;
                 })}
                 <p className="dv-desc">Cleanup: timeout {rewrite.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {rewrite.cleanup.connection_closed ? 'closed' : 'NOT closed'} · scratch left active for further read-only experiments.</p>
+              </section>}
+              {benchmark && <section aria-label="Benchmark timing evidence">
+                <h3>Benchmark · {benchmark.candidate_id} · {benchmark.warmup_runs} warmup + {benchmark.repetitions} repetitions</h3>
+                <p className="dv-desc">Backend {benchmark.backend_id} · {benchmark.pairs.length} measured pairs · alternating order · full-drain execution with no result queue. These are raw observations, not an improvement verdict.</p>
+                {(['baseline', 'candidate'] as const).map(kind => {
+                  const summary = benchmark[kind];
+                  const raw = kind === 'baseline' ? benchmark.baseline_ms : benchmark.candidate_ms;
+                  return <div className="sqp-f-evidence" key={kind}>
+                    <h4>{kind} · count {summary.count} · min {summary.min_ms} ms · median {summary.median_ms} ms · p95 {summary.p95_ms} ms · max {summary.max_ms} ms</h4>
+                    <p className="dv-desc">Raw timings: [{raw.join(', ')}] ms · SHA-256 {kind === 'baseline' ? benchmark.baseline_sha256 : benchmark.candidate_sha256}</p>
+                  </div>;
+                })}
+                {benchmark.pairs.map(pair => <div className="sqp-f-evidence" key={pair.repetition}>
+                  Repetition {pair.repetition} · {pair.order} · baseline {pair.baseline_ms} ms · candidate {pair.candidate_ms} ms
+                </div>)}
+                <p className="dv-desc">Cleanup: timeout {benchmark.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {benchmark.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
               </section>}
             </div>
           </div>

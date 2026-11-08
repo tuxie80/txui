@@ -1,8 +1,9 @@
 use std::time::{Duration, Instant};
 
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::Connection;
+use sqlx::{AssertSqlSafe, Connection};
 use uuid::Uuid;
 
 use crate::apperror::{AppError, ErrorCode};
@@ -1058,6 +1059,39 @@ impl RealConnection {
         }
     }
 
+    async fn timed(
+        &mut self,
+        sql: &str,
+        timeout_ms: u64,
+        cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<u64, AppError> {
+        let started = Instant::now();
+        let execution = async {
+            match self {
+                Self::Mysql { conn, .. } => {
+                    let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(conn);
+                    while stream.try_next().await?.is_some() {}
+                    Ok::<(), sqlx::Error>(())
+                },
+                Self::Postgres { conn, .. } => {
+                    let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(conn);
+                    while stream.try_next().await?.is_some() {}
+                    Ok::<(), sqlx::Error>(())
+                },
+            }
+        };
+        tokio::select! {
+            result = tokio::time::timeout(Duration::from_millis(timeout_ms), execution) => {
+                match result {
+                    Ok(Ok(())) => Ok(started.elapsed().as_millis() as u64),
+                    Ok(Err(error)) => Err(AppError::from(error)),
+                    Err(_) => Err(AppError::new(ErrorCode::Timeout, "Query Lab benchmark run exceeded its timeout")),
+                }
+            },
+            _ = cancel => Err(AppError::new(ErrorCode::Cancelled, "Query Lab benchmark run was cancelled")),
+        }
+    }
+
     async fn raw(&mut self, sql: &str) -> Result<(), AppError> {
         match self {
             Self::Mysql { conn, .. } => crate::db::mysql::execute(conn, sql).await.map(|_| ()).map_err(Into::into),
@@ -1690,6 +1724,251 @@ pub async fn query_lab_rewrite_measure(
     execute_rewrite(input, &state).await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabBenchmarkInput {
+    pub rewrite: QueryLabRewriteInput,
+    pub warmup_runs: u64,
+    pub repetitions: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabBenchmarkPair {
+    pub repetition: u64,
+    pub order: String,
+    pub baseline_ms: u64,
+    pub candidate_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabTimingSummary {
+    pub count: u64,
+    pub min_ms: u64,
+    pub median_ms: f64,
+    pub p95_ms: u64,
+    pub max_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabBenchmarkResponse {
+    pub run_key: String,
+    pub spec_sha256: String,
+    pub candidate_id: String,
+    pub backend_id: u64,
+    pub warmup_runs: u64,
+    pub repetitions: u64,
+    pub pairs: Vec<QueryLabBenchmarkPair>,
+    pub baseline_ms: Vec<u64>,
+    pub candidate_ms: Vec<u64>,
+    pub baseline: QueryLabTimingSummary,
+    pub candidate: QueryLabTimingSummary,
+    pub baseline_sha256: Option<String>,
+    pub candidate_sha256: Option<String>,
+    pub cleanup: QueryLabCleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchmarkSide {
+    Baseline,
+    Candidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BenchmarkStep {
+    measured: bool,
+    repetition: u64,
+    side: BenchmarkSide,
+}
+
+fn benchmark_steps(warmup_runs: u64, repetitions: u64) -> Result<Vec<BenchmarkStep>, AppError> {
+    if warmup_runs > 10 || repetitions == 0 || repetitions > 30 {
+        return Err(AppError::bad_request("Query Lab benchmark requires 0–10 warmups and 1–30 repetitions"));
+    }
+    let mut steps = Vec::with_capacity((warmup_runs as usize + repetitions as usize) * 2);
+    for (measured, count) in [(false, warmup_runs), (true, repetitions)] {
+        for repetition in 1..=count {
+            let baseline_first = repetition % 2 == 1;
+            steps.push(BenchmarkStep { measured, repetition, side: if baseline_first { BenchmarkSide::Baseline } else { BenchmarkSide::Candidate } });
+            steps.push(BenchmarkStep { measured, repetition, side: if baseline_first { BenchmarkSide::Candidate } else { BenchmarkSide::Baseline } });
+        }
+    }
+    Ok(steps)
+}
+
+fn timing_summary(values: &[u64]) -> Result<QueryLabTimingSummary, AppError> {
+    if values.is_empty() {
+        return Err(AppError::local("Query Lab benchmark has no measured timings"));
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    let median_ms = if sorted.len() % 2 == 1 {
+        sorted[middle] as f64
+    } else {
+        (sorted[middle - 1] + sorted[middle]) as f64 / 2.0
+    };
+    Ok(QueryLabTimingSummary {
+        count: sorted.len() as u64,
+        min_ms: sorted[0],
+        median_ms,
+        p95_ms: sorted[(sorted.len() * 95).div_ceil(100).saturating_sub(1)],
+        max_ms: sorted[sorted.len() - 1],
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BenchmarkControl {
+    cancel_after: Option<u64>,
+}
+
+async fn benchmark_inner(
+    input: QueryLabBenchmarkInput,
+    state: &AppState,
+    cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    control: BenchmarkControl,
+) -> Result<QueryLabBenchmarkResponse, AppError> {
+    let steps = benchmark_steps(input.warmup_runs, input.repetitions)?;
+    let correctness = rewrite_inner(input.rewrite.clone(), state, cancel).await?;
+    if correctness.correctness != "equal" {
+        return Err(AppError::guard("Query Lab benchmark requires equal rewrite results; invalid_results cannot be timed as a winner"));
+    }
+    let validated = validate_input(&input.rewrite.baseline, state).await?;
+    let database = validated.execution_database.clone();
+    let mut conn = RealConnection::acquire(&input.rewrite.baseline, state, &database, validated.timeout_ms).await?;
+    let backend_id = conn.backend_id();
+    let mut result = async {
+        let mut pairs = Vec::with_capacity(input.repetitions as usize);
+        let mut baseline_ms = Vec::with_capacity(input.repetitions as usize);
+        let mut candidate_ms = Vec::with_capacity(input.repetitions as usize);
+        let mut current_pair: Option<QueryLabBenchmarkPair> = None;
+        let mut completed = 0_u64;
+        for step in steps {
+            if cancel.try_recv().is_ok() {
+                return Err(AppError::new(ErrorCode::Cancelled, "Query Lab benchmark was cancelled between runs"));
+            }
+            let sql = match step.side {
+                BenchmarkSide::Baseline => &input.rewrite.baseline.sql,
+                BenchmarkSide::Candidate => &input.rewrite.candidate.sql,
+            };
+            let elapsed = conn.timed(sql, validated.timeout_ms, cancel).await?;
+            completed += 1;
+            if step.measured {
+                if current_pair.as_ref().is_none_or(|pair| pair.repetition != step.repetition) {
+                    if let Some(pair) = current_pair.take() { pairs.push(pair); }
+                    current_pair = Some(QueryLabBenchmarkPair {
+                        repetition: step.repetition,
+                        order: if step.side == BenchmarkSide::Baseline { "baseline_first".into() } else { "candidate_first".into() },
+                        baseline_ms: 0,
+                        candidate_ms: 0,
+                    });
+                }
+                let pair = current_pair.as_mut().expect("pair was just initialized");
+                match step.side {
+                    BenchmarkSide::Baseline => {
+                        pair.baseline_ms = elapsed;
+                        baseline_ms.push(elapsed);
+                    },
+                    BenchmarkSide::Candidate => {
+                        pair.candidate_ms = elapsed;
+                        candidate_ms.push(elapsed);
+                    },
+                }
+            }
+            if control.cancel_after == Some(completed) {
+                return Err(AppError::new(ErrorCode::Cancelled, "Query Lab benchmark was cancelled between runs"));
+            }
+        }
+        if let Some(pair) = current_pair { pairs.push(pair); }
+        let baseline = timing_summary(&baseline_ms)?;
+        let candidate = timing_summary(&candidate_ms)?;
+        Ok((pairs, baseline_ms, candidate_ms, baseline, candidate))
+    }.await;
+    if let Err(error) = conn.restore().await {
+        if result.is_ok() { result = Err(error); }
+    }
+    if let Err(error) = conn.close().await {
+        if result.is_ok() { result = Err(error); }
+    }
+    result.map(|(pairs, baseline_ms, candidate_ms, baseline, candidate)| QueryLabBenchmarkResponse {
+        run_key: input.rewrite.baseline.run_key.clone(),
+        spec_sha256: input.rewrite.baseline.spec_sha256.clone(),
+        candidate_id: input.rewrite.candidate.id.clone(),
+        backend_id,
+        warmup_runs: input.warmup_runs,
+        repetitions: input.repetitions,
+        pairs,
+        baseline_ms,
+        candidate_ms,
+        baseline,
+        candidate,
+        baseline_sha256: correctness.baseline.sha256,
+        candidate_sha256: correctness.candidate.sha256,
+        cleanup: QueryLabCleanup { timeout_restored: true, connection_closed: true, hypopg_reset: None },
+    })
+}
+
+async fn audit_benchmark(
+    state: &AppState,
+    input: &QueryLabBenchmarkInput,
+    started: Instant,
+    result: &Result<QueryLabBenchmarkResponse, AppError>,
+) {
+    let rewrite = &input.rewrite;
+    let baseline = &rewrite.baseline;
+    let session_start = state.session_starts.read().await.get(&baseline.session_id).cloned();
+    let (ok, error, code) = match result {
+        Ok(_) => (true, None, ""),
+        Err(error) => (false, Some(error.message.clone()), error.code.as_str()),
+    };
+    let entry = crate::commands::audit::AuditInsert {
+        run_id: format!("query-lab-benchmark:{}", baseline.run_key), stmt_index: Some(1), stmt_total: Some(1),
+        session_id: baseline.session_id.to_string(), tab_title: "Query Optimization Lab (benchmark)".into(),
+        database: baseline.scratch.as_ref().map(|scratch| scratch.database.clone()).unwrap_or_else(|| baseline.database.clone()),
+        source: "query_lab_benchmark".into(),
+        started_at: crate::commands::audit::lifecycle_now(), ended_at: crate::commands::audit::lifecycle_now(),
+        duration_ms: started.elapsed().as_millis() as i64,
+        connection_name: session_start.as_ref().map(|value| value.connection_name.clone()).unwrap_or_default(),
+        db_user: session_start.as_ref().map(|value| value.db_user.clone()).unwrap_or_default(),
+        engine: baseline.engine.clone(), ok, rows_out: 0, rows_affected: None,
+        error, error_code: code.into(), db_code: String::new(), sqlstate: String::new(),
+        sql: format!("{}\n-- Query Lab benchmark candidate: {}\n{}", baseline.sql, rewrite.candidate.id, rewrite.candidate.sql),
+    };
+    if let Err(error) = crate::commands::audit::insert(&state.history, &entry).await {
+        eprintln!("[audit] query lab benchmark insert failed: {error:#}");
+    }
+}
+
+pub async fn execute_benchmark(
+    input: QueryLabBenchmarkInput,
+    state: &AppState,
+) -> Result<QueryLabBenchmarkResponse, AppError> {
+    let started = Instant::now();
+    let key = crate::state::ext_job_key(input.rewrite.baseline.session_id, &input.rewrite.baseline.run_key);
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut jobs = state.ext_jobs.write().await;
+        if jobs.contains_key(&key) {
+            return Err(AppError::bad_request("This Query Lab benchmark is already active"));
+        }
+        jobs.insert(key.clone(), cancel_tx);
+    }
+    let result = benchmark_inner(input.clone(), state, &mut cancel_rx, BenchmarkControl::default()).await;
+    state.ext_jobs.write().await.remove(&key);
+    audit_benchmark(state, &input, started, &result).await;
+    result
+}
+
+#[tauri::command]
+pub async fn query_lab_benchmark(
+    input: QueryLabBenchmarkInput,
+    state: tauri::State<'_, AppState>,
+) -> Result<QueryLabBenchmarkResponse, AppError> {
+    execute_benchmark(input, &state).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1891,6 +2170,32 @@ mod tests {
         assert!(validate_input(&rewrite, &state).await.is_err());
         rewrite.evidence.result_equality = true;
         assert!(validate_input(&rewrite, &state).await.is_ok());
+    }
+
+    #[test]
+    fn benchmark_schedule_and_summary_match_the_pure_contract() {
+        let steps = benchmark_steps(2, 4).unwrap();
+        assert_eq!(steps.len(), 12);
+        assert_eq!(steps.iter().take(4).map(|step| step.side).collect::<Vec<_>>(), [
+            BenchmarkSide::Baseline, BenchmarkSide::Candidate,
+            BenchmarkSide::Candidate, BenchmarkSide::Baseline,
+        ]);
+        assert_eq!(steps.iter().skip(4).map(|step| step.side).collect::<Vec<_>>(), [
+            BenchmarkSide::Baseline, BenchmarkSide::Candidate,
+            BenchmarkSide::Candidate, BenchmarkSide::Baseline,
+            BenchmarkSide::Baseline, BenchmarkSide::Candidate,
+            BenchmarkSide::Candidate, BenchmarkSide::Baseline,
+        ]);
+        assert_eq!(benchmark_steps(10, 30).unwrap().len(), 80);
+        assert!(benchmark_steps(11, 1).is_err());
+        assert!(benchmark_steps(0, 31).is_err());
+        let summary = timing_summary(&[9, 1, 5, 3, 7, 2, 8]).unwrap();
+        assert_eq!(summary.count, 7);
+        assert_eq!(summary.min_ms, 1);
+        assert_eq!(summary.median_ms, 5.0);
+        assert_eq!(summary.p95_ms, 9);
+        assert_eq!(summary.max_ms, 9);
+        assert_eq!(timing_summary(&[10, 1, 7, 3]).unwrap().median_ms, 5.0);
     }
 
     fn grid(columns: &[(&str, &str)], rows: Vec<Vec<serde_json::Value>>) -> QueryResult {
@@ -2269,7 +2574,7 @@ mod tests {
         let cancelled = real_input(session, connection, Engine::Mysql);
         prepare_mysql_real_scratch(&pool, &state, &cancelled).await;
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        cancel_tx.send(()).unwrap();
+        let _ = cancel_tx.send(());
         let error = real_index_inner(cancelled.clone(), &state, &mut cancel_rx, None).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
         assert_mysql_scratch_gone(&pool, &state, &cancelled).await;
@@ -2350,7 +2655,7 @@ mod tests {
         let cancelled = real_input(session, connection, Engine::Postgres);
         prepare_pg_real_scratch(&pool, &state, &cancelled).await;
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        cancel_tx.send(()).unwrap();
+        let _ = cancel_tx.send(());
         let error = real_index_inner(cancelled.clone(), &state, &mut cancel_rx, None).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
         assert_pg_scratch_gone(&pool, &state, &cancelled).await;
@@ -2429,7 +2734,7 @@ mod tests {
 
         let cancelled = rewrite_input(session, connection, Engine::Mysql);
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        cancel_tx.send(()).unwrap();
+        let _ = cancel_tx.send(());
         let error = rewrite_inner(cancelled, &state, &mut cancel_rx).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shop.orders").fetch_one(&pool).await.unwrap();
@@ -2496,11 +2801,122 @@ mod tests {
 
         let cancelled = rewrite_input(session, connection, Engine::Postgres);
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-        cancel_tx.send(()).unwrap();
+        let _ = cancel_tx.send(());
         let error = rewrite_inner(cancelled, &state, &mut cancel_rx).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shop.orders").fetch_one(&pool).await.unwrap();
         assert_eq!(rows, 101);
+        crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_mysql_benchmark_schedule_and_cancellation() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE DATABASE shop").await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::mysql::execute(&pool, "INSERT INTO shop.orders VALUES (1, 1), (2, 1), (3, 2)").await.unwrap();
+        let (state, session, connection) = mysql_live_state(&pool).await;
+        let input = QueryLabBenchmarkInput {
+            rewrite: rewrite_input(session, connection, Engine::Mysql),
+            warmup_runs: 1,
+            repetitions: 4,
+        };
+        let response = execute_benchmark(input.clone(), &state).await.unwrap();
+        assert_eq!(response.pairs.len(), 4);
+        assert_eq!(response.baseline_ms.len(), 4);
+        assert_eq!(response.candidate_ms.len(), 4);
+        assert_eq!(response.pairs.iter().map(|pair| pair.order.as_str()).collect::<Vec<_>>(), [
+            "baseline_first", "candidate_first", "baseline_first", "candidate_first",
+        ]);
+        assert_eq!(response.baseline.count, 4);
+        assert_eq!(response.candidate.count, 4);
+        assert!(response.baseline_sha256 == response.candidate_sha256);
+        assert!(response.cleanup.timeout_restored && response.cleanup.connection_closed);
+        assert!(state.ext_jobs.read().await.is_empty());
+        let audit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE run_id = ? AND source = 'query_lab_benchmark' AND ok = 1")
+            .bind(format!("query-lab-benchmark:{}", response.run_key)).fetch_one(&state.history).await.unwrap();
+        assert_eq!(audit, 1);
+
+        let mut invalid = input.clone();
+        invalid.rewrite.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 2 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert!(benchmark_inner(invalid, &state, &mut cancel_rx, BenchmarkControl::default()).await.is_err());
+
+        let between = QueryLabBenchmarkInput { warmup_runs: 0, repetitions: 3, ..input.clone() };
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let error = benchmark_inner(between, &state, &mut cancel_rx, BenchmarkControl { cancel_after: Some(1) }).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+
+        let mut sleeping = QueryLabBenchmarkInput { warmup_runs: 0, repetitions: 2, ..input };
+        sleeping.rewrite.baseline.timeout_ms = 2000;
+        sleeping.rewrite.baseline.sql = "SELECT SLEEP(0.2)".into();
+        sleeping.rewrite.candidate.sql = sleeping.rewrite.baseline.sql.clone();
+        let task_state = state.clone();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            benchmark_inner(sleeping, &task_state, &mut cancel_rx, BenchmarkControl::default()).await
+        });
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        let _ = cancel_tx.send(());
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        crate::db::mysql::execute(&pool, "DROP DATABASE shop").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18"]
+    async fn dbctl_pg_benchmark_schedule_and_cancellation() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE SCHEMA shop").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders VALUES (1, 1), (2, 1), (3, 2)").await.unwrap();
+        let (state, session, connection) = pg_live_state(&pool).await;
+        let input = QueryLabBenchmarkInput {
+            rewrite: rewrite_input(session, connection, Engine::Postgres),
+            warmup_runs: 1,
+            repetitions: 4,
+        };
+        let response = execute_benchmark(input.clone(), &state).await.unwrap();
+        assert_eq!(response.pairs.len(), 4);
+        assert_eq!(response.baseline_ms.len(), 4);
+        assert_eq!(response.candidate_ms.len(), 4);
+        assert_eq!(response.pairs.iter().map(|pair| pair.order.as_str()).collect::<Vec<_>>(), [
+            "baseline_first", "candidate_first", "baseline_first", "candidate_first",
+        ]);
+        assert_eq!(response.baseline.count, 4);
+        assert_eq!(response.candidate.count, 4);
+        assert!(response.baseline_sha256 == response.candidate_sha256);
+        assert!(response.cleanup.timeout_restored && response.cleanup.connection_closed);
+        assert!(state.ext_jobs.read().await.is_empty());
+
+        let mut invalid = input.clone();
+        invalid.rewrite.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 2 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert!(benchmark_inner(invalid, &state, &mut cancel_rx, BenchmarkControl::default()).await.is_err());
+
+        let between = QueryLabBenchmarkInput { warmup_runs: 0, repetitions: 3, ..input.clone() };
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let error = benchmark_inner(between, &state, &mut cancel_rx, BenchmarkControl { cancel_after: Some(1) }).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+
+        let mut sleeping = QueryLabBenchmarkInput { warmup_runs: 0, repetitions: 2, ..input };
+        sleeping.rewrite.baseline.timeout_ms = 2000;
+        sleeping.rewrite.baseline.sql = "SELECT 1 AS value FROM (SELECT pg_sleep(0.2)) AS slept".into();
+        sleeping.rewrite.candidate.sql = sleeping.rewrite.baseline.sql.clone();
+        let task_state = state.clone();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            benchmark_inner(sleeping, &task_state, &mut cancel_rx, BenchmarkControl::default()).await
+        });
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        let _ = cancel_tx.send(());
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
         crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
         pool.close().await;
     }

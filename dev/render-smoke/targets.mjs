@@ -606,6 +606,23 @@ export function namedTargets(fixtures) {
           },
           cleanup: { timeout_restored: true, connection_closed: true },
         }),
+        query_lab_benchmark: args => {
+          const pairs = Array.from({ length: args.input.repetitions }, (_, index) => ({
+            repetition: index + 1, order: index % 2 === 0 ? 'baseline_first' : 'candidate_first',
+            baseline_ms: 10 + index, candidate_ms: 8 + index,
+          }));
+          return {
+            run_key: args.input.rewrite.baseline.run_key, spec_sha256: args.input.rewrite.baseline.spec_sha256,
+            candidate_id: args.input.rewrite.candidate.id, backend_id: 46,
+            warmup_runs: args.input.warmup_runs, repetitions: args.input.repetitions,
+            pairs,
+            baseline_ms: pairs.map(pair => pair.baseline_ms), candidate_ms: pairs.map(pair => pair.candidate_ms),
+            baseline: { count: pairs.length, min_ms: 10, median_ms: 13, p95_ms: 16, max_ms: 16 },
+            candidate: { count: pairs.length, min_ms: 8, median_ms: 11, p95_ms: 14, max_ms: 14 },
+            baseline_sha256: 'a'.repeat(64), candidate_sha256: 'a'.repeat(64),
+            cleanup: { timeout_restored: true, connection_closed: true },
+          };
+        },
       },
       props: {
         session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'postgres', environment: 'dev', readOnly: false },
@@ -737,6 +754,8 @@ export function namedTargets(fixtures) {
         });
         await click();
         await click('Check rewrite results');
+        container.__rewriteResult = container.textContent;
+        await click('Benchmark rewrite');
       },
       assert: ({ html, calls, container }) => {
         if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
@@ -754,12 +773,17 @@ export function namedTargets(fixtures) {
         if (!realIndex) return 'real-index candidate was not invoked';
         if (realIndex.args.input.baseline.index_evidence_mode !== 'real' || realIndex.args.input.baseline.execution_mode !== 'measured') return 'real-index evidence contract was not preserved';
         if (realIndex.args.input.baseline.scratch.run_key !== '01234567-89ab-cdef-8123-456789abcdef' || realIndex.args.input.baseline.scratch.database !== 'txui_mig_0123456789abcdef') return 'Migration scratch identity was not preserved';
-        if (!html.includes('Rewrite correctness') || !html.includes('<b>equal</b>') || !html.includes('complete canonical hash') || !html.includes('2 observed rows')) return 'rewrite correctness evidence was not rendered';
+        if (!container.__rewriteResult.includes('Rewrite correctness') || !container.__rewriteResult.includes('equal') || !container.__rewriteResult.includes('complete canonical hash') || !container.__rewriteResult.includes('2 observed rows')) return 'rewrite correctness evidence was not rendered';
         const rewrite = calls.find(call => call.cmd === 'query_lab_rewrite_measure');
         if (!rewrite) return 'rewrite candidate was not invoked';
         if (rewrite.args.input.baseline.index_evidence_mode !== 'none' || !rewrite.args.input.baseline.has_rewrite_candidate || !rewrite.args.input.baseline.evidence.result_equality) return 'rewrite evidence contract was not preserved';
         if (rewrite.args.input.row_order_policy !== 'ordered' || rewrite.args.input.max_rows !== 100000 || rewrite.args.input.max_bytes !== 67108864) return 'rewrite policy or budgets were not preserved';
         if (!rewrite.args.input.candidate.sql.includes('customer_id = 1')) return 'rewrite parameters were not resolved';
+        if (!html.includes('1 warmup + 7 repetitions') || !html.includes('Raw timings: [10, 11, 12, 13, 14, 15, 16] ms') || !html.includes('Repetition 7 · baseline_first · baseline 16 ms · candidate 14 ms')) return 'benchmark raw evidence was not rendered';
+        const benchmark = calls.find(call => call.cmd === 'query_lab_benchmark');
+        if (!benchmark) return 'benchmark was not invoked';
+        if (benchmark.args.input.warmup_runs !== 1 || benchmark.args.input.repetitions !== 7) return 'benchmark schedule was not preserved';
+        if (benchmark.args.input.rewrite.candidate.sql !== rewrite.args.input.candidate.sql || benchmark.args.input.rewrite.row_order_policy !== 'ordered') return 'benchmark rewrite contract was not preserved';
         const hypopg = calls.find(call => call.cmd === 'query_lab_hypopg_estimate');
         if (!hypopg) return 'HypoPG candidate was not invoked';
         if (hypopg.args.input.index_evidence_mode !== 'hypothetical') return 'HypoPG was invoked with incompatible evidence';
