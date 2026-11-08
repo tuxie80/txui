@@ -2870,8 +2870,12 @@ mod tests {
             benchmark_inner(sleeping, &task_state, &mut cancel_rx, BenchmarkControl::default()).await
         });
         tokio::time::sleep(Duration::from_millis(450)).await;
+        let cancel_started = Instant::now();
         let _ = cancel_tx.send(());
         let error = task.await.unwrap().unwrap_err();
+        let cancel_ms = cancel_started.elapsed().as_millis();
+        println!("Query Lab cancellation latency: {cancel_ms} ms");
+        assert!(cancel_ms < 2000);
         assert_eq!(error.code, ErrorCode::Cancelled);
         crate::db::mysql::execute(&pool, "DROP DATABASE shop").await.unwrap();
         pool.close().await;
@@ -2924,8 +2928,12 @@ mod tests {
             benchmark_inner(sleeping, &task_state, &mut cancel_rx, BenchmarkControl::default()).await
         });
         tokio::time::sleep(Duration::from_millis(450)).await;
+        let cancel_started = Instant::now();
         let _ = cancel_tx.send(());
         let error = task.await.unwrap().unwrap_err();
+        let cancel_ms = cancel_started.elapsed().as_millis();
+        println!("Query Lab cancellation latency: {cancel_ms} ms");
+        assert!(cancel_ms < 2000);
         assert_eq!(error.code, ErrorCode::Cancelled);
         crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
         pool.close().await;
