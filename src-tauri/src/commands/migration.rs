@@ -76,7 +76,7 @@ pub async fn migration_preflight(
     preflight(session_id, &sql, statements, &state).await
 }
 
-async fn preflight(
+pub(crate) async fn preflight(
     session_id: Uuid,
     sql: &str,
     metadata: Vec<MigrationStatementInput>,

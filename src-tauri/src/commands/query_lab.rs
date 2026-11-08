@@ -59,6 +59,7 @@ pub struct QueryLabPlanEvidence {
     pub format: String,
     pub content: String,
     pub elapsed_ms: u64,
+    pub elapsed_us: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,7 +131,16 @@ fn plan_text(result: &QueryResult) -> Result<String, AppError> {
 }
 
 fn estimated(label: &str, format: &str, content: String, elapsed_ms: u64) -> QueryLabPlanEvidence {
-    QueryLabPlanEvidence { label: label.into(), format: format.into(), content, elapsed_ms }
+    QueryLabPlanEvidence { label: label.into(), format: format.into(), content, elapsed_ms, elapsed_us: None }
+}
+
+fn estimated_precise(label: &str, format: &str, content: String, started: Instant) -> QueryLabPlanEvidence {
+    let elapsed = started.elapsed();
+    QueryLabPlanEvidence {
+        label: label.into(), format: format.into(), content,
+        elapsed_ms: elapsed.as_millis() as u64,
+        elapsed_us: Some(elapsed.as_micros() as u64),
+    }
 }
 
 async fn validated_migration_scratch(
@@ -1111,7 +1121,7 @@ impl RealConnection {
                 let is_maria = version.to_lowercase().contains("mariadb");
                 let (_, explain) = crate::commands::quality::mysql_analyze_statements(version, sql, timeout_ms);
                 let result = mysql_measured_statement(conn, &explain, timeout_ms, cancel).await?;
-                Ok(estimated("executed_query", if is_maria { "json" } else { "text" }, plan_text(&result)?, started.elapsed().as_millis() as u64))
+                Ok(estimated_precise("executed_query", if is_maria { "json" } else { "text" }, plan_text(&result)?, started))
             },
             Self::Postgres { conn, .. } => {
                 let full = format!("EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS) {sql}");
@@ -1121,7 +1131,7 @@ impl RealConnection {
                     },
                     other => other?,
                 };
-                Ok(estimated("executed_query", "json", plan_text(&result)?, started.elapsed().as_millis() as u64))
+                Ok(estimated_precise("executed_query", "json", plan_text(&result)?, started))
             },
         }
     }
@@ -2917,6 +2927,86 @@ mod tests {
         let _ = cancel_tx.send(());
         let error = task.await.unwrap().unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
+        crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18 with hypopg"]
+    async fn dbctl_pg_complete_query_lab_journey() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE EXTENSION IF NOT EXISTS hypopg").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE SCHEMA shop").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL, other_id INT NOT NULL)").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders SELECT g, g % 10, g % 10 FROM generate_series(1, 10000) g").await.unwrap();
+        let (state, session, connection) = pg_live_state(&pool).await;
+
+        let mut baseline_input = input(session, connection, Engine::Postgres, "estimate");
+        baseline_input.sql = "SELECT id FROM orders WHERE customer_id = 1".into();
+        baseline_input.spec_sha256 = "b".repeat(64);
+        baseline_input.index_evidence_mode = "hypothetical".into();
+        let baseline = execute_baseline(baseline_input, &state).await.unwrap();
+        assert_eq!(baseline.execution_mode, "estimate");
+        assert!(baseline.measured_plan.is_none());
+        assert!(baseline.estimated_plan.content.contains("Seq Scan"));
+
+        let winner = execute_hypopg(hypopg_input(session, connection, "customer-index"), &state).await.unwrap();
+        assert!(winner.index_used);
+        assert_eq!(winner.verdict, "lower_estimated_cost");
+        assert!(winner.absolute_delta.is_some_and(|delta| delta < 0.0));
+        let mut losing_input = hypopg_input(session, connection, "losing-index");
+        losing_input.sql = "SELECT id FROM orders WHERE other_id = 1".into();
+        let losing = execute_hypopg(losing_input, &state).await.unwrap();
+        assert!(!losing.index_used);
+        assert_eq!(losing.verdict, "not_used");
+
+        let mut baseline_us = Vec::new();
+        let mut candidate_us = Vec::new();
+        for _ in 0..3 {
+            let mut real = real_input(session, connection, Engine::Postgres);
+            real.baseline.sql = "SELECT id FROM orders WHERE customer_id = 1".into();
+            real.baseline.spec_sha256 = "b".repeat(64);
+            prepare_pg_real_scratch(&pool, &state, &real).await;
+            let response = execute_real_index(real.clone(), &state).await.unwrap();
+            assert!(response.index_used);
+            assert!(response.cleanup.scratch_dropped && response.cleanup.index_dropped);
+            baseline_us.push(response.baseline_plan.elapsed_us.unwrap());
+            candidate_us.push(response.candidate_plan.elapsed_us.unwrap());
+            assert_pg_scratch_gone(&pool, &state, &real).await;
+        }
+        baseline_us.sort_unstable();
+        candidate_us.sort_unstable();
+        assert!(candidate_us[1] < baseline_us[1], "real candidate median was not lower: {baseline_us:?} vs {candidate_us:?}");
+
+        let mut invalid = rewrite_input(session, connection, Engine::Postgres);
+        invalid.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 2 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let invalid_result = rewrite_inner(invalid.clone(), &state, &mut cancel_rx).await.unwrap();
+        assert_eq!(invalid_result.correctness, "different");
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let rejected = benchmark_inner(QueryLabBenchmarkInput {
+            rewrite: invalid, warmup_runs: 1, repetitions: 3,
+        }, &state, &mut cancel_rx, BenchmarkControl::default()).await;
+        assert!(rejected.is_err(), "different rewrite results reached benchmarking");
+
+        let artifact = "CREATE INDEX \"idx_customer_index_bbbbbbbb\" ON \"orders\" (\"customer_id\")";
+        let metadata = vec![crate::commands::migration::MigrationStatementInput {
+            kind: "create-index".into(), line: 1, table: Some("orders".into()), supported: true,
+            summary: "Create candidate index".into(), destructive: false, lossy: false, cost: None,
+        }];
+        let preflight = crate::commands::migration::preflight(session, artifact, metadata, &state).await.unwrap();
+        assert_eq!(preflight.statement_count, 1);
+        assert_eq!(preflight.unsupported, 0);
+        assert!(preflight.stop_on_first_error);
+        assert_eq!(preflight.sql_sha256, format!("{:x}", sha2::Sha256::digest(artifact.as_bytes())));
+        let source_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'shop' AND tablename = 'orders' AND indexname LIKE 'txui_lab_%'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(source_indexes, 0);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generate_series(0,100000) g WHERE public.hypopg_get_indexdef(g) IS NOT NULL")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
         crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
         pool.close().await;
     }

@@ -25,6 +25,15 @@ interface QueryLabPlanEvidence {
   format: string;
   content: string;
   elapsed_ms: number;
+  elapsed_us?: number | null;
+}
+
+function planElapsedMs(plan: QueryLabPlanEvidence): number {
+  return plan.elapsed_us !== undefined && plan.elapsed_us !== null ? plan.elapsed_us / 1000 : plan.elapsed_ms;
+}
+
+function planElapsedLabel(plan: QueryLabPlanEvidence): string {
+  return plan.elapsed_us !== undefined && plan.elapsed_us !== null ? `${plan.elapsed_us} µs` : `${plan.elapsed_ms} ms`;
 }
 
 interface QueryLabBaselineResponse {
@@ -203,8 +212,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     candidateKind: 'rewrite',
   }) : null, [benchmark, experiment.improvementThresholdPct]);
   const realIndexAssessment = useMemo(() => realIndex ? benchmarkVerdict({
-    baselineMs: [realIndex.baseline_plan.elapsed_ms],
-    candidateMs: [realIndex.candidate_plan.elapsed_ms],
+    baselineMs: [planElapsedMs(realIndex.baseline_plan)],
+    candidateMs: [planElapsedMs(realIndex.candidate_plan)],
     baselineSha256: realIndex.spec_sha256,
     candidateSha256: realIndex.spec_sha256,
     improvementThresholdPct: experiment.improvementThresholdPct,
@@ -215,8 +224,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     engine: experiment.engine,
     baselinePlan: realIndex.baseline_plan.content,
     candidatePlan: realIndex.candidate_plan.content,
-    baselineMs: realIndex.baseline_plan.elapsed_ms,
-    candidateMs: realIndex.candidate_plan.elapsed_ms,
+    baselineMs: planElapsedMs(realIndex.baseline_plan),
+    candidateMs: planElapsedMs(realIndex.candidate_plan),
   }) : null, [realIndex, experiment.engine]);
   const hypopgCorrelation = useMemo(() => hypopg ? correlatePlanEvidence({
     engine: 'postgres',
@@ -808,9 +817,9 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <p className="dv-desc">Create wall time: <b>{realIndex.index_build_ms} ms</b> (lock wait + rebuild; components not separately observed). Candidate index used: <b>{realIndex.index_used ? 'yes' : 'no'}</b>.</p>
                 <p className="dv-desc">Cleanup: candidate index {realIndex.cleanup.index_dropped ? 'dropped' : 'NOT dropped'} · Migration scratch {realIndex.cleanup.scratch_dropped ? 'dropped' : 'NOT dropped'} · timeout {realIndex.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {realIndex.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
                 {!realIndex.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner did not use the real candidate index; no improvement is claimed.</span></div>}
-                <h4>EXECUTED BASELINE · {realIndex.baseline_plan.elapsed_ms} ms</h4>
+                <h4>EXECUTED BASELINE · {planElapsedLabel(realIndex.baseline_plan)}</h4>
                 <pre className="sqp-sql">{realIndex.baseline_plan.content}</pre>
-                <h4>EXECUTED CANDIDATE · {realIndex.candidate_plan.elapsed_ms} ms</h4>
+                <h4>EXECUTED CANDIDATE · {planElapsedLabel(realIndex.candidate_plan)}</h4>
                 <pre className="sqp-sql">{realIndex.candidate_plan.content}</pre>
               </section>}
               {rewrite && <section aria-label="Rewrite correctness evidence">

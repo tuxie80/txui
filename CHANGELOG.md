@@ -28,6 +28,8 @@ this project follows semantic versioning.
 
 - **Guarded Query Lab → Migration handoff** — Create migration now emits only a used index artifact or an equal rewrite with strict `labEvidence` and an exact artifact hash. Migration Cockpit treats it as informational only and independently refuses hash mismatches before catalog/preflight; no target or proof phase is carried. Pure SQL/tamper tests and mounted event coverage prove the contract.
 
+- **Complete live Query Lab journey** — a disposable PostgreSQL fixture now proves baseline, used and losing HypoPG candidates, three real scratch measurements with lower candidate median, invalid rewrite refusal and independent Migration preflight, with complete cleanup. Real measured plans expose optional microseconds to avoid false ties. Pure journey checks prove winning evidence enters `draft`, noisy evidence stays inconclusive and invalid rewrites are refused.
+
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
