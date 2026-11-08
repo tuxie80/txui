@@ -26,6 +26,8 @@ this project follows semantic versioning.
 
 - **Deterministic Query Lab reports** — Export report .md now includes exact mode, correctness, noise verdict, raw timing arrays and per-pair order, plan correlation, scratch/index lifecycle, cache caveats and SQL artifacts without timestamps, credentials or result rows. Golden and 30-pair/long-SQL tests pass, mounted exports inspect the real payload, and real Chromium verifies the complete report workflow on Ayu Dark/Light at 1600×1000 and 1100×760.
 
+- **Guarded Query Lab → Migration handoff** — Create migration now emits only a used index artifact or an equal rewrite with strict `labEvidence` and an exact artifact hash. Migration Cockpit treats it as informational only and independently refuses hash mismatches before catalog/preflight; no target or proof phase is carried. Pure SQL/tamper tests and mounted event coverage prove the contract.
+
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.

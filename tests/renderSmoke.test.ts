@@ -62,6 +62,7 @@ const NAMED_MOUNTED = [
   'MigrationPanel_target_verification_mismatch',
   'MigrationPanel_verification_mismatch',
   'MigrationPanel_scratch_cancelled',
+  'MigrationPanel_query_lab_tampered',
   'App',               // whole app chrome + File/Help menu event translation
   'App_migration_handoff',
   'App_migration_prod_handoff',

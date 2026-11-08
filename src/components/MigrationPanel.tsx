@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import type { QueryResult, Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
-import type { MigrationOrigin } from '../utils/operationHandoff';
+import type { MigrationLabEvidence, MigrationOrigin } from '../utils/operationHandoff';
 import { reviewMigrationWithCatalog } from '../utils/migrationReview';
 import type { MigrationReviewResult } from '../utils/migrationReview';
 import { buildMigrationPreflightStatements } from '../utils/migrationPreflight';
@@ -32,6 +32,7 @@ interface Props {
   schema?: string | null;
   initialSql?: string;
   initialOrigin?: MigrationOrigin;
+  initialEvidence?: MigrationLabEvidence | null;
   onClose: () => void;
 }
 
@@ -49,7 +50,7 @@ type DeploymentEvent =
   | { type: 'statement'; statement: MigrationExecutionResult['statements'][number]; committed: number; unknown: number; failed: number; not_started: number }
   | { type: 'done'; ok: boolean; cancelled: boolean; committed: number; unknown: number; failed: number; not_started: number };
 
-export function MigrationPanel({ session, openSessions = [session], schema = null, initialSql = '', initialOrigin = 'editor', onClose }: Props) {
+export function MigrationPanel({ session, openSessions = [session], schema = null, initialSql = '', initialOrigin = 'editor', initialEvidence = null, onClose }: Props) {
   const unavailable = safeOperationUnavailableReason(session.engine, 'migration');
   const flavor = useServerFlavor(session.sessionId, session.engine, session.connectionId);
   const [sql, setSql] = useState(initialSql);
@@ -88,6 +89,10 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   const deploymentRunRef = useRef<string | null>(null);
   const runKeyRef = useRef<string | null>(null);
   const activityKey = panelTabKey(session.sessionId, 'migration');
+  const handoffEvidenceError = initialEvidence
+    && sha256Hex(Array.from(new TextEncoder().encode(initialSql))) !== initialEvidence.artifactSha256
+    ? 'Query Lab artifact hash mismatch; handoff was refused and no migration proof was carried.'
+    : null;
 
   const refreshScratch = useCallback(async () => {
     try {
@@ -100,14 +105,14 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
 
   useEffect(() => { void refreshScratch(); }, [refreshScratch]);
 
-  const scratchBlocked = creating ? 'Scratch creation is already running.'
+  const scratchBlocked = handoffEvidenceError ?? (creating ? 'Scratch creation is already running.'
     : !result || !draft ? 'Review a migration before creating rehearsal scratch.'
     : !result.catalogComplete ? 'Rehearsal requires a complete live before-state.'
     : (result.review.summary.unsupported > 0) ? 'Unsupported migration statements block rehearsal.'
     : preflightError ? 'Backend preflight must pass before rehearsal.'
     : !preflight ? 'Run backend preflight before rehearsal.'
     : eligible.length === 0 ? 'Open a writable, non-production rehearsal session of the same engine.'
-    : null;
+    : null);
 
   const createScratch = useCallback(async () => {
     if (creating || !result || !draft || !preflight || preflightError) return;
@@ -479,6 +484,10 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   useEffect(() => () => { reviewRunRef.current++; }, []);
 
   const review = useCallback(async () => {
+    if (handoffEvidenceError) {
+      setError(handoffEvidenceError);
+      return;
+    }
     if (!sql.trim() || running || unavailable) return;
     const request = ++reviewRunRef.current;
     setRunning(true);
@@ -558,7 +567,7 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
     } finally {
       if (request === reviewRunRef.current) setRunning(false);
     }
-  }, [sql, running, unavailable, session, flavor, schema, initialOrigin]);
+  }, [sql, running, unavailable, session, flavor, schema, initialOrigin, handoffEvidenceError]);
 
   const summary = result?.review.summary;
   const findings = result?.review.findings ?? [];
@@ -585,6 +594,10 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                   Review is read-only. Rehearsal is isolated in scratch; deployment requires its proof and a separate target confirmation.
                 </p>
               </div>
+              {initialEvidence && <div className="sqp-f-evidence">
+                Query Lab evidence (informational only): {initialEvidence.candidateId} · {initialEvidence.candidateKind} · {initialEvidence.mode} · verdict {initialEvidence.verdict} · correctness {initialEvidence.correctness} · index used {initialEvidence.indexUsed === null ? 'not applicable' : initialEvidence.indexUsed ? 'yes' : 'no'}. No rehearsal, deployment or completion proof was carried; independent review and production gates remain mandatory.
+              </div>}
+              {handoffEvidenceError && <div className="proc-error-bar">{handoffEvidenceError}</div>}
               <label className="dg-field-inline" style={{ display: 'block' }}>
                 <span>Ordered migration SQL</span>
                 <textarea

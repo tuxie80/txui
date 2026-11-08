@@ -629,7 +629,7 @@ export function namedTargets(fixtures) {
         session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'postgres', environment: 'dev', readOnly: false },
         schema: 'shop', onClose: () => {},
       },
-      interact: async ({ container, act }) => {
+      interact: async ({ container, act, shim }) => {
         const selects = [];
         const findMode = node => {
           if (node.nodeName === 'SELECT') selects.push(node);
@@ -757,6 +757,9 @@ export function namedTargets(fixtures) {
         await click('Check rewrite results');
         container.__rewriteResult = container.textContent;
         await click('Benchmark rewrite');
+        container.__migrationHandoff = null;
+        shim.window.addEventListener('dbgui:open-migration', event => { container.__migrationHandoff = event.detail; });
+        await click('Create migration');
         await click('Export report .md');
       },
       assert: ({ html, calls, container }) => {
@@ -791,6 +794,12 @@ export function namedTargets(fixtures) {
         if (!benchmark) return 'benchmark was not invoked';
         if (benchmark.args.input.warmup_runs !== 1 || benchmark.args.input.repetitions !== 7) return 'benchmark schedule was not preserved';
         if (benchmark.args.input.rewrite.candidate.sql !== rewrite.args.input.candidate.sql || benchmark.args.input.rewrite.row_order_policy !== 'ordered') return 'benchmark rewrite contract was not preserved';
+        const handoff = container.__migrationHandoff;
+        if (!handoff) return 'Create migration did not emit its handoff';
+        if (handoff.origin !== 'query-lab' || handoff.sql !== rewrite.args.input.candidate.sql) return 'handoff did not carry only the selected rewrite SQL';
+        if (handoff.targetConnectionId !== undefined || handoff.labEvidence.phase !== undefined) return 'handoff carried target or proof state';
+        if (handoff.labEvidence.candidateKind !== 'rewrite' || handoff.labEvidence.correctness !== 'equal' || handoff.labEvidence.mode !== 'measured') return 'handoff evidence contract was not preserved';
+        if (!/^[0-9a-f]{64}$/.test(handoff.labEvidence.artifactSha256)) return 'handoff artifact hash is invalid';
         const report = calls.find(call => call.cmd === 'write_text_file');
         if (!report) return 'Query Lab report was not written';
         if (!report.args.contents.includes('# Query Optimization Lab report') || !report.args.contents.includes('Exact experiment mode | measured')) return 'report lacks identity or mode';
@@ -989,7 +998,7 @@ export function namedTargets(fixtures) {
           connectionId: `c-${engine}`, sessionId: `s-${engine}`,
           connectionName: `${engine} fixture`, engine, environment: 'dev', readOnly: false,
         },
-        schema: null, initialSql: '', initialOrigin: 'editor', onClose: () => {},
+        schema: null, initialSql: '', initialOrigin: 'editor', initialEvidence: null, onClose: () => {},
       },
       assert: ({ html }) => {
         const expected = target.supported.includes(engine) ? target.readyText : 'not available';
@@ -1004,6 +1013,7 @@ export function namedTargets(fixtures) {
       { name: 'MigrationPanel_target_verification_mismatch', denied: false, scratch: true, targetMismatch: true },
       { name: 'MigrationPanel_verification_mismatch', denied: false, scratch: true, mismatch: true },
       { name: 'MigrationPanel_scratch_cancelled', denied: false, scratch: true, cancelCreate: true },
+      { name: 'MigrationPanel_query_lab_tampered', denied: false, queryLabTampered: true },
     ].map(testCase => ({
       name: testCase.name, file: 'src/components/MigrationPanel.tsx', tier: 'mount', settleMs: 30,
       mock: {
@@ -1101,7 +1111,14 @@ export function namedTargets(fixtures) {
           connectionId: 'c-migration', sessionId: 's-migration', connectionName: 'migration fixture',
           engine: 'mysql', environment: 'dev', readOnly: false,
         },
-        schema: 'shop', initialSql: 'CREATE TABLE orders(id int PRIMARY KEY);', initialOrigin: 'editor', onClose: () => {},
+        schema: 'shop', initialSql: 'CREATE TABLE orders(id int PRIMARY KEY);',
+        initialOrigin: testCase.queryLabTampered ? 'query-lab' : 'editor',
+        initialEvidence: testCase.queryLabTampered ? {
+          specSha256: 'a'.repeat(64), artifactSha256: '0'.repeat(64),
+          candidateId: 'customer-index', candidateKind: 'index', mode: 'estimate',
+          correctness: 'not_applicable', verdict: 'lower_estimated_cost', indexUsed: true,
+        } : null,
+        onClose: () => {},
       },
       interact: async ({ container, act }) => {
         const click = async text => {
@@ -1134,6 +1151,12 @@ export function namedTargets(fixtures) {
         }
       },
       assert: ({ html, calls }) => {
+        if (testCase.queryLabTampered) {
+          if (!html.includes('Query Lab artifact hash mismatch') || !html.includes('informational only')) return 'tampered Query Lab handoff was not visibly refused';
+          if (calls.some(call => call.cmd === 'monitor_query' || call.cmd === 'migration_preflight')) return 'tampered handoff reached catalog or preflight';
+          if (html.includes('SQL hash verified')) return 'tampered handoff produced a proof badge';
+          return;
+        }
         if (!calls.some(call => call.cmd === 'monitor_query')) return 'catalog was never read';
         if (!calls.some(call => call.cmd === 'migration_preflight')) return 'backend preflight was never called';
         if (testCase.cancelCreate) {

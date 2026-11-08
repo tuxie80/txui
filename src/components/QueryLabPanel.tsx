@@ -7,6 +7,7 @@ import { benchmarkVerdict } from '../utils/benchmark';
 import { correlatePlanEvidence } from '../utils/planCorrelation';
 import type { PlanCorrelation } from '../utils/planCorrelation';
 import { renderQueryLabReport } from '../utils/queryLabReport';
+import { buildQueryLabMigrationHandoff } from '../utils/queryLabMigration';
 import { saveTextAs } from '../utils/exportersIo';
 import {
   createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabIndexEvidenceMode,
@@ -454,6 +455,26 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setScratchError(errorDisplay(error));
     }
   };
+  const createMigration = () => {
+    const candidate = validated?.candidates[0] ?? experiment.candidates[0];
+    if (!candidate) return;
+    try {
+      const handoff = buildQueryLabMigrationHandoff({
+        engine: experiment.engine,
+        database: experiment.database,
+        specSha256: specHash,
+        mode: validated?.executionMode ?? experiment.executionMode,
+        candidate,
+        correctness: candidate.kind === 'rewrite' && rewrite?.correctness === 'equal' ? 'equal' : candidate.kind === 'rewrite' ? 'not_applicable' : 'not_applicable',
+        verdict: benchmarkAssessment?.verdict ?? realIndexAssessment?.verdict ?? hypopg?.verdict ?? 'not_measured',
+        indexUsed: candidate.kind === 'index' ? realIndex?.index_used ?? hypopg?.index_used ?? false : null,
+      });
+      window.dispatchEvent(new CustomEvent('dbgui:open-migration', { detail: handoff }));
+      setReportStatus(`Migration handoff sent for ${candidate.id}; Migration Cockpit starts at Review with independent proof gates.`);
+    } catch (error) {
+      setReportStatus(errorDisplay(error));
+    }
+  };
   const exportReport = async () => {
     const candidate = validated?.candidates[0] ?? experiment.candidates[0];
     if (!candidate) return;
@@ -523,6 +544,11 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setReportStatus(errorDisplay(error));
     }
   };
+  const migrationCandidate = validated?.candidates[0] ?? experiment.candidates[0];
+  const migrationReady = Boolean(migrationCandidate && (
+    (migrationCandidate.kind === 'index' && (hypopg?.index_used || realIndex?.index_used))
+    || (migrationCandidate.kind === 'rewrite' && rewrite?.correctness === 'equal')
+  ));
 
   return (
     <div className="proc-panel">
@@ -531,6 +557,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
         <span className="dv-desc">{session.connectionName}</span>
         <span className="dv-desc">Specification v1 · guarded estimates and Migration-scratch experiments</span>
         <div style={{ flex: 1 }} />
+        <button className="toolbar-btn" disabled={!migrationReady} title="Send only the selected artifact to Migration Cockpit at Review" onClick={createMigration}>Create migration</button>
         <button className="toolbar-btn" disabled={!baseline && !hypopg && !realIndex && !rewrite && !benchmark} title="Export deterministic evidence without query-result rows" onClick={() => void exportReport()}>Export report .md</button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>

@@ -6,6 +6,17 @@ export const MAX_HANDOFF_SQL_BYTES = 16 * 1024 * 1024;
 export type SafeOperationEngine = 'mysql' | 'postgres';
 export type MigrationOrigin = 'editor' | 'schema-compare' | 'table-designer' | 'query-lab';
 
+export interface MigrationLabEvidence {
+  specSha256: string;
+  artifactSha256: string;
+  candidateId: string;
+  candidateKind: 'index' | 'rewrite';
+  mode: 'estimate' | 'measured';
+  correctness: 'equal' | 'not_applicable';
+  verdict: string;
+  indexUsed: boolean | null;
+}
+
 export interface MigrationHandoff {
   version: typeof OPERATION_HANDOFF_VERSION;
   engine: SafeOperationEngine;
@@ -13,6 +24,7 @@ export interface MigrationHandoff {
   sql: string;
   origin: MigrationOrigin;
   targetConnectionId?: string;
+  labEvidence?: MigrationLabEvidence;
 }
 
 export interface QueryLabMetric {
@@ -43,7 +55,7 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[], l
   const allowedSet = new Set(allowed);
   const unexpected = Object.keys(value).filter(key => !allowedSet.has(key));
   if (unexpected.length) throw new Error(`${label} has unexpected fields: ${unexpected.join(', ')}`);
-  const optional = ['evidence', 'unit', 'targetConnectionId'];
+  const optional = ['evidence', 'labEvidence', 'unit', 'targetConnectionId'];
   const missing = allowed.filter(key => !optional.includes(key) && !(key in value));
   if (missing.length) throw new Error(`${label} is missing fields: ${missing.join(', ')}`);
 }
@@ -77,10 +89,26 @@ function parseBase(value: unknown, label: string): Omit<MigrationHandoff, 'origi
   };
 }
 
+function parseMigrationLabEvidence(value: unknown): MigrationLabEvidence {
+  const label = 'migration Query Lab evidence';
+  const input = object(value, label);
+  exactKeys(input, ['specSha256', 'artifactSha256', 'candidateId', 'candidateKind', 'mode', 'correctness', 'verdict', 'indexUsed'], label);
+  for (const key of ['specSha256', 'artifactSha256']) {
+    if (typeof input[key] !== 'string' || !/^[0-9a-f]{64}$/.test(input[key])) throw new Error(`${label}.${key} must be a lowercase SHA-256 digest`);
+  }
+  if (typeof input.candidateId !== 'string' || !/^[a-z][a-z0-9_-]{0,79}$/.test(input.candidateId)) throw new Error(`${label}.candidateId is invalid`);
+  if (input.candidateKind !== 'index' && input.candidateKind !== 'rewrite') throw new Error(`${label}.candidateKind must be index or rewrite`);
+  if (input.mode !== 'estimate' && input.mode !== 'measured') throw new Error(`${label}.mode must be estimate or measured`);
+  if (input.correctness !== 'equal' && input.correctness !== 'not_applicable') throw new Error(`${label}.correctness must be equal or not_applicable`);
+  if (typeof input.verdict !== 'string' || !input.verdict.trim() || input.verdict.length > 64) throw new Error(`${label}.verdict is invalid`);
+  if (typeof input.indexUsed !== 'boolean' && input.indexUsed !== null) throw new Error(`${label}.indexUsed must be boolean or null`);
+  return input as unknown as MigrationLabEvidence;
+}
+
 export function parseMigrationHandoff(value: unknown): MigrationHandoff {
   const label = 'migration handoff';
   const input = object(value, label);
-  exactKeys(input, ['version', 'engine', 'database', 'sql', 'origin', 'targetConnectionId'], label);
+  exactKeys(input, ['version', 'engine', 'database', 'sql', 'origin', 'targetConnectionId', 'labEvidence'], label);
   if (!['editor', 'schema-compare', 'table-designer', 'query-lab'].includes(String(input.origin))) {
     throw new Error(`${label} has invalid origin ${String(input.origin)}`);
   }
@@ -91,6 +119,7 @@ export function parseMigrationHandoff(value: unknown): MigrationHandoff {
   return {
     ...parseBase(input, label), origin: input.origin as MigrationOrigin,
     ...(input.targetConnectionId === undefined ? {} : { targetConnectionId: input.targetConnectionId as string }),
+    ...(input.labEvidence === undefined ? {} : { labEvidence: parseMigrationLabEvidence(input.labEvidence) }),
   };
 }
 

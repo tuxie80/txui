@@ -826,7 +826,8 @@ const PANEL_META: Record<string, {
     render: (c, close) => withDbScope(c,
       <MigrationPanel key={c.migrationHandoff?.id ?? 'manual'} session={c.session} openSessions={c.openSessions ?? [c.session]}
         schema={c.currentDb || null} initialSql={c.migrationHandoff?.handoff.sql ?? ''}
-        initialOrigin={c.migrationHandoff?.handoff.origin ?? 'editor'} onClose={close} />),
+        initialOrigin={c.migrationHandoff?.handoff.origin ?? 'editor'}
+        initialEvidence={c.migrationHandoff?.handoff.labEvidence ?? null} onClose={close} />),
   },
   refresh: {
     label: 'Safe Environment Refresh',
