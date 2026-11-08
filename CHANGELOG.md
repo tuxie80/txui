@@ -24,6 +24,8 @@ this project follows semantic versioning.
 
 - **Query Lab runtime/plan correlation** — HypoPG and real-index results now correlate optional runtime with plan diff, cardinality errors, buffers and spill flags using the existing PostgreSQL/MySQL/MariaDB parsers. Missing metrics say not available rather than zero, measured/estimated mixing is refused, HypoPG planning time is not runtime, and timing-only benchmarks declare the gap. Pure dialect fixtures and the complete mounted journey pass.
 
+- **Deterministic Query Lab reports** — Export report .md now includes exact mode, correctness, noise verdict, raw timing arrays and per-pair order, plan correlation, scratch/index lifecycle, cache caveats and SQL artifacts without timestamps, credentials or result rows. Golden and 30-pair/long-SQL tests pass, mounted exports inspect the real payload, and real Chromium verifies the complete report workflow on Ayu Dark/Light at 1600×1000 and 1100×760.
+
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.

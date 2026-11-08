@@ -6,6 +6,8 @@ import { errorDisplay } from '../utils/appError';
 import { benchmarkVerdict } from '../utils/benchmark';
 import { correlatePlanEvidence } from '../utils/planCorrelation';
 import type { PlanCorrelation } from '../utils/planCorrelation';
+import { renderQueryLabReport } from '../utils/queryLabReport';
+import { saveTextAs } from '../utils/exportersIo';
 import {
   createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabIndexEvidenceMode,
   queryLabSpecSha256, validateQueryLabExperiment,
@@ -183,6 +185,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkCancelling, setBenchmarkCancelling] = useState(false);
   const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
+  const [reportStatus, setReportStatus] = useState<string | null>(null);
   const benchmarkRunKey = useRef<string | null>(null);
   const realRunKey = useRef<string | null>(null);
   const rewriteRunKey = useRef<string | null>(null);
@@ -451,6 +454,75 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setScratchError(errorDisplay(error));
     }
   };
+  const exportReport = async () => {
+    const candidate = validated?.candidates[0] ?? experiment.candidates[0];
+    if (!candidate) return;
+    try {
+      const report = renderQueryLabReport({
+        engine: experiment.engine,
+        database: experiment.database,
+        mode: validated?.executionMode ?? experiment.executionMode,
+        specSha256: specHash,
+        originalSql: validated?.resolvedSql ?? experiment.originalSql,
+        candidate: { id: candidate.id, kind: candidate.kind, name: candidate.name, sql: candidate.kind === 'rewrite' ? candidate.sql : null },
+        scratch: validated?.scratch ?? experiment.scratch,
+        correctness: rewrite ? {
+          status: rewrite.correctness,
+          reason: rewrite.reason,
+          rowOrder: rewrite.row_order_policy,
+          maxRows: rewrite.max_rows,
+          maxBytes: rewrite.max_bytes,
+          baseline: { rows: rewrite.baseline.rows_observed, bytes: rewrite.baseline.bytes_observed, sha256: rewrite.baseline.sha256, complete: rewrite.baseline.complete, reason: rewrite.baseline.unverified_reason },
+          candidate: { rows: rewrite.candidate.rows_observed, bytes: rewrite.candidate.bytes_observed, sha256: rewrite.candidate.sha256, complete: rewrite.candidate.complete, reason: rewrite.candidate.unverified_reason },
+        } : null,
+        verdict: benchmarkAssessment ?? realIndexAssessment,
+        benchmark: benchmark ? {
+          warmupRuns: benchmark.warmup_runs,
+          repetitions: benchmark.repetitions,
+          pairs: benchmark.pairs,
+          baselineMs: benchmark.baseline_ms,
+          candidateMs: benchmark.candidate_ms,
+          baseline: {
+            count: benchmark.baseline.count, minMs: benchmark.baseline.min_ms,
+            medianMs: benchmark.baseline.median_ms, p95Ms: benchmark.baseline.p95_ms, maxMs: benchmark.baseline.max_ms,
+          },
+          candidate: {
+            count: benchmark.candidate.count, minMs: benchmark.candidate.min_ms,
+            medianMs: benchmark.candidate.median_ms, p95Ms: benchmark.candidate.p95_ms, maxMs: benchmark.candidate.max_ms,
+          },
+          baselineSha256: benchmark.baseline_sha256,
+          candidateSha256: benchmark.candidate_sha256,
+        } : null,
+        correlation: realIndexCorrelation ?? hypopgCorrelation,
+        hypopg: hypopg ? {
+          verdict: hypopg.verdict,
+          baselineCost: hypopg.baseline_cost,
+          candidateCost: hypopg.candidate_cost,
+          absoluteDelta: hypopg.absolute_delta,
+          percentDelta: hypopg.percent_delta,
+          created: hypopg.created_index_names,
+          used: hypopg.used_index_names,
+          reset: hypopg.cleanup.hypopg_reset === true,
+        } : null,
+        realIndex: realIndex ? {
+          indexName: realIndex.index_name,
+          buildMs: realIndex.index_build_ms,
+          used: realIndex.index_used,
+          scratchDropped: realIndex.cleanup.scratch_dropped,
+          indexDropped: realIndex.cleanup.index_dropped,
+          timeoutRestored: realIndex.cleanup.timeout_restored,
+          connectionClosed: realIndex.cleanup.connection_closed,
+        } : null,
+        cacheObservations: baseline?.cache_observations,
+        timeoutRestored: realIndex?.cleanup.timeout_restored ?? rewrite?.cleanup.timeout_restored ?? benchmark?.cleanup.timeout_restored ?? hypopg?.cleanup.timeout_restored ?? baseline?.cleanup.timeout_restored,
+        connectionClosed: realIndex?.cleanup.connection_closed ?? rewrite?.cleanup.connection_closed ?? benchmark?.cleanup.connection_closed ?? hypopg?.cleanup.connection_closed ?? baseline?.cleanup.connection_closed,
+      });
+      const path = await saveTextAs(report, 'query-lab-report.md', 'Markdown', ['md']);
+      setReportStatus(path ? `Report saved to ${path}` : 'Report export cancelled');
+    } catch (error) {
+      setReportStatus(errorDisplay(error));
+    }
+  };
 
   return (
     <div className="proc-panel">
@@ -459,6 +531,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
         <span className="dv-desc">{session.connectionName}</span>
         <span className="dv-desc">Specification v1 · guarded estimates and Migration-scratch experiments</span>
         <div style={{ flex: 1 }} />
+        <button className="toolbar-btn" disabled={!baseline && !hypopg && !realIndex && !rewrite && !benchmark} title="Export deterministic evidence without query-result rows" onClick={() => void exportReport()}>Export report .md</button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
       <div className="dg-body">
@@ -670,6 +743,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 {realIndexError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{realIndexError}</span></div>}
                 {rewriteError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{rewriteError}</span></div>}
                 {benchmarkError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{benchmarkError}</span></div>}
+                {reportStatus && <p className="dv-desc">{reportStatus}</p>}
               </section>
 
               {baseline && <section aria-label="Query Lab baseline evidence">

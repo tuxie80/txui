@@ -546,6 +546,7 @@ export function namedTargets(fixtures) {
     {
       name: 'QueryLabPanel_spec_journey', file: 'src/components/QueryLabPanel.tsx', tier: 'mount', settleMs: 30,
       mock: {
+        save: () => '/mock/query-lab-report.md',
         query_lab_baseline: args => ({
           run_key: args.input.run_key, spec_sha256: args.input.spec_sha256,
           execution_mode: args.input.execution_mode, database: 'shop', engine: 'postgres', version: '18.0',
@@ -756,6 +757,7 @@ export function namedTargets(fixtures) {
         await click('Check rewrite results');
         container.__rewriteResult = container.textContent;
         await click('Benchmark rewrite');
+        await click('Export report .md');
       },
       assert: ({ html, calls, container }) => {
         if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
@@ -789,6 +791,11 @@ export function namedTargets(fixtures) {
         if (!benchmark) return 'benchmark was not invoked';
         if (benchmark.args.input.warmup_runs !== 1 || benchmark.args.input.repetitions !== 7) return 'benchmark schedule was not preserved';
         if (benchmark.args.input.rewrite.candidate.sql !== rewrite.args.input.candidate.sql || benchmark.args.input.rewrite.row_order_policy !== 'ordered') return 'benchmark rewrite contract was not preserved';
+        const report = calls.find(call => call.cmd === 'write_text_file');
+        if (!report) return 'Query Lab report was not written';
+        if (!report.args.contents.includes('# Query Optimization Lab report') || !report.args.contents.includes('Exact experiment mode | measured')) return 'report lacks identity or mode';
+        if (!report.args.contents.includes('Baseline raw timings ms | [10, 11, 12, 13, 14, 15, 16]') || !report.args.contents.includes('Noise-aware verdict')) return 'report lacks raw timing or verdict evidence';
+        if (!report.args.contents.includes('No query-result rows, credentials or report timestamp are included')) return 'report lacks its privacy contract';
         const hypopg = calls.find(call => call.cmd === 'query_lab_hypopg_estimate');
         if (!hypopg) return 'HypoPG candidate was not invoked';
         if (hypopg.args.input.index_evidence_mode !== 'hypothetical') return 'HypoPG was invoked with incompatible evidence';
