@@ -4,7 +4,8 @@ import type { Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
 import { errorDisplay } from '../utils/appError';
 import {
-  createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabSpecSha256, validateQueryLabExperiment,
+  createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabIndexEvidenceMode,
+  queryLabSpecSha256, validateQueryLabExperiment,
 } from '../utils/queryLabSpec';
 import type {
   NormalizedQueryLabExperiment, QueryLabCandidate, QueryLabEvidenceRequirements,
@@ -30,6 +31,8 @@ interface QueryLabBaselineResponse {
   timeout_ms: number;
   estimated_plan: QueryLabPlanEvidence;
   measured_plan: QueryLabPlanEvidence | null;
+  index_evidence_mode: 'none' | 'hypothetical' | 'real';
+  comparison_policy: string;
   cost_estimates: boolean;
   settings: { name: string; value: string | null }[];
   cache_observations: string[];
@@ -103,6 +106,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
           run_key: crypto.randomUUID(), engine: validated.engine,
           database: validated.database, sql: validated.resolvedSql, spec_sha256: specHash,
           execution_mode: validated.executionMode, timeout_ms: validated.timeoutMs,
+          index_evidence_mode: queryLabIndexEvidenceMode(validated.executionMode, validated.candidates),
           evidence: {
             plan: validated.evidence.plan, cost: validated.evidence.cost,
             timing: validated.evidence.timing, buffers: validated.evidence.buffers,
@@ -275,6 +279,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
 
               {baseline && <section aria-label="Query Lab baseline evidence">
                 <h3>Baseline · {baseline.execution_mode}</h3>
+                <p className="dv-desc">Index evidence: {baseline.index_evidence_mode} · {baseline.comparison_policy}</p>
                 <p className="dv-desc">{baseline.engine} · {baseline.version} · backend {baseline.backend_id} · timeout {baseline.timeout_ms} ms · cost estimates {baseline.cost_estimates ? 'included' : 'not requested'}.</p>
                 <p className="dv-desc">Cleanup: timeout {baseline.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {baseline.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
                 {baseline.cache_observations.map(observation => <div className="sqp-f-evidence" key={observation}>{observation}</div>)}

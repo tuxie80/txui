@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabSpecSha256, validateQueryLabExperiment,
+  createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabIndexEvidenceMode,
+  queryLabSpecSha256, validateQueryLabExperiment, validateQueryLabIndexEvidenceContract,
 } from '../src/utils/queryLabSpec.ts';
 import type { QueryLabExperiment } from '../src/utils/queryLabSpec.ts';
 
@@ -129,4 +130,16 @@ test('text, boolean and NULL parameters resolve to safe concrete SQL', () => {
     assert.ok(parsed.experiment.resolvedSql.includes('active = TRUE'));
     assert.ok(parsed.experiment.resolvedSql.includes('deleted_at IS NULL'));
   }
+});
+
+test('index evidence is hypothetical only for estimates and real only for measured scratch', () => {
+  const rewrite = fixture('mysql');
+  assert.equal(queryLabIndexEvidenceMode('estimate', rewrite.candidates), 'none');
+  const index = fixture();
+  assert.equal(queryLabIndexEvidenceMode('estimate', index.candidates), 'hypothetical');
+  assert.equal(queryLabIndexEvidenceMode('measured', index.candidates), 'real');
+  assert.deepEqual(validateQueryLabIndexEvidenceContract('estimate', 'hypothetical'), []);
+  assert.deepEqual(validateQueryLabIndexEvidenceContract('measured', 'real'), []);
+  assert.ok(validateQueryLabIndexEvidenceContract('estimate', 'real')[0].includes('incompatible'));
+  assert.ok(validateQueryLabIndexEvidenceContract('measured', 'hypothetical')[0].includes('cannot produce measured runtime plans'));
 });

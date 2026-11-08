@@ -42,6 +42,7 @@ pub struct QueryLabBaselineInput {
     pub sql: String,
     pub spec_sha256: String,
     pub execution_mode: String,
+    pub index_evidence_mode: String,
     pub timeout_ms: u64,
     pub evidence: QueryLabEvidenceInput,
     pub has_rewrite_candidate: bool,
@@ -77,6 +78,8 @@ pub struct QueryLabBaselineResponse {
     pub run_key: String,
     pub spec_sha256: String,
     pub execution_mode: String,
+    pub index_evidence_mode: String,
+    pub comparison_policy: String,
     pub database: String,
     pub engine: String,
     pub version: String,
@@ -156,6 +159,18 @@ async fn validate_input(input: &QueryLabBaselineInput, state: &AppState) -> Resu
     drop(starts);
     if input.execution_mode != "estimate" && input.execution_mode != "measured" {
         return Err(AppError::bad_request("Query Lab execution mode must be estimate or measured"));
+    }
+    if !matches!(input.index_evidence_mode.as_str(), "none" | "hypothetical" | "real") {
+        return Err(AppError::bad_request("Query Lab index evidence mode must be none, hypothetical or real"));
+    }
+    if input.execution_mode == "estimate" && input.index_evidence_mode == "real" {
+        return Err(AppError::guard("Real-index measured evidence is incompatible with estimate mode"));
+    }
+    if input.execution_mode == "measured" && input.index_evidence_mode == "hypothetical" {
+        return Err(AppError::guard("Hypothetical index evidence cannot produce measured runtime plans"));
+    }
+    if input.index_evidence_mode == "hypothetical" && guard.engine != Engine::Postgres {
+        return Err(AppError::guard("Hypothetical index estimates are PostgreSQL-only"));
     }
     if !input.evidence.plan {
         return Err(AppError::bad_request("Query Lab estimated-plan evidence is required"));
@@ -371,6 +386,14 @@ async fn pg_capture(
     Ok(parts)
 }
 
+fn comparison_policy(index_evidence_mode: &str) -> String {
+    match index_evidence_mode {
+        "hypothetical" => "Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden".into(),
+        "real" => "Real index on scratch: measured runtime evidence is permitted".into(),
+        _ => "No index candidate: query plan evidence only".into(),
+    }
+}
+
 fn cache_observations(mode: &str) -> Vec<String> {
     let mut observations = vec![
         "One dedicated Lab connection; no session timeout or search-path state leaks into the pool".into(),
@@ -400,6 +423,8 @@ async fn baseline_inner(
         run_key: input.run_key,
         spec_sha256: input.spec_sha256,
         execution_mode: input.execution_mode.clone(),
+        index_evidence_mode: input.index_evidence_mode.clone(),
+        comparison_policy: comparison_policy(&input.index_evidence_mode),
         database: input.database,
         engine: validated.engine.wire_name().into(),
         version: parts.version,
@@ -486,6 +511,7 @@ mod tests {
             sql: "SELECT id FROM orders".into(),
             spec_sha256: "a".repeat(64),
             execution_mode: mode.into(),
+            index_evidence_mode: "none".into(),
             timeout_ms: 100,
             evidence: QueryLabEvidenceInput {
                 plan: true, cost: true,
@@ -534,6 +560,24 @@ mod tests {
         let mut engine = input(session, connection, Engine::Mysql, "estimate");
         engine.engine = "postgres".into();
         assert!(validate_input(&engine, &state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn index_evidence_modes_are_incompatible_and_hypothetical_is_postgres_only() {
+        let (state, session, connection) = state_with_session(Engine::Mysql, Some("dev"), false).await;
+        let mut real_estimate = input(session, connection, Engine::Mysql, "estimate");
+        real_estimate.index_evidence_mode = "real".into();
+        assert!(validate_input(&real_estimate, &state).await.is_err());
+        let mut hypothetical = input(session, connection, Engine::Mysql, "measured");
+        hypothetical.index_evidence_mode = "hypothetical".into();
+        assert!(validate_input(&hypothetical, &state).await.is_err());
+
+        let (state, session, connection) = state_with_session(Engine::Postgres, Some("dev"), false).await;
+        let mut hypothetical = input(session, connection, Engine::Postgres, "estimate");
+        hypothetical.index_evidence_mode = "hypothetical".into();
+        assert!(validate_input(&hypothetical, &state).await.is_ok());
+        hypothetical.execution_mode = "measured".into();
+        assert!(validate_input(&hypothetical, &state).await.is_err());
     }
 
     #[tokio::test]

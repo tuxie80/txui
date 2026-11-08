@@ -33,6 +33,30 @@ export interface QueryLabScratchTarget {
 }
 
 export type QueryLabExecutionMode = 'estimate' | 'measured';
+export type QueryLabIndexEvidenceMode = 'none' | 'hypothetical' | 'real';
+
+export function queryLabIndexEvidenceMode(
+  executionMode: QueryLabExecutionMode,
+  candidates: readonly QueryLabCandidate[],
+): QueryLabIndexEvidenceMode {
+  if (!candidates.some(candidate => candidate.kind === 'index')) {
+    return 'none';
+  }
+  return executionMode === 'estimate' ? 'hypothetical' : 'real';
+}
+
+export function validateQueryLabIndexEvidenceContract(
+  executionMode: QueryLabExecutionMode,
+  indexEvidenceMode: QueryLabIndexEvidenceMode,
+): string[] {
+  if (executionMode === 'estimate' && indexEvidenceMode === 'real') {
+    return ['real-index measured evidence is incompatible with estimate mode'];
+  }
+  if (executionMode === 'measured' && indexEvidenceMode === 'hypothetical') {
+    return ['hypothetical index evidence cannot produce measured runtime plans'];
+  }
+  return [];
+}
 
 export interface QueryLabExperiment {
   version: typeof QUERY_LAB_SPEC_VERSION;
@@ -328,8 +352,9 @@ export function validateQueryLabExperiment(value: unknown): string[] {
   const parameterMap = parameters(input.parameters, errors);
   resolveStatement(input.originalSql as string, engine, parameterMap, 'originalSql', errors);
   const candidateList = candidates(input.candidates, engine, parameterMap, errors);
-  const mode = input.executionMode;
+  const mode = input.executionMode as QueryLabExecutionMode;
   if (mode !== 'estimate' && mode !== 'measured') errors.push(`executionMode ${String(mode)} is unsupported`);
+  errors.push(...validateQueryLabIndexEvidenceContract(mode, queryLabIndexEvidenceMode(mode, candidateList)));
   integer(input.warmupRuns, 'warmupRuns', 0, 10, errors);
   integer(input.repetitions, 'repetitions', 1, 30, errors);
   integer(input.timeoutMs, 'timeoutMs', 100, 60_000, errors);

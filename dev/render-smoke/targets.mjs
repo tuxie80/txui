@@ -550,6 +550,12 @@ export function namedTargets(fixtures) {
           run_key: args.input.run_key, spec_sha256: args.input.spec_sha256,
           execution_mode: args.input.execution_mode, database: 'shop', engine: 'mysql', version: '8.4.0',
           backend_id: 42, timeout_ms: args.input.timeout_ms, cost_estimates: true,
+          index_evidence_mode: args.input.index_evidence_mode,
+          comparison_policy: args.input.index_evidence_mode === 'hypothetical'
+            ? 'Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden'
+            : args.input.index_evidence_mode === 'real'
+              ? 'Real index on scratch: measured runtime evidence is permitted'
+              : 'No index candidate: query plan evidence only',
           estimated_plan: { label: 'estimated', format: 'json', content: '{"query_block":{"select_id":1}}', elapsed_ms: 1 },
           measured_plan: args.input.execution_mode === 'measured'
             ? { label: 'executed_query', format: 'text', content: '-> Covering index scan on orders (actual time=0.01 rows=1 loops=1)', elapsed_ms: 2 }
@@ -629,9 +635,11 @@ export function namedTargets(fixtures) {
         if (!html.includes('customer_id = 1')) return 'concrete parameter did not resolve';
         if (!html.includes('EXECUTED QUERY') || !html.includes('actually executed the read-only statement')) return 'measured plan was not labelled as execution';
         if (!html.includes('timeout restored') || !html.includes('dedicated connection closed')) return 'baseline cleanup was not rendered';
+        if (!html.includes('No index candidate: query plan evidence only')) return 'index comparison policy was not rendered';
         const baselines = calls.filter(call => call.cmd === 'query_lab_baseline');
         if (baselines.length !== 2) return `expected two guarded baseline calls, got ${baselines.length}`;
         if (baselines[0].args.input.execution_mode !== 'estimate' || baselines[1].args.input.execution_mode !== 'measured') return 'baseline modes were not preserved';
+        if (baselines.some(call => call.args.input.index_evidence_mode !== 'none')) return 'rewrite-only index evidence was not derived as none';
         if (calls.some(call => call.cmd === 'monitor_query')) return 'Query Lab bypassed the guarded baseline command';
       },
     },
