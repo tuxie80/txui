@@ -143,3 +143,17 @@ test('index evidence is hypothetical only for estimates and real only for measur
   assert.ok(validateQueryLabIndexEvidenceContract('estimate', 'real')[0].includes('incompatible'));
   assert.ok(validateQueryLabIndexEvidenceContract('measured', 'hypothetical')[0].includes('cannot produce measured runtime plans'));
 });
+
+test('owned Migration scratch binds its run key and generated name', () => {
+  const experiment = fixture();
+  experiment.executionMode = 'measured';
+  experiment.evidence.timing = true;
+  experiment.scratch!.runKey = crypto.randomUUID();
+  experiment.scratch!.database = 'txui_mig_0123456789abcdef';
+  assert.deepEqual(validateQueryLabExperiment(experiment), []);
+  experiment.scratch!.database = 'shop';
+  assert.ok(validateQueryLabExperiment(experiment).some(error => error.includes('generated txui_mig_*')));
+  experiment.scratch!.database = 'txui_mig_0123456789abcdef';
+  experiment.scratch!.runKey = null;
+  assert.ok(validateQueryLabExperiment(experiment).some(error => error.includes('unless an owned Migration scratch')));
+});

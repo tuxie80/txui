@@ -575,6 +575,22 @@ export function namedTargets(fixtures) {
           comparison_policy: 'Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden',
           cleanup: { timeout_restored: true, connection_closed: true, hypopg_reset: true },
         }),
+        migration_scratch_list: () => [{
+          run_key: '01234567-89ab-cdef-8123-456789abcdef', session_id: 's-lab', connection_id: 'c-lab',
+          engine: 'postgres', name: 'txui_mig_0123456789abcdef', status: 'active', error: null,
+          created_at: '2026-11-08 00:00:00', updated_at: '2026-11-08 00:00:00',
+        }],
+        query_lab_real_index_measure: args => ({
+          run_key: args.input.baseline.run_key, spec_sha256: args.input.baseline.spec_sha256,
+          candidate_id: args.input.candidate.id, scratch_run_key: args.input.baseline.scratch.run_key,
+          scratch_database: args.input.baseline.scratch.database, backend_id: 44,
+          index_name: 'txui_lab_0123456789abcdef', index_build_ms: 17,
+          baseline_plan: { label: 'executed_query', format: 'json', content: '{"Plan":{"Total Cost":100}}', elapsed_ms: 4 },
+          candidate_plan: { label: 'executed_query', format: 'json', content: '{"Plan":{"Index Name":"txui_lab_0123456789abcdef"}}', elapsed_ms: 2 },
+          index_used: true,
+          comparison_policy: 'Real index on Migration scratch: both plans executed the read-only query once; create wall time includes lock wait and rebuild and is not a runtime verdict',
+          cleanup: { index_dropped: true, scratch_dropped: true, timeout_restored: true, connection_closed: true },
+        }),
       },
       props: {
         session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'postgres', environment: 'dev', readOnly: false },
@@ -658,6 +674,39 @@ export function namedTargets(fixtures) {
         }
         await click();
         await click('Estimate index (HypoPG)');
+        container.__hypopgResult = container.textContent;
+        await act(async () => {
+          mode.value = 'measured';
+          mode.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        for (const label of ['Measured timing', 'Result equality']) {
+          const walk = node => {
+            if (node.nodeName === 'LABEL' && node.textContent.includes(label)) {
+              const input = [...(node.childNodes ?? [])].find(child => child.nodeName === 'INPUT');
+              if (input) {
+                input.checked = true;
+                input.dispatchEvent(new Event('click', { bubbles: true }));
+              }
+            }
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          await act(async () => { walk(container); });
+        }
+        let migrationScratch;
+        const findScratch = node => {
+          if (node.nodeName === 'SELECT' && node.getAttribute('aria-label') === 'Migration scratch') migrationScratch = node;
+          for (const child of node.childNodes ?? []) findScratch(child);
+        };
+        findScratch(container);
+        if (!migrationScratch) throw new Error('Migration scratch selector not found');
+        await act(async () => {
+          migrationScratch.value = '01234567-89ab-cdef-8123-456789abcdef';
+          migrationScratch.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        await click();
+        await click('Build & measure real index');
       },
       assert: ({ html, calls, container }) => {
         if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
@@ -666,8 +715,15 @@ export function namedTargets(fixtures) {
         if (!html.includes('customer_id = 1')) return 'concrete parameter did not resolve';
         if (!container.__measuredBaseline.includes('EXECUTED QUERY') || !container.__measuredBaseline.includes('actually executed the read-only statement')) return 'measured plan was not labelled as execution';
         if (!html.includes('timeout restored') || !html.includes('dedicated connection closed')) return 'baseline cleanup was not rendered';
-        if (!html.includes('Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden')) return 'index comparison policy was not rendered';
-        if (!html.includes('lower_estimated_cost') || !html.includes('HypoPG reset complete')) return 'HypoPG verdict or reset was not rendered';
+        if (!container.__hypopgResult.includes('Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden')) return 'index comparison policy was not rendered';
+        if (!container.__hypopgResult.includes('lower_estimated_cost') || !container.__hypopgResult.includes('HypoPG reset complete')) return 'HypoPG verdict or reset was not rendered';
+        if (!html.includes('Real index on Migration scratch') || !html.includes('Create wall time:') || !html.includes('<b>17 ms</b>')) return 'real-index evidence was not rendered';
+        if (!html.includes('EXECUTED BASELINE') || !html.includes('EXECUTED CANDIDATE')) return 'real-index plans were not labelled as execution';
+        if (!html.includes('candidate index dropped') || !html.includes('Migration scratch dropped') || !html.includes('Candidate index used: <b>yes</b>')) return 'real-index usage or cleanup was not rendered';
+        const realIndex = calls.find(call => call.cmd === 'query_lab_real_index_measure');
+        if (!realIndex) return 'real-index candidate was not invoked';
+        if (realIndex.args.input.baseline.index_evidence_mode !== 'real' || realIndex.args.input.baseline.execution_mode !== 'measured') return 'real-index evidence contract was not preserved';
+        if (realIndex.args.input.baseline.scratch.run_key !== '01234567-89ab-cdef-8123-456789abcdef' || realIndex.args.input.baseline.scratch.database !== 'txui_mig_0123456789abcdef') return 'Migration scratch identity was not preserved';
         const hypopg = calls.find(call => call.cmd === 'query_lab_hypopg_estimate');
         if (!hypopg) return 'HypoPG candidate was not invoked';
         if (hypopg.args.input.index_evidence_mode !== 'hypothetical') return 'HypoPG was invoked with incompatible evidence';

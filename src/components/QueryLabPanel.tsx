@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
@@ -11,6 +11,7 @@ import type {
   NormalizedQueryLabExperiment, QueryLabCandidate, QueryLabEvidenceRequirements,
   QueryLabExperiment, QueryLabParameterKind,
 } from '../utils/queryLabSpec';
+import type { MigrationScratchRecord } from '../utils/migrationPreflight';
 import { StatusIcon } from './StatusIcon';
 
 interface QueryLabPlanEvidence {
@@ -58,6 +59,22 @@ interface QueryLabHypopgResponse {
   cleanup: { timeout_restored: boolean; connection_closed: boolean; hypopg_reset: boolean | null };
 }
 
+interface QueryLabRealIndexResponse {
+  run_key: string;
+  spec_sha256: string;
+  candidate_id: string;
+  scratch_run_key: string;
+  scratch_database: string;
+  backend_id: number;
+  index_name: string;
+  index_build_ms: number;
+  baseline_plan: QueryLabPlanEvidence;
+  candidate_plan: QueryLabPlanEvidence;
+  index_used: boolean;
+  comparison_policy: string;
+  cleanup: { index_dropped: boolean; scratch_dropped: boolean; timeout_restored: boolean; connection_closed: boolean };
+}
+
 interface Props {
   session: Session;
   schema?: string | null;
@@ -81,8 +98,26 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const [hypopg, setHypopg] = useState<QueryLabHypopgResponse | null>(null);
   const [hypopgRunning, setHypopgRunning] = useState(false);
   const [hypopgError, setHypopgError] = useState<string | null>(null);
+  const [scratchRecords, setScratchRecords] = useState<MigrationScratchRecord[]>([]);
+  const [scratchError, setScratchError] = useState<string | null>(null);
+  const [realIndex, setRealIndex] = useState<QueryLabRealIndexResponse | null>(null);
+  const [realIndexRunning, setRealIndexRunning] = useState(false);
+  const [realIndexCancelling, setRealIndexCancelling] = useState(false);
+  const [realIndexError, setRealIndexError] = useState<string | null>(null);
+  const realRunKey = useRef<string | null>(null);
   const errors = useMemo(() => validateQueryLabExperiment(experiment), [experiment]);
   const specHash = useMemo(() => queryLabSpecSha256(experiment), [experiment]);
+  const specHashRef = useRef(specHash);
+  specHashRef.current = specHash;
+
+  const refreshScratch = useCallback(async () => {
+    try {
+      setScratchRecords(await invoke<MigrationScratchRecord[]>('migration_scratch_list'));
+    } catch (error) {
+      setScratchError(errorDisplay(error));
+    }
+  }, []);
+  useEffect(() => { void refreshScratch(); }, [refreshScratch]);
 
   const patch = (change: (current: QueryLabExperiment) => QueryLabExperiment) => {
     setExperiment(change);
@@ -91,6 +126,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setBaselineError(null);
     setHypopg(null);
     setHypopgError(null);
+    setRealIndex(null);
+    setRealIndexError(null);
   };
   const updateCandidate = (index: number, change: Partial<QueryLabCandidate>) => {
     patch(current => ({
@@ -118,7 +155,31 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setBaselineError(null);
     setHypopg(null);
     setHypopgError(null);
+    setRealIndex(null);
+    setRealIndexError(null);
   };
+  const baselinePayload = (normalized: NormalizedQueryLabExperiment, runKey: string) => ({
+    session_id: normalized.scratch?.sessionId ?? session.sessionId,
+    connection_id: normalized.scratch?.connectionId ?? session.connectionId,
+    run_key: runKey, engine: normalized.engine,
+    database: normalized.database, sql: normalized.resolvedSql, spec_sha256: specHash,
+    execution_mode: normalized.executionMode, timeout_ms: normalized.timeoutMs,
+    index_evidence_mode: queryLabIndexEvidenceMode(normalized.executionMode, normalized.candidates),
+    evidence: {
+      plan: normalized.evidence.plan, cost: normalized.evidence.cost,
+      timing: normalized.evidence.timing, buffers: normalized.evidence.buffers,
+      result_equality: normalized.evidence.resultEquality,
+    },
+    has_rewrite_candidate: normalized.candidates.some(candidate => candidate.kind === 'rewrite'),
+    scratch: normalized.scratch ? {
+      session_id: normalized.scratch.sessionId,
+      connection_id: normalized.scratch.connectionId,
+      database: normalized.scratch.database,
+      environment: normalized.scratch.environment,
+      read_only: normalized.scratch.readOnly,
+      run_key: normalized.scratch.runKey,
+    } : null,
+  });
   const captureBaseline = async () => {
     if (!validated || baselineRunning) return;
     setBaselineRunning(true);
@@ -126,27 +187,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setBaseline(null);
     try {
       const response = await invoke<QueryLabBaselineResponse>('query_lab_baseline', {
-        input: {
-          session_id: validated.scratch?.sessionId ?? session.sessionId,
-          connection_id: validated.scratch?.connectionId ?? session.connectionId,
-          run_key: crypto.randomUUID(), engine: validated.engine,
-          database: validated.database, sql: validated.resolvedSql, spec_sha256: specHash,
-          execution_mode: validated.executionMode, timeout_ms: validated.timeoutMs,
-          index_evidence_mode: queryLabIndexEvidenceMode(validated.executionMode, validated.candidates),
-          evidence: {
-            plan: validated.evidence.plan, cost: validated.evidence.cost,
-            timing: validated.evidence.timing, buffers: validated.evidence.buffers,
-            result_equality: validated.evidence.resultEquality,
-          },
-          has_rewrite_candidate: validated.candidates.some(candidate => candidate.kind === 'rewrite'),
-          scratch: validated.scratch ? {
-            session_id: validated.scratch.sessionId,
-            connection_id: validated.scratch.connectionId,
-            database: validated.scratch.database,
-            environment: validated.scratch.environment,
-            read_only: validated.scratch.readOnly,
-          } : null,
-        },
+        input: baselinePayload(validated, crypto.randomUUID()),
       });
       setBaseline(response);
     } catch (error) {
@@ -182,13 +223,55 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setHypopgRunning(false);
     }
   };
+  const captureRealIndex = async () => {
+    const candidate = validated?.candidates.find(candidate => candidate.kind === 'index');
+    if (!validated || validated.executionMode !== 'measured' || !candidate || !validated.scratch?.runKey || realIndexRunning) return;
+    const runKey = crypto.randomUUID();
+    realRunKey.current = runKey;
+    setRealIndexRunning(true);
+    setRealIndexCancelling(false);
+    setRealIndexError(null);
+    setRealIndex(null);
+    try {
+      const response = await invoke<QueryLabRealIndexResponse>('query_lab_real_index_measure', {
+        input: {
+          baseline: baselinePayload(validated, runKey),
+          candidate: {
+            id: candidate.id, name: candidate.name, table: candidate.table,
+            columns: candidate.columns, unique: candidate.unique, where_clause: candidate.where,
+          },
+        },
+      });
+      if (response.spec_sha256 !== specHashRef.current) {
+        setRealIndexError('The experiment changed during execution; the stale result was discarded after backend cleanup.');
+      } else {
+        setRealIndex(response);
+      }
+    } catch (error) {
+      setRealIndexError(errorDisplay(error));
+    } finally {
+      if (realRunKey.current === runKey) realRunKey.current = null;
+      setRealIndexRunning(false);
+      setRealIndexCancelling(false);
+      await refreshScratch();
+    }
+  };
+  const cleanupScratch = async (record: MigrationScratchRecord) => {
+    setScratchError(null);
+    try {
+      await invoke('migration_rehearsal_cleanup', { runKey: record.run_key });
+      await refreshScratch();
+    } catch (error) {
+      setScratchError(errorDisplay(error));
+    }
+  };
 
   return (
     <div className="proc-panel">
       <div className="proc-toolbar">
         <span className="proc-title">Query Optimization Lab</span>
         <span className="dv-desc">{session.connectionName}</span>
-        <span className="dv-desc">Specification v1 · read-only checkpoint</span>
+        <span className="dv-desc">Specification v1 · guarded estimates and Migration-scratch experiments</span>
         <div style={{ flex: 1 }} />
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
       </div>
@@ -310,9 +393,41 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
               <section>
                 <h3>Scratch identity</h3>
                 {experiment.scratch ? <>
-                  <p className="dv-desc">Session {experiment.scratch.sessionId} · connection {experiment.scratch.connectionId} · database {experiment.scratch.database} · environment {experiment.scratch.environment ?? 'unspecified'} · {experiment.scratch.readOnly ? 'read-only' : 'writable'}.</p>
-                  <p className="dv-desc">Measured mode requires this exact writable non-production identity and matching database. Estimate mode creates no real candidate objects.</p>
+                  <label className="dg-field-inline"><span>Migration scratch</span>
+                    <select aria-label="Migration scratch" value={experiment.scratch.runKey ?? ''} onChange={event => {
+                      const record = scratchRecords.find(item => item.run_key === event.target.value && item.status === 'active'
+                        && item.session_id === session.sessionId && item.connection_id === session.connectionId && item.engine === experiment.engine);
+                      patch(current => ({
+                        ...current,
+                        scratch: record ? {
+                          sessionId: record.session_id, connectionId: record.connection_id,
+                          database: record.name, environment: session.environment ?? null,
+                          readOnly: session.readOnly ?? false, runKey: record.run_key,
+                        } : current.scratch ? {
+                          ...current.scratch, sessionId: session.sessionId, connectionId: session.connectionId,
+                          database: current.database, environment: session.environment ?? null,
+                          readOnly: session.readOnly ?? false, runKey: null,
+                        } : null,
+                      }));
+                    }}>
+                      <option value="">Same-name explicit target — baselines only, no real indexes</option>
+                      {scratchRecords.filter(record => record.session_id === session.sessionId
+                        && record.connection_id === session.connectionId && record.engine === experiment.engine)
+                        .map(record => <option key={record.run_key} value={record.run_key} disabled={record.status !== 'active'}>
+                          {record.name} · {record.status} · {record.run_key}
+                        </option>)}
+                    </select>
+                  </label>
+                  <button className="toolbar-btn" onClick={() => void refreshScratch()}>Refresh scratch records</button>
+                  <p className="dv-desc">Session {experiment.scratch.sessionId} · connection {experiment.scratch.connectionId} · database {experiment.scratch.database} · environment {experiment.scratch.environment ?? 'unspecified'} · {experiment.scratch.readOnly ? 'read-only' : 'writable'} · run {experiment.scratch.runKey ?? 'not Migration-owned'}.</p>
+                  <p className="dv-desc">Real indexes require an active Migration scratch with a cloned before-state. The candidate command consumes and drops that scratch after success, error or cancellation. Migration cloning copies structure, not table rows; no production-runtime verdict is made.</p>
                 </> : <p className="dv-desc">No scratch target is configured. Measured mode remains blocked.</p>}
+                {scratchError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{scratchError}</span></div>}
+                {scratchRecords.filter(record => record.status === 'cleanup_failed' && record.session_id === session.sessionId)
+                  .map(record => <div className="sqp-f-evidence" key={record.run_key}>
+                    <span>Leftover {record.name} · {record.error ?? 'cleanup failed'}</span>
+                    <button className="toolbar-btn" onClick={() => void cleanupScratch(record)}>Retry Migration cleanup</button>
+                  </div>)}
               </section>
 
               <section>
@@ -327,9 +442,20 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                   <code className="sqp-f-snippet">{validated.resolvedSql}</code>
                   <button className="primary" disabled={baselineRunning} onClick={() => void captureBaseline()}>{baselineRunning ? 'Capturing baseline…' : 'Capture baseline'}</button>
                   {validated.engine === 'postgres' && validated.executionMode === 'estimate' && validated.candidates.some(candidate => candidate.kind === 'index') && <button className="toolbar-btn" disabled={hypopgRunning} onClick={() => void captureHypopg()}>{hypopgRunning ? 'Estimating index…' : 'Estimate index (HypoPG)'}</button>}
+                  {validated.executionMode === 'measured' && validated.candidates.some(candidate => candidate.kind === 'index') && (validated.scratch?.runKey ? <>
+                    <button className="primary" disabled={realIndexRunning} onClick={() => void captureRealIndex()}>{realIndexRunning ? 'Building and measuring…' : 'Build & measure real index'}</button>
+                    {realIndexRunning && <button className="cancel-btn" onClick={() => {
+                      if (realRunKey.current) {
+                        setRealIndexCancelling(true);
+                        void invoke('cancel_watched', { runKey: realRunKey.current }).catch(() => {});
+                      }
+                    }}>{realIndexCancelling ? 'Cancelling and cleaning…' : '■ Cancel + clean scratch'}</button>}
+                    <p className="dv-desc">Measured baseline → create real index → measured candidate → drop index → drop Migration scratch. Create wall time includes lock wait and rebuild; no benchmark winner is chosen.</p>
+                  </> : <p className="dv-desc">Select an active Migration scratch above to enable real-index execution. Same-name targets remain baseline-only.</p>)}
                 </div>}
                 {baselineError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{baselineError}</span></div>}
                 {hypopgError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{hypopgError}</span></div>}
+                {realIndexError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{realIndexError}</span></div>}
               </section>
 
               {baseline && <section aria-label="Query Lab baseline evidence">
@@ -356,6 +482,18 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 {!hypopg.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner ignored the hypothetical index; no improvement is claimed.</span></div>}
                 <h4>Baseline plan</h4><pre className="sqp-sql">{hypopg.baseline_plan.content}</pre>
                 <h4>Candidate plan</h4><pre className="sqp-sql">{hypopg.candidate_plan.content}</pre>
+              </section>}
+              {realIndex && <section aria-label="Real index candidate evidence">
+                <h3>Real index on Migration scratch · {realIndex.candidate_id}</h3>
+                <p className="dv-desc">{realIndex.comparison_policy}</p>
+                <p className="dv-desc">Scratch {realIndex.scratch_database} · run {realIndex.scratch_run_key} · backend {realIndex.backend_id} · index {realIndex.index_name}.</p>
+                <p className="dv-desc">Create wall time: <b>{realIndex.index_build_ms} ms</b> (lock wait + rebuild; components not separately observed). Candidate index used: <b>{realIndex.index_used ? 'yes' : 'no'}</b>.</p>
+                <p className="dv-desc">Cleanup: candidate index {realIndex.cleanup.index_dropped ? 'dropped' : 'NOT dropped'} · Migration scratch {realIndex.cleanup.scratch_dropped ? 'dropped' : 'NOT dropped'} · timeout {realIndex.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {realIndex.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
+                {!realIndex.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner did not use the real candidate index; no improvement is claimed.</span></div>}
+                <h4>EXECUTED BASELINE · {realIndex.baseline_plan.elapsed_ms} ms</h4>
+                <pre className="sqp-sql">{realIndex.baseline_plan.content}</pre>
+                <h4>EXECUTED CANDIDATE · {realIndex.candidate_plan.elapsed_ms} ms</h4>
+                <pre className="sqp-sql">{realIndex.candidate_plan.content}</pre>
               </section>}
             </div>
           </div>

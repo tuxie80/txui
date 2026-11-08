@@ -30,6 +30,7 @@ export interface QueryLabScratchTarget {
   database: string;
   environment: string | null;
   readOnly: boolean;
+  runKey: string | null;
 }
 
 export type QueryLabExecutionMode = 'estimate' | 'measured';
@@ -286,13 +287,14 @@ function evidence(value: unknown, errors: string[]): QueryLabEvidenceRequirement
 function scratch(value: unknown, errors: string[]): QueryLabScratchTarget | null {
   if (value === null) return null;
   const input = object(value, 'scratch', errors);
-  exactKeys(input, ['sessionId', 'connectionId', 'database', 'environment', 'readOnly'], 'scratch', errors);
+  exactKeys(input, ['sessionId', 'connectionId', 'database', 'environment', 'readOnly', 'runKey'], 'scratch', errors);
   return {
     sessionId: text(input.sessionId, 'scratch.sessionId', errors, 128),
     connectionId: text(input.connectionId, 'scratch.connectionId', errors, 128),
     database: text(input.database, 'scratch.database', errors, 128),
     environment: input.environment === null ? null : text(input.environment, 'scratch.environment', errors, 64),
     readOnly: boolean(input.readOnly, 'scratch.readOnly', errors),
+    runKey: input.runKey === null ? null : text(input.runKey, 'scratch.runKey', errors, 128),
   };
 }
 
@@ -382,7 +384,8 @@ export function validateQueryLabExperiment(value: unknown): string[] {
     if (target) {
       if (target.environment?.toLowerCase() === 'prod') errors.push('measured mode requires a non-production scratch target');
       if (target.readOnly) errors.push('measured scratch target must be writable');
-      if (target.database !== input.database) errors.push('scratch database must exactly match the experiment database');
+      if (!target.runKey && target.database !== input.database) errors.push('scratch database must exactly match the experiment database unless an owned Migration scratch is selected');
+      if (target.runKey && !/^txui_mig_[a-f0-9]{16}$/.test(target.database)) errors.push('Migration scratch must use its generated txui_mig_* database/schema name');
     }
     if (candidateList.some(candidate => candidate.kind === 'rewrite') && !requirements.resultEquality) {
       errors.push('rewrite candidates in measured mode require result-equality evidence');
@@ -445,6 +448,7 @@ export function createDefaultQueryLabExperiment(input: {
       database: input.database,
       environment: input.environment ?? null,
       readOnly: input.readOnly ?? false,
+      runKey: null,
     },
   };
 }

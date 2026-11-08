@@ -29,6 +29,7 @@ pub struct QueryLabScratchInput {
     pub database: String,
     pub environment: Option<String>,
     pub read_only: bool,
+    pub run_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +98,7 @@ pub struct QueryLabBaselineResponse {
 struct ValidatedInput {
     timeout_ms: u64,
     engine: Engine,
+    execution_database: String,
 }
 
 struct CaptureParts {
@@ -127,6 +129,44 @@ fn plan_text(result: &QueryResult) -> Result<String, AppError> {
 
 fn estimated(label: &str, format: &str, content: String, elapsed_ms: u64) -> QueryLabPlanEvidence {
     QueryLabPlanEvidence { label: label.into(), format: format.into(), content, elapsed_ms }
+}
+
+async fn validated_migration_scratch(
+    input: &QueryLabBaselineInput,
+    guard: &crate::state::SessionGuard,
+    state: &AppState,
+) -> Result<crate::commands::migration::MigrationScratchRecord, AppError> {
+    let scratch = input.scratch.as_ref()
+        .ok_or_else(|| AppError::guard("Query Lab real indexes require an explicit Migration scratch"))?;
+    let run_key = scratch.run_key.as_deref()
+        .ok_or_else(|| AppError::guard("Query Lab real indexes require a Migration scratch run key"))?;
+    Uuid::parse_str(run_key).map_err(|_| AppError::bad_request("Query Lab Migration scratch run key must be a UUID"))?;
+    if !scratch.database.starts_with("txui_mig_") {
+        return Err(AppError::guard("Query Lab Migration scratch must use its generated txui_mig_* name"));
+    }
+    if scratch.session_id != input.session_id || scratch.connection_id != input.connection_id {
+        return Err(AppError::guard("Query Lab scratch identity does not match the open session"));
+    }
+    if guard.read_only || scratch.read_only || guard.environment.as_deref() == Some("prod")
+        || scratch.environment.as_deref() == Some("prod")
+    {
+        return Err(AppError::guard("Query Lab real indexes require a writable non-production Migration scratch"));
+    }
+    if scratch.environment != guard.environment || scratch.read_only != guard.read_only {
+        return Err(AppError::guard("Query Lab scratch safety metadata does not match the open session"));
+    }
+    let record = crate::commands::migration::scratch_record(state, run_key).await?;
+    if record.status != "active" {
+        return Err(AppError::guard("Query Lab requires an active Migration scratch record"));
+    }
+    if record.session_id != input.session_id.to_string()
+        || record.connection_id != input.connection_id.to_string()
+        || record.engine != guard.engine.wire_name()
+        || record.name != scratch.database
+    {
+        return Err(AppError::guard("Query Lab scratch/target identity does not match the Migration record"));
+    }
+    Ok(record)
 }
 
 async fn validate_input(input: &QueryLabBaselineInput, state: &AppState) -> Result<ValidatedInput, AppError> {
@@ -193,20 +233,31 @@ async fn validate_input(input: &QueryLabBaselineInput, state: &AppState) -> Resu
         if scratch.session_id != input.session_id || scratch.connection_id != input.connection_id {
             return Err(AppError::guard("Query Lab scratch identity does not match the open session"));
         }
-        if scratch.database != input.database {
-            return Err(AppError::guard("Query Lab scratch database does not match the experiment database"));
-        }
-        if scratch.environment.as_deref() == Some("prod") {
+        if scratch.environment.as_deref() == Some("prod") || guard.environment.as_deref() == Some("prod") {
             return Err(AppError::guard("Query Lab measured experiments require a non-production scratch target"));
         }
-        if scratch.read_only {
+        if scratch.read_only || guard.read_only {
             return Err(AppError::guard("Query Lab measured scratch target must be writable"));
+        }
+        if scratch.environment != guard.environment || scratch.read_only != guard.read_only {
+            return Err(AppError::guard("Query Lab scratch safety metadata does not match the open session"));
+        }
+        if scratch.run_key.is_some() {
+            validated_migration_scratch(input, &guard, state).await?;
+        } else if scratch.database != input.database {
+            return Err(AppError::guard("Query Lab scratch database does not match the experiment database without a Migration scratch run key"));
         }
     }
     state.guard_statement(&input.session_id, &input.sql).await?;
+    let execution_database = if input.execution_mode == "measured" {
+        input.scratch.as_ref().map(|scratch| scratch.database.clone()).unwrap_or_else(|| input.database.clone())
+    } else {
+        input.database.clone()
+    };
     Ok(ValidatedInput {
         timeout_ms: input.timeout_ms.clamp(100, 60_000),
         engine: guard.engine,
+        execution_database,
     })
 }
 
@@ -275,7 +326,7 @@ async fn mysql_capture(
     let result: Result<CaptureParts, AppError> = async {
         let backend_id = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
             .fetch_one(&mut conn).await?;
-        crate::db::mysql::execute(&mut conn, &format!("USE `{}`", input.database.replace('`', "``"))).await?;
+        crate::db::mysql::execute(&mut conn, &format!("USE `{}`", validated.execution_database.replace('`', "``"))).await?;
         let buffer_pool = sqlx::query_scalar::<_, Option<String>>("SELECT CAST(@@innodb_buffer_pool_size AS CHAR)")
             .fetch_one(&mut conn).await?;
         if is_maria {
@@ -342,7 +393,7 @@ async fn pg_capture(
     let result: Result<CaptureParts, AppError> = async {
         let backend_id = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
             .fetch_one(&mut conn).await? as u64;
-        crate::db::postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", input.database.replace('"', "\"\""))).await?;
+        crate::db::postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", validated.execution_database.replace('"', "\"\""))).await?;
         crate::db::postgres::execute(&mut conn, &format!("SET statement_timeout = {}", validated.timeout_ms)).await?;
         let started = Instant::now();
         let estimated_result = pg_statement(&mut conn, &format!("EXPLAIN (FORMAT JSON) {}", input.sql), cancel).await?;
@@ -426,7 +477,7 @@ async fn baseline_inner(
         execution_mode: input.execution_mode.clone(),
         index_evidence_mode: input.index_evidence_mode.clone(),
         comparison_policy: comparison_policy(&input.index_evidence_mode),
-        database: input.database,
+        database: validated.execution_database,
         engine: validated.engine.wire_name().into(),
         version: parts.version,
         backend_id: parts.backend_id,
@@ -814,6 +865,408 @@ pub async fn query_lab_hypopg_estimate(
     execute_hypopg(input, &state).await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabRealIndexInput {
+    pub baseline: QueryLabBaselineInput,
+    pub candidate: QueryLabHypopgCandidateInput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabRealIndexCleanup {
+    pub index_dropped: bool,
+    pub scratch_dropped: bool,
+    pub timeout_restored: bool,
+    pub connection_closed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabRealIndexResponse {
+    pub run_key: String,
+    pub spec_sha256: String,
+    pub candidate_id: String,
+    pub scratch_run_key: String,
+    pub scratch_database: String,
+    pub backend_id: u64,
+    pub index_name: String,
+    pub index_build_ms: u64,
+    pub baseline_plan: QueryLabPlanEvidence,
+    pub candidate_plan: QueryLabPlanEvidence,
+    pub index_used: bool,
+    pub comparison_policy: String,
+    pub cleanup: QueryLabRealIndexCleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealIndexFail {
+    Baseline,
+    Create,
+    AfterCreate,
+    Measure,
+    Drop,
+    Restore,
+}
+
+fn real_fail(step: RealIndexFail, injected: Option<RealIndexFail>) -> Result<(), AppError> {
+    if injected == Some(step) {
+        Err(AppError::local(format!("Query Lab injected {:?} failure", step)))
+    } else {
+        Ok(())
+    }
+}
+
+fn real_identifier(engine: Engine, name: &str) -> Result<String, AppError> {
+    if name.is_empty() || name.len() > 63 || name.contains('\0')
+        || !name.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$'))
+    {
+        return Err(AppError::bad_request("Query Lab real-index identifiers must be unquoted names"));
+    }
+    Ok(match engine {
+        Engine::Mysql => format!("`{name}`"),
+        Engine::Postgres => format!("\"{name}\""),
+        _ => return Err(AppError::unsupported("Query Lab real indexes support MySQL/MariaDB and PostgreSQL only")),
+    })
+}
+
+fn real_index_sql(
+    engine: Engine,
+    candidate: &QueryLabHypopgCandidateInput,
+    index_name: &str,
+) -> Result<String, AppError> {
+    candidate_ddl(candidate)?;
+    if candidate.table.contains('.') {
+        return Err(AppError::guard("Query Lab real-index tables must be unqualified so DDL cannot escape the Migration scratch"));
+    }
+    if engine == Engine::Mysql && candidate.where_clause.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+        return Err(AppError::unsupported("MySQL/MariaDB do not support partial indexes"));
+    }
+    let unique = if candidate.unique { "UNIQUE " } else { "" };
+    let columns = candidate.columns.iter().map(|column| real_identifier(engine, column)).collect::<Result<Vec<_>, _>>()?;
+    let predicate = candidate.where_clause.as_deref().filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" WHERE {value}")).unwrap_or_default();
+    Ok(format!(
+        "CREATE {unique}INDEX {} ON {} ({}){predicate}",
+        real_identifier(engine, index_name)?,
+        real_identifier(engine, &candidate.table)?,
+        columns.join(", "),
+    ))
+}
+
+fn real_index_drop_sql(
+    engine: Engine,
+    candidate: &QueryLabHypopgCandidateInput,
+    index_name: &str,
+) -> Result<String, AppError> {
+    match engine {
+        Engine::Mysql => Ok(format!(
+            "DROP INDEX {} ON {}",
+            real_identifier(engine, index_name)?,
+            real_identifier(engine, &candidate.table)?,
+        )),
+        Engine::Postgres => Ok(format!("DROP INDEX IF EXISTS {}", real_identifier(engine, index_name)?)),
+        _ => Err(AppError::unsupported("Query Lab real indexes support MySQL/MariaDB and PostgreSQL only")),
+    }
+}
+
+enum RealConnection {
+    Mysql {
+        conn: sqlx::MySqlConnection,
+        version: String,
+        previous_timeout: f64,
+        backend_id: u64,
+    },
+    Postgres {
+        conn: sqlx::PgConnection,
+        previous_timeout: String,
+        backend_id: u64,
+    },
+}
+
+impl RealConnection {
+    async fn acquire(
+        input: &QueryLabBaselineInput,
+        state: &AppState,
+        database: &str,
+        timeout_ms: u64,
+    ) -> Result<Self, AppError> {
+        let session = crate::db::connection::get_session_pub(input.session_id, &state.sessions).await?;
+        match session.as_ref() {
+            LiveSession::Mysql(pool) => {
+                let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its real-index connection: {error}")))?.detach();
+                let version = sqlx::query_scalar::<_, String>("SELECT VERSION()").fetch_one(&mut conn).await?;
+                let is_maria = version.to_lowercase().contains("mariadb");
+                let previous_timeout = if is_maria {
+                    sqlx::query_scalar::<_, f64>("SELECT @@max_statement_time").fetch_one(&mut conn).await?
+                } else {
+                    sqlx::query_scalar::<_, f64>("SELECT CAST(@@max_execution_time AS DOUBLE)").fetch_one(&mut conn).await? / 1000.0
+                };
+                let backend_id = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()").fetch_one(&mut conn).await?;
+                crate::db::mysql::execute(&mut conn, &format!("USE `{}`", database.replace('`', "``"))).await?;
+                if is_maria {
+                    crate::db::mysql::execute(&mut conn, &format!("SET SESSION max_statement_time={}", timeout_ms as f64 / 1000.0)).await?;
+                } else {
+                    crate::db::mysql::execute(&mut conn, &format!("SET SESSION max_execution_time={timeout_ms}")).await?;
+                }
+                Ok(Self::Mysql { conn, version, previous_timeout, backend_id })
+            },
+            LiveSession::Postgres(pool) => {
+                let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its real-index connection: {error}")))?.detach();
+                let previous_timeout = sqlx::query_scalar::<_, String>("SHOW statement_timeout").fetch_one(&mut conn).await?;
+                let backend_id = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(&mut conn).await? as u64;
+                crate::db::postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", database.replace('"', "\"\""))).await?;
+                crate::db::postgres::execute(&mut conn, &format!("SET statement_timeout = {timeout_ms}")).await?;
+                Ok(Self::Postgres { conn, previous_timeout, backend_id })
+            },
+            _ => Err(AppError::unsupported("Query Lab real indexes support MySQL/MariaDB and PostgreSQL only")),
+        }
+    }
+
+    fn backend_id(&self) -> u64 {
+        match self {
+            Self::Mysql { backend_id, .. } | Self::Postgres { backend_id, .. } => *backend_id,
+        }
+    }
+
+    async fn statement(
+        &mut self,
+        sql: &str,
+        cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<QueryResult, AppError> {
+        match self {
+            Self::Mysql { conn, .. } => mysql_statement(conn, sql, cancel).await,
+            Self::Postgres { conn, .. } => pg_statement(conn, sql, cancel).await,
+        }
+    }
+
+    async fn raw(&mut self, sql: &str) -> Result<(), AppError> {
+        match self {
+            Self::Mysql { conn, .. } => crate::db::mysql::execute(conn, sql).await.map(|_| ()).map_err(Into::into),
+            Self::Postgres { conn, .. } => crate::db::postgres::execute(conn, sql).await.map(|_| ()).map_err(Into::into),
+        }
+    }
+
+    async fn measured_plan(
+        &mut self,
+        sql: &str,
+        timeout_ms: u64,
+        cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<QueryLabPlanEvidence, AppError> {
+        let started = Instant::now();
+        match self {
+            Self::Mysql { conn, version, .. } => {
+                let is_maria = version.to_lowercase().contains("mariadb");
+                let (_, explain) = crate::commands::quality::mysql_analyze_statements(version, sql, timeout_ms);
+                let result = mysql_measured_statement(conn, &explain, timeout_ms, cancel).await?;
+                Ok(estimated("executed_query", if is_maria { "json" } else { "text" }, plan_text(&result)?, started.elapsed().as_millis() as u64))
+            },
+            Self::Postgres { conn, .. } => {
+                let full = format!("EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS) {sql}");
+                let result = match pg_measured_statement(conn, &full, timeout_ms, cancel).await {
+                    Err(error) if let Some(fallback) = pg_option_fallback_sql(&error.message, sql) => {
+                        pg_measured_statement(conn, &fallback, timeout_ms, cancel).await?
+                    },
+                    other => other?,
+                };
+                Ok(estimated("executed_query", "json", plan_text(&result)?, started.elapsed().as_millis() as u64))
+            },
+        }
+    }
+
+    async fn restore(&mut self) -> Result<(), AppError> {
+        match self {
+            Self::Mysql { conn, version, previous_timeout, .. } => {
+                let sql = if version.to_lowercase().contains("mariadb") {
+                    format!("SET SESSION max_statement_time={previous_timeout}")
+                } else {
+                    format!("SET SESSION max_execution_time={}", (*previous_timeout * 1000.0) as u64)
+                };
+                crate::db::mysql::execute(conn, &sql).await.map(|_| ()).map_err(Into::into)
+            },
+            Self::Postgres { conn, previous_timeout, .. } => {
+                sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                    .bind(previous_timeout.as_str()).execute(conn).await?;
+                Ok(())
+            },
+        }
+    }
+
+    async fn close(self) -> Result<(), AppError> {
+        match self {
+            Self::Mysql { conn, .. } => conn.close().await.map_err(Into::into),
+            Self::Postgres { conn, .. } => conn.close().await.map_err(Into::into),
+        }
+    }
+}
+
+struct RealIndexParts {
+    baseline_plan: QueryLabPlanEvidence,
+    candidate_plan: QueryLabPlanEvidence,
+    index_build_ms: u64,
+    index_used: bool,
+}
+
+async fn finish_real_index(
+    mut result: Result<QueryLabRealIndexResponse, AppError>,
+    state: &AppState,
+    scratch_run_key: &str,
+) -> Result<QueryLabRealIndexResponse, AppError> {
+    match crate::commands::migration::cleanup_scratch(state, scratch_run_key).await {
+        Ok(_) => {
+            if let Ok(response) = result.as_mut() { response.cleanup.scratch_dropped = true; }
+            result
+        },
+        Err(cleanup) => match result {
+            Ok(_) => Err(cleanup),
+            Err(original) => Err(AppError::local(format!(
+                "{}; Migration scratch cleanup also failed: {}",
+                original.message, cleanup.message,
+            ))),
+        },
+    }
+}
+
+async fn real_index_inner(
+    input: QueryLabRealIndexInput,
+    state: &AppState,
+    cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    injected: Option<RealIndexFail>,
+) -> Result<QueryLabRealIndexResponse, AppError> {
+    let validated = validate_input(&input.baseline, state).await?;
+    if input.baseline.execution_mode != "measured" || input.baseline.index_evidence_mode != "real" {
+        return Err(AppError::guard("Query Lab real-index candidates require measured real evidence"));
+    }
+    let scratch = input.baseline.scratch.as_ref()
+        .ok_or_else(|| AppError::guard("Query Lab real indexes require Migration scratch identity"))?;
+    let scratch_run_key = scratch.run_key.clone()
+        .ok_or_else(|| AppError::guard("Query Lab real indexes require a Migration scratch run key"))?;
+    let scratch_database = scratch.database.clone();
+    let guard = state.session_meta.read().await.get(&input.baseline.session_id).cloned()
+        .ok_or_else(|| AppError::bad_request("Query Lab session is not open"))?;
+    validated_migration_scratch(&input.baseline, &guard, state).await?;
+    let index_name = format!("txui_lab_{}", &Uuid::parse_str(&input.baseline.run_key)
+        .map_err(|_| AppError::bad_request("Query Lab run key must be a UUID"))?.simple().to_string()[..16]);
+    let create_sql = real_index_sql(validated.engine, &input.candidate, &index_name)?;
+    let drop_sql = real_index_drop_sql(validated.engine, &input.candidate, &index_name)?;
+    state.guard_statement(&input.baseline.session_id, &create_sql).await?;
+    state.guard_statement(&input.baseline.session_id, &drop_sql).await?;
+    let mut conn = match RealConnection::acquire(&input.baseline, state, &scratch_database, validated.timeout_ms).await {
+        Ok(conn) => conn,
+        Err(error) => return finish_real_index(Err(error), state, &scratch_run_key).await,
+    };
+    let backend_id = conn.backend_id();
+    let mut create_started = false;
+    let mut result: Result<RealIndexParts, AppError> = async {
+        real_fail(RealIndexFail::Baseline, injected)?;
+        let baseline_plan = conn.measured_plan(&input.baseline.sql, validated.timeout_ms, cancel).await?;
+        real_fail(RealIndexFail::Create, injected)?;
+        create_started = true;
+        let started = Instant::now();
+        conn.statement(&create_sql, cancel).await?;
+        let index_build_ms = started.elapsed().as_millis() as u64;
+        real_fail(RealIndexFail::AfterCreate, injected)?;
+        real_fail(RealIndexFail::Measure, injected)?;
+        let candidate_plan = conn.measured_plan(&input.baseline.sql, validated.timeout_ms, cancel).await?;
+        let index_used = candidate_plan.content.contains(&index_name);
+        Ok(RealIndexParts { baseline_plan, candidate_plan, index_build_ms, index_used })
+    }.await;
+    if create_started {
+        if let Err(error) = real_fail(RealIndexFail::Drop, injected) {
+            if result.is_ok() { result = Err(error); }
+        } else if let Err(error) = conn.raw(&drop_sql).await {
+            if result.is_ok() { result = Err(AppError::local(format!("Query Lab candidate index cleanup failed: {error}"))); }
+        }
+    }
+    if let Err(error) = real_fail(RealIndexFail::Restore, injected) {
+        if result.is_ok() { result = Err(error); }
+    } else if let Err(error) = conn.restore().await {
+        if result.is_ok() { result = Err(AppError::local(format!("Query Lab timeout restoration failed: {error}"))); }
+    }
+    if let Err(error) = conn.close().await {
+        if result.is_ok() { result = Err(AppError::local(format!("Query Lab connection cleanup failed: {error}"))); }
+    }
+    let response = result.map(|parts| QueryLabRealIndexResponse {
+        run_key: input.baseline.run_key.clone(),
+        spec_sha256: input.baseline.spec_sha256.clone(),
+        candidate_id: input.candidate.id.clone(),
+        scratch_run_key: scratch_run_key.clone(),
+        scratch_database,
+        backend_id,
+        index_name,
+        index_build_ms: parts.index_build_ms,
+        baseline_plan: parts.baseline_plan,
+        candidate_plan: parts.candidate_plan,
+        index_used: parts.index_used,
+        comparison_policy: "Real index on Migration scratch: both plans executed the read-only query once; create wall time includes lock wait and rebuild and is not a runtime verdict".into(),
+        cleanup: QueryLabRealIndexCleanup {
+            index_dropped: true,
+            scratch_dropped: false,
+            timeout_restored: true,
+            connection_closed: true,
+        },
+    });
+    finish_real_index(response, state, &scratch_run_key).await
+}
+
+async fn audit_real_index(
+    state: &AppState,
+    input: &QueryLabRealIndexInput,
+    started: Instant,
+    result: &Result<QueryLabRealIndexResponse, AppError>,
+) {
+    let baseline = &input.baseline;
+    let session_start = state.session_starts.read().await.get(&baseline.session_id).cloned();
+    let (ok, error, code) = match result {
+        Ok(_) => (true, None, ""),
+        Err(error) => (false, Some(error.message.clone()), error.code.as_str()),
+    };
+    let entry = crate::commands::audit::AuditInsert {
+        run_id: format!("query-lab-real-index:{}", baseline.run_key), stmt_index: Some(1), stmt_total: Some(1),
+        session_id: baseline.session_id.to_string(), tab_title: "Query Optimization Lab (real index)".into(),
+        database: baseline.scratch.as_ref().map(|scratch| scratch.database.clone()).unwrap_or_else(|| baseline.database.clone()),
+        source: "query_lab_real_index".into(),
+        started_at: crate::commands::audit::lifecycle_now(), ended_at: crate::commands::audit::lifecycle_now(),
+        duration_ms: started.elapsed().as_millis() as i64,
+        connection_name: session_start.as_ref().map(|value| value.connection_name.clone()).unwrap_or_default(),
+        db_user: session_start.as_ref().map(|value| value.db_user.clone()).unwrap_or_default(),
+        engine: baseline.engine.clone(), ok, rows_out: 0, rows_affected: None,
+        error, error_code: code.into(), db_code: String::new(), sqlstate: String::new(),
+        sql: baseline.sql.clone(),
+    };
+    if let Err(error) = crate::commands::audit::insert(&state.history, &entry).await {
+        eprintln!("[audit] query lab real-index insert failed: {error:#}");
+    }
+}
+
+pub async fn execute_real_index(
+    input: QueryLabRealIndexInput,
+    state: &AppState,
+) -> Result<QueryLabRealIndexResponse, AppError> {
+    let started = Instant::now();
+    let key = crate::state::ext_job_key(input.baseline.session_id, &input.baseline.run_key);
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut jobs = state.ext_jobs.write().await;
+        if jobs.contains_key(&key) {
+            return Err(AppError::bad_request("This real-index Query Lab run is already active"));
+        }
+        jobs.insert(key.clone(), cancel_tx);
+    }
+    let result = real_index_inner(input.clone(), state, &mut cancel_rx, None).await;
+    state.ext_jobs.write().await.remove(&key);
+    audit_real_index(state, &input, started, &result).await;
+    result
+}
+
+#[tauri::command]
+pub async fn query_lab_real_index_measure(
+    input: QueryLabRealIndexInput,
+    state: tauri::State<'_, AppState>,
+) -> Result<QueryLabRealIndexResponse, AppError> {
+    execute_real_index(input, &state).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,9 +1291,89 @@ mod tests {
             has_rewrite_candidate: false,
             scratch: Some(QueryLabScratchInput {
                 session_id, connection_id, database: "shop".into(),
-                environment: Some("dev".into()), read_only: false,
+                environment: Some("dev".into()), read_only: false, run_key: None,
             }),
         }
+    }
+
+    fn real_input(session_id: Uuid, connection_id: Uuid, engine: Engine) -> QueryLabRealIndexInput {
+        let mut baseline = input(session_id, connection_id, engine, "measured");
+        baseline.sql = "SELECT customer_id FROM orders WHERE customer_id = 1".into();
+        baseline.index_evidence_mode = "real".into();
+        let scratch_run_key = Uuid::new_v4().to_string();
+        baseline.scratch = Some(QueryLabScratchInput {
+            session_id, connection_id,
+            database: "txui_mig_0123456789abcdef".into(),
+            environment: Some("dev".into()), read_only: false,
+            run_key: Some(scratch_run_key),
+        });
+        QueryLabRealIndexInput {
+            baseline,
+            candidate: QueryLabHypopgCandidateInput {
+                id: "customer-index".into(), name: "Customer index".into(),
+                table: "orders".into(), columns: vec!["customer_id".into()],
+                unique: false, where_clause: None,
+            },
+        }
+    }
+
+    async fn insert_real_scratch(state: &AppState, input: &QueryLabRealIndexInput, status: &str) {
+        let scratch = input.baseline.scratch.as_ref().unwrap();
+        sqlx::query(
+            "INSERT INTO migration_scratch (run_key, session_id, connection_id, engine, name, status)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(scratch.run_key.as_deref().unwrap())
+        .bind(input.baseline.session_id.to_string())
+        .bind(input.baseline.connection_id.to_string())
+        .bind(&input.baseline.engine)
+        .bind(&scratch.database)
+        .bind(status)
+        .execute(&state.history).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_index_requires_exact_owned_migration_scratch_identity() {
+        let (state, session, connection) = state_with_session(Engine::Postgres, Some("dev"), false).await;
+        let valid = real_input(session, connection, Engine::Postgres);
+        assert!(validate_input(&valid.baseline, &state).await.is_err(), "missing durable record");
+        insert_real_scratch(&state, &valid, "active").await;
+        assert!(validate_input(&valid.baseline, &state).await.is_ok());
+
+        let mut wrong_database = valid.clone();
+        wrong_database.baseline.scratch.as_mut().unwrap().database = "txui_mig_fedcba9876543210".into();
+        assert!(validate_input(&wrong_database.baseline, &state).await.is_err());
+        let mut wrong_connection = valid.clone();
+        wrong_connection.baseline.scratch.as_mut().unwrap().connection_id = Uuid::new_v4();
+        assert!(validate_input(&wrong_connection.baseline, &state).await.is_err());
+        let mut no_run_key = valid.clone();
+        no_run_key.baseline.scratch.as_mut().unwrap().run_key = None;
+        assert!(validate_input(&no_run_key.baseline, &state).await.is_err());
+        let mut wrong_safety = valid.clone();
+        wrong_safety.baseline.scratch.as_mut().unwrap().read_only = true;
+        assert!(validate_input(&wrong_safety.baseline, &state).await.is_err());
+
+        let scratch_key = valid.baseline.scratch.as_ref().unwrap().run_key.as_deref().unwrap();
+        sqlx::query("UPDATE migration_scratch SET status = 'cleanup_failed' WHERE run_key = ?")
+            .bind(scratch_key).execute(&state.history).await.unwrap();
+        assert!(validate_input(&valid.baseline, &state).await.is_err(), "non-active scratch");
+    }
+
+    #[test]
+    fn real_index_ddl_cannot_escape_scratch_or_use_mysql_partial_indexes() {
+        let candidate = QueryLabHypopgCandidateInput {
+            id: "candidate".into(), name: "Candidate".into(), table: "orders".into(),
+            columns: vec!["customer_id".into()], unique: false, where_clause: None,
+        };
+        let mysql = real_index_sql(Engine::Mysql, &candidate, "txui_lab_0123456789abcdef").unwrap();
+        assert!(mysql.contains("CREATE INDEX `txui_lab_0123456789abcdef` ON `orders`"));
+        let mut qualified = candidate.clone();
+        qualified.table = "shop.orders".into();
+        assert!(real_index_sql(Engine::Mysql, &qualified, "txui_lab_0123456789abcdef").is_err());
+        let mut partial = candidate;
+        partial.where_clause = Some("customer_id > 0".into());
+        assert!(real_index_sql(Engine::Mysql, &partial, "txui_lab_0123456789abcdef").is_err());
+        assert!(real_index_sql(Engine::Postgres, &partial, "txui_lab_0123456789abcdef").unwrap().contains("WHERE customer_id > 0"));
     }
 
     async fn state_with_session(engine: Engine, environment: Option<&str>, read_only: bool) -> (AppState, Uuid, Uuid) {
@@ -1132,6 +1665,173 @@ mod tests {
             let timeout: String = sqlx::query_scalar("SHOW statement_timeout").fetch_one(&pool).await.unwrap();
             assert_eq!(timeout, "0");
         }
+        crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
+        pool.close().await;
+    }
+
+    async fn prepare_mysql_real_scratch(
+        pool: &sqlx::MySqlPool,
+        state: &AppState,
+        input: &QueryLabRealIndexInput,
+    ) {
+        let scratch = input.baseline.scratch.as_ref().unwrap();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        crate::commands::migration::create_scratch_named(
+            state, input.baseline.session_id, scratch.run_key.as_deref().unwrap(),
+            &scratch.database, &mut cancel_rx,
+        ).await.unwrap();
+        crate::db::mysql::execute(pool, &format!(
+            "CREATE TABLE `{}`.orders LIKE shop.orders", scratch.database,
+        )).await.unwrap();
+        crate::db::mysql::execute(pool, &format!(
+            "INSERT INTO `{}`.orders SELECT * FROM shop.orders", scratch.database,
+        )).await.unwrap();
+    }
+
+    async fn assert_mysql_scratch_gone(pool: &sqlx::MySqlPool, state: &AppState, input: &QueryLabRealIndexInput) {
+        let scratch = input.baseline.scratch.as_ref().unwrap();
+        let record = crate::commands::migration::scratch_record(state, scratch.run_key.as_deref().unwrap()).await.unwrap();
+        assert_eq!(record.status, "dropped");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?")
+            .bind(&scratch.database).fetch_one(pool).await.unwrap();
+        assert_eq!(count, 0);
+        let source_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = 'shop' AND table_name = 'orders' AND index_name LIKE 'txui_lab_%'",
+        ).fetch_one(pool).await.unwrap();
+        assert_eq!(source_indexes, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_mysql_real_index_success_failure_cancel_and_identity() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE DATABASE shop").await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::mysql::execute(&pool, "INSERT INTO shop.orders SELECT a.x + 10 * b.x + 1, a.x + 10 * b.x + 1 FROM (SELECT 0 x UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) a CROSS JOIN (SELECT 0 x UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) b").await.unwrap();
+        let (state, session, connection) = mysql_live_state(&pool).await;
+
+        let success = real_input(session, connection, Engine::Mysql);
+        prepare_mysql_real_scratch(&pool, &state, &success).await;
+        let response = execute_real_index(success.clone(), &state).await.unwrap();
+        assert!(response.index_used, "candidate plan did not use the generated index");
+        assert_eq!(response.baseline_plan.label, "executed_query");
+        assert_eq!(response.candidate_plan.label, "executed_query");
+        assert!(response.cleanup.index_dropped && response.cleanup.scratch_dropped);
+        assert!(response.cleanup.timeout_restored && response.cleanup.connection_closed);
+        assert!(response.comparison_policy.contains("lock wait and rebuild"));
+        assert_mysql_scratch_gone(&pool, &state, &success).await;
+        let audit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE run_id = ? AND source = 'query_lab_real_index' AND ok = 1")
+            .bind(format!("query-lab-real-index:{}", success.baseline.run_key)).fetch_one(&state.history).await.unwrap();
+        assert_eq!(audit, 1);
+
+        let failure = real_input(session, connection, Engine::Mysql);
+        prepare_mysql_real_scratch(&pool, &state, &failure).await;
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let error = real_index_inner(failure.clone(), &state, &mut cancel_rx, Some(RealIndexFail::AfterCreate)).await;
+        assert!(error.is_err());
+        assert_mysql_scratch_gone(&pool, &state, &failure).await;
+
+        let cancelled = real_input(session, connection, Engine::Mysql);
+        prepare_mysql_real_scratch(&pool, &state, &cancelled).await;
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        cancel_tx.send(()).unwrap();
+        let error = real_index_inner(cancelled.clone(), &state, &mut cancel_rx, None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_mysql_scratch_gone(&pool, &state, &cancelled).await;
+
+        let mismatch = real_input(session, connection, Engine::Mysql);
+        prepare_mysql_real_scratch(&pool, &state, &mismatch).await;
+        let mut forged = mismatch.clone();
+        forged.baseline.scratch.as_mut().unwrap().connection_id = Uuid::new_v4();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert!(real_index_inner(forged, &state, &mut cancel_rx, None).await.is_err());
+        let record = crate::commands::migration::scratch_record(
+            &state, mismatch.baseline.scratch.as_ref().unwrap().run_key.as_deref().unwrap(),
+        ).await.unwrap();
+        assert_eq!(record.status, "active", "mismatch must not clean an unverified scratch");
+        crate::commands::migration::cleanup_scratch(&state, &record.run_key).await.unwrap();
+        crate::db::mysql::execute(&pool, "DROP DATABASE shop").await.unwrap();
+        pool.close().await;
+    }
+
+    async fn prepare_pg_real_scratch(
+        pool: &sqlx::PgPool,
+        state: &AppState,
+        input: &QueryLabRealIndexInput,
+    ) {
+        let scratch = input.baseline.scratch.as_ref().unwrap();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        crate::commands::migration::create_scratch_named(
+            state, input.baseline.session_id, scratch.run_key.as_deref().unwrap(),
+            &scratch.database, &mut cancel_rx,
+        ).await.unwrap();
+        crate::db::postgres::execute(pool, &format!(
+            "CREATE TABLE \"{}\".orders (LIKE shop.orders INCLUDING ALL)", scratch.database,
+        )).await.unwrap();
+        crate::db::postgres::execute(pool, &format!(
+            "INSERT INTO \"{}\".orders SELECT * FROM shop.orders", scratch.database,
+        )).await.unwrap();
+    }
+
+    async fn assert_pg_scratch_gone(pool: &sqlx::PgPool, state: &AppState, input: &QueryLabRealIndexInput) {
+        let scratch = input.baseline.scratch.as_ref().unwrap();
+        let record = crate::commands::migration::scratch_record(state, scratch.run_key.as_deref().unwrap()).await.unwrap();
+        assert_eq!(record.status, "dropped");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = $1")
+            .bind(&scratch.database).fetch_one(pool).await.unwrap();
+        assert_eq!(count, 0);
+        let source_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'shop' AND tablename = 'orders' AND indexname LIKE 'txui_lab_%'",
+        ).fetch_one(pool).await.unwrap();
+        assert_eq!(source_indexes, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18"]
+    async fn dbctl_pg_real_index_success_failure_cancel_and_identity() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE SCHEMA shop").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders SELECT g, g FROM generate_series(1, 10000) g").await.unwrap();
+        let (state, session, connection) = pg_live_state(&pool).await;
+
+        let success = real_input(session, connection, Engine::Postgres);
+        prepare_pg_real_scratch(&pool, &state, &success).await;
+        let response = execute_real_index(success.clone(), &state).await.unwrap();
+        assert!(response.index_used, "candidate plan did not use the generated index");
+        assert_eq!(response.baseline_plan.label, "executed_query");
+        assert_eq!(response.candidate_plan.label, "executed_query");
+        assert!(response.cleanup.index_dropped && response.cleanup.scratch_dropped);
+        assert!(response.cleanup.timeout_restored && response.cleanup.connection_closed);
+        assert_pg_scratch_gone(&pool, &state, &success).await;
+
+        let failure = real_input(session, connection, Engine::Postgres);
+        prepare_pg_real_scratch(&pool, &state, &failure).await;
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert!(real_index_inner(failure.clone(), &state, &mut cancel_rx, Some(RealIndexFail::AfterCreate)).await.is_err());
+        assert_pg_scratch_gone(&pool, &state, &failure).await;
+
+        let cancelled = real_input(session, connection, Engine::Postgres);
+        prepare_pg_real_scratch(&pool, &state, &cancelled).await;
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        cancel_tx.send(()).unwrap();
+        let error = real_index_inner(cancelled.clone(), &state, &mut cancel_rx, None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_pg_scratch_gone(&pool, &state, &cancelled).await;
+
+        let mismatch = real_input(session, connection, Engine::Postgres);
+        prepare_pg_real_scratch(&pool, &state, &mismatch).await;
+        let mut forged = mismatch.clone();
+        forged.baseline.scratch.as_mut().unwrap().database = "txui_mig_fedcba9876543210".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert!(real_index_inner(forged, &state, &mut cancel_rx, None).await.is_err());
+        let record = crate::commands::migration::scratch_record(
+            &state, mismatch.baseline.scratch.as_ref().unwrap().run_key.as_deref().unwrap(),
+        ).await.unwrap();
+        assert_eq!(record.status, "active", "mismatch must not clean an unverified scratch");
+        crate::commands::migration::cleanup_scratch(&state, &record.run_key).await.unwrap();
         crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
         pool.close().await;
     }

@@ -287,7 +287,7 @@ async fn scratch_status(state: &AppState, run_key: &str, status: &str, error: Op
     Ok(())
 }
 
-async fn scratch_record(state: &AppState, run_key: &str) -> Result<MigrationScratchRecord, AppError> {
+pub(crate) async fn scratch_record(state: &AppState, run_key: &str) -> Result<MigrationScratchRecord, AppError> {
     sqlx::query_as::<_, MigrationScratchRecord>(
         "SELECT run_key, session_id, connection_id, engine, name, status, error, created_at, updated_at
          FROM migration_scratch WHERE run_key = ?",
@@ -308,7 +308,7 @@ async fn admin_for(state: &AppState, session_id: Uuid) -> Result<(Engine, AdminC
     }
 }
 
-async fn create_scratch_named(
+pub(crate) async fn create_scratch_named(
     state: &AppState,
     session_id: Uuid,
     run_key: &str,
@@ -1579,7 +1579,7 @@ pub async fn migration_rehearsal_cleanup(
     cleanup_scratch(&state, &run_key).await
 }
 
-async fn cleanup_scratch(state: &AppState, run_key: &str) -> Result<MigrationScratchRecord, AppError> {
+pub(crate) async fn cleanup_scratch(state: &AppState, run_key: &str) -> Result<MigrationScratchRecord, AppError> {
     let record = scratch_record(state, run_key).await?;
     let session_id = Uuid::parse_str(&record.session_id)
         .map_err(|_| AppError::local("scratch record has an invalid session id"))?;

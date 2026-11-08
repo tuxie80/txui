@@ -904,6 +904,7 @@ pub fn run() {
             explain_analyze_guarded,
             query_lab_baseline,
             query_lab_hypopg_estimate,
+            query_lab_real_index_measure,
             migration_preflight,
             migration_rehearsal_create,
             migration_rehearsal_clone,
