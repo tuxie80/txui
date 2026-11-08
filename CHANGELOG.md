@@ -22,6 +22,8 @@ this project follows semantic versioning.
 
 - **Noise-aware Query Lab verdicts** — raw baseline samples now define a baseline-on-baseline noise floor. Improved/regressed requires a median delta beyond both noise and the configured threshold with at least three matched pairs and equal hashes; index candidates must actually be used. Tiny/noisy deltas and one-shot index evidence stay inconclusive, while mismatched results are invalid. Pure statistics and mounted verdicts are covered without extra queries or a new command.
 
+- **Query Lab runtime/plan correlation** — HypoPG and real-index results now correlate optional runtime with plan diff, cardinality errors, buffers and spill flags using the existing PostgreSQL/MySQL/MariaDB parsers. Missing metrics say not available rather than zero, measured/estimated mixing is refused, HypoPG planning time is not runtime, and timing-only benchmarks declare the gap. Pure dialect fixtures and the complete mounted journey pass.
+
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.

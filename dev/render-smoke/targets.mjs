@@ -567,8 +567,8 @@ export function namedTargets(fixtures) {
         query_lab_hypopg_estimate: args => ({
           run_key: args.input.run_key, spec_sha256: args.input.spec_sha256,
           candidate_id: args.input.candidate.id, backend_id: 43,
-          baseline_plan: { label: 'estimated', format: 'json', content: '{"Plan":{"Total Cost":100}}', elapsed_ms: 1 },
-          candidate_plan: { label: 'hypothetical', format: 'json', content: '{"Plan":{"Total Cost":75}}', elapsed_ms: 1 },
+          baseline_plan: { label: 'estimated', format: 'json', content: '{"Plan":{"Node Type":"Seq Scan","Total Cost":100}}', elapsed_ms: 1 },
+          candidate_plan: { label: 'hypothetical', format: 'json', content: '{"Plan":{"Node Type":"Index Scan","Index Name":"<13342>btree_orders_customer_id","Total Cost":75}}', elapsed_ms: 1 },
           created_index_names: ['<13342>btree_orders_customer_id'], used_index_names: ['<13342>btree_orders_customer_id'],
           baseline_cost: 100, candidate_cost: 75, absolute_delta: -25, percent_delta: -25,
           index_used: true, verdict: 'lower_estimated_cost',
@@ -585,8 +585,8 @@ export function namedTargets(fixtures) {
           candidate_id: args.input.candidate.id, scratch_run_key: args.input.baseline.scratch.run_key,
           scratch_database: args.input.baseline.scratch.database, backend_id: 44,
           index_name: 'txui_lab_0123456789abcdef', index_build_ms: 17,
-          baseline_plan: { label: 'executed_query', format: 'json', content: '{"Plan":{"Total Cost":100}}', elapsed_ms: 4 },
-          candidate_plan: { label: 'executed_query', format: 'json', content: '{"Plan":{"Index Name":"txui_lab_0123456789abcdef"}}', elapsed_ms: 2 },
+          baseline_plan: { label: 'executed_query', format: 'json', content: '{"Plan":{"Node Type":"Seq Scan","Total Cost":100,"Actual Total Time":4,"Actual Loops":1}}', elapsed_ms: 4 },
+          candidate_plan: { label: 'executed_query', format: 'json', content: '{"Plan":{"Node Type":"Index Scan","Index Name":"txui_lab_0123456789abcdef","Total Cost":75,"Actual Total Time":2,"Actual Loops":1}}', elapsed_ms: 2 },
           index_used: true,
           comparison_policy: 'Real index on Migration scratch: both plans executed the read-only query once; create wall time includes lock wait and rebuild and is not a runtime verdict',
           cleanup: { index_dropped: true, scratch_dropped: true, timeout_restored: true, connection_closed: true },
@@ -766,10 +766,12 @@ export function namedTargets(fixtures) {
         if (!html.includes('timeout restored') || !html.includes('dedicated connection closed')) return 'baseline cleanup was not rendered';
         if (!container.__hypopgResult.includes('Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden')) return 'index comparison policy was not rendered';
         if (!container.__hypopgResult.includes('lower_estimated_cost') || !container.__hypopgResult.includes('HypoPG reset complete')) return 'HypoPG verdict or reset was not rendered';
+        if (!container.__hypopgResult.includes('Plan correlation') || !container.__hypopgResult.includes('buffers not available') || !container.__hypopgResult.includes('spills none reported')) return 'HypoPG plan correlation or missing metrics was not rendered';
         if (!container.__realIndexResult.includes('Real index on Migration scratch') || !container.__realIndexResult.includes('Create wall time: 17 ms')) return 'real-index evidence was not rendered';
         if (!container.__realIndexResult.includes('EXECUTED BASELINE') || !container.__realIndexResult.includes('EXECUTED CANDIDATE')) return 'real-index plans were not labelled as execution';
         if (!container.__realIndexResult.includes('candidate index dropped') || !container.__realIndexResult.includes('Migration scratch dropped') || !container.__realIndexResult.includes('Candidate index used: yes')) return 'real-index usage or cleanup was not rendered';
         if (!container.__realIndexResult.includes('Verdict: inconclusive') || !container.__realIndexResult.includes('At least three matched baseline/candidate pairs')) return 'one-shot real-index result was not kept inconclusive';
+        if (!container.__realIndexResult.includes('Plan correlation') || !container.__realIndexResult.includes('Runtime: 4 ms → 2 ms') || !container.__realIndexResult.includes('cardinality not available')) return 'real-index runtime/plan correlation was not rendered';
         const realIndex = calls.find(call => call.cmd === 'query_lab_real_index_measure');
         if (!realIndex) return 'real-index candidate was not invoked';
         if (realIndex.args.input.baseline.index_evidence_mode !== 'real' || realIndex.args.input.baseline.execution_mode !== 'measured') return 'real-index evidence contract was not preserved';
@@ -782,6 +784,7 @@ export function namedTargets(fixtures) {
         if (!rewrite.args.input.candidate.sql.includes('customer_id = 1')) return 'rewrite parameters were not resolved';
         if (!html.includes('1 warmup + 7 repetitions') || !html.includes('Raw timings: [10, 11, 12, 13, 14, 15, 16] ms') || !html.includes('Repetition 7 · baseline_first · baseline 16 ms · candidate 14 ms')) return 'benchmark raw evidence was not rendered';
         if (!html.includes('Verdict: <b>improved</b>') || !html.includes('baseline-on-baseline noise 1 ms') || !html.includes('configured threshold 0.65 ms')) return 'noise-aware benchmark verdict was not rendered';
+        if (!html.includes('Plan correlation is not available for this timing-only run')) return 'timing-only plan correlation gap was not explained';
         const benchmark = calls.find(call => call.cmd === 'query_lab_benchmark');
         if (!benchmark) return 'benchmark was not invoked';
         if (benchmark.args.input.warmup_runs !== 1 || benchmark.args.input.repetitions !== 7) return 'benchmark schedule was not preserved';

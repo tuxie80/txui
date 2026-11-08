@@ -4,6 +4,8 @@ import type { Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
 import { errorDisplay } from '../utils/appError';
 import { benchmarkVerdict } from '../utils/benchmark';
+import { correlatePlanEvidence } from '../utils/planCorrelation';
+import type { PlanCorrelation } from '../utils/planCorrelation';
 import {
   createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabIndexEvidenceMode,
   queryLabSpecSha256, validateQueryLabExperiment,
@@ -125,6 +127,25 @@ interface QueryLabTimingSummary {
   max_ms: number;
 }
 
+function PlanCorrelationEvidence({ correlation }: { correlation: PlanCorrelation }) {
+  return <div className="sqp-f-evidence">
+    <h4>Plan correlation · {correlation.headline}</h4>
+    {!correlation.comparable && <p className="dv-desc">{correlation.reason}</p>}
+    {correlation.runtime && <p className="dv-desc">Runtime: {correlation.runtime.baselineMs} ms → {correlation.runtime.candidateMs} ms · delta {correlation.runtime.deltaMs} ms ({correlation.runtime.improvementPct ?? 'not available'}%).</p>}
+    <p className="dv-desc">Plan diff: {correlation.diff.changed} changed · {correlation.diff.added} added · {correlation.diff.removed} removed.</p>
+    {(['baseline', 'candidate'] as const).map(kind => {
+      const evidence = correlation[kind];
+      return <p className="dv-desc" key={kind}>
+        {kind}: cardinality {evidence.cardinality
+          ? `${evidence.cardinality.factor}× ${evidence.cardinality.direction} at ${evidence.cardinality.operation} (${evidence.cardinality.estimatedRowsPerLoop} → ${evidence.cardinality.actualRowsPerLoop} rows/loop)`
+          : 'not available'} · buffers {evidence.buffers
+          ? `${evidence.buffers.hit} hit / ${evidence.buffers.read} read at ${evidence.buffers.operation}`
+          : 'not available'} · spills {evidence.spills.length ? evidence.spills.join(', ') : 'none reported'}.
+      </p>;
+    })}
+  </div>;
+}
+
 interface Props {
   session: Session;
   schema?: string | null;
@@ -186,6 +207,18 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     candidateKind: 'index',
     indexUsed: realIndex.index_used,
   }) : null, [realIndex, experiment.improvementThresholdPct]);
+  const realIndexCorrelation = useMemo(() => realIndex ? correlatePlanEvidence({
+    engine: experiment.engine,
+    baselinePlan: realIndex.baseline_plan.content,
+    candidatePlan: realIndex.candidate_plan.content,
+    baselineMs: realIndex.baseline_plan.elapsed_ms,
+    candidateMs: realIndex.candidate_plan.elapsed_ms,
+  }) : null, [realIndex, experiment.engine]);
+  const hypopgCorrelation = useMemo(() => hypopg ? correlatePlanEvidence({
+    engine: 'postgres',
+    baselinePlan: hypopg.baseline_plan.content,
+    candidatePlan: hypopg.candidate_plan.content,
+  }) : null, [hypopg]);
 
   const refreshScratch = useCallback(async () => {
     try {
@@ -660,6 +693,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <p className="dv-desc">Verdict: <b>{hypopg.verdict}</b> · baseline cost {hypopg.baseline_cost ?? 'not available'} · candidate cost {hypopg.candidate_cost ?? 'not available'} · delta {hypopg.absolute_delta ?? 'not available'} ({hypopg.percent_delta ?? 'not available'}%).</p>
                 <p className="dv-desc">Index used: {hypopg.index_used ? 'yes' : 'no'} · created {hypopg.created_index_names.join(', ')} · used {hypopg.used_index_names.join(', ') || 'none'}.</p>
                 <p className="dv-desc">Cleanup: HypoPG reset {hypopg.cleanup.hypopg_reset ? 'complete' : 'incomplete'} · timeout {hypopg.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {hypopg.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
+                {hypopgCorrelation && <PlanCorrelationEvidence correlation={hypopgCorrelation} />}
                 {!hypopg.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner ignored the hypothetical index; no improvement is claimed.</span></div>}
                 <h4>Baseline plan</h4><pre className="sqp-sql">{hypopg.baseline_plan.content}</pre>
                 <h4>Candidate plan</h4><pre className="sqp-sql">{hypopg.candidate_plan.content}</pre>
@@ -668,6 +702,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <h3>Real index on Migration scratch · {realIndex.candidate_id}</h3>
                 <p className="dv-desc">{realIndex.comparison_policy}</p>
                 {realIndexAssessment && <p className="dv-desc">Verdict: <b>{realIndexAssessment.verdict}</b> · {realIndexAssessment.reason}</p>}
+                {realIndexCorrelation && <PlanCorrelationEvidence correlation={realIndexCorrelation} />}
                 <p className="dv-desc">Scratch {realIndex.scratch_database} · run {realIndex.scratch_run_key} · backend {realIndex.backend_id} · index {realIndex.index_name}.</p>
                 <p className="dv-desc">Create wall time: <b>{realIndex.index_build_ms} ms</b> (lock wait + rebuild; components not separately observed). Candidate index used: <b>{realIndex.index_used ? 'yes' : 'no'}</b>.</p>
                 <p className="dv-desc">Cleanup: candidate index {realIndex.cleanup.index_dropped ? 'dropped' : 'NOT dropped'} · Migration scratch {realIndex.cleanup.scratch_dropped ? 'dropped' : 'NOT dropped'} · timeout {realIndex.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {realIndex.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
@@ -693,7 +728,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
               </section>}
               {benchmark && <section aria-label="Benchmark timing evidence">
                 <h3>Benchmark · {benchmark.candidate_id} · {benchmark.warmup_runs} warmup + {benchmark.repetitions} repetitions</h3>
-                <p className="dv-desc">Backend {benchmark.backend_id} · {benchmark.pairs.length} measured pairs · alternating order · full-drain execution with no result queue. Raw observations stay beside the noise-aware verdict.</p>
+                <p className="dv-desc">Backend {benchmark.backend_id} · {benchmark.pairs.length} measured pairs · alternating order · full-drain execution with no result queue. Raw observations stay beside the noise-aware verdict. Plan correlation is not available for this timing-only run.</p>
                 {benchmarkAssessment && <p className="dv-desc">Verdict: <b>{benchmarkAssessment.verdict}</b> · median delta {benchmarkAssessment.deltaMs ?? 'not available'} ms ({benchmarkAssessment.improvementPct ?? 'not available'}%) · baseline-on-baseline noise {benchmarkAssessment.noiseFloorMs ?? 'not available'} ms · configured threshold {benchmarkAssessment.thresholdMs ?? 'not available'} ms. {benchmarkAssessment.reason}</p>}
                 {(['baseline', 'candidate'] as const).map(kind => {
                   const summary = benchmark[kind];
