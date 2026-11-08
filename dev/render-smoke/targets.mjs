@@ -769,6 +769,7 @@ export function namedTargets(fixtures) {
         if (!container.__realIndexResult.includes('Real index on Migration scratch') || !container.__realIndexResult.includes('Create wall time: 17 ms')) return 'real-index evidence was not rendered';
         if (!container.__realIndexResult.includes('EXECUTED BASELINE') || !container.__realIndexResult.includes('EXECUTED CANDIDATE')) return 'real-index plans were not labelled as execution';
         if (!container.__realIndexResult.includes('candidate index dropped') || !container.__realIndexResult.includes('Migration scratch dropped') || !container.__realIndexResult.includes('Candidate index used: yes')) return 'real-index usage or cleanup was not rendered';
+        if (!container.__realIndexResult.includes('Verdict: inconclusive') || !container.__realIndexResult.includes('At least three matched baseline/candidate pairs')) return 'one-shot real-index result was not kept inconclusive';
         const realIndex = calls.find(call => call.cmd === 'query_lab_real_index_measure');
         if (!realIndex) return 'real-index candidate was not invoked';
         if (realIndex.args.input.baseline.index_evidence_mode !== 'real' || realIndex.args.input.baseline.execution_mode !== 'measured') return 'real-index evidence contract was not preserved';
@@ -780,6 +781,7 @@ export function namedTargets(fixtures) {
         if (rewrite.args.input.row_order_policy !== 'ordered' || rewrite.args.input.max_rows !== 100000 || rewrite.args.input.max_bytes !== 67108864) return 'rewrite policy or budgets were not preserved';
         if (!rewrite.args.input.candidate.sql.includes('customer_id = 1')) return 'rewrite parameters were not resolved';
         if (!html.includes('1 warmup + 7 repetitions') || !html.includes('Raw timings: [10, 11, 12, 13, 14, 15, 16] ms') || !html.includes('Repetition 7 · baseline_first · baseline 16 ms · candidate 14 ms')) return 'benchmark raw evidence was not rendered';
+        if (!html.includes('Verdict: <b>improved</b>') || !html.includes('baseline-on-baseline noise 1 ms') || !html.includes('configured threshold 0.65 ms')) return 'noise-aware benchmark verdict was not rendered';
         const benchmark = calls.find(call => call.cmd === 'query_lab_benchmark');
         if (!benchmark) return 'benchmark was not invoked';
         if (benchmark.args.input.warmup_runs !== 1 || benchmark.args.input.repetitions !== 7) return 'benchmark schedule was not preserved';

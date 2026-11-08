@@ -20,6 +20,8 @@ this project follows semantic versioning.
 
 - **Bounded alternating Query Lab benchmarks** — equal rewrite candidates can run 0–10 warmups and 1–30 repetitions per side with alternating baseline/candidate order. Statements are fully drained without retaining result rows, with server/client deadlines and between-run/in-flight cancellation. Raw pair timings, arrays, median/p95/min/max, hashes and cleanup are visible; invalid results never reach timing and no verdict is inferred. Live MySQL 8.4, MariaDB 11.8 and PostgreSQL 18 matrices pass.
 
+- **Noise-aware Query Lab verdicts** — raw baseline samples now define a baseline-on-baseline noise floor. Improved/regressed requires a median delta beyond both noise and the configured threshold with at least three matched pairs and equal hashes; index candidates must actually be used. Tiny/noisy deltas and one-shot index evidence stay inconclusive, while mismatched results are invalid. Pure statistics and mounted verdicts are covered without extra queries or a new command.
+
 ### Changed
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { Session } from '../types';
 import { safeOperationUnavailableReason } from '../utils/operationSupport';
 import { errorDisplay } from '../utils/appError';
+import { benchmarkVerdict } from '../utils/benchmark';
 import {
   createDefaultQueryLabExperiment, parseQueryLabExperiment, queryLabIndexEvidenceMode,
   queryLabSpecSha256, validateQueryLabExperiment,
@@ -168,6 +169,23 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const specHash = useMemo(() => queryLabSpecSha256(experiment), [experiment]);
   const specHashRef = useRef(specHash);
   specHashRef.current = specHash;
+  const benchmarkAssessment = useMemo(() => benchmark ? benchmarkVerdict({
+    baselineMs: benchmark.baseline_ms,
+    candidateMs: benchmark.candidate_ms,
+    baselineSha256: benchmark.baseline_sha256,
+    candidateSha256: benchmark.candidate_sha256,
+    improvementThresholdPct: experiment.improvementThresholdPct,
+    candidateKind: 'rewrite',
+  }) : null, [benchmark, experiment.improvementThresholdPct]);
+  const realIndexAssessment = useMemo(() => realIndex ? benchmarkVerdict({
+    baselineMs: [realIndex.baseline_plan.elapsed_ms],
+    candidateMs: [realIndex.candidate_plan.elapsed_ms],
+    baselineSha256: realIndex.spec_sha256,
+    candidateSha256: realIndex.spec_sha256,
+    improvementThresholdPct: experiment.improvementThresholdPct,
+    candidateKind: 'index',
+    indexUsed: realIndex.index_used,
+  }) : null, [realIndex, experiment.improvementThresholdPct]);
 
   const refreshScratch = useCallback(async () => {
     try {
@@ -649,6 +667,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
               {realIndex && <section aria-label="Real index candidate evidence">
                 <h3>Real index on Migration scratch · {realIndex.candidate_id}</h3>
                 <p className="dv-desc">{realIndex.comparison_policy}</p>
+                {realIndexAssessment && <p className="dv-desc">Verdict: <b>{realIndexAssessment.verdict}</b> · {realIndexAssessment.reason}</p>}
                 <p className="dv-desc">Scratch {realIndex.scratch_database} · run {realIndex.scratch_run_key} · backend {realIndex.backend_id} · index {realIndex.index_name}.</p>
                 <p className="dv-desc">Create wall time: <b>{realIndex.index_build_ms} ms</b> (lock wait + rebuild; components not separately observed). Candidate index used: <b>{realIndex.index_used ? 'yes' : 'no'}</b>.</p>
                 <p className="dv-desc">Cleanup: candidate index {realIndex.cleanup.index_dropped ? 'dropped' : 'NOT dropped'} · Migration scratch {realIndex.cleanup.scratch_dropped ? 'dropped' : 'NOT dropped'} · timeout {realIndex.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {realIndex.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
@@ -674,7 +693,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
               </section>}
               {benchmark && <section aria-label="Benchmark timing evidence">
                 <h3>Benchmark · {benchmark.candidate_id} · {benchmark.warmup_runs} warmup + {benchmark.repetitions} repetitions</h3>
-                <p className="dv-desc">Backend {benchmark.backend_id} · {benchmark.pairs.length} measured pairs · alternating order · full-drain execution with no result queue. These are raw observations, not an improvement verdict.</p>
+                <p className="dv-desc">Backend {benchmark.backend_id} · {benchmark.pairs.length} measured pairs · alternating order · full-drain execution with no result queue. Raw observations stay beside the noise-aware verdict.</p>
+                {benchmarkAssessment && <p className="dv-desc">Verdict: <b>{benchmarkAssessment.verdict}</b> · median delta {benchmarkAssessment.deltaMs ?? 'not available'} ms ({benchmarkAssessment.improvementPct ?? 'not available'}%) · baseline-on-baseline noise {benchmarkAssessment.noiseFloorMs ?? 'not available'} ms · configured threshold {benchmarkAssessment.thresholdMs ?? 'not available'} ms. {benchmarkAssessment.reason}</p>}
                 {(['baseline', 'candidate'] as const).map(kind => {
                   const summary = benchmark[kind];
                   const raw = kind === 'baseline' ? benchmark.baseline_ms : benchmark.candidate_ms;
