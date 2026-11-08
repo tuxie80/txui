@@ -903,6 +903,7 @@ pub fn run() {
             column_map,
             explain_analyze_guarded,
             query_lab_baseline,
+            query_lab_hypopg_estimate,
             migration_preflight,
             migration_rehearsal_create,
             migration_rehearsal_clone,

@@ -70,6 +70,7 @@ pub struct QueryLabSetting {
 pub struct QueryLabCleanup {
     pub timeout_restored: bool,
     pub connection_closed: bool,
+    pub hypopg_reset: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -435,7 +436,7 @@ async fn baseline_inner(
         cost_estimates: input.evidence.cost,
         settings: parts.settings,
         cache_observations: cache_observations(&input.execution_mode),
-        cleanup: QueryLabCleanup { timeout_restored: true, connection_closed: true },
+        cleanup: QueryLabCleanup { timeout_restored: true, connection_closed: true, hypopg_reset: None },
     })
 }
 
@@ -495,6 +496,323 @@ pub async fn query_lab_baseline(
     execute_baseline(input, &state).await
 }
 
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabHypopgCandidateInput {
+    pub id: String,
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub where_clause: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabHypopgInput {
+    pub session_id: Uuid,
+    pub connection_id: Uuid,
+    pub run_key: String,
+    pub database: String,
+    pub sql: String,
+    pub spec_sha256: String,
+    pub index_evidence_mode: String,
+    pub timeout_ms: u64,
+    pub candidate: QueryLabHypopgCandidateInput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabHypopgResponse {
+    pub run_key: String,
+    pub spec_sha256: String,
+    pub candidate_id: String,
+    pub backend_id: u64,
+    pub baseline_plan: QueryLabPlanEvidence,
+    pub candidate_plan: QueryLabPlanEvidence,
+    pub created_index_names: Vec<String>,
+    pub used_index_names: Vec<String>,
+    pub baseline_cost: Option<f64>,
+    pub candidate_cost: Option<f64>,
+    pub absolute_delta: Option<f64>,
+    pub percent_delta: Option<f64>,
+    pub index_used: bool,
+    pub verdict: String,
+    pub comparison_policy: String,
+    pub cleanup: QueryLabCleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HypopgFail {
+    InitialReset,
+    Baseline,
+    Create,
+    Explain,
+    FinalReset,
+    Restore,
+}
+
+fn fail_step(step: HypopgFail, injected: Option<HypopgFail>) -> Result<(), AppError> {
+    if injected == Some(step) {
+        Err(AppError::local(format!("Query Lab injected {:?} failure", step)))
+    } else {
+        Ok(())
+    }
+}
+
+fn quote_pg_identifier(name: &str) -> Result<String, AppError> {
+    if name.is_empty() || name.len() > 63 || name.contains('\0') {
+        return Err(AppError::bad_request("Query Lab identifier is empty or invalid"));
+    }
+    if !name.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$')) {
+        return Err(AppError::bad_request("Query Lab identifiers must be unquoted names"));
+    }
+    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+}
+
+fn pg_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn candidate_ddl(candidate: &QueryLabHypopgCandidateInput) -> Result<String, AppError> {
+    if candidate.columns.is_empty() || candidate.columns.len() > 32 {
+        return Err(AppError::bad_request("Query Lab index requires 1–32 columns"));
+    }
+    if candidate.id.is_empty() || candidate.name.is_empty() {
+        return Err(AppError::bad_request("Query Lab candidate id/name is required"));
+    }
+    let table = candidate.table.split('.').map(quote_pg_identifier).collect::<Result<Vec<_>, _>>()?;
+    if table.len() > 2 {
+        return Err(AppError::bad_request("Query Lab table must be table or schema.table"));
+    }
+    let columns = candidate.columns.iter().map(|column| quote_pg_identifier(column)).collect::<Result<Vec<_>, _>>()?;
+    let unique = if candidate.unique { "UNIQUE " } else { "" };
+    let predicate = match &candidate.where_clause {
+        Some(where_clause) if !where_clause.trim().is_empty() => {
+            if where_clause.len() > 10_000 || where_clause.contains([';', '\0']) {
+                return Err(AppError::bad_request("Query Lab partial-index predicate is invalid"));
+            }
+            format!(" WHERE {where_clause}")
+        }
+        _ => String::new(),
+    };
+    Ok(format!(
+        "CREATE {unique}INDEX ON {} ({}){predicate}",
+        table.join("."),
+        columns.join(", "),
+    ))
+}
+
+fn total_cost(plan_json: &str) -> Option<f64> {
+    fn walk(value: &serde_json::Value) -> Option<f64> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(cost) = map.get("Total Cost").and_then(serde_json::Value::as_f64) {
+                    return Some(cost);
+                }
+                map.values().find_map(walk)
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(walk),
+            _ => None,
+        }
+    }
+    let parsed: serde_json::Value = serde_json::from_str(plan_json).ok()?;
+    let cost = walk(&parsed)?;
+    cost.is_finite().then_some(cost)
+}
+
+async fn validate_hypopg(input: &QueryLabHypopgInput, state: &AppState) -> Result<u64, AppError> {
+    Uuid::parse_str(&input.run_key).map_err(|_| AppError::bad_request("Query Lab run key must be a UUID"))?;
+    if input.sql.len() > MAX_QUERY_LAB_SQL_BYTES {
+        return Err(AppError::bad_request("Query Lab SQL exceeds the 2 MiB limit"));
+    }
+    if input.spec_sha256.len() != 64 || !input.spec_sha256.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(AppError::bad_request("Query Lab spec hash must be 64 hexadecimal characters"));
+    }
+    let statements = crate::sqlguard::split_statements_for(Some(Engine::Postgres), &input.sql);
+    if statements.len() != 1 || !crate::sqlguard::is_read_family(&input.sql)
+        || crate::sqlguard::is_write_for(Some(Engine::Postgres), &input.sql)
+    {
+        return Err(AppError::guard("HypoPG accepts exactly one read-only statement"));
+    }
+    if input.index_evidence_mode != "hypothetical" {
+        return Err(AppError::guard("HypoPG candidates require hypothetical estimate evidence; measured or real evidence is incompatible"));
+    }
+    let guard = state.session_meta.read().await.get(&input.session_id).cloned()
+        .ok_or_else(|| AppError::bad_request("Query Lab session is not open"))?;
+    if guard.engine != Engine::Postgres {
+        return Err(AppError::unsupported("HypoPG is available on PostgreSQL only"));
+    }
+    let starts = state.session_starts.read().await;
+    let start = starts.get(&input.session_id)
+        .ok_or_else(|| AppError::bad_request("Query Lab connection identity is unavailable"))?;
+    if start.connection_id != input.connection_id {
+        return Err(AppError::guard("Query Lab connection ID does not match the open session"));
+    }
+    drop(starts);
+    state.guard_statement(&input.session_id, &input.sql).await?;
+    candidate_ddl(&input.candidate)?;
+    Ok(input.timeout_ms.clamp(100, 60_000))
+}
+
+async fn hypopg_inner(
+    input: QueryLabHypopgInput,
+    state: &AppState,
+    cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    injected: Option<HypopgFail>,
+) -> Result<QueryLabHypopgResponse, AppError> {
+    let timeout_ms = validate_hypopg(&input, state).await?;
+    let session = crate::db::connection::get_session_pub(input.session_id, &state.sessions).await?;
+    let pool = match session.as_ref() {
+        LiveSession::Postgres(pool) => pool,
+        _ => return Err(AppError::unsupported("HypoPG is available on PostgreSQL only")),
+    };
+    let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its HypoPG connection: {error}")))?.detach();
+    let backend_id = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut conn).await? as u64;
+    crate::db::postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", input.database.replace('"', "\"\""))).await?;
+    let previous_timeout = sqlx::query_scalar::<_, String>("SHOW statement_timeout")
+        .fetch_one(&mut conn).await?;
+    crate::db::postgres::execute(&mut conn, &format!("SET statement_timeout = {timeout_ms}")).await?;
+    let result = async {
+        let (installed, available) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT (SELECT extversion FROM pg_extension WHERE extname = 'hypopg'), (SELECT default_version FROM pg_available_extensions WHERE name = 'hypopg')",
+        ).fetch_one(&mut conn).await?;
+        if installed.is_none() {
+            if available.is_none() {
+                return Err(AppError::unsupported("HypoPG is not available on this PostgreSQL server"));
+            }
+            state.guard_statement(&input.session_id, "CREATE EXTENSION IF NOT EXISTS hypopg").await?;
+            pg_statement(&mut conn, "CREATE EXTENSION IF NOT EXISTS hypopg", cancel).await?;
+        }
+        fail_step(HypopgFail::InitialReset, injected)?;
+        pg_statement(&mut conn, "SELECT public.hypopg_reset()", cancel).await?;
+        let started = Instant::now();
+        let baseline_result = pg_statement(&mut conn, &format!("EXPLAIN (FORMAT JSON) {}", input.sql), cancel).await?;
+        let baseline_plan = estimated("estimated", "json", plan_text(&baseline_result)?, started.elapsed().as_millis() as u64);
+        fail_step(HypopgFail::Baseline, injected)?;
+        fail_step(HypopgFail::Create, injected)?;
+        let ddl = candidate_ddl(&input.candidate)?;
+        let create_sql = format!("SELECT indexrelid, indexname FROM public.hypopg_create_index({})", pg_literal(&ddl));
+        let created = pg_statement(&mut conn, &create_sql, cancel).await?;
+        let created_index_names = created.rows.iter().filter_map(|row| {
+            row.last().and_then(serde_json::Value::as_str).map(ToOwned::to_owned)
+        }).collect::<Vec<_>>();
+        if created_index_names.is_empty() {
+            return Err(AppError::local("HypoPG returned no hypothetical index name"));
+        }
+        fail_step(HypopgFail::Explain, injected)?;
+        let started = Instant::now();
+        let candidate_result = pg_statement(&mut conn, &format!("EXPLAIN (FORMAT JSON) {}", input.sql), cancel).await?;
+        let candidate_plan = estimated("hypothetical", "json", plan_text(&candidate_result)?, started.elapsed().as_millis() as u64);
+        Ok((baseline_plan, candidate_plan, created_index_names))
+    }.await;
+    fail_step(HypopgFail::FinalReset, injected)?;
+    let reset = pg_statement(&mut conn, "SELECT public.hypopg_reset()", cancel).await;
+    let restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+        .bind(previous_timeout).execute(&mut conn).await;
+    fail_step(HypopgFail::Restore, injected)?;
+    let close = conn.close().await;
+    let (baseline_plan, candidate_plan, created_index_names) = result?;
+    if reset.is_err() || restored.is_err() || close.is_err() {
+        return Err(AppError::local("HypoPG lifecycle cleanup was incomplete"));
+    }
+    let baseline_cost = total_cost(&baseline_plan.content);
+    let candidate_cost = total_cost(&candidate_plan.content);
+    let used_index_names = created_index_names.iter().filter(|name| candidate_plan.content.contains(name.as_str())).cloned().collect::<Vec<_>>();
+    let index_used = !used_index_names.is_empty();
+    let (absolute_delta, percent_delta) = match (baseline_cost, candidate_cost) {
+        (Some(baseline), Some(candidate)) if baseline > 0.0 => {
+            let absolute = candidate - baseline;
+            (Some(absolute), Some(absolute / baseline * 100.0))
+        }
+        _ => (None, None),
+    };
+    let verdict = if !index_used {
+        "not_used".into()
+    } else if absolute_delta.is_some_and(|delta| delta < 0.0) {
+        "lower_estimated_cost".into()
+    } else if absolute_delta.is_some_and(|delta| delta > 0.0) {
+        "higher_estimated_cost".into()
+    } else {
+        "unchanged".into()
+    };
+    Ok(QueryLabHypopgResponse {
+        run_key: input.run_key,
+        spec_sha256: input.spec_sha256,
+        candidate_id: input.candidate.id,
+        backend_id,
+        baseline_plan,
+        candidate_plan,
+        created_index_names,
+        used_index_names,
+        baseline_cost,
+        candidate_cost,
+        absolute_delta,
+        percent_delta,
+        index_used,
+        verdict,
+        comparison_policy: "Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden".into(),
+        cleanup: QueryLabCleanup { timeout_restored: true, connection_closed: true, hypopg_reset: Some(true) },
+    })
+}
+
+async fn audit_hypopg(
+    state: &AppState,
+    input: &QueryLabHypopgInput,
+    started: Instant,
+    result: &Result<QueryLabHypopgResponse, AppError>,
+) {
+    let session_start = state.session_starts.read().await.get(&input.session_id).cloned();
+    let (ok, error, code) = match result {
+        Ok(_) => (true, None, ""),
+        Err(error) => (false, Some(error.message.clone()), error.code.as_str()),
+    };
+    let entry = crate::commands::audit::AuditInsert {
+        run_id: format!("query-lab-hypopg:{}", input.run_key), stmt_index: Some(1), stmt_total: Some(1),
+        session_id: input.session_id.to_string(), tab_title: "Query Optimization Lab (HypoPG)".into(),
+        database: input.database.clone(), source: "query_lab_hypopg".into(),
+        started_at: crate::commands::audit::lifecycle_now(), ended_at: crate::commands::audit::lifecycle_now(),
+        duration_ms: started.elapsed().as_millis() as i64,
+        connection_name: session_start.as_ref().map(|value| value.connection_name.clone()).unwrap_or_default(),
+        db_user: session_start.as_ref().map(|value| value.db_user.clone()).unwrap_or_default(),
+        engine: "postgres".into(), ok, rows_out: 0, rows_affected: None,
+        error, error_code: code.into(), db_code: String::new(), sqlstate: String::new(),
+        sql: input.sql.clone(),
+    };
+    if let Err(error) = crate::commands::audit::insert(&state.history, &entry).await {
+        eprintln!("[audit] query lab HypoPG insert failed: {error:#}");
+    }
+}
+
+pub async fn execute_hypopg(
+    input: QueryLabHypopgInput,
+    state: &AppState,
+) -> Result<QueryLabHypopgResponse, AppError> {
+    let started = Instant::now();
+    let key = crate::state::ext_job_key(input.session_id, &input.run_key);
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut jobs = state.ext_jobs.write().await;
+        if jobs.contains_key(&key) {
+            return Err(AppError::bad_request("This HypoPG run is already active"));
+        }
+        jobs.insert(key.clone(), cancel_tx);
+    }
+    let result = hypopg_inner(input.clone(), state, &mut cancel_rx, None).await;
+    state.ext_jobs.write().await.remove(&key);
+    audit_hypopg(state, &input, started, &result).await;
+    result
+}
+
+#[tauri::command]
+pub async fn query_lab_hypopg_estimate(
+    input: QueryLabHypopgInput,
+    state: tauri::State<'_, AppState>,
+) -> Result<QueryLabHypopgResponse, AppError> {
+    execute_hypopg(input, &state).await
+}
 
 #[cfg(test)]
 mod tests {
@@ -737,6 +1055,83 @@ mod tests {
         assert!(execute_baseline(write, &state).await.is_err());
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shop.orders").fetch_one(&pool).await.unwrap();
         assert_eq!(rows, 1);
+        crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
+        pool.close().await;
+    }
+
+    fn hypopg_input(session_id: Uuid, connection_id: Uuid, id: &str) -> QueryLabHypopgInput {
+        QueryLabHypopgInput {
+            session_id, connection_id, run_key: Uuid::new_v4().to_string(),
+            database: "shop".into(), sql: if id == "created-index" {
+                "SELECT id FROM orders WHERE other_id = 1".into()
+            } else {
+                "SELECT id FROM orders WHERE customer_id = 1".into()
+            },
+            spec_sha256: "b".repeat(64), index_evidence_mode: "hypothetical".into(), timeout_ms: 1000,
+            candidate: QueryLabHypopgCandidateInput {
+                id: id.into(), name: format!("{id} name"), table: "orders".into(),
+                columns: vec![if id == "created-index" { "other_id".into() } else { "customer_id".into() }], unique: false, where_clause: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18 with hypopg"]
+    async fn dbctl_hypopg_full_lifecycle_and_concurrent_isolation() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE EXTENSION IF NOT EXISTS hypopg").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE SCHEMA shop").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL, other_id INT NOT NULL)").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders SELECT g, g % 10, g % 10 FROM generate_series(1, 100) g").await.unwrap();
+        let (state, session, connection) = pg_live_state(&pool).await;
+        let response = execute_hypopg(hypopg_input(session, connection, "customer-index"), &state).await.unwrap();
+        assert!(response.index_used, "planner did not use the hypothetical index: {response:?}");
+        assert_eq!(response.verdict, "lower_estimated_cost");
+        assert!(response.absolute_delta.is_some_and(|delta| delta < 0.0));
+        assert_eq!(response.cleanup.hypopg_reset, Some(true));
+        assert_eq!(response.cleanup.connection_closed, true);
+        assert_eq!(response.comparison_policy.contains("measured runtime comparison is forbidden"), true);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generate_series(0, 100000) g WHERE public.hypopg_get_indexdef(g) IS NOT NULL").fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
+
+        let (left, right) = tokio::join!(
+            execute_hypopg(hypopg_input(session, connection, "customer-index"), &state),
+            execute_hypopg(hypopg_input(session, connection, "created-index"), &state),
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+        assert!(left.index_used && right.index_used);
+        assert!(left.used_index_names.iter().all(|name| !right.created_index_names.contains(name)));
+        assert!(right.used_index_names.iter().all(|name| !left.created_index_names.contains(name)));
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generate_series(0, 100000) g WHERE public.hypopg_get_indexdef(g) IS NOT NULL").fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
+        crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18 with hypopg"]
+    async fn dbctl_hypopg_failures_reset_every_step() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE EXTENSION IF NOT EXISTS hypopg").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE SCHEMA shop").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL, other_id INT NOT NULL)").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders SELECT g, g % 10, g % 10 FROM generate_series(1, 100) g").await.unwrap();
+        let (state, session, connection) = pg_live_state(&pool).await;
+        for step in [
+            HypopgFail::InitialReset, HypopgFail::Baseline, HypopgFail::Create,
+            HypopgFail::Explain, HypopgFail::FinalReset, HypopgFail::Restore,
+        ] {
+            let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+            let error = hypopg_inner(hypopg_input(session, connection, "failure"), &state, &mut cancel_rx, Some(step)).await;
+            assert!(error.is_err(), "failure {step:?} unexpectedly succeeded");
+            let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generate_series(0, 100000) g WHERE public.hypopg_get_indexdef(g) IS NOT NULL").fetch_one(&pool).await.unwrap();
+            assert_eq!(remaining, 0, "failure {step:?} left hypothetical indexes");
+            let timeout: String = sqlx::query_scalar("SHOW statement_timeout").fetch_one(&pool).await.unwrap();
+            assert_eq!(timeout, "0");
+        }
         crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
         pool.close().await;
     }

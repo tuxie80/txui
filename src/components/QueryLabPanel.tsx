@@ -36,7 +36,26 @@ interface QueryLabBaselineResponse {
   cost_estimates: boolean;
   settings: { name: string; value: string | null }[];
   cache_observations: string[];
-  cleanup: { timeout_restored: boolean; connection_closed: boolean };
+  cleanup: { timeout_restored: boolean; connection_closed: boolean; hypopg_reset?: boolean | null };
+}
+
+interface QueryLabHypopgResponse {
+  run_key: string;
+  spec_sha256: string;
+  candidate_id: string;
+  backend_id: number;
+  baseline_plan: QueryLabPlanEvidence;
+  candidate_plan: QueryLabPlanEvidence;
+  created_index_names: string[];
+  used_index_names: string[];
+  baseline_cost: number | null;
+  candidate_cost: number | null;
+  absolute_delta: number | null;
+  percent_delta: number | null;
+  index_used: boolean;
+  verdict: 'not_used' | 'lower_estimated_cost' | 'higher_estimated_cost' | 'unchanged';
+  comparison_policy: string;
+  cleanup: { timeout_restored: boolean; connection_closed: boolean; hypopg_reset: boolean | null };
 }
 
 interface Props {
@@ -59,6 +78,9 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const [baseline, setBaseline] = useState<QueryLabBaselineResponse | null>(null);
   const [baselineRunning, setBaselineRunning] = useState(false);
   const [baselineError, setBaselineError] = useState<string | null>(null);
+  const [hypopg, setHypopg] = useState<QueryLabHypopgResponse | null>(null);
+  const [hypopgRunning, setHypopgRunning] = useState(false);
+  const [hypopgError, setHypopgError] = useState<string | null>(null);
   const errors = useMemo(() => validateQueryLabExperiment(experiment), [experiment]);
   const specHash = useMemo(() => queryLabSpecSha256(experiment), [experiment]);
 
@@ -67,6 +89,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setValidated(null);
     setBaseline(null);
     setBaselineError(null);
+    setHypopg(null);
+    setHypopgError(null);
   };
   const updateCandidate = (index: number, change: Partial<QueryLabCandidate>) => {
     patch(current => ({
@@ -92,6 +116,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setValidated(parsed.ok ? parsed.experiment : null);
     setBaseline(null);
     setBaselineError(null);
+    setHypopg(null);
+    setHypopgError(null);
   };
   const captureBaseline = async () => {
     if (!validated || baselineRunning) return;
@@ -127,6 +153,33 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setBaselineError(errorDisplay(error));
     } finally {
       setBaselineRunning(false);
+    }
+  };
+  const captureHypopg = async () => {
+    const candidate = validated?.candidates.find(candidate => candidate.kind === 'index');
+    if (!validated || validated.executionMode !== 'estimate' || validated.engine !== 'postgres' || !candidate || hypopgRunning) return;
+    setHypopgRunning(true);
+    setHypopgError(null);
+    setHypopg(null);
+    try {
+      const response = await invoke<QueryLabHypopgResponse>('query_lab_hypopg_estimate', {
+        input: {
+          session_id: validated.scratch?.sessionId ?? session.sessionId,
+          connection_id: validated.scratch?.connectionId ?? session.connectionId,
+          run_key: crypto.randomUUID(), database: validated.database,
+          sql: validated.resolvedSql, spec_sha256: specHash,
+          index_evidence_mode: 'hypothetical', timeout_ms: validated.timeoutMs,
+          candidate: {
+            id: candidate.id, name: candidate.name, table: candidate.table,
+            columns: candidate.columns, unique: candidate.unique, where_clause: candidate.where,
+          },
+        },
+      });
+      setHypopg(response);
+    } catch (error) {
+      setHypopgError(errorDisplay(error));
+    } finally {
+      setHypopgRunning(false);
     }
   };
 
@@ -273,8 +326,10 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                   <p className="dv-desc"><b>Validated without a database call.</b> {validated.candidates.length} candidates · {validated.executionMode} mode · {validated.warmupRuns} warmup + {validated.repetitions} measured runs · timeout {validated.timeoutMs} ms.</p>
                   <code className="sqp-f-snippet">{validated.resolvedSql}</code>
                   <button className="primary" disabled={baselineRunning} onClick={() => void captureBaseline()}>{baselineRunning ? 'Capturing baseline…' : 'Capture baseline'}</button>
+                  {validated.engine === 'postgres' && validated.executionMode === 'estimate' && validated.candidates.some(candidate => candidate.kind === 'index') && <button className="toolbar-btn" disabled={hypopgRunning} onClick={() => void captureHypopg()}>{hypopgRunning ? 'Estimating index…' : 'Estimate index (HypoPG)'}</button>}
                 </div>}
                 {baselineError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{baselineError}</span></div>}
+                {hypopgError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{hypopgError}</span></div>}
               </section>
 
               {baseline && <section aria-label="Query Lab baseline evidence">
@@ -291,6 +346,16 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                   <p className="dv-desc">EXPLAIN ANALYZE actually executed the read-only statement; this is measured evidence, not a hypothetical estimate.</p>
                   <pre className="sqp-sql">{baseline.measured_plan.content}</pre>
                 </div>}
+              </section>}
+              {hypopg && <section aria-label="HypoPG candidate evidence">
+                <h3>Hypothetical index · {hypopg.candidate_id}</h3>
+                <p className="dv-desc">{hypopg.comparison_policy}</p>
+                <p className="dv-desc">Verdict: <b>{hypopg.verdict}</b> · baseline cost {hypopg.baseline_cost ?? 'not available'} · candidate cost {hypopg.candidate_cost ?? 'not available'} · delta {hypopg.absolute_delta ?? 'not available'} ({hypopg.percent_delta ?? 'not available'}%).</p>
+                <p className="dv-desc">Index used: {hypopg.index_used ? 'yes' : 'no'} · created {hypopg.created_index_names.join(', ')} · used {hypopg.used_index_names.join(', ') || 'none'}.</p>
+                <p className="dv-desc">Cleanup: HypoPG reset {hypopg.cleanup.hypopg_reset ? 'complete' : 'incomplete'} · timeout {hypopg.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {hypopg.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
+                {!hypopg.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner ignored the hypothetical index; no improvement is claimed.</span></div>}
+                <h4>Baseline plan</h4><pre className="sqp-sql">{hypopg.baseline_plan.content}</pre>
+                <h4>Candidate plan</h4><pre className="sqp-sql">{hypopg.candidate_plan.content}</pre>
               </section>}
             </div>
           </div>

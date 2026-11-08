@@ -548,7 +548,7 @@ export function namedTargets(fixtures) {
       mock: {
         query_lab_baseline: args => ({
           run_key: args.input.run_key, spec_sha256: args.input.spec_sha256,
-          execution_mode: args.input.execution_mode, database: 'shop', engine: 'mysql', version: '8.4.0',
+          execution_mode: args.input.execution_mode, database: 'shop', engine: 'postgres', version: '18.0',
           backend_id: 42, timeout_ms: args.input.timeout_ms, cost_estimates: true,
           index_evidence_mode: args.input.index_evidence_mode,
           comparison_policy: args.input.index_evidence_mode === 'hypothetical'
@@ -564,9 +564,20 @@ export function namedTargets(fixtures) {
           cache_observations: ['No complete cache control or cold/warm-cache claim is made'],
           cleanup: { timeout_restored: true, connection_closed: true },
         }),
+        query_lab_hypopg_estimate: args => ({
+          run_key: args.input.run_key, spec_sha256: args.input.spec_sha256,
+          candidate_id: args.input.candidate.id, backend_id: 43,
+          baseline_plan: { label: 'estimated', format: 'json', content: '{"Plan":{"Total Cost":100}}', elapsed_ms: 1 },
+          candidate_plan: { label: 'hypothetical', format: 'json', content: '{"Plan":{"Total Cost":75}}', elapsed_ms: 1 },
+          created_index_names: ['<13342>btree_orders_customer_id'], used_index_names: ['<13342>btree_orders_customer_id'],
+          baseline_cost: 100, candidate_cost: 75, absolute_delta: -25, percent_delta: -25,
+          index_used: true, verdict: 'lower_estimated_cost',
+          comparison_policy: 'Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden',
+          cleanup: { timeout_restored: true, connection_closed: true, hypopg_reset: true },
+        }),
       },
       props: {
-        session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'mysql', environment: 'dev', readOnly: false },
+        session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'postgres', environment: 'dev', readOnly: false },
         schema: 'shop', onClose: () => {},
       },
       interact: async ({ container, act }) => {
@@ -625,21 +636,46 @@ export function namedTargets(fixtures) {
           await act(async () => { walk(container); });
         }
         await click();
-        container.__beforeMeasuredCapture = container.textContent;
         await click('Capture baseline');
+        container.__measuredBaseline = container.textContent;
+        await act(async () => {
+          mode.value = 'estimate';
+          mode.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        for (const label of ['Measured timing', 'Result equality']) {
+          const walk = node => {
+            if (node.nodeName === 'LABEL' && node.textContent.includes(label)) {
+              const input = [...(node.childNodes ?? [])].find(child => child.nodeName === 'INPUT');
+              if (input) {
+                input.checked = false;
+                input.dispatchEvent(new Event('click', { bubbles: true }));
+              }
+            }
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          await act(async () => { walk(container); });
+        }
+        await click();
+        await click('Estimate index (HypoPG)');
       },
       assert: ({ html, calls, container }) => {
         if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
         if (!container.__estimatedBaseline.includes('Estimated plan') || !container.__estimatedBaseline.includes('query_block')) return 'estimated baseline was not rendered';
         if (!html.includes('Validated without a database call')) return 'valid experiment did not produce local proof';
         if (!html.includes('customer_id = 1')) return 'concrete parameter did not resolve';
-        if (!html.includes('EXECUTED QUERY') || !html.includes('actually executed the read-only statement')) return 'measured plan was not labelled as execution';
+        if (!container.__measuredBaseline.includes('EXECUTED QUERY') || !container.__measuredBaseline.includes('actually executed the read-only statement')) return 'measured plan was not labelled as execution';
         if (!html.includes('timeout restored') || !html.includes('dedicated connection closed')) return 'baseline cleanup was not rendered';
-        if (!html.includes('No index candidate: query plan evidence only')) return 'index comparison policy was not rendered';
+        if (!html.includes('Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden')) return 'index comparison policy was not rendered';
+        if (!html.includes('lower_estimated_cost') || !html.includes('HypoPG reset complete')) return 'HypoPG verdict or reset was not rendered';
+        const hypopg = calls.find(call => call.cmd === 'query_lab_hypopg_estimate');
+        if (!hypopg) return 'HypoPG candidate was not invoked';
+        if (hypopg.args.input.index_evidence_mode !== 'hypothetical') return 'HypoPG was invoked with incompatible evidence';
+        if (hypopg.args.input.candidate.columns.join(',') !== 'customer_id') return 'HypoPG candidate columns were not preserved';
         const baselines = calls.filter(call => call.cmd === 'query_lab_baseline');
         if (baselines.length !== 2) return `expected two guarded baseline calls, got ${baselines.length}`;
         if (baselines[0].args.input.execution_mode !== 'estimate' || baselines[1].args.input.execution_mode !== 'measured') return 'baseline modes were not preserved';
-        if (baselines.some(call => call.args.input.index_evidence_mode !== 'none')) return 'rewrite-only index evidence was not derived as none';
+        if (baselines[0].args.input.index_evidence_mode !== 'hypothetical' || baselines[1].args.input.index_evidence_mode !== 'real') return 'index evidence did not follow the execution modes';
         if (calls.some(call => call.cmd === 'monitor_query')) return 'Query Lab bypassed the guarded baseline command';
       },
     },
