@@ -21,6 +21,7 @@ pub mod templates;
 pub mod theme;
 pub mod import;
 pub mod quality;
+pub mod query_lab;
 pub mod audit;
 pub mod dump;
 pub mod sqlscript;

@@ -17,7 +17,7 @@ pub mod tuner;
 pub mod sqlscript;
 mod commands;
 
-use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, audit::*, dump::*, sqlscript::*, migration::*, refresh::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
+use commands::{ai::*, conndiag::*, connections::*, connimport::*, discover::*, galera::*, gsheets::*, query::*, schema::*, history::*, browser::*, redis_browser::*, mongo::*, export::*, ops::*, multi_exec::*, saved::*, secrets::*, templates::*, theme::*, import::*, quality::*, query_lab::*, audit::*, dump::*, sqlscript::*, migration::*, refresh::*, datagen::*, datagen_profile::*, watch::*, kill::*, playground::*, metrics::*, srvlog::*, tuner::*, sqlite::*, duckdb::*, ssh::*, routines::*, shell::*, instdata::*, sqlfile::*, pgcopy::*, pglisten::*, pgwait::*, update::*};
 use state::AppState;
 use tauri::Manager;
 use tauri::Emitter;
@@ -902,6 +902,7 @@ pub fn run() {
             explain_with_warnings,
             column_map,
             explain_analyze_guarded,
+            query_lab_baseline,
             migration_preflight,
             migration_rehearsal_create,
             migration_rehearsal_clone,

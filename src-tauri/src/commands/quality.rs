@@ -71,7 +71,7 @@ pub async fn explain_with_warnings(
 /// the equivalent guard is `max_statement_time` in seconds. Sending MySQL's
 /// spelling unprobed killed the whole analysis on MariaDB. Same probe as
 /// ops.rs::explain_query.
-fn mysql_analyze_statements(version: &str, sql: &str, timeout_ms: u64) -> (String, String) {
+pub(crate) fn mysql_analyze_statements(version: &str, sql: &str, timeout_ms: u64) -> (String, String) {
     if version.to_lowercase().contains("mariadb") {
         // Seconds, fractional — the caller's clamp keeps this in 0.1..=600.
         (

@@ -545,6 +545,20 @@ export function namedTargets(fixtures) {
     },
     {
       name: 'QueryLabPanel_spec_journey', file: 'src/components/QueryLabPanel.tsx', tier: 'mount', settleMs: 30,
+      mock: {
+        query_lab_baseline: args => ({
+          run_key: args.input.run_key, spec_sha256: args.input.spec_sha256,
+          execution_mode: args.input.execution_mode, database: 'shop', engine: 'mysql', version: '8.4.0',
+          backend_id: 42, timeout_ms: args.input.timeout_ms, cost_estimates: true,
+          estimated_plan: { label: 'estimated', format: 'json', content: '{"query_block":{"select_id":1}}', elapsed_ms: 1 },
+          measured_plan: args.input.execution_mode === 'measured'
+            ? { label: 'executed_query', format: 'text', content: '-> Covering index scan on orders (actual time=0.01 rows=1 loops=1)', elapsed_ms: 2 }
+            : null,
+          settings: [{ name: 'cleanup', value: 'timeout restored and dedicated connection closed' }],
+          cache_observations: ['No complete cache control or cold/warm-cache claim is made'],
+          cleanup: { timeout_restored: true, connection_closed: true },
+        }),
+      },
       props: {
         session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'mysql', environment: 'dev', readOnly: false },
         schema: 'shop', onClose: () => {},
@@ -558,14 +572,14 @@ export function namedTargets(fixtures) {
         findMode(container);
         const mode = selects[2];
         if (!mode) throw new Error('Experiment mode select not found');
-        const click = async () => {
+        const click = async (label = 'Validate experiment') => {
           const buttons = [];
           const walk = node => {
-            if (node.nodeName === 'BUTTON' && node.textContent.includes('Validate experiment')) buttons.push(node);
+            if (node.nodeName === 'BUTTON' && node.textContent.includes(label)) buttons.push(node);
             for (const child of node.childNodes ?? []) walk(child);
           };
           walk(container);
-          if (!buttons[0]) throw new Error('Validate experiment button not found');
+          if (!buttons[0]) throw new Error(`${label} button not found`);
           await act(async () => {
             buttons[0].dispatchEvent(new Event('click', { bubbles: true }));
             await new Promise(resolve => setTimeout(resolve, 20));
@@ -584,12 +598,41 @@ export function namedTargets(fixtures) {
           await new Promise(resolve => setTimeout(resolve, 20));
         });
         await click();
+        await click('Capture baseline');
+        container.__estimatedBaseline = container.textContent;
+        await act(async () => {
+          mode.value = 'measured';
+          mode.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        for (const label of ['Measured timing', 'Result equality']) {
+          const walk = node => {
+            if (node.nodeName === 'LABEL' && node.textContent.includes(label)) {
+              const input = [...(node.childNodes ?? [])].find(child => child.nodeName === 'INPUT');
+              if (input) {
+                input.checked = true;
+                input.dispatchEvent(new Event('click', { bubbles: true }));
+              }
+            }
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          await act(async () => { walk(container); });
+        }
+        await click();
+        container.__beforeMeasuredCapture = container.textContent;
+        await click('Capture baseline');
       },
       assert: ({ html, calls, container }) => {
         if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
+        if (!container.__estimatedBaseline.includes('Estimated plan') || !container.__estimatedBaseline.includes('query_block')) return 'estimated baseline was not rendered';
         if (!html.includes('Validated without a database call')) return 'valid experiment did not produce local proof';
         if (!html.includes('customer_id = 1')) return 'concrete parameter did not resolve';
-        if (calls.length) return `Query Lab specification invoked a backend command: ${calls.map(call => call.cmd).join(',')}`;
+        if (!html.includes('EXECUTED QUERY') || !html.includes('actually executed the read-only statement')) return 'measured plan was not labelled as execution';
+        if (!html.includes('timeout restored') || !html.includes('dedicated connection closed')) return 'baseline cleanup was not rendered';
+        const baselines = calls.filter(call => call.cmd === 'query_lab_baseline');
+        if (baselines.length !== 2) return `expected two guarded baseline calls, got ${baselines.length}`;
+        if (baselines[0].args.input.execution_mode !== 'estimate' || baselines[1].args.input.execution_mode !== 'measured') return 'baseline modes were not preserved';
+        if (calls.some(call => call.cmd === 'monitor_query')) return 'Query Lab bypassed the guarded baseline command';
       },
     },
     ...[
