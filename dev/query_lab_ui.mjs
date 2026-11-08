@@ -78,7 +78,7 @@ async function click(page, text) {
   await page.locator('button:visible', { hasText: text }).first().click();
 }
 
-async function runFlow(page) {
+async function runFlow(page, theme, errors) {
   await page.goto(`${BASE}dev/query-lab.html`, { waitUntil: 'networkidle' });
   try {
     await page.locator('.proc-title:visible', { hasText: 'Query Optimization Lab' }).waitFor({ timeout: 10000 });
@@ -91,12 +91,17 @@ async function runFlow(page) {
     await page.screenshot({ path: `${OUT}/query-lab-open-failure.png`, fullPage: true });
     throw error;
   }
+  await captureStage(page, theme, 'query-empty', errors);
   const longSql = `SELECT id, customer_id, created_at FROM orders WHERE customer_id = :customer_id ${'AND id > 0 '.repeat(700)}ORDER BY id LIMIT 1000`;
   await page.locator('.sqp-left textarea').first().fill(longSql);
   await page.locator('select').filter({ has: page.locator('option[value="measured"]') }).first().selectOption('measured');
   await page.locator('label', { hasText: 'Measured timing' }).click();
   await page.locator('label', { hasText: 'Result equality' }).click();
+  await captureStage(page, theme, 'query-configured', errors);
+  await click(page, 'Candidates');
+  await captureStage(page, theme, 'candidates', errors);
   await click(page, 'Validate experiment');
+  await captureStage(page, theme, 'run-proof', errors);
   await click(page, 'Check rewrite results');
   await page.locator('section[aria-label="Rewrite correctness evidence"]').waitFor();
   await click(page, 'Benchmark rewrite');
@@ -123,17 +128,51 @@ async function checkLayout(page, label) {
       const box = element.getBoundingClientRect();
       return box.width > 0 && (box.left < -1 || box.right > innerWidth + 1);
     }).map(element => element.textContent || element.getAttribute('aria-label') || element.tagName);
+    const scroller = [...document.querySelectorAll('.op-panel .sqp-main')].find(element => element.getBoundingClientRect().width > 0);
+    let scrolling = null;
+    if (scroller) {
+      const before = scroller.scrollTop;
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = Math.max(0, max);
+      const reached = scroller.scrollTop;
+      scroller.scrollTop = before;
+      scrolling = { overflowY: getComputedStyle(scroller).overflowY, max, reached };
+    }
+    const visibleControls = [...document.querySelectorAll('.op-panel input, .op-panel select, .op-panel textarea, .op-panel button')]
+      .filter(element => element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
+    const tiny = visibleControls.filter(element => element.matches('input:not([type="checkbox"]), select, textarea') && element.getBoundingClientRect().height < 32)
+      .map(element => element.getAttribute('aria-label') || element.tagName);
+    const oversized = visibleControls.filter(element => element.tagName === 'BUTTON' && element.getBoundingClientRect().height > 64)
+      .map(element => element.textContent);
     return {
-      viewport: innerWidth, documentWidth: document.documentElement.scrollWidth,
+      viewport: innerWidth, scrolling, tiny, oversized, documentWidth: document.documentElement.scrollWidth,
       panel: rect('.proc-panel'), toolbar: rect('.proc-toolbar'), main: rect('.sqp-main'),
       left: rect('.sqp-left'), right: rect('.sqp-right'), overflowing,
     };
   });
   if (layout.documentWidth > layout.viewport + 1 || layout.overflowing.length) throw new Error(`${label}: horizontal overflow ${JSON.stringify(layout)}`);
+  if (!layout.scrolling || !['auto', 'scroll'].includes(layout.scrolling.overflowY)
+    || (layout.scrolling.max > 0 && layout.scrolling.reached < 1)
+    || layout.tiny.length || layout.oversized.length) {
+    throw new Error(`${label}: scrolling or control sizing failed ${JSON.stringify(layout)}`);
+  }
   for (const key of ['panel', 'toolbar', 'main', 'left', 'right']) {
     const box = layout[key];
     if (box && (box.left < -1 || box.right > layout.viewport + 1 || box.width < 1)) throw new Error(`${label}: ${key} outside viewport ${JSON.stringify(box)}`);
   }
+}
+
+async function captureStage(page, theme, name, errors) {
+  await page.locator('.op-panel .sqp-main:visible').evaluate(element => { element.scrollTop = 0; });
+  await checkLayout(page, `${theme}/${name}`);
+  await page.screenshot({ path: `${OUT}/query-lab-${theme}-${name}.png`, fullPage: true });
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await page.waitForTimeout(100);
+  await checkLayout(page, `${theme}/${name}-compact`);
+  await page.screenshot({ path: `${OUT}/query-lab-${theme}-${name}-compact.png`, fullPage: true });
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  if (errors.length) throw new Error(`${theme}/${name}: browser errors ${errors.join(' | ')}`);
+  console.log(`PASS ${theme}/${name} — stage, 1600×1000 + 1100×760`);
 }
 
 const server = await ensureServer();
@@ -149,7 +188,8 @@ try {
     await page.addInitScript(installMock, mockFor('mysql'));
     await page.addInitScript(queryLabMock);
     await page.addInitScript(theme => localStorage.setItem('dbgui:theme', theme), theme);
-    await runFlow(page);
+    await runFlow(page, theme, errors);
+    await captureStage(page, theme, 'verified-top', errors);
     await page.locator('section[aria-label="Benchmark timing evidence"]').scrollIntoViewIfNeeded();
     await checkLayout(page, `${theme}/1600`);
     await page.screenshot({ path: `${OUT}/query-lab-${theme}-1600.png`, fullPage: true });

@@ -55,6 +55,7 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   const flavor = useServerFlavor(session.sessionId, session.engine, session.connectionId);
   const [sql, setSql] = useState(initialSql);
   const [draft, setDraft] = useState<MigrationDraft | null>(null);
+  const [workspace, setWorkspace] = useState<'review' | 'rehearsal' | 'deploy'>('review');
   const [result, setResult] = useState<MigrationReviewResult | null>(null);
   const [preflight, setPreflight] = useState<MigrationPreflightResponse | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
@@ -104,6 +105,14 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   }, []);
 
   useEffect(() => { void refreshScratch(); }, [refreshScratch]);
+
+  useEffect(() => {
+    if (draft && ['rehearsed', 'ready', 'deploying', 'verifying', 'done'].includes(draft.phase)) {
+      setWorkspace('deploy');
+    } else if (draft?.phase === 'reviewed' && preflight && !preflightError) {
+      setWorkspace('rehearsal');
+    }
+  }, [draft, preflight, preflightError]);
 
   const scratchBlocked = handoffEvidenceError ?? (creating ? 'Scratch creation is already running.'
     : !result || !draft ? 'Review a migration before creating rehearsal scratch.'
@@ -572,11 +581,23 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   const summary = result?.review.summary;
   const findings = result?.review.findings ?? [];
   return (
-    <div className="proc-panel">
+    <div className="proc-panel op-panel op-migration">
       <div className="proc-toolbar">
         <span className="proc-title">Migration Cockpit</span>
         <span className="dv-desc">{session.connectionName}</span>
         <span className="dv-desc">Phase: {draft?.phase ?? 'draft'}</span>
+        <div className="op-steps" aria-label="Migration workflow">
+          {(['review', 'rehearsal', 'deploy'] as const).map((step, index) => (
+            <button
+              key={step}
+              className={workspace === step ? 'active' : ''}
+              disabled={step === 'rehearsal' ? !draft : step === 'deploy' ? !draft || !['rehearsed', 'ready', 'deploying', 'verifying', 'done'].includes(draft.phase) : false}
+              onClick={() => setWorkspace(step)}
+            >
+              {index + 1}. {step === 'deploy' ? 'Deploy & verify' : step[0].toUpperCase() + step.slice(1)}
+            </button>
+          ))}
+        </div>
         <div style={{ flex: 1 }} />
         <button className="toolbar-btn" disabled={!draft} title="Export a deterministic report with incomplete evidence and no credentials or row data" onClick={() => void exportReport()}>Export report .md</button>
         <button className="icon-btn" onClick={onClose} title="Close">×</button>
@@ -587,54 +608,59 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
         ) : (
           <div className="sqp-main">
             <div className="sqp-left">
-              <div className="sqp-schema-intro">
-                <h3>Review migration</h3>
-                <p className="sqp-schema-note">
-                  Models CREATE/ALTER/DROP TABLE, columns, indexes and foreign keys in statement order.
-                  Review is read-only. Rehearsal is isolated in scratch; deployment requires its proof and a separate target confirmation.
-                </p>
+              <div className="op-stage" hidden={workspace !== 'review'}>
+                <div className="sqp-schema-intro">
+                  <h3>Review migration</h3>
+                  <p className="sqp-schema-note">
+                    Paste the ordered SQL, inspect the model and resolve blockers. Nothing is executed during Review.
+                  </p>
+                </div>
+                {initialEvidence && <div className="sqp-f-evidence">
+                  Query Lab evidence (informational only): {initialEvidence.candidateId} · {initialEvidence.candidateKind} · {initialEvidence.mode} · verdict {initialEvidence.verdict} · correctness {initialEvidence.correctness} · index used {initialEvidence.indexUsed === null ? 'not applicable' : initialEvidence.indexUsed ? 'yes' : 'no'}. No rehearsal, deployment or completion proof was carried; independent review and production gates remain mandatory.
+                </div>}
+                {handoffEvidenceError && <div className="proc-error-bar">{handoffEvidenceError}</div>}
+                <label className="dg-field-inline" style={{ display: 'block' }}>
+                  <span>Ordered migration SQL</span>
+                  <textarea
+                    className="sqp-sql"
+                    value={sql}
+                    readOnly={deploying || targetVerifying}
+                    onChange={event => {
+                      reviewRunRef.current++;
+                      setRunning(false);
+                      setWorkspace('review');
+                      setSql(event.target.value);
+                      setDraft(null);
+                      setResult(null);
+                      setPreflight(null);
+                      setPreflightError(null);
+                      setVerifying(null);
+                      setCloneResults({});
+                      setExecutionResults({});
+                      setVerificationResults({});
+                      setConfirmDeployment(false);
+                      setDeploymentResult(null);
+                      setDeploymentProgress(null);
+                      setTargetVerification(null);
+                      setLogs([]);
+                      setError(null);
+                    }}
+                    placeholder="ALTER TABLE orders ADD COLUMN note varchar(255);"
+                    spellCheck={false}
+                  />
+                </label>
+                <button className="primary" disabled={running || !sql.trim()} onClick={() => void review()}>
+                  {running ? 'Reviewing…' : '▶ Review migration'}
+                </button>
+                {error && <div className="proc-error-bar">{error}</div>}
+                {logs.length > 0 && <details className="op-disclosure">
+                  <summary>Activity log · {logs.length} entries</summary>
+                  <div className="sqp-log">
+                    {logs.map((line, index) => <div key={index} className="sqp-log-line">{line}</div>)}
+                  </div>
+                </details>}
               </div>
-              {initialEvidence && <div className="sqp-f-evidence">
-                Query Lab evidence (informational only): {initialEvidence.candidateId} · {initialEvidence.candidateKind} · {initialEvidence.mode} · verdict {initialEvidence.verdict} · correctness {initialEvidence.correctness} · index used {initialEvidence.indexUsed === null ? 'not applicable' : initialEvidence.indexUsed ? 'yes' : 'no'}. No rehearsal, deployment or completion proof was carried; independent review and production gates remain mandatory.
-              </div>}
-              {handoffEvidenceError && <div className="proc-error-bar">{handoffEvidenceError}</div>}
-              <label className="dg-field-inline" style={{ display: 'block' }}>
-                <span>Ordered migration SQL</span>
-                <textarea
-                  className="sqp-sql"
-                  value={sql}
-                  readOnly={deploying || targetVerifying}
-                  onChange={event => {
-                    reviewRunRef.current++;
-                    setRunning(false);
-                    setSql(event.target.value);
-                    setDraft(null);
-                    setResult(null);
-                    setPreflight(null);
-                    setPreflightError(null);
-                    setVerifying(null);
-                    setCloneResults({});
-                    setExecutionResults({});
-                    setVerificationResults({});
-                    setConfirmDeployment(false);
-                    setDeploymentResult(null);
-                    setDeploymentProgress(null);
-                    setTargetVerification(null);
-                    setLogs([]);
-                    setError(null);
-                  }}
-                  placeholder="ALTER TABLE orders ADD COLUMN note varchar(255);"
-                  spellCheck={false}
-                />
-              </label>
-              <button className="primary" disabled={running || !sql.trim()} onClick={() => void review()}>
-                {running ? 'Reviewing…' : '▶ Review migration'}
-              </button>
-              {error && <div className="proc-error-bar">{error}</div>}
-              <div className="sqp-log">
-                {logs.map((line, index) => <div key={index} className="sqp-log-line">{line}</div>)}
-              </div>
-              <section>
+              <section hidden={workspace !== 'rehearsal'}>
                 <h3>Rehearsal scratch</h3>
                 <p className="dv-desc">Uses only a generated scratch database/schema on an explicit writable, non-production session. Clone the before-state, then execute the exact reviewed hash once. Deployment never runs here.</p>
                 <label className="dg-field-inline">
@@ -750,7 +776,7 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                   </div>
                 )}
               </section>
-              <section>
+              <section hidden={workspace !== 'deploy'}>
                 <h3>Target deployment</h3>
                 <p className="dv-desc">Runs the original statements sequentially on one dedicated target connection after a complete Rust preflight. Each statement commits independently; failure or cancellation never implies rollback.</p>
                 {draft && ['rehearsed', 'ready'].includes(draft.phase) && !confirmDeployment && !deploying && (
@@ -857,8 +883,9 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                         : 'Rehearsal requires a complete live before-state.'}</span>
                     </div>
                   )}
+                  <div className="op-stage" hidden={workspace !== 'review'}>
                   <section>
-                    <h3>Statements</h3>
+                    <h3>Statements · {result.review.statements.length}</h3>
                     {result.review.statements.map(statement => (
                       <div key={statement.number} className="sqp-finding">
                         <div className="sqp-f-title">
@@ -904,6 +931,7 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                       </div>
                     ))}
                   </section>
+                  </div>
                 </>
               )}
             </div>

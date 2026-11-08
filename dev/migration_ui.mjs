@@ -228,8 +228,9 @@ async function review(page) {
   await page.waitForFunction(() => document.querySelector('.sqp-right')?.textContent?.includes('Backend preflight'));
 }
 
-async function lifecycle(page, stopBeforeVerify = false) {
+async function lifecycle(page, stopBeforeVerify = false, captureStage = null) {
   await review(page);
+  if (captureStage) await captureStage('rehearsal');
   await page.locator('button:visible', { hasText: 'Create scratch' }).click();
   await page.locator('button:visible', { hasText: 'Clone before-state' }).waitFor();
   await page.locator('button:visible', { hasText: 'Clone before-state' }).click();
@@ -237,6 +238,7 @@ async function lifecycle(page, stopBeforeVerify = false) {
   await page.locator('button:visible', { hasText: 'Execute migration in scratch' }).click();
   await page.locator('button:visible', { hasText: 'Compare final objects' }).waitFor();
   await page.locator('button:visible', { hasText: 'Compare final objects' }).click();
+  if (captureStage) await captureStage('deploy-ready');
   try {
     await page.locator('button:visible', { hasText: 'Prepare target deployment' }).waitFor({ timeout: 5000 });
   } catch (error) {
@@ -266,8 +268,24 @@ async function checkLayout(page, label) {
       const box = button.getBoundingClientRect();
       return style.display !== 'none' && box.width > 0 && (box.left < -1 || box.right > innerWidth + 1);
     }).map(button => button.textContent);
+    const scroller = [...document.querySelectorAll('.op-panel .sqp-main')].find(element => element.getBoundingClientRect().width > 0);
+    let scrolling = null;
+    if (scroller) {
+      const before = scroller.scrollTop;
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = Math.max(0, max);
+      const reached = scroller.scrollTop;
+      scroller.scrollTop = before;
+      scrolling = { overflowY: getComputedStyle(scroller).overflowY, max, reached };
+    }
+    const visibleControls = [...document.querySelectorAll('.op-panel input, .op-panel select, .op-panel textarea, .op-panel button')]
+      .filter(element => element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
+    const tiny = visibleControls.filter(element => element.matches('input:not([type="checkbox"]), select, textarea') && element.getBoundingClientRect().height < 32)
+      .map(element => element.getAttribute('aria-label') || element.tagName);
+    const oversized = visibleControls.filter(element => element.tagName === 'BUTTON' && element.getBoundingClientRect().height > 64)
+      .map(element => element.textContent);
     return {
-      viewport: innerWidth,
+      viewport: innerWidth, scrolling, tiny, oversized,
       documentWidth: document.documentElement.scrollWidth,
       panel: rect('.proc-panel'), toolbar: rect('.proc-toolbar'),
       main: rect('.sqp-main'), left: rect('.sqp-left'), right: rect('.sqp-right'),
@@ -276,6 +294,11 @@ async function checkLayout(page, label) {
   });
   if (layout.documentWidth > layout.viewport + 1 || layout.buttons.length) {
     throw new Error(`${label}: horizontal overflow ${JSON.stringify(layout)}`);
+  }
+  if (!layout.scrolling || !['auto', 'scroll'].includes(layout.scrolling.overflowY)
+    || (layout.scrolling.max > 0 && layout.scrolling.reached < 1)
+    || layout.tiny.length || layout.oversized.length) {
+    throw new Error(`${label}: scrolling or control sizing failed ${JSON.stringify(layout)}`);
   }
   for (const key of ['panel', 'toolbar', 'main', 'left', 'right']) {
     const box = layout[key];
@@ -286,6 +309,7 @@ async function checkLayout(page, label) {
 }
 
 async function capture(page, theme, name, errors) {
+  await page.locator('.op-panel .sqp-main:visible').evaluate(element => { element.scrollTop = 0; });
   const visiblePanel = await page.locator('.proc-panel:visible').innerText();
   if (!visiblePanel.includes('Migration Cockpit')) throw new Error(`${theme}/${name}: screenshot would not show Migration Cockpit`);
   await checkLayout(page, `${theme}/${name}`);
@@ -313,7 +337,8 @@ try {
     await page.goto(BASE, { waitUntil: 'networkidle' });
 
     await openMigration(page, 'cdev', CREATE_SQL);
-    await lifecycle(page);
+    await capture(page, theme, 'review-empty', errors);
+    await lifecycle(page, false, name => capture(page, theme, name, errors));
     await page.reload({ waitUntil: 'networkidle' });
     await openMigration(page, 'cdev', CREATE_SQL);
     await lifecycle(page);

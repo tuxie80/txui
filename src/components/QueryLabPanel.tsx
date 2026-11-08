@@ -175,6 +175,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     readOnly: session.readOnly,
   }));
   const [validated, setValidated] = useState<NormalizedQueryLabExperiment | null>(null);
+  const [workspace, setWorkspace] = useState<'query' | 'candidates' | 'run'>('query');
   const [baseline, setBaseline] = useState<QueryLabBaselineResponse | null>(null);
   const [baselineRunning, setBaselineRunning] = useState(false);
   const [baselineError, setBaselineError] = useState<string | null>(null);
@@ -276,6 +277,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     patch(current => ({ ...current, evidence: { ...current.evidence, [key]: value } }));
   };
   const validate = () => {
+    setWorkspace('run');
     const parsed = parseQueryLabExperiment(experiment);
     setValidated(parsed.ok ? parsed.experiment : null);
     setBaseline(null);
@@ -560,11 +562,19 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   ));
 
   return (
-    <div className="proc-panel">
+    <div className="proc-panel op-panel op-query-lab" data-workspace={workspace}>
       <div className="proc-toolbar">
         <span className="proc-title">Query Optimization Lab</span>
         <span className="dv-desc">{session.connectionName}</span>
-        <span className="dv-desc">Specification v1 · guarded estimates and Migration-scratch experiments</span>
+        <span className="dv-desc">Specification v1</span>
+        <div className="op-steps" aria-label="Query Lab workflow">
+          {(['query', 'candidates', 'run'] as const).map((step, index) => (
+            <button key={step} className={workspace === step ? 'active' : ''} onClick={() => setWorkspace(step)}>
+              {index + 1}. {step === 'query' ? 'Query' : step === 'candidates' ? 'Candidates' : 'Run & evidence'}
+            </button>
+          ))}
+        </div>
+        <button className="toolbar-btn" onClick={validate}>Validate experiment</button>
         <div style={{ flex: 1 }} />
         <button className="toolbar-btn" disabled={!migrationReady} title="Send only the selected artifact to Migration Cockpit at Review" onClick={createMigration}>Create migration</button>
         <button className="toolbar-btn" disabled={!baseline && !hypopg && !realIndex && !rewrite && !benchmark} title="Export deterministic evidence without query-result rows" onClick={() => void exportReport()}>Export report .md</button>
@@ -576,7 +586,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
         ) : (
           <div className="sqp-main">
             <div className="sqp-left">
-              <section>
+              <section hidden={workspace !== 'query'}>
                 <h3>Original query and database</h3>
                 <label className="dg-field-inline"><span>Database/schema</span>
                   <input value={experiment.database} onChange={event => patch(current => ({
@@ -591,7 +601,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <p className="dv-desc">Named <code>:parameters</code> require concrete values below. Positional <code>$1</code>/<code>?</code>, writes, multi-statements and client commands are refused before any invocation.</p>
               </section>
 
-              <section>
+              <section hidden={workspace !== 'query'}>
                 <h3>Concrete parameters</h3>
                 {Object.entries(experiment.parameters).map(([name, parameter]) => (
                   <div className="sqp-f-evidence" key={name}>
@@ -626,7 +636,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 }))}>+ Add parameter</button>
               </section>
 
-              <section>
+              <section hidden={workspace !== 'candidates'}>
                 <h3>Candidates</h3>
                 {experiment.candidates.map((candidate, index) => (
                   <div className="sqp-finding" key={`${candidate.id}-${index}`}>
@@ -660,7 +670,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
             </div>
 
             <div className="sqp-right">
-              <section>
+              <section hidden={workspace === 'run'}>
                 <h3>Execution and evidence</h3>
                 <label className="dg-field-inline"><span>Experiment mode</span>
                   <select value={experiment.executionMode} onChange={event => patch(current => ({
@@ -693,7 +703,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 </label>)}
               </section>
 
-              <section>
+              <section hidden={workspace === 'run'}>
                 <h3>Scratch identity</h3>
                 {experiment.scratch ? <>
                   <label className="dg-field-inline"><span>Migration scratch</span>
@@ -733,16 +743,15 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                   </div>)}
               </section>
 
-              <section>
+              <section hidden={workspace !== 'run'}>
                 <h3>Specification proof</h3>
                 <p className="dv-desc">Spec SHA-256: {specHash}</p>
-                <button className="primary" onClick={validate}>Validate experiment</button>
                 {errors.length > 0 ? <div className="mnt-warn"><StatusIcon kind="error" /><span>{errors.length} blockers; no database invocation is possible.</span></div>
                   : <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Contract is valid. Local proof is complete; baseline capture uses the guarded backend.</span></div>}
                 {errors.map(error => <div className="sqp-f-evidence" key={error}>{error}</div>)}
                 {validated && <div>
                   <p className="dv-desc"><b>Validated without a database call.</b> {validated.candidates.length} candidates · {validated.executionMode} mode · {validated.warmupRuns} warmup + {validated.repetitions} measured runs · timeout {validated.timeoutMs} ms.</p>
-                  <code className="sqp-f-snippet">{validated.resolvedSql}</code>
+                  <details className="op-disclosure"><summary>Resolved SQL preview</summary><code className="sqp-f-snippet">{validated.resolvedSql}</code></details>
                   <button className="primary" disabled={baselineRunning} onClick={() => void captureBaseline()}>{baselineRunning ? 'Capturing baseline…' : 'Capture baseline'}</button>
                   {validated.engine === 'postgres' && validated.executionMode === 'estimate' && validated.candidates.some(candidate => candidate.kind === 'index') && <button className="toolbar-btn" disabled={hypopgRunning} onClick={() => void captureHypopg()}>{hypopgRunning ? 'Estimating index…' : 'Estimate index (HypoPG)'}</button>}
                   {validated.executionMode === 'measured' && validated.candidates.some(candidate => candidate.kind === 'index') && (validated.scratch?.runKey ? <>
@@ -782,6 +791,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 {reportStatus && <p className="dv-desc">{reportStatus}</p>}
               </section>
 
+              <div className="op-stage" hidden={workspace !== 'run'}>
               {baseline && <section aria-label="Query Lab baseline evidence">
                 <h3>Baseline · {baseline.execution_mode}</h3>
                 <p className="dv-desc">Index evidence: {baseline.index_evidence_mode} · {baseline.comparison_policy}</p>
@@ -789,13 +799,15 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <p className="dv-desc">Cleanup: timeout {baseline.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {baseline.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
                 {baseline.cache_observations.map(observation => <div className="sqp-f-evidence" key={observation}>{observation}</div>)}
                 {baseline.settings.map(setting => <div className="sqp-f-evidence" key={setting.name}>{setting.name}: {setting.value ?? 'not available'}</div>)}
-                <h4>Estimated plan · {baseline.estimated_plan.label} · {baseline.estimated_plan.elapsed_ms} ms</h4>
-                <pre className="sqp-sql">{baseline.estimated_plan.content}</pre>
-                {baseline.measured_plan && <div>
-                  <h4>EXECUTED QUERY · {baseline.measured_plan.label} · {baseline.measured_plan.elapsed_ms} ms</h4>
+                <details className="op-disclosure">
+                  <summary>Estimated plan · {baseline.estimated_plan.label} · {baseline.estimated_plan.elapsed_ms} ms</summary>
+                  <pre className="sqp-sql">{baseline.estimated_plan.content}</pre>
+                </details>
+                {baseline.measured_plan && <details className="op-disclosure">
+                  <summary>EXECUTED QUERY · {baseline.measured_plan.label} · {baseline.measured_plan.elapsed_ms} ms</summary>
                   <p className="dv-desc">EXPLAIN ANALYZE actually executed the read-only statement; this is measured evidence, not a hypothetical estimate.</p>
                   <pre className="sqp-sql">{baseline.measured_plan.content}</pre>
-                </div>}
+                </details>}
               </section>}
               {hypopg && <section aria-label="HypoPG candidate evidence">
                 <h3>Hypothetical index · {hypopg.candidate_id}</h3>
@@ -805,8 +817,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <p className="dv-desc">Cleanup: HypoPG reset {hypopg.cleanup.hypopg_reset ? 'complete' : 'incomplete'} · timeout {hypopg.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {hypopg.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
                 {hypopgCorrelation && <PlanCorrelationEvidence correlation={hypopgCorrelation} />}
                 {!hypopg.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner ignored the hypothetical index; no improvement is claimed.</span></div>}
-                <h4>Baseline plan</h4><pre className="sqp-sql">{hypopg.baseline_plan.content}</pre>
-                <h4>Candidate plan</h4><pre className="sqp-sql">{hypopg.candidate_plan.content}</pre>
+                <details className="op-disclosure"><summary>Baseline plan</summary><pre className="sqp-sql">{hypopg.baseline_plan.content}</pre></details>
+                <details className="op-disclosure"><summary>Candidate plan</summary><pre className="sqp-sql">{hypopg.candidate_plan.content}</pre></details>
               </section>}
               {realIndex && <section aria-label="Real index candidate evidence">
                 <h3>Real index on Migration scratch · {realIndex.candidate_id}</h3>
@@ -817,10 +829,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <p className="dv-desc">Create wall time: <b>{realIndex.index_build_ms} ms</b> (lock wait + rebuild; components not separately observed). Candidate index used: <b>{realIndex.index_used ? 'yes' : 'no'}</b>.</p>
                 <p className="dv-desc">Cleanup: candidate index {realIndex.cleanup.index_dropped ? 'dropped' : 'NOT dropped'} · Migration scratch {realIndex.cleanup.scratch_dropped ? 'dropped' : 'NOT dropped'} · timeout {realIndex.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {realIndex.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
                 {!realIndex.index_used && <div className="mnt-warn"><StatusIcon kind="error" /><span>The planner did not use the real candidate index; no improvement is claimed.</span></div>}
-                <h4>EXECUTED BASELINE · {planElapsedLabel(realIndex.baseline_plan)}</h4>
-                <pre className="sqp-sql">{realIndex.baseline_plan.content}</pre>
-                <h4>EXECUTED CANDIDATE · {planElapsedLabel(realIndex.candidate_plan)}</h4>
-                <pre className="sqp-sql">{realIndex.candidate_plan.content}</pre>
+                <details className="op-disclosure"><summary>EXECUTED BASELINE · {planElapsedLabel(realIndex.baseline_plan)}</summary><pre className="sqp-sql">{realIndex.baseline_plan.content}</pre></details>
+                <details className="op-disclosure"><summary>EXECUTED CANDIDATE · {planElapsedLabel(realIndex.candidate_plan)}</summary><pre className="sqp-sql">{realIndex.candidate_plan.content}</pre></details>
               </section>}
               {rewrite && <section aria-label="Rewrite correctness evidence">
                 <h3>Rewrite correctness · {rewrite.candidate_id} · <b>{rewrite.correctness}</b></h3>
@@ -848,11 +858,15 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                     <p className="dv-desc">Raw timings: [{raw.join(', ')}] ms · SHA-256 {kind === 'baseline' ? benchmark.baseline_sha256 : benchmark.candidate_sha256}</p>
                   </div>;
                 })}
-                {benchmark.pairs.map(pair => <div className="sqp-f-evidence" key={pair.repetition}>
-                  Repetition {pair.repetition} · {pair.order} · baseline {pair.baseline_ms} ms · candidate {pair.candidate_ms} ms
-                </div>)}
+                <details className="op-disclosure">
+                  <summary>Raw repetition pairs · {benchmark.pairs.length}</summary>
+                  {benchmark.pairs.map(pair => <div className="sqp-f-evidence" key={pair.repetition}>
+                    Repetition {pair.repetition} · {pair.order} · baseline {pair.baseline_ms} ms · candidate {pair.candidate_ms} ms
+                  </div>)}
+                </details>
                 <p className="dv-desc">Cleanup: timeout {benchmark.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {benchmark.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
               </section>}
+              </div>
             </div>
           </div>
         )}

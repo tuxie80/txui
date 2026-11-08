@@ -192,7 +192,7 @@ async function click(page, text) {
   await page.locator('button:visible', { hasText: text }).first().click();
 }
 
-async function runFlow(page, afterReload) {
+async function runFlow(page, afterReload, captureStage = null) {
   const executionsBefore = await page.evaluate(() => window.__CALLS__.filter(call => call.cmd === 'refresh_execute').length);
   if (executionsBefore !== 0) throw new Error(`${afterReload ? 'reload' : 'initial'}: Refresh executed before an explicit run`);
   await click(page, 'Import JSON');
@@ -200,6 +200,12 @@ async function runFlow(page, afterReload) {
   await page.locator('.sqp-left select').nth(0).selectOption('sess-c1');
   await page.locator('.sqp-left select').nth(1).selectOption('sess-c2');
   await click(page, 'Reconfirm source and target');
+  if (captureStage) {
+    await captureStage('setup-confirmed');
+    await click(page, 'Tables & masks');
+    await captureStage('policies');
+    await click(page, 'Setup');
+  }
   await click(page, 'Analyze catalogs');
   await page.waitForFunction(() => document.body.innerText.includes('Catalog compatibility proven'));
   await click(page, 'Plan row sets');
@@ -223,6 +229,7 @@ async function runFlow(page, afterReload) {
   }
   const executions = await page.evaluate(() => window.__CALLS__.filter(call => call.cmd === 'refresh_execute').length);
   if (executions !== 1) throw new Error(`expected one explicit Refresh execution, got ${executions}`);
+  if (captureStage) await captureStage('verified-top');
 }
 
 async function checkLayout(page, label) {
@@ -238,8 +245,24 @@ async function checkLayout(page, label) {
       const box = button.getBoundingClientRect();
       return style.display !== 'none' && box.width > 0 && (box.left < -1 || box.right > innerWidth + 1);
     }).map(button => button.textContent);
+    const scroller = [...document.querySelectorAll('.op-panel .sqp-main')].find(element => element.getBoundingClientRect().width > 0);
+    let scrolling = null;
+    if (scroller) {
+      const before = scroller.scrollTop;
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = Math.max(0, max);
+      const reached = scroller.scrollTop;
+      scroller.scrollTop = before;
+      scrolling = { overflowY: getComputedStyle(scroller).overflowY, max, reached };
+    }
+    const visibleControls = [...document.querySelectorAll('.op-panel input, .op-panel select, .op-panel textarea, .op-panel button')]
+      .filter(element => element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
+    const tiny = visibleControls.filter(element => element.matches('input:not([type="checkbox"]), select, textarea') && element.getBoundingClientRect().height < 32)
+      .map(element => element.getAttribute('aria-label') || element.tagName);
+    const oversized = visibleControls.filter(element => element.tagName === 'BUTTON' && element.getBoundingClientRect().height > 64)
+      .map(element => element.textContent);
     return {
-      viewport: innerWidth, documentWidth: document.documentElement.scrollWidth,
+      viewport: innerWidth, scrolling, tiny, oversized, documentWidth: document.documentElement.scrollWidth,
       panel: rect('.proc-panel'), toolbar: rect('.proc-toolbar'), main: rect('.sqp-main'),
       left: rect('.sqp-left'), right: rect('.sqp-right'), buttons,
     };
@@ -247,12 +270,30 @@ async function checkLayout(page, label) {
   if (layout.documentWidth > layout.viewport + 1 || layout.buttons.length) {
     throw new Error(`${label}: horizontal overflow ${JSON.stringify(layout)}`);
   }
+  if (!layout.scrolling || !['auto', 'scroll'].includes(layout.scrolling.overflowY)
+    || (layout.scrolling.max > 0 && layout.scrolling.reached < 1)
+    || layout.tiny.length || layout.oversized.length) {
+    throw new Error(`${label}: scrolling or control sizing failed ${JSON.stringify(layout)}`);
+  }
   for (const key of ['panel', 'toolbar', 'main', 'left', 'right']) {
     const box = layout[key];
     if (box && (box.left < -1 || box.right > layout.viewport + 1 || box.width < 1)) {
       throw new Error(`${label}: ${key} outside viewport ${JSON.stringify(box)}`);
     }
   }
+}
+
+async function captureStage(page, theme, name, errors) {
+  await page.locator('.op-panel .sqp-main:visible').evaluate(element => { element.scrollTop = 0; });
+  await checkLayout(page, `${theme}/${name}`);
+  await page.screenshot({ path: `${OUT}/refresh-${theme}-${name}.png`, fullPage: true });
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await page.waitForTimeout(100);
+  await checkLayout(page, `${theme}/${name}-compact`);
+  await page.screenshot({ path: `${OUT}/refresh-${theme}-${name}-compact.png`, fullPage: true });
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  if (errors.length) throw new Error(`${theme}/${name}: browser errors: ${errors.join(' | ')}`);
+  console.log(`PASS ${theme}/${name} — stage, 1600×1000 + 1100×760`);
 }
 
 async function capture(page, theme, name, errors) {
@@ -286,7 +327,7 @@ try {
     await page.addInitScript(theme => localStorage.setItem('dbgui:theme', theme), theme);
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await openRefresh(page);
-    await runFlow(page, false);
+    await runFlow(page, false, name => captureStage(page, theme, name, errors));
     await capture(page, theme, 'verified-initial', errors);
     const savedBuffers = await page.evaluate(() => localStorage.getItem('dbgui.buffers.c1'));
     if (!savedBuffers?.includes('Safe Environment Refresh')) throw new Error(`Refresh tab was not persisted before reload: ${savedBuffers}`);

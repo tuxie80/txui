@@ -80,6 +80,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     return initial;
   });
   const [confirmed, setConfirmed] = useState(false);
+  const [workspace, setWorkspace] = useState<'setup' | 'policies' | 'review'>('setup');
   const [fileError, setFileError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<RefreshCatalogAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -184,6 +185,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
       if (!path) return;
       const text = await invoke<string>('refresh_spec_load', { path });
       const imported = refreshSpecHints(parseRefreshSpecText(text));
+      setWorkspace('setup');
       patch(() => imported);
       setLogs(current => [...current,
         `Loaded ${path}. Connection IDs are hints only; both session selections were cleared. Reconfirm source and target before any future planning.`]);
@@ -274,6 +276,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
       });
       if (analysisGeneration.current !== generation) return;
       setAnalysis(result);
+      setWorkspace('review');
       setLogs(current => [...current,
         `${result.complete ? 'Catalog compatibility proven' : 'Catalog analysis found blockers'}: ${result.scanned.sourceTables} source tables, ${result.scanned.targetTables} target tables, ${result.scanned.foreignKeys} foreign keys, ${result.blockers.length} blockers. No table rows were read or written.`]);
     } catch (error) {
@@ -492,11 +495,18 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   };
 
   return (
-    <div className="proc-panel">
+    <div className="proc-panel op-panel op-refresh">
       <div className="proc-toolbar">
         <span className="proc-title">Safe Environment Refresh</span>
         <span className="dv-desc">{session.connectionName}</span>
         <span className="dv-desc">Specification v1</span>
+        <div className="op-steps" aria-label="Environment Refresh workflow">
+          {(['setup', 'policies', 'review'] as const).map((step, index) => (
+            <button key={step} className={workspace === step ? 'active' : ''} onClick={() => setWorkspace(step)}>
+              {index + 1}. {step === 'setup' ? 'Setup' : step === 'policies' ? 'Tables & masks' : 'Review & run'}
+            </button>
+          ))}
+        </div>
         <div style={{ flex: 1 }} />
         <button className="toolbar-btn" disabled={running || !!unavailable} onClick={() => void importSpec()}>Import JSON…</button>
         <button className="toolbar-btn" disabled={running || !!unavailable || !!validationError} title={validationError ?? 'Export deterministic, secret-free JSON'} onClick={() => void exportSpec()}>Export JSON…</button>
@@ -509,7 +519,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         ) : (
           <div className="sqp-main">
             <div className="sqp-left">
-              <section>
+              <section hidden={workspace !== 'setup'}>
                 <h3>Endpoint hints and reconfirmation</h3>
                 <p className="dv-desc">Source and target must be different open MySQL/MariaDB sessions. Imported IDs are hints only. Confirmation belongs to this editor and is never exported.</p>
                 <label className="dg-field-inline"><span>Source session</span>
@@ -531,30 +541,11 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   <button className="toolbar-btn" disabled={running || !confirmed || !!validationError || analyzing || planningRows} title={!confirmed ? 'Reconfirm both endpoints first' : 'Read only source and target catalog metadata; never application rows'} onClick={() => void analyzeCatalogs()}>
                     {analyzing ? 'Analyzing catalogs…' : 'Analyze catalogs'}
                   </button>
-                  <button className="toolbar-btn" disabled={running || !analysis?.complete || analyzing || planningRows || planningRust} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
-                    {planningRows ? 'Planning row sets…' : 'Plan row sets'}
-                  </button>
-                  <button className="toolbar-btn" disabled={running || !maskSafety?.complete || !executionPlan?.executable || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Apply masks in Rust to a bounded first-page batch; no target writes and no row values displayed'} onClick={() => void verifyRustMasking()}>
-                    {planningRust ? 'Verifying Rust masking…' : 'Verify Rust masking'}
-                  </button>
-                  <button className="toolbar-btn" disabled={running || !maskSafety?.complete || !executionPlan?.executable || planningPreflight || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Run backend target safety and emptiness checks; no writes'} onClick={() => void checkTargetEmpty()}>
-                    {planningPreflight ? 'Checking target…' : 'Check target empty'}
-                  </button>
-                  <button className="primary" disabled={running || !preflightReport || !maskSafety?.complete || !executionPlan?.executable} title={!preflightReport ? 'Run target-empty preflight first' : 'Recompute closure in one consistent source snapshot, then commit bounded target chunks'} onClick={() => void runRefresh()}>
-                    {running ? 'Refresh running…' : 'Run Refresh'}
-                  </button>
-                  {running && <button className="toolbar-btn" disabled={cancelling} onClick={() => void cancelRefresh()}>{cancelling ? 'Cancelling…' : 'Cancel Refresh'}</button>}
                 </div>
-                {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? running ? 'Specification is locked while the snapshot executor is running.' : 'Catalog proof is current for this specification; execution still requires fresh preflight.' : 'No catalog read or write has run.'}</p>}
-                {candidates.find(candidate => candidate.sessionId === spec.target.sessionId)?.environment === 'prod' && (
-                  <label className="dg-field-inline"><span>Type exactly: I understand — production</span>
-                    <input value={productionConfirmation} onChange={event => { setProductionConfirmation(event.target.value); setPreflightReport(null); }} placeholder="I understand — production" />
-                  </label>
-                )}
-                {preflightReport && <p className="dv-desc">Target preflight passed: {preflightReport.emptyTables} selected tables are empty · {preflightReport.preflightSha256}</p>}
+                {confirmed && <p className="dv-desc">Confirmed for this editor only. {analysis ? 'Catalog proof is current for this specification; execution still requires fresh preflight.' : 'No catalog read or write has run.'}</p>}
               </section>
 
-              <section>
+              <section hidden={workspace !== 'setup'}>
                 <h3>Schema mappings and deterministic seed</h3>
                 <label className="dg-field-inline"><span>Seed (not a password or masking key)</span>
                   <input value={spec.seed} onChange={event => patch(current => ({ ...current, seed: event.target.value }))} />
@@ -581,7 +572,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 </label>
               </section>
 
-              <section>
+              <section hidden={workspace !== 'policies'}>
                 <h3>Independent table policies</h3>
                 {spec.tables.map((table, index) => (
                   <div key={`${table.table}-${index}`} className="sqp-finding">
@@ -634,10 +625,46 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 ))}
                 <button className="toolbar-btn" onClick={() => patch(current => ({ ...current, tables: [...current.tables, { table: `table_${current.tables.length + 1}`, policy: 'full' }] }))}>+ Add table policy</button>
               </section>
+
+              <section hidden={workspace !== 'review'}>
+                <h3>Review and run</h3>
+                <p className="dv-desc">Complete each proof in order. Only the final action writes to the confirmed target; committed chunks are never described as rolled back.</p>
+                <div className="op-run-steps">
+                  <span className={analysis?.complete ? 'done' : ''}>1. Catalogs</span>
+                  <span className={rowSetPlan?.fixedPoint ? 'done' : ''}>2. Row sets</span>
+                  <span className={rustMaskReport ? 'done' : ''}>3. Masking</span>
+                  <span className={preflightReport ? 'done' : ''}>4. Empty target</span>
+                </div>
+                <div className="row-actions">
+                  <button className="toolbar-btn" disabled={running || !analysis?.complete || analyzing || planningRows || planningRust} title={!analysis?.complete ? 'Complete catalog compatibility analysis first' : 'Read source unique keys and FK columns only, then compute fixed-point parent closure; no target writes'} onClick={() => void planRowSets()}>
+                    {planningRows ? 'Planning row sets…' : 'Plan row sets'}
+                  </button>
+                  <button className="toolbar-btn" disabled={running || !maskSafety?.complete || !executionPlan?.executable || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Apply masks in Rust to a bounded first-page batch; no target writes and no row values displayed'} onClick={() => void verifyRustMasking()}>
+                    {planningRust ? 'Verifying Rust masking…' : 'Verify Rust masking'}
+                  </button>
+                  <button className="toolbar-btn" disabled={running || !maskSafety?.complete || !executionPlan?.executable || planningPreflight || planningRust || planningRows || analyzing} title={!maskSafety?.complete ? 'Resolve mask safety blockers first' : 'Run backend target safety and emptiness checks; no writes'} onClick={() => void checkTargetEmpty()}>
+                    {planningPreflight ? 'Checking target…' : 'Check target empty'}
+                  </button>
+                </div>
+                {candidates.find(candidate => candidate.sessionId === spec.target.sessionId)?.environment === 'prod' && (
+                  <label className="dg-field-inline"><span>Type exactly: I understand — production</span>
+                    <input value={productionConfirmation} onChange={event => { setProductionConfirmation(event.target.value); setPreflightReport(null); }} placeholder="I understand — production" />
+                  </label>
+                )}
+                {rustMaskReport && <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Rust masking verified: {rustMaskReport.acceptedRows} accepted rows · {rustMaskReport.maskedCells} masked cells · {rustMaskReport.uniqueKeys} unique keys · {rustMaskReport.elapsedMs} ms. No target writes.</span></div>}
+                {preflightReport && <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Target preflight passed: {preflightReport.emptyTables} selected tables are empty · {preflightReport.preflightSha256}</span></div>}
+                {fileError && <div className="proc-error-bar">{fileError}</div>}
+                <div className="row-actions">
+                  <button className="primary" disabled={running || !preflightReport || !maskSafety?.complete || !executionPlan?.executable} title={!preflightReport ? 'Run target-empty preflight first' : 'Recompute closure in one consistent source snapshot, then commit bounded target chunks'} onClick={() => void runRefresh()}>
+                    {running ? 'Refresh running…' : 'Run Refresh'}
+                  </button>
+                  {running && <button className="toolbar-btn" disabled={cancelling} onClick={() => void cancelRefresh()}>{cancelling ? 'Cancelling…' : 'Cancel Refresh'}</button>}
+                </div>
+              </section>
             </div>
 
             <div className="sqp-right">
-              <section>
+              <section hidden={workspace !== 'policies'}>
                 <h3>Mask rules</h3>
                 <p className="dv-desc">Relational equality is preserved by default. Fake/hash rules are deterministic under the specification seed; no password-derived key exists.</p>
                 {spec.masks.map((mask, index) => (
@@ -687,7 +714,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 )}
               </section>
 
-              <section>
+              <section hidden={workspace !== 'setup'}>
                 <h3>Bounded chunks and planning</h3>
                 {([
                   ['maxRowsPerChunk', 'Max rows per chunk'],
@@ -701,7 +728,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 ))}
               </section>
 
-              <section>
+              <section hidden={workspace !== 'setup'}>
                 <h3>Verification options</h3>
                 {([
                   ['exactCounts', 'Exact source/target counts'],
@@ -714,6 +741,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                 ))}
               </section>
 
+              <div className="op-stage" hidden={workspace !== 'review'}>
               {analysis && (
                 <section>
                   <h3>Catalog graph &amp; target compatibility</h3>
@@ -780,17 +808,22 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   {progress.status && <div className={progress.status === 'completed' && progress.verification?.status === 'verified' ? 'mnt-bulk-cost c-metadata' : 'mnt-warn'}><StatusIcon kind={progress.status === 'completed' && progress.verification?.status === 'verified' ? 'ok' : 'error'} /><span>{progress.status === 'completed' ? progress.verification?.status === 'verified' ? 'Copy and all count, FK and comparable-content checks passed.' : progress.verification?.status === 'partial' ? 'Copy completed with partial verification. Disabled checks and unverified columns below are not matching-content proof.' : progress.verification?.status === 'disabled' ? 'Copy completed with every verification option disabled; no count, FK or content match is claimed.' : 'Copy completed, but terminal verification evidence is unavailable.' : progress.status === 'uncertain' ? 'A target outcome is uncertain. In-flight rows are not counted as committed or rolled back; inspect the target before any retry.' : 'The run stopped. Already committed chunks remain; no whole-run rollback is claimed.'}</span></div>}
                   {progress.verification && <div aria-label="Refresh verification report">
                     <p className="dv-desc"><b>Verification {progress.verification.status}</b> · {progress.verification.tables.filter(table => table.count_status === 'verified').length}/{progress.verification.tables.length} exact table counts · {progress.verification.foreign_keys.filter(edge => edge.status === 'verified').length}/{progress.verification.foreign_keys.length} FK checks · {progress.verification.unverified_columns.length} unverified columns.</p>
-                    {progress.verification.comparable_content_sha256 && <p className="dv-desc">Comparable-content SHA-256 {progress.verification.comparable_content_sha256} · hashes cover only the explicitly listed comparable columns.</p>}
-                    {progress.verification.tables.slice(0, 200).map(table => <div key={table.table} className="sqp-f-detail">
-                      <b>{table.table}</b> → {table.target} · selected {table.selected_rows.toLocaleString()} · committed {table.committed_rows.toLocaleString()} · target {table.target_rows?.toLocaleString() ?? 'not counted'} · counts {table.count_status} · content {table.content_status} · {table.chunks_checked.toLocaleString()} chunks checked{table.chunk_hashes_omitted > 0 ? ` · ${table.chunk_hashes_omitted.toLocaleString()} matching chunk hashes omitted from this bounded view` : ''}{table.content_sha256 ? ` · table hash ${table.content_sha256.slice(0, 16)}…` : ''}
-                    </div>)}
-                    {progress.verification.foreign_keys.filter(edge => edge.status !== 'verified').map(edge => <div key={`${edge.child}:${edge.name}`} className="sqp-f-detail">FK {edge.name}: {edge.status} · orphan rows {edge.orphan_rows?.toLocaleString() ?? 'not checked'}.</div>)}
-                    {progress.verification.unverified_columns.slice(0, 200).map(column => <div key={`${column.table}:${column.column}`} className="sqp-f-evidence">Unverified {column.table}.{column.column} ({column.data_type}): {column.reason}</div>)}
+                    <details className="op-disclosure">
+                      <summary>Verification details · {progress.verification.tables.length} tables</summary>
+                      {progress.verification.comparable_content_sha256 && <p className="dv-desc">Comparable-content SHA-256 {progress.verification.comparable_content_sha256} · hashes cover only the explicitly listed comparable columns.</p>}
+                      {progress.verification.tables.slice(0, 200).map(table => <div key={table.table} className="sqp-f-detail">
+                        <b>{table.table}</b> → {table.target} · selected {table.selected_rows.toLocaleString()} · committed {table.committed_rows.toLocaleString()} · target {table.target_rows?.toLocaleString() ?? 'not counted'} · counts {table.count_status} · content {table.content_status} · {table.chunks_checked.toLocaleString()} chunks checked{table.chunk_hashes_omitted > 0 ? ` · ${table.chunk_hashes_omitted.toLocaleString()} matching chunk hashes omitted from this bounded view` : ''}{table.content_sha256 ? ` · table hash ${table.content_sha256.slice(0, 16)}…` : ''}
+                      </div>)}
+                      {progress.verification.foreign_keys.filter(edge => edge.status !== 'verified').map(edge => <div key={`${edge.child}:${edge.name}`} className="sqp-f-detail">FK {edge.name}: {edge.status} · orphan rows {edge.orphan_rows?.toLocaleString() ?? 'not checked'}.</div>)}
+                      {progress.verification.unverified_columns.slice(0, 200).map(column => <div key={`${column.table}:${column.column}`} className="sqp-f-evidence">Unverified {column.table}.{column.column} ({column.data_type}): {column.reason}</div>)}
+                    </details>
                   </div>}
                 </section>
               )}
 
               {executionPlan && (
+                <details className="op-disclosure">
+                  <summary>Deterministic execution plan · {executionPlan.tables.length} tables · {executionPlan.blockers.length} blockers</summary>
                 <section>
                   <h3>Deterministic execution plan</h3>
                   <p className="dv-desc">Catalog SHA-256: {executionPlan.catalogSha256} · row-set SHA-256: {executionPlan.rowSetSha256} · {executionPlan.blockers.length} blockers. Exact first-page SQL and unique keyset boundaries; OFFSET is never used.</p>
@@ -810,9 +843,12 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   ))}
                   {executionPlan.tables.length > 200 && <p className="dv-desc">Showing 200 of {executionPlan.tables.length} tables.</p>}
                 </section>
+                </details>
               )}
 
               {plan && (
+                <details className="op-disclosure">
+                  <summary>Read-only plan preview · {plan.tables.length} tables · {plan.blockers.length} blockers</summary>
                 <section>
                   <h3>Read-only plan preview</h3>
                   <p className="dv-desc">Spec SHA-256: {plan.specSha256} · {plan.tables.filter(table => table.action === 'read').length} reads · {plan.tables.filter(table => table.action === 'generate').length} generate · {plan.tables.filter(table => table.action === 'exclude').length} excluded · {plan.blockers.length} blockers. No SQL is executed and row estimates are not available.</p>
@@ -826,16 +862,25 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                     </div>
                   ))}
                 </section>
+                </details>
               )}
+              </div>
 
-              <section>
+              <section hidden={workspace !== 'setup'}>
                 <h3>Specification status</h3>
                 {validationError
                   ? <div className="mnt-warn"><StatusIcon kind="error" /><span>{validationError}</span></div>
                   : <div className="mnt-bulk-cost c-metadata"><StatusIcon kind="ok" /><span>Valid secret-free specification. Execution requires current catalog, closure, mask and target-empty proofs.</span></div>}
                 {fileError && <div className="proc-error-bar">{fileError}</div>}
-                <div className="sqp-log">{logs.map((line, index) => <div key={index} className="sqp-log-line">{line}</div>)}</div>
-                <textarea className="sqp-sql" readOnly value={json} aria-label="Refresh specification JSON" spellCheck={false} />
+                {logs.length > 0 && <p className="dv-desc" role="status">{logs[logs.length - 1]}</p>}
+                <details className="op-disclosure">
+                  <summary>Activity log · {logs.length} entries</summary>
+                  <div className="sqp-log">{logs.map((line, index) => <div key={index} className="sqp-log-line">{line}</div>)}</div>
+                </details>
+                <details className="op-disclosure">
+                  <summary>Specification JSON</summary>
+                  <textarea className="sqp-sql" readOnly value={json} aria-label="Refresh specification JSON" spellCheck={false} />
+                </details>
               </section>
             </div>
           </div>
