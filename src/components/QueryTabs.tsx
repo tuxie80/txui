@@ -844,7 +844,7 @@ const PANEL_META: Record<string, {
   },
   querylab: {
     label: 'Query Optimization Lab',
-    render: (c, close) => <QueryLabPanel session={c.session} onClose={close} />,
+    render: (c, close) => <QueryLabPanel session={c.session} schema={c.currentDb || null} onClose={close} />,
   },
   serverinfo: {
     label: 'Server',

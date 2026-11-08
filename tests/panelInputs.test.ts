@@ -55,7 +55,7 @@ interface Entry {
 }
 
 /** Every panel QueryTabs feeds a schema — the count pin below fails if a
- *  fourteenth appears without being registered here. */
+ *  new one appears without being registered here. */
 const PANELS: Entry[] = [
   { panel: 'routines',   component: 'RoutinePanel',       file: 'RoutinePanel.tsx',       mechanism: 'schemaPick' },
   { panel: 'find',       component: 'FindPanel',          file: 'FindPanel.tsx',          mechanism: 'delegates' },
@@ -71,6 +71,7 @@ const PANELS: Entry[] = [
   { panel: 'datagen',    component: 'DataGenPanel',       file: 'DataGenPanel.tsx',       mechanism: 'inline' },
   { panel: 'sqlscript',  component: 'SqlScriptPanel',     file: 'SqlScriptPanel.tsx',     mechanism: 'inline' },    // exempt: MySQL-only
   { panel: 'migration',  component: 'MigrationPanel',     file: 'MigrationPanel.tsx',     mechanism: 'inline' },    // exempt: MySQL/PostgreSQL only
+  { panel: 'querylab',   component: 'QueryLabPanel',      file: 'QueryLabPanel.tsx',      mechanism: 'inline' },    // exempt: MySQL/PostgreSQL only
 ];
 
 /** Engines with no default-database plumbing — currentDb never arrives. */

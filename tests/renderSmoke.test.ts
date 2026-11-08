@@ -72,6 +72,7 @@ const NAMED_MOUNTED = [
   'EnvironmentRefreshPanel_rust_mask_journey',
   'EnvironmentRefreshPanel_activity_survives_close',
   'QueryTabs_refresh_generate_handoff',
+  'QueryLabPanel_spec_journey',
 ];
 
 for (const name of NAMED_MOUNTED) {

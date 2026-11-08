@@ -2159,12 +2159,12 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     <h3 id="query-optimization-lab">Query Optimization Lab</h3>
     <div class="panel-engs"><span class="eng-badge e-mysql">MySQL</span> <span class="eng-badge e-postgres">PostgreSQL</span></div>
   </div>
-  <p>Query Optimization Lab is the planned query/index experiment workflow. It will distinguish HypoPG estimates from real scratch measurements and reject different query results or inconclusive benchmarks; experiments are not operational yet.</p>
+  <p>Edit and locally validate a strict Query Optimization Lab experiment: one read-only query, concrete named parameters, index/rewrite/setting candidates, bounded runs and incompatible estimate/measured evidence rules. No database action runs in this checkpoint.</p>
   <p class="how"><b>Open:</b> SQL menu -&gt; Query Optimization Lab (also native Tools -&gt; SQL). MySQL/MariaDB and PostgreSQL sessions expose the shell.</p>
-  <div class="acts"><b>Key actions</b><ul><li>Open the panel and read the intended estimate-versus-measurement experiment model</li><li>Accept bounded numeric query-lab evidence contracts in code without row payloads</li><li>No database action is available in this checkpoint</li></ul></div>
+  <div class="acts"><b>Key actions</b><ul><li>Edit one SELECT/read-only WITH statement and an exact database/schema</li><li>Provide concrete named parameters; positional, unresolved and unused parameters are refused</li><li>Configure index, rewrite and setting candidates with bounded warmup, repetition, timeout and improvement thresholds</li><li>Choose estimate (plan/cost only) or measured (writable non-production scratch) mode and its evidence requirements</li><li>Validate locally to inspect blockers, spec hash and safely resolved SQL without any database invocation</li></ul></div>
   <p class="dim"><b>Engines:</b> The shell opens on MySQL/MariaDB and PostgreSQL. SQL Server has a registered, explained gap; other unsupported engines fail closed.</p>
-  <p class="caveat"><b>Note:</b> This is not a working benchmark or HypoPG runner yet. It cannot execute a query, create an index, compare plans or generate a migration. No performance verdict is implied.</p>
-  <div class="na-shot">📷 <b>Screenshot: NA.</b> Not captured: this checkpoint exposes only an inert contract shell. It performs no database action and needs no connection; screenshots will be added with the operational UI.</div>
+  <p class="caveat"><b>Note:</b> Validation is local and operational, but baseline capture, benchmarking, HypoPG, real index creation, plan comparison and migration handoff are not available yet. Estimate mode permits plan/cost evidence only and PostgreSQL hypothetical indexes; MySQL hypothetical indexes and all settings require measured mode. Measured mode requires timing, an exact writable non-production scratch database and result equality for rewrites. No performance verdict is implied.</p>
+  <div class="na-shot">📷 <b>Screenshot: NA.</b> Not captured: Q1.1 is a read-only experiment editor with pure and mounted validation tests but no generated visual set yet. It performs no database action; baseline capture is Q1.2.</div>
 </div>
 <div class="panel-doc" id="panel-saved">
   <div class="panel-head">

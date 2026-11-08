@@ -543,6 +543,55 @@ export function namedTargets(fixtures) {
         if (calls.some(call => ['generate_data', 'generate_database', 'preview_datagen'].includes(call.cmd))) return 'handoff generated data without a user action';
       },
     },
+    {
+      name: 'QueryLabPanel_spec_journey', file: 'src/components/QueryLabPanel.tsx', tier: 'mount', settleMs: 30,
+      props: {
+        session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'mysql', environment: 'dev', readOnly: false },
+        schema: 'shop', onClose: () => {},
+      },
+      interact: async ({ container, act }) => {
+        const selects = [];
+        const findMode = node => {
+          if (node.nodeName === 'SELECT') selects.push(node);
+          for (const child of node.childNodes ?? []) findMode(child);
+        };
+        findMode(container);
+        const mode = selects[2];
+        if (!mode) throw new Error('Experiment mode select not found');
+        const click = async () => {
+          const buttons = [];
+          const walk = node => {
+            if (node.nodeName === 'BUTTON' && node.textContent.includes('Validate experiment')) buttons.push(node);
+            for (const child of node.childNodes ?? []) walk(child);
+          };
+          walk(container);
+          if (!buttons[0]) throw new Error('Validate experiment button not found');
+          await act(async () => {
+            buttons[0].dispatchEvent(new Event('click', { bubbles: true }));
+            await new Promise(resolve => setTimeout(resolve, 20));
+          });
+        };
+        await act(async () => {
+          mode.value = 'measured';
+          mode.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        await click();
+        container.__modeErrors = container.textContent;
+        await act(async () => {
+          mode.value = 'estimate';
+          mode.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        await click();
+      },
+      assert: ({ html, calls, container }) => {
+        if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
+        if (!html.includes('Validated without a database call')) return 'valid experiment did not produce local proof';
+        if (!html.includes('customer_id = 1')) return 'concrete parameter did not resolve';
+        if (calls.length) return `Query Lab specification invoked a backend command: ${calls.map(call => call.cmd).join(',')}`;
+      },
+    },
     ...[
       { name: 'EnvironmentRefreshPanel_catalog_journey', missingTarget: false },
       { name: 'EnvironmentRefreshPanel_catalog_blocked', missingTarget: true },
@@ -716,7 +765,7 @@ export function namedTargets(fixtures) {
     ...[
       { name: 'MigrationPanel', file: 'src/components/MigrationPanel.tsx', supported: ['mysql', 'postgres'], readyText: 'Review migration' },
       { name: 'EnvironmentRefreshPanel', file: 'src/components/EnvironmentRefreshPanel.tsx', supported: ['mysql'], readyText: 'Specification only' },
-      { name: 'QueryLabPanel', file: 'src/components/QueryLabPanel.tsx', supported: ['mysql', 'postgres'], readyText: 'not operational yet' },
+      { name: 'QueryLabPanel', file: 'src/components/QueryLabPanel.tsx', supported: ['mysql', 'postgres'], readyText: 'Contract is valid' },
     ].flatMap(target => ['mysql', 'postgres', 'redis', 'clickhouse', 'sqlite', 'parquet', 'duckdb', 'mongodb', 'sqlserver'].map(engine => ({
       name: `${target.name}_${engine}`, file: target.file, tier: 'mount',
       mock: { migration_scratch_list: () => [] },
