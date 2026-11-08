@@ -75,8 +75,14 @@ export function getCurrentWebview() {
 
 export async function getVersion(): Promise<string> { return VERSION; }
 
-export async function open(_opts?: any): Promise<string | null> { return null; }
-export async function save(_opts?: any): Promise<string | null> { return null; }
+export async function open(opts?: any): Promise<string | null> {
+  const injected = (globalThis as any).__MOCK__?.open;
+  return typeof injected === 'function' ? injected(opts) : (injected ?? null);
+}
+export async function save(opts?: any): Promise<string | null> {
+  const injected = (globalThis as any).__MOCK__?.save;
+  return typeof injected === 'function' ? injected(opts) : (injected ?? null);
+}
 
 // ── Additions the real app needs to boot under the mock ──────────────────────
 // Each of these was a hard boot failure, not a missing feature: Vite's

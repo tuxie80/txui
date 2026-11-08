@@ -4,7 +4,7 @@ import { analyzeRefreshCatalog } from '../src/utils/refreshCatalog.ts';
 import { buildGenerateInsteadHandoff, parseGenerateInsteadHandoff } from '../src/utils/refreshGenerate.ts';
 import { buildRefreshMaskPlan } from '../src/utils/refreshMask.ts';
 import { createDefaultRefreshSpec } from '../src/utils/refreshSpec.ts';
-import type { RefreshSpec, RefreshTablePolicy } from '../src/utils/refreshSpec.ts';
+import type { RefreshTablePolicy } from '../src/utils/refreshSpec.ts';
 import type { CatalogColumn, CatalogFk, CatalogIndex, CatalogTable, SchemaSnapshot } from '../src/utils/schemaRules.ts';
 
 function column(table: string, name: string, dataType = 'varchar', generated = false): CatalogColumn {

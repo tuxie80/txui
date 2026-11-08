@@ -2257,6 +2257,60 @@ mod tests {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
+    async fn refresh_mixed_node(
+        args: &[String],
+        input: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut command = tokio::process::Command::new("node");
+        command
+            .arg(root.join("dev/refresh_mixed_live.mjs"))
+            .args(args)
+            .current_dir(root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if input.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
+        let mut child = command.spawn().unwrap();
+        if let Some(input) = input {
+            tokio::io::AsyncWriteExt::write_all(
+                child.stdin.as_mut().unwrap(), input.to_string().as_bytes(),
+            ).await.unwrap();
+            drop(child.stdin.take());
+        }
+        let output = child.wait_with_output().await.unwrap();
+        assert!(output.status.success(), "mixed refresh proof failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    async fn mixed_input(
+        pool: &sqlx::MySqlPool,
+        source: &str,
+        target: &str,
+    ) -> (ExecuteInput, serde_json::Value) {
+        let request = refresh_mixed_node(&["--queries".into(), source.into(), target.into()], None).await;
+        let mut grids = Vec::new();
+        for query in request["queries"].as_array().unwrap() {
+            let sql = query["sql"].as_str().unwrap();
+            let result = crate::db::mysql::execute(pool, sql).await.unwrap();
+            assert!(!result.truncated);
+            grids.push(serde_json::json!({
+                "sessionId": query["sessionId"], "sql": sql,
+                "grid": {
+                    "columns": result.columns.iter().map(|column| &column.name).collect::<Vec<_>>(),
+                    "rows": result.rows, "truncated": result.truncated,
+                },
+            }));
+        }
+        let evidence = refresh_mixed_node(&[], Some(serde_json::json!({
+            "spec": request["spec"], "grids": grids,
+        }))).await;
+        let input = serde_json::from_value(evidence["input"].clone()).unwrap();
+        (input, evidence)
+    }
+
     async fn live_input(
         pool: &sqlx::MySqlPool,
         source: &str,
@@ -2832,6 +2886,94 @@ mod tests {
         assert!(!error.message.contains("second-masked-value"));
         connection.close().await.unwrap();
         assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("masked-value"));
+        drop_live_schemas(&pool, &source, &target).await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8 and node"]
+    async fn dbctl_mixed_policies_copy_closure_and_verify() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(12).connect(&url).await.unwrap();
+        let suffix = &Uuid::new_v4().simple().to_string()[..8];
+        let source = format!("txui_refresh_mixed_source_{suffix}");
+        let target = format!("txui_refresh_mixed_target_{suffix}");
+        let tables = [
+            "CREATE TABLE countries (id INT PRIMARY KEY, code VARCHAR(20) NOT NULL) ENGINE=InnoDB",
+            "CREATE TABLE customers (id INT PRIMARY KEY, email VARCHAR(64) NOT NULL UNIQUE, created_at DATETIME NOT NULL) ENGINE=InnoDB",
+            "CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT NOT NULL, created_at DATETIME NOT NULL, INDEX idx_customer(customer_id), CONSTRAINT fk_order_customer FOREIGN KEY(customer_id) REFERENCES customers(id)) ENGINE=InnoDB",
+            "CREATE TABLE events (id INT PRIMARY KEY, order_id INT NOT NULL, created_at DATETIME NOT NULL, INDEX idx_order(order_id), CONSTRAINT fk_event_order FOREIGN KEY(order_id) REFERENCES orders(id)) ENGINE=InnoDB",
+            "CREATE TABLE audit_logs (id INT PRIMARY KEY, message VARCHAR(80) NOT NULL) ENGINE=InnoDB",
+            "CREATE TABLE notes (id INT PRIMARY KEY, country_id INT NOT NULL, tenant_id INT NOT NULL, body VARCHAR(80) NOT NULL, INDEX idx_country(country_id), CONSTRAINT fk_note_country FOREIGN KEY(country_id) REFERENCES countries(id)) ENGINE=InnoDB",
+        ];
+        for schema in [&source, &target] {
+            crate::db::mysql::execute(&pool, &format!("CREATE DATABASE `{schema}`")).await.unwrap();
+            for sql in tables {
+                crate::db::mysql::execute(&pool, &sql.replacen("CREATE TABLE ", &format!("CREATE TABLE `{schema}`."), 1)).await.unwrap();
+            }
+        }
+        for sql in [
+            "INSERT INTO countries VALUES (1,'CZ'),(2,'GB')",
+            "INSERT INTO customers VALUES (1,'older@example.test','2020-01-01 00:00:00'),(2,'second@example.test','2024-01-01 00:00:00'),(3,'third@example.test','2025-01-01 00:00:00'),(4,'newest@example.test','2026-11-01 00:00:00')",
+            "INSERT INTO orders VALUES (1,4,'2026-11-05 10:00:00'),(2,4,'2026-11-04 10:00:00'),(3,1,'2026-10-01 10:00:00')",
+            "INSERT INTO events VALUES (1,3,'2026-11-06 10:00:00'),(2,3,'2026-11-06 09:00:00'),(3,1,'2026-11-01 09:00:00')",
+            "INSERT INTO audit_logs VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four')",
+            "INSERT INTO notes VALUES (1,1,1,'first'),(2,1,1,'second'),(3,2,2,'excluded')",
+        ] {
+            crate::db::mysql::execute(&pool, &sql.replacen("INTO ", &format!("INTO `{source}`."), 1)).await.unwrap();
+        }
+        let (mut input, evidence) = mixed_input(&pool, &source, &target).await;
+        input.run_key = Uuid::new_v4().to_string();
+        let (state, source_session, target_session) = live_state(&pool).await;
+        bind_live_input(&mut input, &state, source_session, target_session).await;
+        let (channel, events) = recorder();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let mut run = RunState::new(input.run_key.clone());
+        let counts = execute_inner(
+            input, &state, channel, &mut run, &mut RefreshCancel::one(cancel_rx),
+        ).await.unwrap();
+        assert_eq!(counts.status, "completed");
+        assert_eq!(counts.requested_rows, Some(11));
+        assert_eq!(counts.closure_rows, Some(2));
+        assert_eq!(counts.planned_rows, Some(13));
+        assert_eq!(counts.committed_rows, 13);
+        assert_eq!(counts.remaining_rows, Some(0));
+        assert_eq!(counts.in_flight_rows, 0);
+        assert!(counts.chunks_committed >= 6, "{counts:?}");
+        let verification = counts.verification.as_ref().unwrap();
+        assert_eq!(verification.status, "verified");
+        assert!(verification.unverified_columns.is_empty());
+        assert_eq!(verification.foreign_keys.len(), 3);
+        assert!(verification.foreign_keys.iter().all(|edge| edge.status == "verified" && edge.orphan_rows == Some(0)));
+        for table in &verification.tables {
+            let name = table.table.rsplit('.').next().unwrap();
+            let expected = &evidence["expected"][name];
+            assert_eq!(table.selected_rows, expected["final"].as_u64().unwrap(), "{name}");
+            assert_eq!(table.committed_rows, expected["final"].as_u64().unwrap(), "{name}");
+            assert_eq!(table.target_rows, expected["final"].as_u64(), "{name}");
+            assert_eq!(table.count_status, "verified", "{name}");
+            assert_eq!(table.content_status, "verified", "{name}");
+            assert_eq!(table.content_sha256.as_ref().map(String::len), Some(64), "{name}");
+        }
+        let target_rows: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT (SELECT COUNT(*) FROM `{target}`.`countries`) + (SELECT COUNT(*) FROM `{target}`.`customers`) + (SELECT COUNT(*) FROM `{target}`.`orders`) + (SELECT COUNT(*) FROM `{target}`.`events`) + (SELECT COUNT(*) FROM `{target}`.`audit_logs`) + (SELECT COUNT(*) FROM `{target}`.`notes`)",
+        )).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(target_rows, 13);
+        let selected_customers: String = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT GROUP_CONCAT(id ORDER BY id) FROM `{target}`.`customers`",
+        )).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(selected_customers, "1,4");
+        let selected_orders: String = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT GROUP_CONCAT(id ORDER BY id) FROM `{target}`.`orders`",
+        )).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(selected_orders, "1,2,3");
+        let unmasked: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM `{target}`.`customers` WHERE email LIKE '%example.test' OR LENGTH(email) <> 64",
+        )).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(unmasked, 0);
+        let event_text = serde_json::to_string(&*events.lock().unwrap()).unwrap();
+        assert!(!event_text.contains("example.test"));
+        assert!(!event_text.contains("private-row"));
         drop_live_schemas(&pool, &source, &target).await;
         pool.close().await;
     }
