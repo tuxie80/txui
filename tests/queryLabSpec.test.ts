@@ -157,3 +157,23 @@ test('owned Migration scratch binds its run key and generated name', () => {
   experiment.scratch!.runKey = null;
   assert.ok(validateQueryLabExperiment(experiment).some(error => error.includes('unless an owned Migration scratch')));
 });
+
+test('rewrite row policy and complete-result budgets are explicit and bounded', () => {
+  const experiment = fixture();
+  assert.equal(experiment.resultRowOrder, 'ordered');
+  assert.equal(experiment.resultMaxRows, 100_000);
+  assert.equal(experiment.resultMaxBytes, 64 * 1024 * 1024);
+  experiment.resultRowOrder = 'multiset';
+  assert.deepEqual(validateQueryLabExperiment(experiment), []);
+  for (const mutate of [
+    (value: QueryLabExperiment) => { value.resultRowOrder = 'unordered' as 'ordered'; },
+    (value: QueryLabExperiment) => { value.resultMaxRows = 0; },
+    (value: QueryLabExperiment) => { value.resultMaxRows = 100_001; },
+    (value: QueryLabExperiment) => { value.resultMaxBytes = 1023; },
+    (value: QueryLabExperiment) => { value.resultMaxBytes = 64 * 1024 * 1024 + 1; },
+  ]) {
+    const invalid = structuredClone(experiment);
+    mutate(invalid);
+    assert.ok(validateQueryLabExperiment(invalid).length > 0);
+  }
+});

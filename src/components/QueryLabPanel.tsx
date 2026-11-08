@@ -75,6 +75,30 @@ interface QueryLabRealIndexResponse {
   cleanup: { index_dropped: boolean; scratch_dropped: boolean; timeout_restored: boolean; connection_closed: boolean };
 }
 
+interface QueryLabRewriteResponse {
+  run_key: string;
+  spec_sha256: string;
+  candidate_id: string;
+  backend_id: number;
+  correctness: 'equal' | 'different' | 'unverified';
+  reason: string | null;
+  row_order_policy: 'ordered' | 'multiset';
+  max_rows: number;
+  max_bytes: number;
+  baseline: QueryLabRewriteEvidence;
+  candidate: QueryLabRewriteEvidence;
+  cleanup: { timeout_restored: boolean; connection_closed: boolean };
+}
+
+interface QueryLabRewriteEvidence {
+  columns: { name: string; type_name: string }[];
+  rows_observed: number;
+  bytes_observed: number;
+  sha256: string | null;
+  complete: boolean;
+  unverified_reason: string | null;
+}
+
 interface Props {
   session: Session;
   schema?: string | null;
@@ -104,7 +128,12 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const [realIndexRunning, setRealIndexRunning] = useState(false);
   const [realIndexCancelling, setRealIndexCancelling] = useState(false);
   const [realIndexError, setRealIndexError] = useState<string | null>(null);
+  const [rewrite, setRewrite] = useState<QueryLabRewriteResponse | null>(null);
+  const [rewriteRunning, setRewriteRunning] = useState(false);
+  const [rewriteCancelling, setRewriteCancelling] = useState(false);
+  const [rewriteError, setRewriteError] = useState<string | null>(null);
   const realRunKey = useRef<string | null>(null);
+  const rewriteRunKey = useRef<string | null>(null);
   const errors = useMemo(() => validateQueryLabExperiment(experiment), [experiment]);
   const specHash = useMemo(() => queryLabSpecSha256(experiment), [experiment]);
   const specHashRef = useRef(specHash);
@@ -128,6 +157,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setHypopgError(null);
     setRealIndex(null);
     setRealIndexError(null);
+    setRewrite(null);
+    setRewriteError(null);
   };
   const updateCandidate = (index: number, change: Partial<QueryLabCandidate>) => {
     patch(current => ({
@@ -157,6 +188,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setHypopgError(null);
     setRealIndex(null);
     setRealIndexError(null);
+    setRewrite(null);
+    setRewriteError(null);
   };
   const baselinePayload = (normalized: NormalizedQueryLabExperiment, runKey: string) => ({
     session_id: normalized.scratch?.sessionId ?? session.sessionId,
@@ -254,6 +287,38 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setRealIndexRunning(false);
       setRealIndexCancelling(false);
       await refreshScratch();
+    }
+  };
+  const captureRewrite = async () => {
+    const candidate = validated?.candidates.find(candidate => candidate.kind === 'rewrite');
+    if (!validated || validated.executionMode !== 'measured' || !candidate || rewriteRunning) return;
+    const runKey = crypto.randomUUID();
+    rewriteRunKey.current = runKey;
+    setRewriteRunning(true);
+    setRewriteCancelling(false);
+    setRewriteError(null);
+    setRewrite(null);
+    try {
+      const response = await invoke<QueryLabRewriteResponse>('query_lab_rewrite_measure', {
+        input: {
+          baseline: baselinePayload(validated, runKey),
+          candidate: { id: candidate.id, name: candidate.name, sql: candidate.sql },
+          row_order_policy: validated.resultRowOrder,
+          max_rows: validated.resultMaxRows,
+          max_bytes: validated.resultMaxBytes,
+        },
+      });
+      if (response.spec_sha256 !== specHashRef.current) {
+        setRewriteError('The experiment changed during execution; the stale result was discarded after connection cleanup.');
+      } else {
+        setRewrite(response);
+      }
+    } catch (error) {
+      setRewriteError(errorDisplay(error));
+    } finally {
+      if (rewriteRunKey.current === runKey) rewriteRunKey.current = null;
+      setRewriteRunning(false);
+      setRewriteCancelling(false);
     }
   };
   const cleanupScratch = async (record: MigrationScratchRecord) => {
@@ -379,6 +444,14 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <label className="dg-field-inline"><span>Measured repetitions (1–30)</span><input type="number" value={experiment.repetitions} onChange={event => patch(current => ({ ...current, repetitions: Number(event.target.value) }))} /></label>
                 <label className="dg-field-inline"><span>Server timeout ms (100–60000)</span><input type="number" value={experiment.timeoutMs} onChange={event => patch(current => ({ ...current, timeoutMs: Number(event.target.value) }))} /></label>
                 <label className="dg-field-inline"><span>Improvement threshold %</span><input type="number" value={experiment.improvementThresholdPct} onChange={event => patch(current => ({ ...current, improvementThresholdPct: Number(event.target.value) }))} /></label>
+                <label className="dg-field-inline"><span>Rewrite row order</span>
+                  <select aria-label="Result row order" value={experiment.resultRowOrder} onChange={event => patch(current => ({ ...current, resultRowOrder: event.target.value as QueryLabExperiment['resultRowOrder'] }))}>
+                    <option value="ordered">Ordered — sequence must match</option>
+                    <option value="multiset">Multiset — order ignored, duplicates retained</option>
+                  </select>
+                </label>
+                <label className="dg-field-inline"><span>Rewrite max rows (1–100000)</span><input type="number" value={experiment.resultMaxRows} onChange={event => patch(current => ({ ...current, resultMaxRows: Number(event.target.value) }))} /></label>
+                <label className="dg-field-inline"><span>Rewrite max decoded bytes</span><input type="number" value={experiment.resultMaxBytes} onChange={event => patch(current => ({ ...current, resultMaxBytes: Number(event.target.value) }))} /></label>
                 {([
                   ['plan', 'Estimated plans (required)'],
                   ['cost', 'Estimated cost'],
@@ -452,10 +525,21 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                     }}>{realIndexCancelling ? 'Cancelling and cleaning…' : '■ Cancel + clean scratch'}</button>}
                     <p className="dv-desc">Measured baseline → create real index → measured candidate → drop index → drop Migration scratch. Create wall time includes lock wait and rebuild; no benchmark winner is chosen.</p>
                   </> : <p className="dv-desc">Select an active Migration scratch above to enable real-index execution. Same-name targets remain baseline-only.</p>)}
+                  {validated.executionMode === 'measured' && validated.candidates.some(candidate => candidate.kind === 'rewrite') && <>
+                    <button className="primary" disabled={rewriteRunning} onClick={() => void captureRewrite()}>{rewriteRunning ? 'Executing and hashing…' : 'Check rewrite results'}</button>
+                    {rewriteRunning && <button className="cancel-btn" onClick={() => {
+                      if (rewriteRunKey.current) {
+                        setRewriteCancelling(true);
+                        void invoke('cancel_watched', { runKey: rewriteRunKey.current }).catch(() => {});
+                      }
+                    }}>{rewriteCancelling ? 'Cancelling…' : '■ Cancel rewrite'}</button>}
+                    <p className="dv-desc">Both read-only queries execute within the declared row/byte budgets. Only complete canonical typed hashes can be equal; different results are invalid, never a winner.</p>
+                  </>}
                 </div>}
                 {baselineError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{baselineError}</span></div>}
                 {hypopgError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{hypopgError}</span></div>}
                 {realIndexError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{realIndexError}</span></div>}
+                {rewriteError && <div className="mnt-warn"><StatusIcon kind="error" /><span>{rewriteError}</span></div>}
               </section>
 
               {baseline && <section aria-label="Query Lab baseline evidence">
@@ -494,6 +578,20 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
                 <pre className="sqp-sql">{realIndex.baseline_plan.content}</pre>
                 <h4>EXECUTED CANDIDATE · {realIndex.candidate_plan.elapsed_ms} ms</h4>
                 <pre className="sqp-sql">{realIndex.candidate_plan.content}</pre>
+              </section>}
+              {rewrite && <section aria-label="Rewrite correctness evidence">
+                <h3>Rewrite correctness · {rewrite.candidate_id} · <b>{rewrite.correctness}</b></h3>
+                <p className="dv-desc">Backend {rewrite.backend_id} · {rewrite.row_order_policy} rows · budgets {rewrite.max_rows} rows / {rewrite.max_bytes} decoded bytes. No query-result rows are retained in this evidence.</p>
+                {rewrite.reason && <div className={rewrite.correctness === 'equal' ? 'sqp-f-evidence' : 'mnt-warn'}><StatusIcon kind={rewrite.correctness === 'unverified' ? 'error' : 'pending'} /><span>{rewrite.reason}</span></div>}
+                {(['baseline', 'candidate'] as const).map(kind => {
+                  const evidence = rewrite[kind];
+                  return <div className="sqp-f-evidence" key={kind}>
+                    <h4>{kind === 'baseline' ? 'EXECUTED BASELINE' : 'EXECUTED CANDIDATE'} · {evidence.complete ? 'complete canonical hash' : 'unverified'}</h4>
+                    <p className="dv-desc">{evidence.rows_observed} observed rows · {evidence.bytes_observed} decoded bytes · columns {evidence.columns.map(column => `${column.name}:${column.type_name}`).join(', ') || 'none'}.</p>
+                    <p className="dv-desc">SHA-256: {evidence.sha256 ?? 'not available'} {evidence.unverified_reason ? `· ${evidence.unverified_reason}` : ''}</p>
+                  </div>;
+                })}
+                <p className="dv-desc">Cleanup: timeout {rewrite.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {rewrite.cleanup.connection_closed ? 'closed' : 'NOT closed'} · scratch left active for further read-only experiments.</p>
               </section>}
             </div>
           </div>

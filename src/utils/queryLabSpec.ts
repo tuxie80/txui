@@ -71,6 +71,9 @@ export interface QueryLabExperiment {
   repetitions: number;
   timeoutMs: number;
   improvementThresholdPct: number;
+  resultRowOrder: 'ordered' | 'multiset';
+  resultMaxRows: number;
+  resultMaxBytes: number;
   evidence: QueryLabEvidenceRequirements;
   scratch: QueryLabScratchTarget | null;
 }
@@ -345,7 +348,7 @@ export function validateQueryLabExperiment(value: unknown): string[] {
   const input = object(value, 'query lab experiment', errors);
   exactKeys(input, [
     'version', 'engine', 'database', 'originalSql', 'parameters', 'candidates', 'executionMode',
-    'warmupRuns', 'repetitions', 'timeoutMs', 'improvementThresholdPct', 'evidence', 'scratch',
+    'warmupRuns', 'repetitions', 'timeoutMs', 'improvementThresholdPct', 'resultRowOrder', 'resultMaxRows', 'resultMaxBytes', 'evidence', 'scratch',
   ], 'query lab experiment', errors);
   if (input.version !== QUERY_LAB_SPEC_VERSION) errors.push(`query lab experiment has unsupported version ${String(input.version)}`);
   if (input.engine !== 'mysql' && input.engine !== 'postgres') errors.push(`query lab experiment has unsupported engine ${String(input.engine)}`);
@@ -360,6 +363,9 @@ export function validateQueryLabExperiment(value: unknown): string[] {
   integer(input.warmupRuns, 'warmupRuns', 0, 10, errors);
   integer(input.repetitions, 'repetitions', 1, 30, errors);
   integer(input.timeoutMs, 'timeoutMs', 100, 60_000, errors);
+  if (input.resultRowOrder !== 'ordered' && input.resultRowOrder !== 'multiset') errors.push('resultRowOrder must be ordered or multiset');
+  integer(input.resultMaxRows, 'resultMaxRows', 1, 100_000, errors);
+  integer(input.resultMaxBytes, 'resultMaxBytes', 1024, 64 * 1024 * 1024, errors);
   if (typeof input.improvementThresholdPct !== 'number' || !Number.isFinite(input.improvementThresholdPct)
     || input.improvementThresholdPct < 0 || input.improvementThresholdPct > 100) {
     errors.push('improvementThresholdPct must be between 0 and 100');
@@ -441,6 +447,9 @@ export function createDefaultQueryLabExperiment(input: {
     repetitions: 7,
     timeoutMs: 5000,
     improvementThresholdPct: 5,
+    resultRowOrder: 'ordered',
+    resultMaxRows: 100_000,
+    resultMaxBytes: 64 * 1024 * 1024,
     evidence: { plan: true, cost: true, timing: false, buffers: false, resultEquality: false },
     scratch: {
       sessionId: input.sessionId,

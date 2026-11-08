@@ -591,6 +591,21 @@ export function namedTargets(fixtures) {
           comparison_policy: 'Real index on Migration scratch: both plans executed the read-only query once; create wall time includes lock wait and rebuild and is not a runtime verdict',
           cleanup: { index_dropped: true, scratch_dropped: true, timeout_restored: true, connection_closed: true },
         }),
+        query_lab_rewrite_measure: args => ({
+          run_key: args.input.baseline.run_key, spec_sha256: args.input.baseline.spec_sha256,
+          candidate_id: args.input.candidate.id, backend_id: 45,
+          correctness: 'equal', reason: null,
+          row_order_policy: args.input.row_order_policy, max_rows: args.input.max_rows, max_bytes: args.input.max_bytes,
+          baseline: {
+            columns: [{ name: 'id', type_name: 'INT8' }], rows_observed: 2, bytes_observed: 24,
+            sha256: 'a'.repeat(64), complete: true, unverified_reason: null,
+          },
+          candidate: {
+            columns: [{ name: 'id', type_name: 'INT8' }], rows_observed: 2, bytes_observed: 24,
+            sha256: 'a'.repeat(64), complete: true, unverified_reason: null,
+          },
+          cleanup: { timeout_restored: true, connection_closed: true },
+        }),
       },
       props: {
         session: { connectionId: 'c-lab', sessionId: 's-lab', connectionName: 'lab fixture', engine: 'postgres', environment: 'dev', readOnly: false },
@@ -707,6 +722,21 @@ export function namedTargets(fixtures) {
         });
         await click();
         await click('Build & measure real index');
+        container.__realIndexResult = container.textContent;
+        let candidateKind;
+        const findCandidateKind = node => {
+          if (node.nodeName === 'SELECT' && node.getAttribute('aria-label') === 'Candidate 1 kind') candidateKind = node;
+          for (const child of node.childNodes ?? []) findCandidateKind(child);
+        };
+        findCandidateKind(container);
+        if (!candidateKind) throw new Error('Candidate kind selector not found');
+        await act(async () => {
+          candidateKind.value = 'rewrite';
+          candidateKind.dispatchEvent(new Event('change', { bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        await click();
+        await click('Check rewrite results');
       },
       assert: ({ html, calls, container }) => {
         if (!container.__modeErrors.includes('no database invocation is possible') || !container.__modeErrors.includes('requires timing evidence')) return 'measured mode did not produce its evidence blocker';
@@ -717,13 +747,19 @@ export function namedTargets(fixtures) {
         if (!html.includes('timeout restored') || !html.includes('dedicated connection closed')) return 'baseline cleanup was not rendered';
         if (!container.__hypopgResult.includes('Hypothetical index: plan/cost evidence only; measured runtime comparison is forbidden')) return 'index comparison policy was not rendered';
         if (!container.__hypopgResult.includes('lower_estimated_cost') || !container.__hypopgResult.includes('HypoPG reset complete')) return 'HypoPG verdict or reset was not rendered';
-        if (!html.includes('Real index on Migration scratch') || !html.includes('Create wall time:') || !html.includes('<b>17 ms</b>')) return 'real-index evidence was not rendered';
-        if (!html.includes('EXECUTED BASELINE') || !html.includes('EXECUTED CANDIDATE')) return 'real-index plans were not labelled as execution';
-        if (!html.includes('candidate index dropped') || !html.includes('Migration scratch dropped') || !html.includes('Candidate index used: <b>yes</b>')) return 'real-index usage or cleanup was not rendered';
+        if (!container.__realIndexResult.includes('Real index on Migration scratch') || !container.__realIndexResult.includes('Create wall time: 17 ms')) return 'real-index evidence was not rendered';
+        if (!container.__realIndexResult.includes('EXECUTED BASELINE') || !container.__realIndexResult.includes('EXECUTED CANDIDATE')) return 'real-index plans were not labelled as execution';
+        if (!container.__realIndexResult.includes('candidate index dropped') || !container.__realIndexResult.includes('Migration scratch dropped') || !container.__realIndexResult.includes('Candidate index used: yes')) return 'real-index usage or cleanup was not rendered';
         const realIndex = calls.find(call => call.cmd === 'query_lab_real_index_measure');
         if (!realIndex) return 'real-index candidate was not invoked';
         if (realIndex.args.input.baseline.index_evidence_mode !== 'real' || realIndex.args.input.baseline.execution_mode !== 'measured') return 'real-index evidence contract was not preserved';
         if (realIndex.args.input.baseline.scratch.run_key !== '01234567-89ab-cdef-8123-456789abcdef' || realIndex.args.input.baseline.scratch.database !== 'txui_mig_0123456789abcdef') return 'Migration scratch identity was not preserved';
+        if (!html.includes('Rewrite correctness') || !html.includes('<b>equal</b>') || !html.includes('complete canonical hash') || !html.includes('2 observed rows')) return 'rewrite correctness evidence was not rendered';
+        const rewrite = calls.find(call => call.cmd === 'query_lab_rewrite_measure');
+        if (!rewrite) return 'rewrite candidate was not invoked';
+        if (rewrite.args.input.baseline.index_evidence_mode !== 'none' || !rewrite.args.input.baseline.has_rewrite_candidate || !rewrite.args.input.baseline.evidence.result_equality) return 'rewrite evidence contract was not preserved';
+        if (rewrite.args.input.row_order_policy !== 'ordered' || rewrite.args.input.max_rows !== 100000 || rewrite.args.input.max_bytes !== 67108864) return 'rewrite policy or budgets were not preserved';
+        if (!rewrite.args.input.candidate.sql.includes('customer_id = 1')) return 'rewrite parameters were not resolved';
         const hypopg = calls.find(call => call.cmd === 'query_lab_hypopg_estimate');
         if (!hypopg) return 'HypoPG candidate was not invoked';
         if (hypopg.args.input.index_evidence_mode !== 'hypothetical') return 'HypoPG was invoked with incompatible evidence';

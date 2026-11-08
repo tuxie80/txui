@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::Connection;
 use uuid::Uuid;
 
@@ -994,7 +995,7 @@ impl RealConnection {
         let session = crate::db::connection::get_session_pub(input.session_id, &state.sessions).await?;
         match session.as_ref() {
             LiveSession::Mysql(pool) => {
-                let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its real-index connection: {error}")))?.detach();
+                let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its candidate connection: {error}")))?.detach();
                 let version = sqlx::query_scalar::<_, String>("SELECT VERSION()").fetch_one(&mut conn).await?;
                 let is_maria = version.to_lowercase().contains("mariadb");
                 let previous_timeout = if is_maria {
@@ -1012,7 +1013,7 @@ impl RealConnection {
                 Ok(Self::Mysql { conn, version, previous_timeout, backend_id })
             },
             LiveSession::Postgres(pool) => {
-                let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its real-index connection: {error}")))?.detach();
+                let mut conn = pool.acquire().await.map_err(|error| AppError::local(format!("Query Lab could not acquire its candidate connection: {error}")))?.detach();
                 let previous_timeout = sqlx::query_scalar::<_, String>("SHOW statement_timeout").fetch_one(&mut conn).await?;
                 let backend_id = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(&mut conn).await? as u64;
                 crate::db::postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", database.replace('"', "\"\""))).await?;
@@ -1037,6 +1038,23 @@ impl RealConnection {
         match self {
             Self::Mysql { conn, .. } => mysql_statement(conn, sql, cancel).await,
             Self::Postgres { conn, .. } => pg_statement(conn, sql, cancel).await,
+        }
+    }
+
+    async fn capped(
+        &mut self,
+        sql: &str,
+        max_rows: usize,
+        cancel: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<QueryResult, AppError> {
+        tokio::select! {
+            result = async {
+                match self {
+                    Self::Mysql { conn, .. } => crate::db::mysql::execute_capped(conn, sql, Some(max_rows)).await,
+                    Self::Postgres { conn, .. } => crate::db::postgres::execute_capped(conn, sql, Some(max_rows)).await,
+                }
+            } => result.map_err(Into::into),
+            _ = cancel => Err(AppError::new(ErrorCode::Cancelled, "Query Lab rewrite was cancelled")),
         }
     }
 
@@ -1267,6 +1285,411 @@ pub async fn query_lab_real_index_measure(
     execute_real_index(input, &state).await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabRewriteCandidateInput {
+    pub id: String,
+    pub name: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabRewriteInput {
+    pub baseline: QueryLabBaselineInput,
+    pub candidate: QueryLabRewriteCandidateInput,
+    pub row_order_policy: String,
+    pub max_rows: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabResultColumn {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabResultEvidence {
+    pub columns: Vec<QueryLabResultColumn>,
+    pub rows_observed: u64,
+    pub bytes_observed: u64,
+    pub sha256: Option<String>,
+    pub complete: bool,
+    pub unverified_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueryLabRewriteResponse {
+    pub run_key: String,
+    pub spec_sha256: String,
+    pub candidate_id: String,
+    pub backend_id: u64,
+    pub correctness: String,
+    pub reason: Option<String>,
+    pub row_order_policy: String,
+    pub max_rows: u64,
+    pub max_bytes: u64,
+    pub baseline: QueryLabResultEvidence,
+    pub candidate: QueryLabResultEvidence,
+    pub cleanup: QueryLabCleanup,
+}
+
+fn hash_part(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn scalar_text(value: &serde_json::Value) -> Result<String, String> {
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Bool(value) => Ok(if *value { "1" } else { "0" }.into()),
+        _ => Err("Query Lab scalar value does not match its declared type".into()),
+    }
+}
+
+fn canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> Result<(), String> {
+    match value {
+        serde_json::Value::Null => output.push(b'z'),
+        serde_json::Value::Bool(value) => {
+            output.push(b'b');
+            output.push(u8::from(*value));
+        },
+        serde_json::Value::Number(number) => {
+            let exact = number.as_i64().map(|value| value.to_string())
+                .or_else(|| number.as_u64().map(|value| value.to_string()))
+                .ok_or_else(|| "Query Lab JSON number is not an exact integer; lossy floating-point comparison is refused".to_string())?;
+            output.push(b'n');
+            output.extend_from_slice(&(exact.len() as u64).to_be_bytes());
+            output.extend_from_slice(exact.as_bytes());
+        },
+        serde_json::Value::String(text) => {
+            output.push(b's');
+            output.extend_from_slice(&(text.len() as u64).to_be_bytes());
+            output.extend_from_slice(text.as_bytes());
+        },
+        serde_json::Value::Array(values) => {
+            output.push(b'a');
+            output.extend_from_slice(&(values.len() as u64).to_be_bytes());
+            for value in values {
+                let mut encoded = Vec::new();
+                canonical_json(value, &mut encoded)?;
+                output.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                output.extend_from_slice(&encoded);
+            }
+        },
+        serde_json::Value::Object(values) => {
+            output.push(b'o');
+            output.extend_from_slice(&(values.len() as u64).to_be_bytes());
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (key, value) in entries {
+                output.extend_from_slice(&(key.len() as u64).to_be_bytes());
+                output.extend_from_slice(key.as_bytes());
+                let mut encoded = Vec::new();
+                canonical_json(value, &mut encoded)?;
+                output.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                output.extend_from_slice(&encoded);
+            }
+        },
+    }
+    Ok(())
+}
+
+fn canonical_cell(
+    engine: Engine,
+    type_name: &str,
+    value: &serde_json::Value,
+) -> Result<Vec<u8>, String> {
+    if value.is_null() {
+        return Ok(vec![b'z']);
+    }
+    let upper = type_name.to_ascii_uppercase();
+    let integer = match engine {
+        Engine::Mysql => matches!(upper.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "YEAR" | "BIT"),
+        Engine::Postgres => matches!(upper.as_str(), "INT2" | "INT4" | "INT8" | "OID"),
+        _ => false,
+    };
+    let decimal = matches!(upper.as_str(), "DECIMAL" | "NUMERIC" | "DEC" | "FIXED" | "MONEY");
+    let boolean = matches!(upper.as_str(), "BOOL" | "BOOLEAN");
+    let textual = match engine {
+        Engine::Mysql => matches!(upper.as_str(), "CHAR" | "VARCHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" | "SET"),
+        Engine::Postgres => matches!(upper.as_str(), "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "UUID"),
+        _ => false,
+    };
+    let temporal = matches!(upper.as_str(), "DATE" | "DATETIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "TIME");
+    let binary = match engine {
+        Engine::Mysql => upper.contains("BINARY") || upper.contains("BLOB"),
+        Engine::Postgres => upper == "BYTEA",
+        _ => false,
+    };
+    let (tag, payload) = if integer {
+        let text = scalar_text(value)?;
+        let parsed = text.parse::<i128>().map_err(|_| "Query Lab integer is not an exact i128".to_string())?;
+        (b'i', parsed.to_string().into_bytes())
+    } else if decimal {
+        let text = scalar_text(value)?;
+        let parsed = <rust_decimal::Decimal as std::str::FromStr>::from_str(&text)
+            .map_err(|_| "Query Lab decimal is not exact or finite".to_string())?;
+        (b'd', parsed.normalize().to_string().into_bytes())
+    } else if boolean {
+        let value = match value {
+            serde_json::Value::Bool(value) => *value,
+            serde_json::Value::String(text) if text == "1" || text.eq_ignore_ascii_case("true") => true,
+            serde_json::Value::String(text) if text == "0" || text.eq_ignore_ascii_case("false") => false,
+            serde_json::Value::Number(number) if number.as_u64() == Some(1) => true,
+            serde_json::Value::Number(number) if number.as_u64() == Some(0) => false,
+            _ => return Err("Query Lab boolean does not match its declared type".into()),
+        };
+        (b'b', vec![u8::from(value)])
+    } else if textual || temporal {
+        (b's', scalar_text(value)?.into_bytes())
+    } else if binary {
+        if engine != Engine::Postgres {
+            return Err(format!("Query Lab refuses {type_name} equality because the MySQL decoder does not preserve raw-byte versus UTF-8 ambiguity"));
+        }
+        let encoded = value.as_str().ok_or_else(|| "Query Lab BYTEA is not hexadecimal text".to_string())?;
+        (b'b', hex::decode(encoded).map_err(|_| "Query Lab BYTEA is not valid hexadecimal".to_string())?)
+    } else if matches!(upper.as_str(), "FLOAT" | "DOUBLE" | "REAL" | "FLOAT4" | "FLOAT8") {
+        return Err(format!("Query Lab refuses lossy floating-point equality for {type_name}"));
+    } else if matches!(upper.as_str(), "JSON" | "JSONB") {
+        let mut encoded = Vec::new();
+        canonical_json(value, &mut encoded)?;
+        (b'j', encoded)
+    } else {
+        return Err(format!("Query Lab has no exact canonical decoder for {type_name}"));
+    };
+    let mut output = vec![tag];
+    output.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    output.extend_from_slice(&payload);
+    Ok(output)
+}
+
+fn result_columns(result: &QueryResult) -> Vec<QueryLabResultColumn> {
+    result.columns.iter().map(|column| QueryLabResultColumn {
+        name: column.name.clone(),
+        type_name: column.type_name.clone(),
+    }).collect()
+}
+
+fn rewrite_result_evidence(
+    engine: Engine,
+    result: &QueryResult,
+    row_order_policy: &str,
+    max_bytes: u64,
+) -> QueryLabResultEvidence {
+    let columns = result_columns(result);
+    let rows_observed = result.rows.len() as u64;
+    let bytes_observed = result.rows.iter().map(|row| crate::db::types::row_bytes(row) as u64).sum::<u64>();
+    let unverified = |reason: String| QueryLabResultEvidence {
+        columns: columns.clone(), rows_observed, bytes_observed,
+        sha256: None, complete: false, unverified_reason: Some(reason),
+    };
+    if result.truncated || result.rows.len() > 100_000 {
+        return unverified("Query Lab result exceeded the declared row/driver budget; no correctness verdict is available".into());
+    }
+    if bytes_observed > max_bytes {
+        return unverified(format!("Query Lab result exceeded the declared {max_bytes}-byte budget; no correctness verdict is available"));
+    }
+    let mut encoded_rows = Vec::with_capacity(result.rows.len());
+    for row in &result.rows {
+        if row.len() != result.columns.len() {
+            return unverified("Query Lab row/column metadata mismatch prevents exact hashing".into());
+        }
+        let mut encoded = Vec::new();
+        for (column, value) in result.columns.iter().zip(row) {
+            match canonical_cell(engine, &column.type_name, value) {
+                Ok(cell) => {
+                    encoded.extend_from_slice(&(cell.len() as u64).to_be_bytes());
+                    encoded.extend_from_slice(&cell);
+                },
+                Err(reason) => return unverified(reason),
+            }
+        }
+        encoded_rows.push(encoded);
+    }
+    if row_order_policy == "multiset" {
+        encoded_rows.sort();
+    }
+    let mut hash = Sha256::new();
+    hash_part(&mut hash, b"TxUI Query Lab result v1");
+    hash_part(&mut hash, row_order_policy.as_bytes());
+    for column in &columns {
+        hash_part(&mut hash, column.name.as_bytes());
+        hash_part(&mut hash, column.type_name.as_bytes());
+    }
+    hash.update((encoded_rows.len() as u64).to_be_bytes());
+    for row in encoded_rows {
+        hash_part(&mut hash, &row);
+    }
+    QueryLabResultEvidence {
+        columns,
+        rows_observed,
+        bytes_observed,
+        sha256: Some(format!("{:x}", hash.finalize())),
+        complete: true,
+        unverified_reason: None,
+    }
+}
+
+fn rewrite_correctness(
+    baseline: &QueryLabResultEvidence,
+    candidate: &QueryLabResultEvidence,
+) -> (String, Option<String>) {
+    if baseline.columns != candidate.columns {
+        return ("different".into(), Some("Ordered column names/types differ; result equality is invalid".into()));
+    }
+    if !baseline.complete || !candidate.complete {
+        let reasons = [baseline.unverified_reason.clone(), candidate.unverified_reason.clone()]
+            .into_iter().flatten().collect::<Vec<_>>().join(" | ");
+        return ("unverified".into(), Some(reasons));
+    }
+    if baseline.sha256 != candidate.sha256 {
+        return ("different".into(), Some("Complete canonical result hashes differ; a faster rewrite would be invalid_results, never a winner".into()));
+    }
+    ("equal".into(), None)
+}
+
+fn select_or_with(sql: &str) -> bool {
+    let keyword = sql.trim_start().chars().take_while(|character| character.is_ascii_alphabetic())
+        .collect::<String>().to_ascii_lowercase();
+    matches!(keyword.as_str(), "select" | "with")
+}
+
+fn validate_rewrite_candidate(
+    engine: Engine,
+    candidate: &QueryLabRewriteCandidateInput,
+) -> Result<(), AppError> {
+    if candidate.id.is_empty() || candidate.id.len() > 80 || candidate.name.is_empty() || candidate.name.len() > 160 {
+        return Err(AppError::bad_request("Query Lab rewrite candidate id/name is invalid"));
+    }
+    if candidate.sql.len() > MAX_QUERY_LAB_SQL_BYTES {
+        return Err(AppError::bad_request("Query Lab rewrite SQL exceeds the 2 MiB limit"));
+    }
+    let statements = crate::sqlguard::split_statements_for(Some(engine), &candidate.sql);
+    if statements.len() != 1 || !select_or_with(&candidate.sql) || !crate::sqlguard::is_read_family(&candidate.sql)
+        || crate::sqlguard::is_write_for(Some(engine), &candidate.sql)
+    {
+        return Err(AppError::guard("Query Lab rewrite accepts exactly one read-only statement"));
+    }
+    Ok(())
+}
+
+async fn rewrite_inner(
+    input: QueryLabRewriteInput,
+    state: &AppState,
+    cancel: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<QueryLabRewriteResponse, AppError> {
+    let validated = validate_input(&input.baseline, state).await?;
+    if input.baseline.execution_mode != "measured" || input.baseline.index_evidence_mode != "none"
+        || !input.baseline.has_rewrite_candidate || !input.baseline.evidence.result_equality
+        || !select_or_with(&input.baseline.sql)
+    {
+        return Err(AppError::guard("Query Lab rewrite requires measured mode, result-equality evidence and no index candidate"));
+    }
+    if !matches!(input.row_order_policy.as_str(), "ordered" | "multiset") {
+        return Err(AppError::bad_request("Query Lab row order policy must be ordered or multiset"));
+    }
+    if !(1..=100_000).contains(&input.max_rows) || !(1024..=64 * 1024 * 1024).contains(&input.max_bytes) {
+        return Err(AppError::bad_request("Query Lab rewrite budgets exceed their declared bounds"));
+    }
+    validate_rewrite_candidate(validated.engine, &input.candidate)?;
+    state.guard_statement(&input.baseline.session_id, &input.candidate.sql).await?;
+    let database = validated.execution_database.clone();
+    let mut conn = RealConnection::acquire(&input.baseline, state, &database, validated.timeout_ms).await?;
+    let backend_id = conn.backend_id();
+    let mut result = async {
+        let baseline = conn.capped(&input.baseline.sql, input.max_rows as usize, cancel).await?;
+        let baseline = rewrite_result_evidence(validated.engine, &baseline, &input.row_order_policy, input.max_bytes);
+        let candidate = conn.capped(&input.candidate.sql, input.max_rows as usize, cancel).await?;
+        let candidate = rewrite_result_evidence(validated.engine, &candidate, &input.row_order_policy, input.max_bytes);
+        let (correctness, reason) = rewrite_correctness(&baseline, &candidate);
+        Ok((correctness, reason, baseline, candidate))
+    }.await;
+    if let Err(error) = conn.restore().await {
+        if result.is_ok() { result = Err(error); }
+    }
+    if let Err(error) = conn.close().await {
+        if result.is_ok() { result = Err(error); }
+    }
+    result.map(|(correctness, reason, baseline, candidate)| QueryLabRewriteResponse {
+        run_key: input.baseline.run_key.clone(),
+        spec_sha256: input.baseline.spec_sha256.clone(),
+        candidate_id: input.candidate.id.clone(),
+        backend_id,
+        correctness,
+        reason,
+        row_order_policy: input.row_order_policy,
+        max_rows: input.max_rows,
+        max_bytes: input.max_bytes,
+        baseline,
+        candidate,
+        cleanup: QueryLabCleanup { timeout_restored: true, connection_closed: true, hypopg_reset: None },
+    })
+}
+
+async fn audit_rewrite(
+    state: &AppState,
+    input: &QueryLabRewriteInput,
+    started: Instant,
+    result: &Result<QueryLabRewriteResponse, AppError>,
+) {
+    let baseline = &input.baseline;
+    let session_start = state.session_starts.read().await.get(&baseline.session_id).cloned();
+    let (ok, error, code) = match result {
+        Ok(_) => (true, None, ""),
+        Err(error) => (false, Some(error.message.clone()), error.code.as_str()),
+    };
+    let entry = crate::commands::audit::AuditInsert {
+        run_id: format!("query-lab-rewrite:{}", baseline.run_key), stmt_index: Some(1), stmt_total: Some(1),
+        session_id: baseline.session_id.to_string(), tab_title: "Query Optimization Lab (rewrite)".into(),
+        database: baseline.scratch.as_ref().map(|scratch| scratch.database.clone()).unwrap_or_else(|| baseline.database.clone()),
+        source: "query_lab_rewrite".into(),
+        started_at: crate::commands::audit::lifecycle_now(), ended_at: crate::commands::audit::lifecycle_now(),
+        duration_ms: started.elapsed().as_millis() as i64,
+        connection_name: session_start.as_ref().map(|value| value.connection_name.clone()).unwrap_or_default(),
+        db_user: session_start.as_ref().map(|value| value.db_user.clone()).unwrap_or_default(),
+        engine: baseline.engine.clone(), ok, rows_out: 0, rows_affected: None,
+        error, error_code: code.into(), db_code: String::new(), sqlstate: String::new(),
+        sql: format!("{}\n-- Query Lab rewrite candidate: {}\n{}", baseline.sql, input.candidate.id, input.candidate.sql),
+    };
+    if let Err(error) = crate::commands::audit::insert(&state.history, &entry).await {
+        eprintln!("[audit] query lab rewrite insert failed: {error:#}");
+    }
+}
+
+pub async fn execute_rewrite(
+    input: QueryLabRewriteInput,
+    state: &AppState,
+) -> Result<QueryLabRewriteResponse, AppError> {
+    let started = Instant::now();
+    let key = crate::state::ext_job_key(input.baseline.session_id, &input.baseline.run_key);
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut jobs = state.ext_jobs.write().await;
+        if jobs.contains_key(&key) {
+            return Err(AppError::bad_request("This Query Lab rewrite run is already active"));
+        }
+        jobs.insert(key.clone(), cancel_tx);
+    }
+    let result = rewrite_inner(input.clone(), state, &mut cancel_rx).await;
+    state.ext_jobs.write().await.remove(&key);
+    audit_rewrite(state, &input, started, &result).await;
+    result
+}
+
+#[tauri::command]
+pub async fn query_lab_rewrite_measure(
+    input: QueryLabRewriteInput,
+    state: tauri::State<'_, AppState>,
+) -> Result<QueryLabRewriteResponse, AppError> {
+    execute_rewrite(input, &state).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,6 +1716,23 @@ mod tests {
                 session_id, connection_id, database: "shop".into(),
                 environment: Some("dev".into()), read_only: false, run_key: None,
             }),
+        }
+    }
+
+    fn rewrite_input(session_id: Uuid, connection_id: Uuid, engine: Engine) -> QueryLabRewriteInput {
+        let mut baseline = input(session_id, connection_id, engine, "measured");
+        baseline.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 1 ORDER BY id".into();
+        baseline.has_rewrite_candidate = true;
+        baseline.evidence.result_equality = true;
+        QueryLabRewriteInput {
+            baseline,
+            candidate: QueryLabRewriteCandidateInput {
+                id: "equivalent".into(), name: "Equivalent rewrite".into(),
+                sql: "SELECT id, customer_id FROM orders WHERE customer_id = 1 AND id > 0 ORDER BY id".into(),
+            },
+            row_order_policy: "ordered".into(),
+            max_rows: 10_000,
+            max_bytes: 1024 * 1024,
         }
     }
 
@@ -1451,6 +1891,100 @@ mod tests {
         assert!(validate_input(&rewrite, &state).await.is_err());
         rewrite.evidence.result_equality = true;
         assert!(validate_input(&rewrite, &state).await.is_ok());
+    }
+
+    fn grid(columns: &[(&str, &str)], rows: Vec<Vec<serde_json::Value>>) -> QueryResult {
+        QueryResult {
+            result_sets: vec![],
+            columns: columns.iter().map(|(name, type_name)| crate::db::types::ColumnInfo {
+                name: (*name).into(), type_name: (*type_name).into(), nullable: true,
+            }).collect(),
+            rows,
+            rows_affected: None,
+            execution_ms: 0,
+            fetch_ms: 0,
+            warnings: vec![],
+            truncated: false,
+            geo_bbox: None,
+        }
+    }
+
+    #[test]
+    fn rewrite_hash_enforces_ordered_columns_and_explicit_row_order_with_duplicates() {
+        let left = grid(&[("id", "INT8")], vec![vec![1.into()], vec![1.into()], vec![2.into()]]);
+        let right = grid(&[("id", "INT8")], vec![vec![2.into()], vec![1.into()], vec![1.into()]]);
+        let ordered_left = rewrite_result_evidence(Engine::Postgres, &left, "ordered", 1024);
+        let ordered_right = rewrite_result_evidence(Engine::Postgres, &right, "ordered", 1024);
+        assert_eq!(rewrite_correctness(&ordered_left, &ordered_right).0, "different");
+        let multiset_left = rewrite_result_evidence(Engine::Postgres, &left, "multiset", 1024);
+        let multiset_right = rewrite_result_evidence(Engine::Postgres, &right, "multiset", 1024);
+        assert_eq!(rewrite_correctness(&multiset_left, &multiset_right).0, "equal");
+        let deduplicated = grid(&[("id", "INT8")], vec![vec![1.into()], vec![2.into()]]);
+        let deduplicated = rewrite_result_evidence(Engine::Postgres, &deduplicated, "multiset", 1024);
+        assert_eq!(rewrite_correctness(&multiset_left, &deduplicated).0, "different");
+
+        let columns_left = grid(&[("id", "INT8"), ("label", "TEXT")], vec![]);
+        let columns_right = grid(&[("label", "TEXT"), ("id", "INT8")], vec![]);
+        let left = rewrite_result_evidence(Engine::Postgres, &columns_left, "ordered", 1024);
+        let right = rewrite_result_evidence(Engine::Postgres, &columns_right, "ordered", 1024);
+        assert_eq!(rewrite_correctness(&left, &right).0, "different");
+    }
+
+    #[test]
+    fn rewrite_hash_distinguishes_null_empty_decimal_scale_and_binary() {
+        let null = grid(&[("value", "TEXT")], vec![vec![serde_json::Value::Null]]);
+        let empty = grid(&[("value", "TEXT")], vec![vec!["".into()]]);
+        let null = rewrite_result_evidence(Engine::Postgres, &null, "ordered", 1024);
+        let empty = rewrite_result_evidence(Engine::Postgres, &empty, "ordered", 1024);
+        assert_eq!(rewrite_correctness(&null, &empty).0, "different");
+
+        let one = grid(&[("amount", "NUMERIC")], vec![vec!["1.0".into()]]);
+        let scaled = grid(&[("amount", "NUMERIC")], vec![vec!["1.00".into()]]);
+        let one = rewrite_result_evidence(Engine::Postgres, &one, "ordered", 1024);
+        let scaled = rewrite_result_evidence(Engine::Postgres, &scaled, "ordered", 1024);
+        assert_eq!(rewrite_correctness(&one, &scaled).0, "equal");
+        let changed = grid(&[("amount", "NUMERIC")], vec![vec!["1.01".into()]]);
+        let changed = rewrite_result_evidence(Engine::Postgres, &changed, "ordered", 1024);
+        assert_eq!(rewrite_correctness(&one, &changed).0, "different");
+
+        let binary = grid(&[("payload", "BYTEA")], vec![vec!["00ff".into()]]);
+        let changed_binary = grid(&[("payload", "BYTEA")], vec![vec!["00fe".into()]]);
+        let binary = rewrite_result_evidence(Engine::Postgres, &binary, "ordered", 1024);
+        let changed_binary = rewrite_result_evidence(Engine::Postgres, &changed_binary, "ordered", 1024);
+        assert_eq!(rewrite_correctness(&binary, &changed_binary).0, "different");
+    }
+
+    #[test]
+    fn rewrite_hash_refuses_lossy_or_ambiguous_values() {
+        let float = grid(&[("ratio", "FLOAT8")], vec![vec![serde_json::json!(1.5)]]);
+        let evidence = rewrite_result_evidence(Engine::Postgres, &float, "ordered", 1024);
+        assert!(!evidence.complete);
+        assert!(evidence.unverified_reason.unwrap().contains("floating-point"));
+        let null_float = grid(&[("ratio", "FLOAT8")], vec![vec![serde_json::Value::Null]]);
+        assert!(rewrite_result_evidence(Engine::Postgres, &null_float, "ordered", 1024).complete);
+        let binary = grid(&[("payload", "BLOB")], vec![vec!["text".into()]]);
+        let evidence = rewrite_result_evidence(Engine::Mysql, &binary, "ordered", 1024);
+        assert!(!evidence.complete);
+        assert!(evidence.unverified_reason.unwrap().contains("ambiguity"));
+        let json = grid(&[("document", "JSONB")], vec![vec![serde_json::json!({"n": 1.5})]]);
+        assert!(!rewrite_result_evidence(Engine::Postgres, &json, "ordered", 1024).complete);
+    }
+
+    #[test]
+    fn rewrite_hash_refuses_truncated_and_over_byte_budget_results() {
+        let mut truncated = grid(&[("id", "INT8")], vec![vec![1.into()]]);
+        truncated.truncated = true;
+        assert!(!rewrite_result_evidence(Engine::Postgres, &truncated, "ordered", 1024).complete);
+        let large = grid(&[("value", "TEXT")], vec![vec![serde_json::Value::String("x".repeat(2048))]]);
+        let evidence = rewrite_result_evidence(Engine::Postgres, &large, "ordered", 1024);
+        assert!(!evidence.complete);
+        assert!(evidence.unverified_reason.unwrap().contains("1024-byte budget"));
+        assert!(validate_rewrite_candidate(Engine::Postgres, &QueryLabRewriteCandidateInput {
+            id: "explain".into(), name: "Not a result query".into(), sql: "EXPLAIN SELECT 1".into(),
+        }).is_err());
+        assert!(validate_rewrite_candidate(Engine::Postgres, &QueryLabRewriteCandidateInput {
+            id: "select".into(), name: "Valid result query".into(), sql: "SELECT(1)".into(),
+        }).is_ok());
     }
 
     #[test]
@@ -1832,6 +2366,141 @@ mod tests {
         ).await.unwrap();
         assert_eq!(record.status, "active", "mismatch must not clean an unverified scratch");
         crate::commands::migration::cleanup_scratch(&state, &record.run_key).await.unwrap();
+        crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_mysql_rewrite_equality_order_budget_binary_and_cancel() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE DATABASE shop").await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::mysql::execute(&pool, "INSERT INTO shop.orders SELECT a.x + 10 * b.x + 1, a.x + 10 * b.x + 1 FROM (SELECT 0 x UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) a CROSS JOIN (SELECT 0 x UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) b").await.unwrap();
+        crate::db::mysql::execute(&pool, "INSERT INTO shop.orders VALUES (101, 1)").await.unwrap();
+        let (state, session, connection) = mysql_live_state(&pool).await;
+
+        let equal = execute_rewrite(rewrite_input(session, connection, Engine::Mysql), &state).await.unwrap();
+        assert_eq!(equal.correctness, "equal");
+        assert!(equal.baseline.complete && equal.candidate.complete);
+        assert_eq!(equal.baseline.rows_observed, 2);
+        assert!(equal.baseline.sha256.is_some() && equal.cleanup.timeout_restored && equal.cleanup.connection_closed);
+        let audit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE run_id = ? AND source = 'query_lab_rewrite' AND ok = 1")
+            .bind(format!("query-lab-rewrite:{}", equal.run_key)).fetch_one(&state.history).await.unwrap();
+        assert_eq!(audit, 1);
+
+        let mut ordered = rewrite_input(session, connection, Engine::Mysql);
+        ordered.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 1 ORDER BY id DESC".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(ordered.clone(), &state, &mut cancel_rx).await.unwrap().correctness, "different");
+        ordered.row_order_policy = "multiset".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(ordered, &state, &mut cancel_rx).await.unwrap().correctness, "equal");
+
+        let mut columns = rewrite_input(session, connection, Engine::Mysql);
+        columns.candidate.sql = "SELECT customer_id, id FROM orders WHERE customer_id = 1 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let response = rewrite_inner(columns, &state, &mut cancel_rx).await.unwrap();
+        assert_eq!(response.correctness, "different");
+        assert!(response.reason.unwrap().contains("Ordered column"));
+
+        let mut different = rewrite_input(session, connection, Engine::Mysql);
+        different.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 2 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(different, &state, &mut cancel_rx).await.unwrap().correctness, "different");
+
+        let mut budget = rewrite_input(session, connection, Engine::Mysql);
+        budget.baseline.sql = "SELECT id, customer_id FROM orders ORDER BY id".into();
+        budget.candidate.sql = budget.baseline.sql.clone();
+        budget.max_rows = 1;
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let response = rewrite_inner(budget, &state, &mut cancel_rx).await.unwrap();
+        assert_eq!(response.correctness, "unverified");
+        assert!(!response.baseline.complete && response.baseline.sha256.is_none());
+
+        for sql in ["SELECT CAST(1.5 AS DOUBLE) AS ratio", "SELECT CAST('00ff' AS BINARY) AS payload"] {
+            let mut unsupported = rewrite_input(session, connection, Engine::Mysql);
+            unsupported.baseline.sql = sql.into();
+            unsupported.candidate.sql = sql.into();
+            let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+            assert_eq!(rewrite_inner(unsupported, &state, &mut cancel_rx).await.unwrap().correctness, "unverified");
+        }
+
+        let cancelled = rewrite_input(session, connection, Engine::Mysql);
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        cancel_tx.send(()).unwrap();
+        let error = rewrite_inner(cancelled, &state, &mut cancel_rx).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shop.orders").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 101);
+        crate::db::mysql::execute(&pool, "DROP DATABASE shop").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18"]
+    async fn dbctl_pg_rewrite_equality_order_budget_binary_and_cancel() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE SCHEMA shop").await.unwrap();
+        crate::db::postgres::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders SELECT g, g FROM generate_series(1, 100) g").await.unwrap();
+        crate::db::postgres::execute(&pool, "INSERT INTO shop.orders VALUES (101, 1)").await.unwrap();
+        let (state, session, connection) = pg_live_state(&pool).await;
+
+        let equal = execute_rewrite(rewrite_input(session, connection, Engine::Postgres), &state).await.unwrap();
+        assert_eq!(equal.correctness, "equal");
+        assert!(equal.baseline.complete && equal.candidate.complete);
+        assert!(equal.baseline.sha256.is_some() && equal.cleanup.timeout_restored && equal.cleanup.connection_closed);
+
+        let mut ordered = rewrite_input(session, connection, Engine::Postgres);
+        ordered.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 1 ORDER BY id DESC".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(ordered.clone(), &state, &mut cancel_rx).await.unwrap().correctness, "different");
+        ordered.row_order_policy = "multiset".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(ordered, &state, &mut cancel_rx).await.unwrap().correctness, "equal");
+
+        let mut columns = rewrite_input(session, connection, Engine::Postgres);
+        columns.candidate.sql = "SELECT customer_id, id FROM orders WHERE customer_id = 1 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(columns, &state, &mut cancel_rx).await.unwrap().correctness, "different");
+
+        let mut different = rewrite_input(session, connection, Engine::Postgres);
+        different.candidate.sql = "SELECT id, customer_id FROM orders WHERE customer_id = 2 ORDER BY id".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(different, &state, &mut cancel_rx).await.unwrap().correctness, "different");
+
+        let mut budget = rewrite_input(session, connection, Engine::Postgres);
+        budget.baseline.sql = "SELECT id, customer_id FROM orders ORDER BY id".into();
+        budget.candidate.sql = budget.baseline.sql.clone();
+        budget.max_rows = 1;
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(budget, &state, &mut cancel_rx).await.unwrap().correctness, "unverified");
+
+        let mut binary = rewrite_input(session, connection, Engine::Postgres);
+        binary.baseline.sql = "SELECT CAST('1.00' AS NUMERIC) AS amount, decode('00ff', 'hex') AS payload".into();
+        binary.candidate.sql = "SELECT CAST('1.0' AS NUMERIC) AS amount, decode('00ff', 'hex') AS payload".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(binary.clone(), &state, &mut cancel_rx).await.unwrap().correctness, "equal");
+        binary.candidate.sql = "SELECT CAST('1.0' AS NUMERIC) AS amount, decode('00fe', 'hex') AS payload".into();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(binary, &state, &mut cancel_rx).await.unwrap().correctness, "different");
+
+        let mut float = rewrite_input(session, connection, Engine::Postgres);
+        float.baseline.sql = "SELECT CAST(1.5 AS FLOAT8) AS ratio".into();
+        float.candidate.sql = float.baseline.sql.clone();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(rewrite_inner(float, &state, &mut cancel_rx).await.unwrap().correctness, "unverified");
+
+        let cancelled = rewrite_input(session, connection, Engine::Postgres);
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        cancel_tx.send(()).unwrap();
+        let error = rewrite_inner(cancelled, &state, &mut cancel_rx).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shop.orders").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 101);
         crate::db::postgres::execute(&pool, "DROP SCHEMA shop CASCADE").await.unwrap();
         pool.close().await;
     }

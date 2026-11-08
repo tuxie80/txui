@@ -905,6 +905,7 @@ pub fn run() {
             query_lab_baseline,
             query_lab_hypopg_estimate,
             query_lab_real_index_measure,
+            query_lab_rewrite_measure,
             migration_preflight,
             migration_rehearsal_create,
             migration_rehearsal_clone,
