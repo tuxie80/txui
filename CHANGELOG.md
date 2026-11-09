@@ -32,6 +32,8 @@ this project follows semantic versioning.
 
 ### Changed
 
+- **One-command Safe Operations live verification** — `dev/safe_operations_live.sh` runs all 45 Migration Cockpit, Environment Refresh and Query Optimization Lab dbctl tests on tiny auto-destroyed MySQL 8.4, MariaDB 11.8 and PostgreSQL 18 fixtures, including the complete HypoPG journey. Serial fixture execution prevents interference, per-group and exact 45-test summaries expose failures, and a repository contract test prevents live tests from silently escaping the matrix.
+
 - **Safe Operations workspaces are usable at real desktop sizes** — Migration Cockpit now guides Review → Rehearsal → Deploy & verify, Safe Environment Refresh uses Setup → Tables & masks → Review & run, and Query Optimization Lab uses Query → Candidates → Run & evidence. The three panels have real vertical scrolling, responsive one/two-column layouts, aligned full-size form controls, normally sized action buttons and collapsible raw evidence instead of unstructured walls of text. Stage changes preserve mounted form state and proof. Every stage is exercised in Ayu Dark/Light at 1600×1000 and 1100×760 with scrolling, overflow, control-size and screenshot checks; all 5,442 frontend tests and all 32 core Chromium journeys pass.
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
