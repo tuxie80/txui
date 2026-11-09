@@ -101,6 +101,10 @@ export async function runSmokeSelfTest(): Promise<void> {
     window.dispatchEvent(new CustomEvent('dbgui:run-statement', { detail: { sql: 'SELECT 42 AS answer' } }));
     const grid = await waitFor('.fg-cell', 30_000);
     check('query-grid-renders', !!grid);
+    const cells = [...document.querySelectorAll('.fg-cell')];
+    check('query-grid-exact-result', cells.length === 1 && cells[0].textContent === '42'
+      && document.querySelector('.fg-header')?.textContent?.includes('answer') === true,
+    `cells=${cells.length} value=${cells[0]?.textContent ?? 'missing'} header=${document.querySelector('.fg-header')?.textContent ?? 'missing'}`);
 
     // 6. no CSP violations at all
     check('no-csp-violations', cspViolations.length === 0, cspViolations[0]);

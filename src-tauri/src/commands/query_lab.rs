@@ -2552,6 +2552,43 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_mysql_restricted_index_privilege_is_visible_and_recoverable() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE DATABASE shop").await.unwrap();
+        crate::db::mysql::execute(&pool, "CREATE TABLE shop.orders (id INT PRIMARY KEY, customer_id INT NOT NULL)").await.unwrap();
+        crate::db::mysql::execute(&pool, "INSERT INTO shop.orders VALUES (1,1),(2,1),(3,2)").await.unwrap();
+        let (state, session, connection) = mysql_live_state(&pool).await;
+        let input = real_input(session, connection, Engine::Mysql);
+        prepare_mysql_real_scratch(&pool, &state, &input).await;
+        let scratch = input.baseline.scratch.as_ref().unwrap();
+        let user = format!("txui_read_{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let password = Uuid::new_v4().simple().to_string();
+        crate::db::mysql::execute(&pool, &format!("CREATE USER '{user}'@'%' IDENTIFIED BY '{password}'")).await.unwrap();
+        crate::db::mysql::execute(&pool, &format!("GRANT SELECT ON `{}`.* TO '{user}'@'%'", scratch.database)).await.unwrap();
+        let options = url.parse::<sqlx::mysql::MySqlConnectOptions>().unwrap().username(&user).password(&password);
+        let restricted = sqlx::mysql::MySqlPoolOptions::new().max_connections(2).connect_with(options).await.unwrap();
+        state.sessions.write().await.insert(session, std::sync::Arc::new(LiveSession::Mysql(restricted.clone())));
+
+        let error = execute_real_index(input.clone(), &state).await.expect_err("SELECT-only scratch must reject CREATE INDEX");
+        assert!(error.message.contains("Migration scratch cleanup also failed"), "{error}");
+        let record = crate::commands::migration::scratch_record(&state, scratch.run_key.as_deref().unwrap()).await.unwrap();
+        assert_eq!(record.status, "cleanup_failed");
+        let indexes: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema = ? AND table_name = 'orders' AND index_name LIKE 'txui_lab_%'")
+            .bind(&scratch.database).fetch_one(&pool).await.unwrap();
+        assert_eq!(indexes, 0);
+        assert!(state.ext_jobs.read().await.is_empty());
+        restricted.close().await;
+        state.sessions.write().await.insert(session, std::sync::Arc::new(LiveSession::Mysql(pool.clone())));
+        crate::commands::migration::cleanup_scratch(&state, scratch.run_key.as_deref().unwrap()).await.unwrap();
+        assert_mysql_scratch_gone(&pool, &state, &input).await;
+        crate::db::mysql::execute(&pool, &format!("DROP USER '{user}'@'%'")).await.unwrap();
+        crate::db::mysql::execute(&pool, "DROP DATABASE shop").await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
     async fn dbctl_mysql_real_index_success_failure_cancel_and_identity() {
         let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
         let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(8).connect(&url).await.unwrap();

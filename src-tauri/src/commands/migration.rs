@@ -2224,6 +2224,61 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
+    async fn dbctl_mysql_privilege_denial_leaves_no_scratch() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let user = format!("txui_read_{suffix}");
+        let password = Uuid::new_v4().simple().to_string();
+        crate::db::mysql::execute(&pool, &format!("CREATE USER '{user}'@'%' IDENTIFIED BY '{password}'")).await.unwrap();
+        crate::db::mysql::execute(&pool, &format!("GRANT SELECT ON *.* TO '{user}'@'%'")).await.unwrap();
+        let options = url.parse::<sqlx::mysql::MySqlConnectOptions>().unwrap().username(&user).password(&password);
+        let restricted = sqlx::mysql::MySqlPoolOptions::new().max_connections(2).connect_with(options).await.unwrap();
+        let (state, session_id) = mysql_live_state(restricted.clone()).await;
+        let scratch = live_scratch_name("denied");
+        let run_key = Uuid::new_v4().to_string();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let error = create_scratch_named(&state, session_id, &run_key, &scratch, &mut cancel_rx)
+            .await.expect_err("SELECT-only user must not create scratch");
+        assert!(error.message.contains("could not create scratch object"), "{error}");
+        assert_eq!(scratch_record(&state, &run_key).await.unwrap().status, "failed");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?")
+            .bind(&scratch).fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
+        restricted.close().await;
+        crate::db::mysql::execute(&pool, &format!("DROP USER '{user}'@'%'")).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp postgres@18"]
+    async fn dbctl_postgres_privilege_denial_leaves_no_scratch() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let role = format!("txui_read_{suffix}");
+        let password = Uuid::new_v4().simple().to_string();
+        crate::db::postgres::execute(&pool, &format!("CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}'")).await.unwrap();
+        let options = url.parse::<sqlx::postgres::PgConnectOptions>().unwrap().username(&role).password(&password);
+        let restricted = sqlx::postgres::PgPoolOptions::new().max_connections(2).connect_with(options).await.unwrap();
+        let (state, session_id) = postgres_live_state(restricted.clone()).await;
+        let scratch = live_scratch_name("pg_denied");
+        let run_key = Uuid::new_v4().to_string();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let error = create_scratch_named(&state, session_id, &run_key, &scratch, &mut cancel_rx)
+            .await.expect_err("role without CREATE must not create scratch");
+        assert!(error.message.contains("could not create scratch object"), "{error}");
+        assert_eq!(scratch_record(&state, &run_key).await.unwrap().status, "failed");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = $1")
+            .bind(&scratch).fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
+        restricted.close().await;
+        crate::db::postgres::execute(&pool, &format!("DROP ROLE \"{role}\"")).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8"]
     async fn dbctl_mysql_execution_success_failure_and_cancel() {
         let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
         let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(5).connect(&url).await.unwrap();

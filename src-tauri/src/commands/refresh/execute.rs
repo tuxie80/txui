@@ -2892,6 +2892,47 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8 and node"]
+    async fn dbctl_mysql_refresh_restricted_target_writes_nothing() {
+        let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
+        let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(8).connect(&url).await.unwrap();
+        let suffix = &Uuid::new_v4().simple().to_string()[..8];
+        let (source, target) = create_live_schemas(&pool, suffix, 2).await;
+        let (mut input, expected) = live_input(&pool, &source, &target, 2).await;
+        input.run_key = Uuid::new_v4().to_string();
+        let (state, source_session, target_session) = live_state(&pool).await;
+        bind_live_input(&mut input, &state, source_session, target_session).await;
+
+        let user = format!("txui_read_{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let password = Uuid::new_v4().simple().to_string();
+        crate::db::mysql::execute(&pool, &format!("CREATE USER '{user}'@'%' IDENTIFIED BY '{password}'")).await.unwrap();
+        crate::db::mysql::execute(&pool, &format!("GRANT SELECT ON `{target}`.* TO '{user}'@'%'")).await.unwrap();
+        let options = url.parse::<sqlx::mysql::MySqlConnectOptions>().unwrap().username(&user).password(&password);
+        let restricted = sqlx::mysql::MySqlPoolOptions::new().max_connections(2).connect_with(options).await.unwrap();
+        state.sessions.write().await.insert(
+            target_session,
+            std::sync::Arc::new(crate::db::types::LiveSession::Mysql(restricted.clone())),
+        );
+        let (channel, events) = recorder();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let mut run = RunState::new(input.run_key.clone());
+        let error = execute_inner(input, &state, channel, &mut run, &mut RefreshCancel::one(cancel_rx))
+            .await.expect_err("SELECT-only target must refuse INSERT");
+        assert_eq!(run.committed_rows, 0);
+        assert!(!error.message.contains("private-note"));
+        let target_rows: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT (SELECT COUNT(*) FROM `{target}`.`parents`) + (SELECT COUNT(*) FROM `{target}`.`children`)",
+        )).into_sql_str()).fetch_one(&pool).await.unwrap();
+        assert_eq!(target_rows, 0, "expected {expected} planned rows, but none may be committed");
+        let event_text = serde_json::to_string(&*events.lock().unwrap()).unwrap();
+        assert!(!event_text.contains("private-note"));
+        restricted.close().await;
+        crate::db::mysql::execute(&pool, &format!("DROP USER '{user}'@'%'")).await.unwrap();
+        drop_live_schemas(&pool, &source, &target).await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires dbctl tmp mysql@8.4 or mariadb@11.8 and node"]
     async fn dbctl_mixed_policies_copy_closure_and_verify() {
         let url = std::env::var("DATABASE_URL").expect("run through dbctl tmp");
         let pool = sqlx::mysql::MySqlPoolOptions::new().max_connections(12).connect(&url).await.unwrap();
