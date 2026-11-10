@@ -1226,16 +1226,16 @@ mod bundled_version_tests {
     /// The SQLite that actually ships, asserted rather than assumed.
     ///
     /// The version is not chosen — it falls out of
-    /// `rust-toolchain → sqlx → libsqlite3-sys` (docs/SQLITE_PRAGMAS.md §1),
-    /// and it went stale for two years without anything noticing because
-    /// nothing checked. This is what notices: a dependency bump that moves
-    /// SQLite has to come here and say so.
+    /// `rust-toolchain → patched sqlx-sqlite → libsqlite3-sys`
+    /// (docs/SQLITE_PRAGMAS.md §1), and it went stale for two years without
+    /// anything noticing because nothing checked. This is what notices: a
+    /// dependency bump that moves SQLite has to come here and say so.
     #[tokio::test]
     async fn the_bundled_sqlite_is_the_version_the_docs_describe() {
         let opts = SqliteConnectOptions::new().filename(":memory:").create_if_missing(true);
         let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
         let v: String = sqlx::query_scalar("SELECT sqlite_version()").fetch_one(&pool).await.unwrap();
-        assert_eq!(v, "3.51.3", "bundled SQLite moved — update docs/SQLITE_PRAGMAS.md §1");
+        assert_eq!(v, "3.54.1", "bundled SQLite moved — update docs/SQLITE_PRAGMAS.md §1");
 
         // dbstat backs the Space usage and Table sizes views; it is a compile
         // option, so its absence would be a silent feature loss on whichever

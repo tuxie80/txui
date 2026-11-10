@@ -15,7 +15,7 @@
 ![SQL Server](https://img.shields.io/badge/SQL%20Server-CC2927 "Tested: 2022 - 29 live tests")
 ![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white "Tested: 8.10.0")
 ![ClickHouse](https://img.shields.io/badge/ClickHouse-E0A300?logo=clickhouse&logoColor=white "Tested: 26.7.2.59, 26.8")
-![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white "Bundled 3.51.3 - reads any 3.x file")
+![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white "Bundled 3.54.1 - reads any 3.x file")
 ![DuckDB](https://img.shields.io/badge/DuckDB%202.0-E5C100?logo=duckdb&logoColor=white "Bundled duckdb-rs 1.20000.1 (compiled in, pinned)")
 ![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white "Tested: 8.0 (8.0.29 fixture)")
 ![Parquet](https://img.shields.io/badge/Parquet-50ABF1?logo=apacheparquet&logoColor=white "File-format level - any parquet file")
@@ -92,7 +92,7 @@ brew install --cask tuxie80/tap/txui
 | PostgreSQL | 14.23, 16.10 (md5), 17.10, 18.4 (TLS) + streaming standby |
 | Redis | 8.10.0; Cluster and Sentinel failover fixtures |
 | ClickHouse | 26.7.2.59, 26.8 |
-| SQLite | 3.51.3 (bundled; reads any 3.x file) |
+| SQLite | 3.54.1 (bundled; reads any 3.x file) |
 | DuckDB | 2.0 through bundled duckdb-rs 1.20000.1; local and two-process Quack checks |
 | MongoDB | 8.0 (8.0.29 fixture) |
 | SQL Server | 2022 (29 live tests) |

@@ -454,7 +454,7 @@ fn trim_frac(rendered: String) -> String {
 /// owns its data (and `FromSql` requires the 'static form).
 ///
 /// `is_udt` marks a CLR UDT column (geometry, geography, hierarchyid, custom
-/// types). The vendored tiberius decodes the wire value as Binary — the raw
+/// types). tiberius 0.13 decodes the wire value as Binary — the raw
 /// MS-SSCLRT serialization, which nothing client-side can parse — so the grid
 /// gets an explicit placeholder with the escape hatch, never a wall of hex,
 /// never a fake NULL, and (the landmine this replaces) never a process crash.
@@ -1496,8 +1496,8 @@ mod tests {
     /// The CLR-UDT landmine (geometry/geography/hierarchyid): tiberius 0.12.3
     /// hit `todo!()`/`unimplemented!()` decoding these columns, and the
     /// release profile is panic=abort — one SELECT took the whole backend
-    /// down. The vendored tiberius patch (src-tauri/vendor/tiberius) decodes
-    /// the wire value as Binary; this pins what the grid gets for it.
+    /// down. tiberius 0.13 decodes the wire value as Binary; this pins what
+    /// the grid gets for it.
     #[test]
     fn udt_cells_render_a_placeholder_never_null_never_panic() {
         use std::borrow::Cow;
