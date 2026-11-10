@@ -341,8 +341,13 @@ export function schemaFor(engine) {
     ],
   };
 
+  const MONGO = {
+    __root: [{ kind: 'database', name: 'shop' }],
+    shop: [{ kind: 'collection', name: 'orders', schema: 'shop', row_count: 184_223 }],
+  };
+
   return { mysql: MYSQL, postgres: PG, clickhouse: CH, sqlite: SQLITE,
-    parquet: PARQUET, redis: REDIS }[engine] ?? { __root: [] };
+    parquet: PARQUET, redis: REDIS, mongodb: MONGO }[engine] ?? { __root: [] };
 }
 
 /**
@@ -696,6 +701,7 @@ export function mockFor(engine) {
     open_connection: `sess-doc-${engine}`,
     session_ping: 3,
     list_columns: columnsFor(engine),
+    migration_scratch_list: [],
     execute_query: ORDERS_RESULT,
     panel_query: ORDERS_RESULT,
     monitor_query: ORDERS_RESULT,
@@ -714,10 +720,7 @@ export function mockFor(engine) {
     redis_scan: { cursor: 0, keys: REDIS_KEYS },
     redis_key_info: REDIS_KEY_INFO,
     redis_get_value: REDIS_VALUE,
-    redis_server_info: queryResult(['key', 'value'], [
-      ['redis_version', '8.0.2'], ['used_memory_human', '1.82G'],
-      ['connected_clients', '148'], ['keyspace_hits', '9812004'],
-    ]),
+    redis_server_info: '# Server\r\nredis_version:8.0.2\r\n\r\n# Clients\r\nconnected_clients:148\r\n\r\n# Memory\r\nused_memory_human:1.82G\r\n\r\n# Stats\r\nkeyspace_hits:9812004\r\n',
     tx_status: { held: false, server_autocommit: true },
     app_metrics: {
       rss_bytes: 92_274_688, cpu_percent: 2.1,

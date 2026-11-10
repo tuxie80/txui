@@ -32,6 +32,8 @@ this project follows semantic versioning.
 
 ### Changed
 
+- **Every-plugin interaction sweep** — `dev/panel_interactions.mjs` now opens every available plugin across the fixture engines and exercises each visible enabled button, text field, textarea, checkbox, radio and multi-option select from a fresh panel state. Clicks require observable mocked/native-plugin or DOM effects, edited values must stick, and browser errors or dead controls fail the run. The real-Chromium suite uses only Tauri mocks; deeper post-action workflows remain covered by their named interaction and live-database journeys.
+
 - **One-command Safe Operations live verification** — `dev/safe_operations_live.sh` runs all 52 Migration Cockpit, Environment Refresh and Query Optimization Lab dbctl tests on tiny auto-destroyed MySQL 8.4, MariaDB 11.8 and PostgreSQL 18 fixtures, including the complete HypoPG journey. Real SELECT-only roles now prove zero unintended writes and honest cleanup failures under database privilege denial. Serial fixture execution prevents interference, per-group and exact 52-test summaries expose failures, and a repository contract test prevents live tests from silently escaping the matrix. The packaged smoke also checks the exact result column and value returned through the real backend.
 
 - **Safe Operations workspaces are usable at real desktop sizes** — Migration Cockpit now guides Review → Rehearsal → Deploy & verify, Safe Environment Refresh uses Setup → Tables & masks → Review & run, and Query Optimization Lab uses Query → Candidates → Run & evidence. The three panels have real vertical scrolling, responsive one/two-column layouts, aligned full-size form controls, normally sized action buttons and collapsible raw evidence instead of unstructured walls of text. Stage changes preserve mounted form state and proof. Every stage is exercised in Ayu Dark/Light at 1600×1000 and 1100×760 with scrolling, overflow, control-size and screenshot checks; all 5,442 frontend tests and all 32 core Chromium journeys pass.
@@ -39,6 +41,10 @@ this project follows semantic versioning.
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
 
 ### Fixed
+
+- **PostgreSQL deadlock counters never render NaN** — malformed or non-numeric counter values now display an em dash instead of leaking `NaN` into React, for both live and stored snapshots. The Locks & Deadlocks Chromium sweep passes with a clean browser console.
+
+- **Query Lab names keep focus while typing** — parameter names and candidate IDs no longer act as their own React keys, so editing them does not remount the input after the first change. The every-plugin Chromium sweep reproduces the detached input and now passes the complete Query Optimization Lab control set.
 
 - **Refresh preserves DECIMAL values and raw binary bytes** — verification exposed MySQL interpreting a hexadecimal DECIMAL string as its integer byte value (for example, synthetic `1.00` becoming `825110576.00`). Refresh now validates and emits exact numeric DECIMAL literals, and binary values carry an internal raw-byte envelope so non-UTF-8 payloads are copied and compared as bytes rather than ambiguous text. Clean and planted-mutation live tests pass on MySQL 8.4 and MariaDB 11.8.
 

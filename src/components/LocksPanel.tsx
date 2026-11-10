@@ -160,7 +160,7 @@ interface DeadlockEvent extends DeadlockEventMeta {
 }
 
 /** One PG counters snapshot, as stored in a PG event's `parsed` payload. */
-interface PgCounters { counters: [string, number][] }
+interface PgCounters { counters: [string, number | null][] }
 
 /** Short victim label for the history list: "(2) · thread 813". */
 function victimLabel(g: DeadlockGraph): string {
@@ -331,7 +331,7 @@ function PgNoGraphNote() {
   );
 }
 
-function PgCountersTable({ counters }: { counters: [string, number][] }) {
+function PgCountersTable({ counters }: { counters: [string, number | null][] }) {
   if (!counters.length) {
     return <div className="mx-empty">No deadlocks counted in pg_stat_database.</div>;
   }
@@ -340,7 +340,7 @@ function PgCountersTable({ counters }: { counters: [string, number][] }) {
       <thead><tr><th>database</th><th>deadlocks since stats reset</th></tr></thead>
       <tbody>
         {counters.map(([db, n]) => (
-          <tr key={db}><td>{db}</td><td className="rs-warn">{n}</td></tr>
+          <tr key={db}><td>{db}</td><td className="rs-warn">{n ?? '—'}</td></tr>
         ))}
       </tbody>
     </table>
@@ -358,7 +358,7 @@ function DeadlocksSection({ session }: { session: Session }) {
   const isMysql = engine === 'mysql';
   const isMssql = engine === 'sqlserver';
   const [live, setLive] = useState<DeadlockGraph | null>(null);
-  const [pgCounters, setPgCounters] = useState<[string, number][]>([]);
+  const [pgCounters, setPgCounters] = useState<[string, number | null][]>([]);
   const [events, setEvents] = useState<DeadlockEventMeta[]>([]);
   /** null = the live/current view; an id = viewing that stored event. */
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -412,8 +412,10 @@ function DeadlocksSection({ session }: { session: Session }) {
         setLive(newest);
       } else {
         const r = await pq(sessionId, PG_COUNTERS_SQL).catch(() => null);
-        const counters: [string, number][] =
-          (r?.rows ?? []).map(row => [String(row[0]), Number(row[1])]);
+        const counters: [string, number | null][] = (r?.rows ?? []).map(row => {
+          const value = Number(row[1]);
+          return [String(row[0]), Number.isFinite(value) ? value : null];
+        });
         setPgCounters(counters);
         // A counter snapshot is history too — recorded only when the counts
         // moved (identical raw dedupes), i.e. when a deadlock was counted.

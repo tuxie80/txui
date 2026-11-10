@@ -34,17 +34,19 @@ function fallback(cmd: string): any {
   return null;
 }
 
-export async function invoke<T = any>(cmd: string, _args?: any): Promise<T> {
-  // Record every call on window.__CALLS__ so verification scripts (e.g.
-  // dev/verify_cluster_kill.mjs) can assert exactly what the frontend asked
-  // the backend to do — command name and args. Capped; Channels survive via
-  // their toJSON. Recording itself must never break the mock.
+function record(cmd: string, args?: any): void {
+  // Record every call on window.__CALLS__ so verification scripts can assert
+  // exactly what the frontend asked the backend or native plugins to do.
   try {
     const g = globalThis as any;
     const calls = (g.__CALLS__ ??= []);
-    calls.push({ cmd, args: _args ?? null });
+    calls.push({ cmd, args: args ?? null });
     if (calls.length > 5000) calls.splice(0, calls.length - 5000);
   } catch { /* recording is best-effort */ }
+}
+
+export async function invoke<T = any>(cmd: string, _args?: any): Promise<T> {
+  record(cmd, _args);
   // Allow a test page to inject per-command responses via window.__MOCK__.
   // The injection wins over SAMPLE so a shot can deliberately EMPTY a list
   // SAMPLE fills — the zero-connection first-run screen is unreachable while
@@ -76,10 +78,12 @@ export function getCurrentWebview() {
 export async function getVersion(): Promise<string> { return VERSION; }
 
 export async function open(opts?: any): Promise<string | null> {
+  record('dialog:open', opts);
   const injected = (globalThis as any).__MOCK__?.open;
   return typeof injected === 'function' ? injected(opts) : (injected ?? null);
 }
 export async function save(opts?: any): Promise<string | null> {
+  record('dialog:save', opts);
   const injected = (globalThis as any).__MOCK__?.save;
   return typeof injected === 'function' ? injected(opts) : (injected ?? null);
 }

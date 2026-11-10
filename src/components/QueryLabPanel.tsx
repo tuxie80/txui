@@ -603,8 +603,8 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
 
               <section hidden={workspace !== 'query'}>
                 <h3>Concrete parameters</h3>
-                {Object.entries(experiment.parameters).map(([name, parameter]) => (
-                  <div className="sqp-f-evidence" key={name}>
+                {Object.entries(experiment.parameters).map(([name, parameter], index) => (
+                  <div className="sqp-f-evidence" key={index}>
                     <label>Name <input value={name} onChange={event => patch(current => {
                       const parameters = Object.fromEntries(Object.entries(current.parameters)
                         .map(([key, value]) => [key === name ? event.target.value : key, value]));
@@ -639,7 +639,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
               <section hidden={workspace !== 'candidates'}>
                 <h3>Candidates</h3>
                 {experiment.candidates.map((candidate, index) => (
-                  <div className="sqp-finding" key={`${candidate.id}-${index}`}>
+                  <div className="sqp-finding" key={index}>
                     <div className="row-actions">
                       <input aria-label={`Candidate ${index + 1} ID`} value={candidate.id} onChange={event => updateCandidate(index, { id: event.target.value })} />
                       <select aria-label={`Candidate ${index + 1} kind`} value={candidate.kind} onChange={event => changeCandidateKind(index, event.target.value as QueryLabCandidate['kind'])}>
