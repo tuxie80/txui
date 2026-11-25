@@ -189,7 +189,21 @@ async function openRefresh(page, afterReload = false) {
 }
 
 async function click(page, text) {
-  await page.locator('button:visible', { hasText: text }).first().click();
+  try {
+    await page.locator('button:visible', { hasText: text }).first().click();
+  } catch (error) {
+    console.error(`Click failed: ${text}`);
+    console.error((await page.locator('body').innerText()).slice(0, 12000));
+    await page.screenshot({ path: `${OUT}/refresh-click-failure.png`, fullPage: true });
+    throw error;
+  }
+}
+
+async function assertRunReason(page, expected) {
+  const button = page.getByRole('button', { name: 'Run Refresh', exact: true });
+  const actual = await button.getAttribute('data-tip');
+  if (actual !== expected) throw new Error(`wrong Run Refresh prerequisite: ${actual}; expected: ${expected}`);
+  if (await button.getAttribute('aria-disabled') !== 'true') throw new Error(`Run Refresh should be visibly unavailable: ${expected}`);
 }
 
 async function runFlow(page, afterReload, captureStage = null) {
@@ -197,9 +211,37 @@ async function runFlow(page, afterReload, captureStage = null) {
   if (executionsBefore !== 0) throw new Error(`${afterReload ? 'reload' : 'initial'}: Refresh executed before an explicit run`);
   await click(page, 'Import JSON');
   await page.waitForFunction(() => document.body.innerText.includes('Connection IDs are hints only'));
-  await page.locator('.sqp-left select').nth(0).selectOption('sess-c1');
-  await page.locator('.sqp-left select').nth(1).selectOption('sess-c2');
+  if (await page.locator('details.op-workspace-section').count() !== 3) throw new Error('Refresh stages are not mounted in one window');
+  await assertRunReason(page, 'Reconfirm source and target in Setup first');
+  await page.locator('.op-refresh-main select').nth(0).selectOption('sess-c1');
+  await page.locator('.op-refresh-main select').nth(1).selectOption('sess-c2');
+  const setup = page.locator('details.op-workspace-section').nth(0);
+  await setup.locator(':scope > summary').click();
+  if (await setup.getAttribute('open') !== null) throw new Error('Setup did not collapse');
+  await click(page, 'Setup');
+  if (await setup.getAttribute('open') === null) throw new Error('Setup did not reopen from section navigation');
+  const selected = await page.locator('.op-refresh-main select').evaluateAll(items => items.slice(0, 2).map(item => item.value));
+  if (selected.join(',') !== 'sess-c1,sess-c2') throw new Error(`collapsing Setup lost endpoint selections: ${selected}`);
+  const mappingBox = page.locator('.op-refresh-main textarea').first();
+  await mappingBox.focus();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  const mappingAfterEnter = await mappingBox.inputValue();
+  if (mappingAfterEnter !== 'shop => stage\n') throw new Error(`mapping textarea fought Enter keystroke: ${JSON.stringify(mappingAfterEnter)}`);
+  await page.keyboard.press('Backspace');
+  await click(page, 'Tables & masks');
+  for (const aria of ['Table 1', 'Mask table 1', 'Mask column 1']) {
+    const field = page.getByLabel(aria, { exact: true });
+    await field.focus();
+    await page.keyboard.press('End');
+    await page.keyboard.type('x');
+    const stillFocused = await field.evaluate(element => document.activeElement === element);
+    if (!stillFocused) throw new Error(`${aria} lost focus after typing a character`);
+    await page.keyboard.press('Backspace');
+  }
+  await click(page, 'Setup');
   await click(page, 'Reconfirm source and target');
+  await assertRunReason(page, 'Analyze catalogs in Setup first');
   if (captureStage) {
     await captureStage('setup-confirmed');
     await click(page, 'Tables & masks');
@@ -208,6 +250,7 @@ async function runFlow(page, afterReload, captureStage = null) {
   }
   await click(page, 'Analyze catalogs');
   await page.waitForFunction(() => document.body.innerText.includes('Catalog compatibility proven'));
+  await assertRunReason(page, 'Plan row sets below first');
   await click(page, 'Plan row sets');
   try {
     await page.waitForFunction(() => document.body.innerText.includes('Requested 11 + closure 2 = final 13'), undefined, { timeout: 5000 });
@@ -217,18 +260,25 @@ async function runFlow(page, afterReload, captureStage = null) {
     await page.screenshot({ path: `${OUT}/refresh-rowset-failure.png`, fullPage: true });
     throw error;
   }
-  await click(page, 'Verify Rust masking');
-  await page.waitForFunction(() => document.body.innerText.includes('Rust masking verified'));
+  await assertRunReason(page, 'Check target empty below first; preflight reads metadata and at most one row per selected table, and never writes');
+  if (!afterReload) {
+    await click(page, 'Verify Rust masking');
+    await page.waitForFunction(() => document.body.innerText.includes('Rust masking verified'));
+  }
   await click(page, 'Check target empty');
   await page.waitForFunction(() => document.body.innerText.includes('Target preflight passed: 6 selected tables are empty'));
+  if (await page.getByRole('button', { name: 'Run Refresh', exact: true }).getAttribute('aria-disabled') === 'true') throw new Error('Run Refresh stayed unavailable after every required proof');
   await click(page, 'Run Refresh');
   await page.waitForFunction(() => document.body.innerText.includes('Verification verified'));
   const text = await page.locator('.proc-panel:visible').innerText();
-  for (const expected of ['13 committed', '6/6 exact table counts', '3/3 FK checks', '0 unverified columns', 'Copy and all count, FK and comparable-content checks passed']) {
+  for (const expected of ['13 committed', '6/6 exact table counts', '3/3 FK checks', '0 unverified columns', 'Copy and all count, FK and comparable-content checks passed', 'ETA 0 s (completed)']) {
     if (!text.includes(expected)) throw new Error(`missing final evidence ${expected}: ${text}`);
   }
+  await assertRunReason(page, 'Re-run Check target empty below before starting another Refresh; the previous run already used this preflight');
   const executions = await page.evaluate(() => window.__CALLS__.filter(call => call.cmd === 'refresh_execute').length);
   if (executions !== 1) throw new Error(`expected one explicit Refresh execution, got ${executions}`);
+  const maskSamples = await page.evaluate(() => window.__CALLS__.filter(call => call.cmd === 'refresh_mask_apply').length);
+  if (maskSamples !== (afterReload ? 0 : 1)) throw new Error(`optional masking sample count was ${maskSamples} afterReload=${afterReload}`);
   if (captureStage) await captureStage('verified-top');
 }
 

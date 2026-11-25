@@ -459,6 +459,7 @@ async function readMysqlSnapshot(
   side: 'source' | 'target',
   runGrid: RefreshGridRunner,
   onLog: (message: string) => void,
+  connectionName?: string,
 ): Promise<SchemaSnapshot> {
   onLog(`Reading ${side} catalog schema ${schema}; metadata only, no table rows.`);
   const [defaults, tables, columns, indexes, foreignKeys] = await Promise.all([
@@ -468,7 +469,13 @@ async function readMysqlSnapshot(
     runGrid(sessionId, MYSQL_SNAPSHOT_SQL.indexes(schema)),
     runGrid(sessionId, MYSQL_SNAPSHOT_SQL.foreignKeys(schema)),
   ]);
-  if (!defaults || defaults.rows.length !== 1) throw new Error(`${side} schema ${schema} does not exist or is not visible`);
+  if (!defaults || defaults.rows.length !== 1) {
+    const connection = connectionName ? ` on ${side} connection ${connectionName}` : '';
+    const advice = side === 'target'
+      ? '; create the schema and matching empty tables first (Refresh does not create them)'
+      : '; check the source mapping and catalog privileges';
+    throw new Error(`${side} schema ${schema} does not exist or is not visible${connection}${advice}`);
+  }
   for (const [name, grid] of Object.entries({ tables, columns, indexes, foreignKeys })) {
     if (!grid) throw new Error(`${side} ${schema} ${name} catalog read failed or was denied`);
     if (grid.truncated) throw new Error(`${side} ${schema} ${name} catalog was truncated; compatibility cannot be proven`);
@@ -495,6 +502,7 @@ export async function readRefreshCatalogAnalysis(input: {
   spec: RefreshSpec;
   runGrid: RefreshGridRunner;
   onLog?: (message: string) => void;
+  connectionNames?: { source?: string; target?: string };
 }): Promise<RefreshCatalogAnalysis> {
   const spec = parseRefreshSpec(input.spec);
   if (!spec.source.sessionId || !spec.target.sessionId || spec.source.sessionId === spec.target.sessionId) {
@@ -504,8 +512,8 @@ export async function readRefreshCatalogAnalysis(input: {
   const source: SchemaSnapshot[] = [];
   const target: SchemaSnapshot[] = [];
   for (const mapping of spec.schemaMappings) {
-    source.push(await readMysqlSnapshot(spec.source.sessionId, mapping.source, 'source', input.runGrid, onLog));
-    target.push(await readMysqlSnapshot(spec.target.sessionId, mapping.target, 'target', input.runGrid, onLog));
+    source.push(await readMysqlSnapshot(spec.source.sessionId, mapping.source, 'source', input.runGrid, onLog, input.connectionNames?.source));
+    target.push(await readMysqlSnapshot(spec.target.sessionId, mapping.target, 'target', input.runGrid, onLog, input.connectionNames?.target));
   }
   return analyzeRefreshCatalog({ spec, source, target });
 }

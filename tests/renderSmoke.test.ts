@@ -70,6 +70,7 @@ const NAMED_MOUNTED = [
   'EnvironmentRefreshPanel_spec_journey',
   'EnvironmentRefreshPanel_catalog_journey',
   'EnvironmentRefreshPanel_catalog_blocked',
+  'EnvironmentRefreshPanel_schema_missing',
   'EnvironmentRefreshPanel_rust_mask_journey',
   'EnvironmentRefreshPanel_activity_survives_close',
   'QueryTabs_refresh_generate_handoff',

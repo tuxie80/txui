@@ -481,6 +481,7 @@ export function namedTargets(fixtures) {
           });
         }
         await click('Reconfirm source and target');
+        container.__afterReconfirm = container.textContent;
         await click('Export JSON');
         await click('Export report .md');
       },
@@ -488,6 +489,11 @@ export function namedTargets(fixtures) {
         if (!calls.some(call => call.cmd === 'refresh_spec_load')) return 'specification was not loaded';
         if (!calls.some(call => call.cmd === 'refresh_spec_save')) return 'specification was not saved atomically';
         if (!html.includes('Endpoints reconfirmed')) return 'endpoint reconfirmation was not visible';
+        for (const section of ['1. Setup', '2. Tables & masks', '3. Review & run', 'Independent table policies', 'Mask rules', 'Required proofs and final action']) {
+          if (!container.__afterReconfirm.includes(section)) return `one-window section is not mounted: ${section}`;
+        }
+        if (!container.__afterReconfirm.includes('Analyze catalogs in Setup first')) return 'Run does not name catalog analysis as the actual next action';
+        if (container.__afterReconfirm.includes('Run target-empty preflight first')) return 'Run still hides its real prerequisite behind the generic preflight message';
         const saved = calls.find(call => call.cmd === 'refresh_spec_save');
         for (const needle of ['"sessionId": "s-source"', '"sessionId": "s-target"', '"seed": "imported-seed"']) {
           if (!saved.args.contents.includes(needle)) return `exported specification lacks ${needle}: ${container.__afterImport}`;
@@ -819,6 +825,7 @@ export function namedTargets(fixtures) {
     ...[
       { name: 'EnvironmentRefreshPanel_catalog_journey', missingTarget: false },
       { name: 'EnvironmentRefreshPanel_catalog_blocked', missingTarget: true },
+      { name: 'EnvironmentRefreshPanel_schema_missing', missingSchema: true },
       { name: 'EnvironmentRefreshPanel_rust_mask_journey', rustMask: true },
       { name: 'EnvironmentRefreshPanel_activity_survives_close', rustMask: true, activity: true },
     ].map(testCase => ({
@@ -829,7 +836,7 @@ export function namedTargets(fixtures) {
           const names = [...(testCase.rustMask ? ['customers'] : []), 'countries', 'orders', 'events'].filter(name => !(target && testCase.missingTarget && name === 'events'));
           if (sql.includes('information_schema.SCHEMATA')) return fixtures.queryResult(
             ['server_charset', 'server_collation', 'server_version', 'schema_charset', 'schema_collation'],
-            [['utf8mb4', 'utf8mb4_0900_ai_ci', '8.4.0', 'utf8mb4', 'utf8mb4_0900_ai_ci']]);
+            target && testCase.missingSchema ? [] : [['utf8mb4', 'utf8mb4_0900_ai_ci', '8.4.0', 'utf8mb4', 'utf8mb4_0900_ai_ci']]);
           if (sql.includes('mysql.innodb_table_stats')) return fixtures.queryResult(
             ['table_name', 'n_rows', 'data_bytes', 'index_bytes', 'last_update'],
             names.map(name => [name, 0, 0, 0, null]));
@@ -910,7 +917,11 @@ export function namedTargets(fixtures) {
         };
         await click('Reconfirm source and target');
         await click('Analyze catalogs');
-        if (!testCase.missingTarget) await click('Plan row sets');
+        container.__afterCatalog = container.textContent;
+        if (!testCase.missingTarget && !testCase.missingSchema) {
+          await click('Plan row sets');
+          container.__afterRowSets = container.textContent;
+        }
         if (testCase.rustMask) {
           await click('Verify Rust masking');
           await click('Check target empty');
@@ -921,11 +932,14 @@ export function namedTargets(fixtures) {
           }
         }
       },
-      assert: ({ html, calls }) => {
+      assert: ({ html, calls, container }) => {
         const queries = calls.filter(call => call.cmd === 'monitor_query');
-        const expectedQueries = testCase.missingTarget ? 12 : testCase.rustMask ? 18 : 15;
+        const expectedQueries = testCase.missingSchema ? 11 : testCase.missingTarget ? 12 : testCase.rustMask ? 18 : 15;
         if (queries.length !== expectedQueries) return `expected ${expectedQueries} catalog/key reads, got ${queries.length}`;
         if (queries.slice(0, 12).some(call => !/information_schema|innodb_table_stats/.test(call.args.sql))) return 'catalog analysis read application rows';
+        if (!testCase.missingTarget && !testCase.missingSchema && !container.__afterCatalog.includes('Plan row sets below first')) return 'Run does not name row-set planning after catalog analysis';
+        if (testCase.rustMask && !container.__afterRowSets.includes('Check target empty below first')) return 'Run does not name target-empty preflight after row-set planning';
+        if (!testCase.activity && !html.includes('The Rust masking sample is optional')) return 'optional masking sample is still presented as a required proof';
         if (testCase.activity) {
           const executeCall = calls.find(call => call.cmd === 'refresh_execute');
           if (!executeCall) return 'Refresh executor was not invoked before close';
@@ -936,7 +950,12 @@ export function namedTargets(fixtures) {
           if (JSON.stringify(executeCall.args).includes('private-row')) return 'activity payload contains a planted row value';
           return undefined;
         }
-        if (testCase.missingTarget) {
+        if (testCase.missingSchema) {
+          if (!html.includes('target schema shop does not exist or is not visible on target connection target fixture')) return 'missing target schema does not name the selected target connection';
+          if (!html.includes('create the schema and matching empty tables first')) return 'missing target schema does not explain the required setup';
+          if (!html.includes('Target requirement:')) return 'target schema/table requirement is not visible before analysis';
+          if (html.includes('Catalog compatibility proven')) return 'missing target schema produced a success badge';
+        } else if (testCase.missingTarget) {
           if (!html.includes('Catalog compatibility is blocked')) return 'missing target did not block analysis';
           if (!html.includes('target table shop.events does not exist')) return 'missing target table was not named';
           if (html.includes('Catalog compatibility proven')) return 'missing target produced a success badge';
@@ -1111,6 +1130,10 @@ export function namedTargets(fixtures) {
           connectionId: 'c-migration', sessionId: 's-migration', connectionName: 'migration fixture',
           engine: 'mysql', environment: 'dev', readOnly: false,
         },
+        openSessions: [{
+          connectionId: 'c-migration', sessionId: 's-migration', connectionName: 'migration fixture',
+          engine: 'mysql', environment: 'dev', readOnly: false,
+        }],
         schema: 'shop', initialSql: 'CREATE TABLE orders(id int PRIMARY KEY);',
         initialOrigin: testCase.queryLabTampered ? 'query-lab' : 'editor',
         initialEvidence: testCase.queryLabTampered ? {

@@ -230,6 +230,8 @@ async function review(page) {
 
 async function lifecycle(page, stopBeforeVerify = false, captureStage = null) {
   await review(page);
+  await page.locator('button:visible', { hasText: 'Continue to Rehearsal' }).waitFor();
+  await page.locator('button:visible', { hasText: 'Continue to Rehearsal' }).click();
   if (captureStage) await captureStage('rehearsal');
   await page.locator('button:visible', { hasText: 'Create scratch' }).click();
   await page.locator('button:visible', { hasText: 'Clone before-state' }).waitFor();

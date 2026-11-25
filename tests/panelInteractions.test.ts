@@ -22,6 +22,8 @@ test('panel interaction sweep discovers every menu panel on all fixture engines'
 
 test('panel interactions cover enabled controls with mocked I/O and observable effects', () => {
   assert.match(harness, /button, input, select, textarea, \[role="button"\]/);
+  assert.match(harness, /return !element\.closest\('details:not\(\[open\]\)'\)/);
+  assert.match(harness, /return !candidate\.closest\('details:not\(\[open\]\)'\)/);
   for (const guard of ['!element.disabled', "aria-disabled", '!element.readOnly', "!element.closest('.unavail')"]) {
     assert.ok(harness.includes(guard), `missing enabled-control guard: ${guard}`);
   }

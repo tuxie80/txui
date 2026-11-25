@@ -234,3 +234,27 @@ test('denied, missing and truncated core catalogs cannot become proof', async ()
     },
   }), /target schema target does not exist or is not visible/);
 });
+
+
+test('same-name nyc_taxi mapping reads galera1 as source and mariadb118 as target', async () => {
+  const value = spec();
+  value.schemaMappings = [{ source: 'nyc_taxi', target: 'nyc_taxi' }];
+  value.tables = [{ table: 'items', policy: 'full' }];
+  const calls: { sessionId: string; sql: string }[] = [];
+  await assert.rejects(() => readRefreshCatalogAnalysis({
+    spec: value,
+    connectionNames: { source: 'galera1', target: 'mariadb118' },
+    runGrid: async (sessionId, sql) => {
+      calls.push({ sessionId, sql });
+      const grid = catalogGrid(sql, sessionId === 'source-session' ? 'source' : 'target');
+      return sessionId === 'target-session' && sql.includes('information_schema.SCHEMATA')
+        ? { ...grid, rows: [] }
+        : grid;
+    },
+  }), /target schema nyc_taxi does not exist or is not visible on target connection mariadb118; create the schema and matching empty tables first/);
+  const sourceDefaults = calls.find(call => call.sessionId === 'source-session' && call.sql.includes('information_schema.SCHEMATA'));
+  const targetDefaults = calls.find(call => call.sessionId === 'target-session' && call.sql.includes('information_schema.SCHEMATA'));
+  assert.ok(sourceDefaults?.sql.includes("SCHEMA_NAME = 'nyc_taxi'"));
+  assert.ok(targetDefaults?.sql.includes("SCHEMA_NAME = 'nyc_taxi'"));
+  assert.ok(calls.indexOf(sourceDefaults!) < calls.indexOf(targetDefaults!));
+});

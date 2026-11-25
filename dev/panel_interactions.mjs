@@ -51,7 +51,8 @@ async function controls(page, rootSelector) {
     const visible = element => {
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      return !element.closest('details:not([open])')
+        && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     };
     const controls = [...root.querySelectorAll('button, input, select, textarea, [role="button"]')]
       .filter(element => visible(element)
@@ -118,7 +119,8 @@ async function exerciseControl(page, engine, _group, label, control, rootSelecto
     const visible = candidate => {
       const style = getComputedStyle(candidate);
       const rect = candidate.getBoundingClientRect();
-      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      return !candidate.closest('details:not([open])')
+        && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     };
     const eligible = [...element.querySelectorAll('button, input, select, textarea, [role="button"]')]
       .filter(candidate => visible(candidate)

@@ -64,10 +64,13 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   const [error, setError] = useState<string | null>(null);
   const reviewRunRef = useRef(0);
   const eligible = openSessions.filter(candidate =>
-    candidate.engine === session.engine && !candidate.readOnly && candidate.environment !== 'prod');
+    candidate.engine === session.engine
+    && candidate.connectionId === session.connectionId
+    && !candidate.readOnly
+    && candidate.environment !== 'prod');
   const [rehearsalSessionId, setRehearsalSessionId] = useState(
     eligible.some(candidate => candidate.sessionId === session.sessionId)
-      ? session.sessionId : eligible[0]?.sessionId ?? session.sessionId);
+      ? session.sessionId : eligible[0]?.sessionId ?? '');
   const [scratchRecords, setScratchRecords] = useState<MigrationScratchRecord[]>([]);
   const [creating, setCreating] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -107,12 +110,19 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
   useEffect(() => { void refreshScratch(); }, [refreshScratch]);
 
   useEffect(() => {
+    if (eligible.length === 0) {
+      if (rehearsalSessionId !== '') setRehearsalSessionId('');
+    } else if (!eligible.some(candidate => candidate.sessionId === rehearsalSessionId)) {
+      setRehearsalSessionId(eligible.some(candidate => candidate.sessionId === session.sessionId)
+        ? session.sessionId : eligible[0].sessionId);
+    }
+  }, [eligible, rehearsalSessionId, session.sessionId]);
+
+  useEffect(() => {
     if (draft && ['rehearsed', 'ready', 'deploying', 'verifying', 'done'].includes(draft.phase)) {
       setWorkspace('deploy');
-    } else if (draft?.phase === 'reviewed' && preflight && !preflightError) {
-      setWorkspace('rehearsal');
     }
-  }, [draft, preflight, preflightError]);
+  }, [draft]);
 
   const scratchBlocked = handoffEvidenceError ?? (creating ? 'Scratch creation is already running.'
     : !result || !draft ? 'Review a migration before creating rehearsal scratch.'
@@ -120,7 +130,7 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
     : (result.review.summary.unsupported > 0) ? 'Unsupported migration statements block rehearsal.'
     : preflightError ? 'Backend preflight must pass before rehearsal.'
     : !preflight ? 'Run backend preflight before rehearsal.'
-    : eligible.length === 0 ? 'Open a writable, non-production rehearsal session of the same engine.'
+    : eligible.length === 0 ? 'Open a writable, non-production rehearsal session on the same connection.'
     : null);
 
   const createScratch = useCallback(async () => {
@@ -580,6 +590,18 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
 
   const summary = result?.review.summary;
   const findings = result?.review.findings ?? [];
+  const reviewBlockReason = running ? 'Migration review is already running'
+    : !sql.trim() ? 'Paste or enter migration SQL first' : null;
+  const rehearsalTabReason = !draft ? 'Review a migration first to unlock Rehearsal' : null;
+  const deployTabReason = !draft ? 'Review and rehearse a migration first'
+    : !['rehearsed', 'ready', 'deploying', 'verifying', 'done'].includes(draft.phase)
+      ? 'Complete rehearsal and final-object comparison first to unlock Deploy & verify' : null;
+  const exportReportReason = !draft ? 'Review a migration first before exporting a report' : null;
+  const prepareDeployReason = !schema?.trim() ? 'Select a target database/schema first'
+    : preflightError ? 'Backend preflight must pass before deployment'
+    : !preflight ? 'Run backend preflight before deployment' : null;
+  const deploymentStarted = Boolean(deploymentResult || deploying
+    || ['deploying', 'verifying', 'done', 'failed', 'cancelled'].includes(draft?.phase ?? ''));
   return (
     <div className="proc-panel op-panel op-migration">
       <div className="proc-toolbar">
@@ -587,20 +609,34 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
         <span className="dv-desc">{session.connectionName}</span>
         <span className="dv-desc">Phase: {draft?.phase ?? 'draft'}</span>
         <div className="op-steps" aria-label="Migration workflow">
-          {(['review', 'rehearsal', 'deploy'] as const).map((step, index) => (
-            <button
-              key={step}
-              className={workspace === step ? 'active' : ''}
-              disabled={step === 'rehearsal' ? !draft : step === 'deploy' ? !draft || !['rehearsed', 'ready', 'deploying', 'verifying', 'done'].includes(draft.phase) : false}
-              onClick={() => setWorkspace(step)}
-            >
-              {index + 1}. {step === 'deploy' ? 'Deploy & verify' : step[0].toUpperCase() + step.slice(1)}
-            </button>
-          ))}
+          {(['review', 'rehearsal', 'deploy'] as const).map((step, index) => {
+            const stepReason = step === 'rehearsal' ? rehearsalTabReason : step === 'deploy' ? deployTabReason : null;
+            return (
+              <button
+                key={step}
+                className={`${workspace === step ? 'active' : ''}${stepReason ? ' unavail' : ''}`.trim()}
+                aria-disabled={stepReason ? true : undefined}
+                data-tip={stepReason ?? undefined}
+                title={stepReason ?? undefined}
+                onClick={() => { if (!stepReason) setWorkspace(step); }}
+              >
+                {index + 1}. {step === 'deploy' ? 'Deploy & verify' : step[0].toUpperCase() + step.slice(1)}
+              </button>
+            );
+          })}
         </div>
-        <div style={{ flex: 1 }} />
-        <button className="toolbar-btn" disabled={!draft} title="Export a deterministic report with incomplete evidence and no credentials or row data" onClick={() => void exportReport()}>Export report .md</button>
-        <button className="icon-btn" onClick={onClose} title="Close">×</button>
+        <div className="op-toolbar-actions">
+          <button
+            className={`toolbar-btn${exportReportReason ? ' unavail' : ''}`}
+            aria-disabled={exportReportReason ? true : undefined}
+            data-tip={exportReportReason ?? 'Export a deterministic report with incomplete evidence and no credentials or row data'}
+            title={exportReportReason ?? 'Export a deterministic report with incomplete evidence and no credentials or row data'}
+            onClick={() => { if (!exportReportReason) void exportReport(); }}
+          >
+            Export report .md
+          </button>
+          <button className="icon-btn" onClick={onClose} title="Close">×</button>
+        </div>
       </div>
       <div className="dg-body">
         {unavailable ? (
@@ -649,7 +685,13 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                     spellCheck={false}
                   />
                 </label>
-                <button className="primary" disabled={running || !sql.trim()} onClick={() => void review()}>
+                <button
+                  className={`primary${reviewBlockReason ? ' unavail' : ''}`}
+                  aria-disabled={reviewBlockReason ? true : undefined}
+                  data-tip={reviewBlockReason ?? 'Analyze migration SQL against the live catalog without executing statements'}
+                  title={reviewBlockReason ?? 'Analyze migration SQL against the live catalog without executing statements'}
+                  onClick={() => { if (!reviewBlockReason) void review(); }}
+                >
                   {running ? 'Reviewing…' : '▶ Review migration'}
                 </button>
                 {error && <div className="proc-error-bar">{error}</div>}
@@ -679,7 +721,13 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                   </select>
                 </label>
                 <div className="row-actions">
-                  <button className="primary" disabled={!!scratchBlocked} title={scratchBlocked ?? 'Create isolated rehearsal scratch'} onClick={() => void createScratch()}>
+                  <button
+                    className={`primary${scratchBlocked ? ' unavail' : ''}`}
+                    aria-disabled={scratchBlocked ? true : undefined}
+                    data-tip={scratchBlocked ?? 'Create isolated rehearsal scratch'}
+                    title={scratchBlocked ?? 'Create isolated rehearsal scratch'}
+                    onClick={() => { if (!scratchBlocked) void createScratch(); }}
+                  >
                     {creating ? 'Creating…' : '+ Create scratch'}
                   </button>
                   {creating && <button className="cancel-btn" onClick={() => {
@@ -694,19 +742,33 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                 {scratchRecords.length > 0 && (
                   <div className="mnt-results">
                     <h4>Scratch requiring cleanup</h4>
-                    {scratchRecords.map(record => (
+                    {scratchRecords.map(record => {
+                      const cloneBlockedReason = cloning !== null ? 'A scratch clone is already running'
+                        : executing !== null ? 'Wait for rehearsal execution to finish'
+                        : cleaning !== null ? 'Wait for scratch cleanup to finish'
+                        : scratchBlocked ?? (record.connection_id !== session.connectionId
+                          ? 'The initial native clone requires the source and scratch on the same connection' : null);
+                      const executeBlockedReason = executing !== null ? 'Rehearsal execution is already running'
+                        : cleaning !== null ? 'Wait for scratch cleanup to finish'
+                        : cloning !== null ? 'Wait for cloning to finish'
+                        : scratchBlocked ?? (cloneResults[record.run_key]?.statements_executed !== cloneResults[record.run_key]?.total_statements
+                          ? 'Complete cloning before executing migration statements' : null);
+                      const dropBlockedReason = cleaning !== null ? 'Scratch cleanup is already running'
+                        : cloning !== null || executing !== null || verifying !== null || deploying ? 'Wait for the active migration operation to finish'
+                        : (draft?.rehearsalProof?.scratch.runKey === record.run_key && ['rehearsed', 'ready'].includes(draft.phase))
+                          ? 'Keep the completed rehearsal record until deployment finishes; it authorizes the exact source/hash binding' : null;
+                      return (
                       <div key={record.run_key} className="sqp-finding">
                         <div className="sqp-f-title"><b>{record.name}</b> · {record.status}</div>
                         <div className="sqp-f-detail">{record.engine} · session {record.session_id}</div>
                         {record.error && <div className="sqp-f-detail">{record.error}</div>}
                         {record.status === 'active' && !cloneResults[record.run_key] && (
                           <button
-                            className="toolbar-btn"
-                            disabled={cloning !== null || executing !== null || cleaning !== null || !!scratchBlocked || record.connection_id !== session.connectionId}
-                            title={record.connection_id !== session.connectionId
-                              ? 'The initial native clone requires the source and scratch on the same connection'
-                              : 'Clone catalog structure and foreign keys; do not execute migration SQL'}
-                            onClick={() => void cloneScratch(record)}
+                            className={`toolbar-btn${cloneBlockedReason ? ' unavail' : ''}`}
+                            aria-disabled={cloneBlockedReason ? true : undefined}
+                            data-tip={cloneBlockedReason ?? 'Clone catalog structure and foreign keys; do not execute migration SQL'}
+                            title={cloneBlockedReason ?? 'Clone catalog structure and foreign keys; do not execute migration SQL'}
+                            onClick={() => { if (!cloneBlockedReason) void cloneScratch(record); }}
                           >
                             {cloning === record.run_key ? 'Cloning…' : 'Clone before-state'}
                           </button>
@@ -721,11 +783,11 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                         )}
                         {record.status === 'active' && cloneResults[record.run_key] && !executionResults[record.run_key] && (
                           <button
-                            className="primary"
-                            disabled={executing !== null || cleaning !== null || cloning !== null || !!scratchBlocked
-                              || cloneResults[record.run_key].statements_executed !== cloneResults[record.run_key].total_statements}
-                            title="Execute the exact reviewed SQL hash once on one pinned scratch connection"
-                            onClick={() => void executeScratch(record)}
+                            className={`primary${executeBlockedReason ? ' unavail' : ''}`}
+                            aria-disabled={executeBlockedReason ? true : undefined}
+                            data-tip={executeBlockedReason ?? 'Execute the exact reviewed SQL hash once on one pinned scratch connection'}
+                            title={executeBlockedReason ?? 'Execute the exact reviewed SQL hash once on one pinned scratch connection'}
+                            onClick={() => { if (!executeBlockedReason) void executeScratch(record); }}
                           >
                             {executing === record.run_key ? 'Executing…' : '▶ Execute migration in scratch'}
                           </button>
@@ -761,18 +823,17 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                           </div>
                         )}
                         <button
-                          className="toolbar-btn"
-                          disabled={cleaning !== null || cloning !== null || executing !== null || verifying !== null || deploying
-                            || (draft?.rehearsalProof?.scratch.runKey === record.run_key && ['rehearsed', 'ready'].includes(draft.phase))}
-                          title={draft?.rehearsalProof?.scratch.runKey === record.run_key && ['rehearsed', 'ready'].includes(draft.phase)
-                            ? 'Keep the completed rehearsal record until deployment finishes; it authorizes the exact source/hash binding'
-                            : 'Drop this generated scratch object'}
-                          onClick={() => void cleanupScratch(record.run_key)}
+                          className={`toolbar-btn${dropBlockedReason ? ' unavail' : ''}`}
+                          aria-disabled={dropBlockedReason ? true : undefined}
+                          data-tip={dropBlockedReason ?? 'Drop this generated scratch object'}
+                          title={dropBlockedReason ?? 'Drop this generated scratch object'}
+                          onClick={() => { if (!dropBlockedReason) void cleanupScratch(record.run_key); }}
                         >
                           {cleaning === record.run_key ? 'Dropping…' : 'Drop scratch'}
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </section>
@@ -780,7 +841,13 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                 <h3>Target deployment</h3>
                 <p className="dv-desc">Runs the original statements sequentially on one dedicated target connection after a complete Rust preflight. Each statement commits independently; failure or cancellation never implies rollback.</p>
                 {draft && ['rehearsed', 'ready'].includes(draft.phase) && !confirmDeployment && !deploying && (
-                  <button className="primary" disabled={!schema?.trim() || !!preflightError || !preflight} onClick={() => setConfirmDeployment(true)}>
+                  <button
+                    className={`primary${prepareDeployReason ? ' unavail' : ''}`}
+                    aria-disabled={prepareDeployReason ? true : undefined}
+                    data-tip={prepareDeployReason ?? 'Review exact deployment target and confirm before executing'}
+                    title={prepareDeployReason ?? 'Review exact deployment target and confirm before executing'}
+                    onClick={() => { if (!prepareDeployReason) setConfirmDeployment(true); }}
+                  >
                     Prepare target deployment
                   </button>
                 )}
@@ -864,7 +931,7 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                       <h3>Backend preflight</h3>
                       <div className="mnt-bulk-cost c-metadata">
                         <StatusIcon kind="ok" />
-                        <span>SQL hash verified · stop on first error · no deployment has run</span>
+                        <span>SQL hash verified · stop on first error · {deploymentStarted ? 'deployment started' : 'no deployment has run'}</span>
                       </div>
                       <div className="sqp-f-detail">
                         {preflight.statement_count} statements · {preflight.affected_objects.length} affected objects · {preflight.destructive} destructive · {preflight.lossy} lossy · {preflight.implicit_commits} implicit commits
@@ -873,6 +940,11 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
                         Environment: {preflight.environment ?? 'unspecified'} · read-only: {preflight.read_only ? 'yes' : 'no'} · prod DDL opt-in: {preflight.prod_allow_ddl ? 'yes' : 'no'} · unfiltered-write opt-in: {preflight.prod_allow_unfiltered_write ? 'yes' : 'no'}
                       </div>
                       <div className="sqp-f-detail">Affected objects, in ordered migration sequence: {preflight.affected_objects.join(', ') || 'none named'}</div>
+                      {workspace === 'review' && draft?.phase === 'reviewed' && !preflightError && (
+                        <div className="row-actions">
+                          <button className="primary" onClick={() => setWorkspace('rehearsal')}>Continue to Rehearsal →</button>
+                        </div>
+                      )}
                     </section>
                   )}
                   {(summary.unsupported > 0 || !result.catalogComplete) && (

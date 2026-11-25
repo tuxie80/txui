@@ -102,10 +102,18 @@ async function runFlow(page, theme, errors) {
   await captureStage(page, theme, 'candidates', errors);
   await click(page, 'Validate experiment');
   await captureStage(page, theme, 'run-proof', errors);
+  const gap = await page.evaluate(() => {
+    const a = [...document.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Capture baseline')?.getBoundingClientRect();
+    const b = [...document.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Check rewrite results')?.getBoundingClientRect();
+    return a && b ? b.left - a.right : -1;
+  });
+  if (gap < 6) throw new Error(`Query Lab run buttons lack horizontal spacing: gap=${gap}`);
   await click(page, 'Check rewrite results');
   await page.locator('section[aria-label="Rewrite correctness evidence"]').waitFor();
   await click(page, 'Benchmark rewrite');
   await page.locator('section[aria-label="Benchmark timing evidence"]').waitFor();
+  const benchText = await page.locator('section[aria-label="Benchmark timing evidence"]').innerText();
+  if (!benchText.includes('(15.4%)') || benchText.includes('15.384615')) throw new Error(`Benchmark percentage not cleanly formatted: ${benchText}`);
   await click(page, 'Export report .md');
   await page.waitForFunction(() => document.body.innerText.includes('Report saved to /mock/query-lab-report.md'));
   const calls = await page.evaluate(() => window.__CALLS__);
