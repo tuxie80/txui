@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxUI Help · v1.5.3</title>
+<title>TxUI Help · v1.6.0</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>/* TxUI Help — dark-first, light-aware, red accent. */
 :root{
@@ -218,7 +218,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </head>
 <body class="show-mac">
 <header class="topbar">
-  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.5.3</span></div>
+  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.6.0</span></div>
   <div class="top-actions">
     <input id="globalSearch" class="global-search" placeholder="Search the docs…" oninput="globalSearch(this.value)" autocomplete="off">
     <div class="seg" id="osToggle">
@@ -231,13 +231,13 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="layout">
   <nav class="sidenav">
     <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-ai-assistant">AI assistant</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li><li><a href="#guide-txshell">TxShell</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
-    <div class="nav-foot">Generated from source<br>at v1.5.3 · macOS screenshots</div>
+    <div class="nav-foot">Generated from source<br>at v1.6.0 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
     
 <section id="overview" class="doc-section">
-  <h1 id="txui-v1-5-3">TxUI <span class="ver">v1.5.3</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 41 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.5.3.</p>
+  <h1 id="txui-v1-6-0">TxUI <span class="ver">v1.6.0</span></h1>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 41 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.6.0.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
     <div class="card"><div class="big">41</div><div>tool panels</div></div>
@@ -255,7 +255,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="engines" class="doc-section">
   <h1 id="engine-support-matrix">Engine support matrix</h1>
-  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.5.3). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
+  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.6.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
   <div class="toolbar">
     <input id="engFilter" class="filter" placeholder="Filter capabilities…" oninput="filterTable('engFilter','engTable')">
   </div>
@@ -1149,11 +1149,11 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <p><b>Safety and limits:</b></p>
 <ul><li>READONLY is enforced by TxUI&#39;s application and driver pre-execution guards; it is not claimed as server-side authorization.</li><li>Quack-over-SSH is refused because discovered remote addresses would bypass a single tunnel.</li><li>Processlist/kill, replication, Playground, dump/restore and Tuner are unavailable.</li><li>Use SQL (<code>COPY … FROM</code> or <code>read_csv()</code>) instead of the CSV import wizard.</li><li>Table designer, view editor and the default-database picker are unavailable.</li></ul>
 <h3 id="cve-2026-111497-broccoli2shell">CVE-2026-111497 / Broccoli2Shell</h3>
-<p><b>Released TxUI 1.5.3 and earlier binaries remain affected through DuckDB&#39;s Brotli decoder. Current source builds contain the fix.</b> A malicious Brotli-compressed Parquet file opened through DuckDB or a Parquet dataset could crash an affected TxUI release, corrupt memory, or potentially execute code with the user&#39;s permissions.</p>
-<p>Current source vendors <code>libduckdb-sys</code> 1.20000.1 with upstream DuckDB PR #27791 applied to the native decoder and statically links Parquet, ensuring that the patched implementation is used without downloading an extension. Tests verify the <code>BLOCK_SWITCH</code> fix, static Parquet linkage and a valid Brotli-compressed Parquet round trip.</p>
+<p><b>Fixed in TxUI 1.6.0. Released TxUI 1.5.3 and earlier binaries remain affected through DuckDB&#39;s Brotli decoder.</b> A malicious Brotli-compressed Parquet file opened through DuckDB or a Parquet dataset could crash an affected TxUI release, corrupt memory, or potentially execute code with the user&#39;s permissions.</p>
+<p>TxUI 1.6.0 vendors <code>libduckdb-sys</code> 1.20000.1 with upstream DuckDB PR #27791 applied to the native decoder and statically links Parquet, ensuring that the patched implementation is used without downloading an extension. Tests verify the <code>BLOCK_SWITCH</code> fix, static Parquet linkage and a valid Brotli-compressed Parquet round trip.</p>
 <p>Direct single-file Parquet inspection uses the safe Rust decoder and was never affected by this CVE. Ordinary database connections and TxUI&#39;s Rust HTTP clients do not expose this decoder.</p>
 <h4 id="recommended-actions">Recommended actions</h4>
-<ol><li><b>Use a rebuilt TxUI release containing this fix.</b> With 1.5.3 or earlier, do not open untrusted Brotli-compressed Parquet files through DuckDB or Parquet datasets; re-encode them using a patched tool to Snappy or Zstandard.</li><li><b>Rebuilding is mandatory.</b> The upstream merge alone does not repair existing TxUI binaries, and updating macOS, Homebrew or the system Brotli library cannot repair the bundled copy.</li><li><b>Development machines should separately upgrade vulnerable runtimes:</b> Node.js 24.22.1 or 26.12.1 and Brotli 1.2.1. These upgrades protect local tooling but do not repair shipped TxUI 1.5.3 binaries.</li></ol>
+<ol><li><b>Upgrade to TxUI 1.6.0 or later.</b> With 1.5.3 or earlier, do not open untrusted Brotli-compressed Parquet files through DuckDB or Parquet datasets; re-encode them using a patched tool to Snappy or Zstandard.</li><li><b>Updating the app binary is mandatory.</b> Updating macOS, Homebrew or the system Brotli library cannot repair older TxUI binaries that bundle the unpatched decoder.</li><li><b>Development machines should separately upgrade vulnerable runtimes:</b> Node.js 24.22.1 or 26.12.1 and Brotli 1.2.1.</li></ol>
 <p>Details: <a href="https://broccoli2shell.com">Broccoli2Shell advisory</a> · <a href="https://github.com/duckdb/duckdb/pull/27791">DuckDB PR #27791</a> · <a href="https://github.com/google/brotli/commit/0ed4268">upstream Brotli fix</a>.</p>
 <h3 id="parquet-a-deep-read-only-inspector">Parquet — a deep read-only inspector</h3>
 <figure><a class="shot-link" href="user-guide/screenshots/dark/51-parquet.png" target="_blank" rel="noopener" title="Open the full-size screenshot in a new tab"><img src="user-guide/screenshots/dark/51-parquet.png" data-dark-src="user-guide/screenshots/dark/51-parquet.png" data-light-src="user-guide/screenshots/light/51-parquet.png" alt="Parquet inspector" loading="lazy"></a><figcaption>Parquet inspector</figcaption></figure>
@@ -1230,7 +1230,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="shortcuts" class="doc-section">
   <h1 id="keyboard-shortcuts">Keyboard shortcuts</h1>
-  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.5.3). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
+  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.6.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
   <div class="toolbar"><input id="scFilter" class="filter" placeholder="Filter shortcuts by action or key…" oninput="filterTable('scFilter','scTable')"></div>
   <table class="ref" id="scTable">
     <thead><tr><th>Command</th><th>Category</th><th>Shortcut</th><th>What it does</th></tr></thead>
@@ -2590,7 +2590,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.5.3 · 41 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.6.0 · 41 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

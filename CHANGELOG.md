@@ -3,7 +3,7 @@
 All notable changes to TxUI. Format: [Keep a Changelog](https://keepachangelog.com);
 this project follows semantic versioning.
 
-## [Unreleased]
+## [1.6.0] - 2026-11-25
 
 ### Added
 
@@ -36,11 +36,17 @@ this project follows semantic versioning.
 
 - **One-command Safe Operations live verification** — `dev/safe_operations_live.sh` runs all 52 Migration Cockpit, Environment Refresh and Query Optimization Lab dbctl tests on tiny auto-destroyed MySQL 8.4, MariaDB 11.8 and PostgreSQL 18 fixtures, including the complete HypoPG journey. Real SELECT-only roles now prove zero unintended writes and honest cleanup failures under database privilege denial. Serial fixture execution prevents interference, per-group and exact 52-test summaries expose failures, and a repository contract test prevents live tests from silently escaping the matrix. The packaged smoke also checks the exact result column and value returned through the real backend.
 
-- **Safe Operations workspaces are usable at real desktop sizes** — Migration Cockpit now guides Review → Rehearsal → Deploy & verify, Safe Environment Refresh uses Setup → Tables & masks → Review & run, and Query Optimization Lab uses Query → Candidates → Run & evidence. The three panels have real vertical scrolling, responsive one/two-column layouts, aligned full-size form controls, normally sized action buttons and collapsible raw evidence instead of unstructured walls of text. Stage changes preserve mounted form state and proof. Every stage is exercised in Ayu Dark/Light at 1600×1000 and 1100×760 with scrolling, overflow, control-size and screenshot checks; all 5,442 frontend tests and all 32 core Chromium journeys pass.
+- **Safe Operations workspaces are usable at real desktop sizes** — Migration Cockpit guides Review → Rehearsal → Deploy & verify, and Query Optimization Lab uses Query → Candidates → Run & evidence. Safe Environment Refresh now keeps Setup, Tables & masks and Review & run together in one scrolling window with independently collapsible sections; advanced limits, logs, JSON and proof details stay collapsed until needed. All three panels have responsive layouts, aligned full-size form controls and normally sized action buttons. Section changes preserve mounted form state and proof. Refresh is exercised in Ayu Dark/Light at 1600×1000 and 1100×760 with scrolling, overflow, control-size, collapse/reopen and screenshot checks.
 
 - **External Dump / Restore is temporarily hidden** — its sidebar button and command-palette action are commented out until that workflow is properly tested. The implementation remains available in the repository; new MySQL/MariaDB script restores use the native session plugin instead.
 
 ### Fixed
+
+- **Safe Operations workflow, editing and layout polish across Migration Cockpit, Environment Refresh and Query Lab** — shared `.op-panel` styles now reset inherited `.row-actions` padding/borders/backgrounds, align right-side toolbar actions and `×` cleanly at compact widths, and space stacked textarea labels cleanly on macOS, Windows and Linux. Migration Cockpit keeps Review findings visible until you click **Continue to Rehearsal**, restricts rehearsal sessions to the same connection required by native cloning, updates preflight status once deployment starts, and explains blocked controls with hoverable `.unavail` tooltips. Environment Refresh preserves input focus while editing table policies and mask rules, lets you edit multi-line schema mappings without fighting cursor resets, consumes target-empty preflight once a run starts, and reports `ETA 0 s (completed)` when finished. Query Optimization Lab adds explicit active-candidate selection so execution, reports and migration handoffs stay matched to the selected candidate, fixes parameter rename/add collisions, adds an explicit mode-evidence helper and local validation on entering Run & evidence, labels spec-only `setting` candidates honestly, separates proof action buttons, and formats percentage deltas cleanly. Verified with `renderSmoke.test.ts`, the MySQL/PostgreSQL panel interaction sweep, and Ayu Dark/Light Chromium harnesses at `1600×1000` and `1100×760`.
+
+- **Refresh names the actual next action** — Run Refresh no longer always says to run target-empty preflight when catalog analysis, row-set planning or mask safety is the real blocker. Unavailable workflow buttons remain hoverable and focusable with the same reason enforced by their handlers, preflight explains its read-only behavior, and the optional Rust masking sample is no longer presented as mandatory. Real Chromium checks every blocked state through a complete run plus disclosure state preservation and a clean browser console.
+
+- **Refresh identifies the actual missing target schema location** — catalog errors now name the selected source/target connection and explain that mapped schemas and matching empty tables must exist before Refresh; the Setup section states this before analysis. A same-name `nyc_taxi => nyc_taxi` regression proves that galera1 is read as source and mariadb118 as target without crossing sessions.
 
 - **PostgreSQL deadlock counters never render NaN** — malformed or non-numeric counter values now display an em dash instead of leaking `NaN` into React, for both live and stored snapshots. The Locks & Deadlocks Chromium sweep passes with a clean browser console.
 
@@ -50,7 +56,9 @@ this project follows semantic versioning.
 
 ### Security
 
-- **CVE-2026-111497 / Broccoli2Shell is fixed in current source builds** — `libduckdb-sys` 1.20000.1 is vendored with upstream DuckDB PR #27791 applied verbatim to its Brotli decoder, and DuckDB's Parquet extension is now statically linked so this patched decoder is the one used without an extension download. Regression coverage checks the patched source and native `BLOCK_SWITCH` path, proves Parquet is statically linked, and round-trips a real Brotli-compressed Parquet file. All three desktops compile the same vendored source; published TxUI 1.5.3 and earlier binaries remain affected until a rebuilt release replaces them.
+- **Rust dependency audit cleared across all lockfiles** — upgraded `cookie` `0.18.2` → `0.18.3` (`RUSTSEC-2026-0594`), `url` `2.5.8` → `2.5.9` (`RUSTSEC-2026-0592`), and `parquet`/`arrow-*` `60.1.0` → `60.2.0` (`RUSTSEC-2026-0595` / `CVE-2026-125651`, preserving one unified Arrow `60.2.0` tree with `duckdb 1.20000.1`) in `src-tauri`, and refreshed the vendored `libduckdb-sys` and `sqlx-sqlite` lockfiles (`rustls`, `rustls-webpki`, `webpki-roots`, `arrow*`, `rustix`, `libsqlite3-sys`, `url`, `event-listener`, `spin`). `cargo audit` now reports zero vulnerabilities across all three Rust lockfiles on macOS, Windows and Linux.
+
+- **CVE-2026-111497 / Broccoli2Shell is fixed in 1.6.0** — `libduckdb-sys` 1.20000.1 is vendored with upstream DuckDB PR #27791 applied verbatim to its Brotli decoder, and DuckDB's Parquet extension is statically linked so this patched decoder is always used without an extension download. Regression coverage checks the patched source and native `BLOCK_SWITCH` path, proves Parquet is statically linked, and round-trips a real Brotli-compressed Parquet file. All three desktops ship the patched binary; TxUI 1.5.3 and earlier binaries remain affected and should upgrade.
 
 ## [1.5.3] - 2026-11-04
 

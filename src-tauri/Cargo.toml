@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.5.3"
+version = "1.6.0"
 # One bin now (the mssql-spike probe was retired once the live tests covered it)
 default-run = "TxUI"
 description = "TxUI — fast native database GUI"
@@ -211,10 +211,10 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
 # Keep the app's Parquet stack on the same Arrow line duckdb-rs 1.20000 uses
 # internally, so Arrow arrays and schemas have one canonical version.
-parquet = { version = "=60.1.0", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "lz4", "flate2", "flate2-rust_backened"] }
-arrow-array = "=60.1.0"
-arrow-schema = "=60.1.0"
-arrow-cast = "=60.1.0"
+parquet = { version = "=60.2.0", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "lz4", "flate2", "flate2-rust_backened"] }
+arrow-array = "=60.2.0"
+arrow-schema = "=60.2.0"
+arrow-cast = "=60.2.0"
 argon2 = "0.5.3"
 zeroize = "1.8.2"
 rand = "0.9.5"

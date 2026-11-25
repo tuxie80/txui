@@ -1,12 +1,13 @@
 # TxUI
 
-![Version](https://img.shields.io/badge/version-1.5.3-blue)
+![Version](https://img.shields.io/badge/version-1.6.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey)
 ![Tauri](https://img.shields.io/badge/Tauri-2-ffc131?logo=tauri&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-1.97.1-orange?logo=rust&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)
 [![Built with Kimi](https://img.shields.io/badge/Built%20with-Kimi-1783FF?logo=data:image/svg+xml;base64,PHN2ZyBmaWxsPSJ3aGl0ZSIgZmlsbC1ydWxlPSJldmVub2RkIiBoZWlnaHQ9IjFlbSIgc3R5bGU9ImZsZXg6bm9uZTtsaW5lLWhlaWdodDoxIiB2aWV3Qm94PSIwIDAgMjQgMjQiIHdpZHRoPSIxZW0iIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHRpdGxlPktpbWk8L3RpdGxlPjxwYXRoIGQ9Ik0yMS44NDYgMGExLjkyMyAxLjkyMyAwIDExMCAzLjg0NkgyMC4xNWEuMjI2LjIyNiAwIDAxLS4yMjctLjIyNlYxLjkyM0MxOS45MjMuODYxIDIwLjc4NCAwIDIxLjg0NiAweiI+PC9wYXRoPjxwYXRoIGQ9Ik0xMS4wNjUgMTEuMTk5bDcuMjU3LTcuMmMuMTM3LS4xMzYuMDYtLjQxLS4xMTYtLjQxSDE0LjNhLjE2NC4xNjQgMCAwMC0uMTE3LjA1MWwtNy44MiA3Ljc1NmMtLjEyMi4xMi0uMzAyLjAxMy0uMzAyLS4xNzlWMy44MmMwLS4xMjctLjA4My0uMjMtLjE4NS0uMjNIMy4xODZjLS4xMDMgMC0uMTg2LjEwMy0uMTg2LjIzVjE5Ljc3YzAgLjEyOC4wODMuMjMuMTg2LjIzaDIuNjljLjEwMyAwIC4xODYtLjEwMi4xODYtLjIzdi0zLjI1YzAtLjA2OS4wMjUtLjEzNS4wNjktLjE3OGwyLjQyNC0yLjQwNmEuMTU4LjE1OCAwIDAxLjIwNS0uMDIzbDYuNDg0IDQuNzcyYTcuNjc3IDcuNjc3IDAgMDAzLjQ1MyAxLjI4M2MuMTA4LjAxMi4yLS4wOTUuMi0uMjN2LTMuMDZjMC0uMTE3LS4wNy0uMjEyLS4xNjQtLjIyN2E1LjAyOCA1LjAyOCAwIDAxLTIuMDI3LS44MDdsLTUuNjEzLTQuMDY0Yy0uMTE3LS4wNzgtLjEzMi0uMjc5LS4wMjgtLjM4MXoiPjwvcGF0aD48L3N2Zz4=)](https://www.kimi.com/)
+[![Built with Google Neon](https://img.shields.io/badge/Built%20with-Google%20Neon-4285F4?logo=googlegemini&logoColor=white)](https://gemini.google.com/)
 
 ![MySQL](https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white "Tested: 8.0.46, 8.4.10 (also 8.0.29, 8.0.43-google)")
 ![MariaDB](https://img.shields.io/badge/MariaDB-003545?logo=mariadb&logoColor=white "Tested: 10.6.27, 10.11.18, 11.4.12, 11.8.8")
@@ -77,8 +78,9 @@ brew install --cask tuxie80/tap/txui
 - **Workload analysis** — PostgreSQL baseline/after investigations combine statement deltas, optional wait samples and retained incidents without an always-on collector.
 - **Server tuner** — per-engine rule packs with health scores and generated, never-executed fixes.
 - **Geospatial, end to end** — WKB/EWKB/GeoPackage/SpatiaLite decoding, offline and optional online maps, PostGIS transforms, SQL Server geo, MongoDB GeoJSON, ClickHouse geo, Redis GEO and GeoParquet.
-- **Schema tooling** — ER diagrams, schema/data/result/script compare, reviewed migration scripts, documenter, routines, table designer and virtual foreign keys.
-- **Data in and out** — CSV/spreadsheet import, native PostgreSQL COPY, a deterministic data generator with schema kits and uniqueness controls, and dump/restore wrappers.
+- **Safe Operations** — **Migration Cockpit** (Review → Rehearsal → Deploy & verify with native scratch cloning, exact SQL-hash execution and scoped target verification), **Safe Environment Refresh** (MySQL/MariaDB subsetting with FK closure, deterministic relational masking, consistent-snapshot chunked copy and exact count/FK/SHA-256 verification), and **Query Optimization Lab** (guarded baselines, PostgreSQL HypoPG estimates, real-index scratch benchmarks, canonical typed rewrite equality and noise-aware verdicts).
+- **Schema tooling** — ER diagrams, schema/data/result/script compare with Migration Cockpit handoffs, documenter, routines, table designer and virtual foreign keys.
+- **Data in and out** — native two-pass SQL script runner (`.sql`, `.gz`, `.zst`, `.xz`, `.bz2`, `.lz4`, `.zip`, `.tar.*` with no external client or shell), CSV/spreadsheet import, native PostgreSQL COPY, and a deterministic data generator with schema kits and uniqueness controls.
 - **Fleet operations** — multi-server execution, replica-set and fleet checks, immutable audit log, query history, saved queries and incident timelines.
 - **Safety by default** — production confirmations and server-side hard limits, dialect-aware write guards in Rust, driver-level read-only enforcement, SSH tunnels and an optional encrypted Safe Vault.
 - **One app on all three desktops** — native menus and the same behavior on macOS, Windows and Linux.
