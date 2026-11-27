@@ -275,16 +275,23 @@ pub async fn datagen_profile_table(
 ) -> Result<Vec<ColumnProfile>, crate::apperror::AppError> {
     let session = get_session_pub(session_id, &state.sessions).await?;
     let quote = match session.as_ref() {
-        LiveSession::Mysql(_) => '`',
-        LiveSession::Postgres(_) | LiveSession::Sqlite(_) => '"',
+        LiveSession::Mysql(_) | LiveSession::Clickhouse(_) => '`',
+        LiveSession::Postgres(_) | LiveSession::Sqlite(_) | LiveSession::Duckdb(_) => '"',
         // Brackets are not a symmetric pair, but every builder below takes
         // the `[` arm explicitly (datagen_fk precedent).
         LiveSession::SqlServer(_) => '[',
         _ => return Err("datagen profiling is not supported for this engine".into()),
     };
+    if !matches!(
+        session.as_ref(),
+        LiveSession::Mysql(_) | LiveSession::Postgres(_) | LiveSession::Sqlite(_) | LiveSession::SqlServer(_)
+    ) {
+        return Err("datagen profiling is not supported for this engine".into());
+    }
+    let quoted_table = super::datagen::quote_datagen_table(quote, &table)?;
     let mut out = Vec::with_capacity(columns.len());
     for col in &columns {
-        let p = profile_column(session.as_ref(), quote, &table, col)
+        let p = profile_column(session.as_ref(), quote, &quoted_table, col)
             .await
             .unwrap_or_else(|e| ColumnProfile::failed(col, e.to_string()));
         out.push(p);
@@ -369,5 +376,18 @@ mod tests {
         assert!(ms.starts_with("SELECT TOP (8) v, COUNT(*) AS c FROM (SELECT TOP (100000)"), "{ms}");
         assert!(ms.ends_with("GROUP BY v ORDER BY c DESC"), "{ms}");
         assert!(!ms.contains("LIMIT"), "{ms}");
+    }
+
+    #[test]
+    fn profile_table_quotes_bare_and_qualified_names_and_rejects_breakouts() {
+        let q_my = super::super::datagen::quote_datagen_table('`', "shop.orders").unwrap();
+        assert_eq!(
+            topn_sql(&q_my, "`status`", '`'),
+            "SELECT v, COUNT(*) AS c FROM (SELECT `status` AS v FROM `shop`.`orders` LIMIT 100000) AS s \
+             WHERE v IS NOT NULL GROUP BY v ORDER BY c DESC LIMIT 8"
+        );
+        let q_ms = super::super::datagen::quote_datagen_table('[', "dbo.ord]ers").unwrap();
+        assert_eq!(q_ms, "[dbo].[ord]]ers]");
+        assert!(super::super::datagen::quote_datagen_table('"', "\"t\" UNION SELECT 1").is_err());
     }
 }

@@ -402,11 +402,14 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             name          TEXT NOT NULL,
             status        TEXT NOT NULL,
             error         TEXT,
+            sql_sha256    TEXT,
             created_at    TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
         )"
     )
     .execute(&mut *tx).await?;
+    let _ = sqlx::query("ALTER TABLE migration_scratch ADD COLUMN sql_sha256 TEXT")
+        .execute(&mut *tx).await;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_migration_scratch_status
@@ -420,7 +423,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             session_id         TEXT NOT NULL,
             connection_id      TEXT NOT NULL,
             source_connection_id TEXT NOT NULL,
-            rehearsal_run_key  TEXT NOT NULL,
+            rehearsal_run_key  TEXT NOT NULL UNIQUE,
             database_name      TEXT NOT NULL,
             engine             TEXT NOT NULL,
             sql_sha256         TEXT NOT NULL,
@@ -429,6 +432,12 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             created_at         TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
         )"
+    )
+    .execute(&mut *tx).await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_migration_deployment_rehearsal_run_key
+         ON migration_deployment(rehearsal_run_key)"
     )
     .execute(&mut *tx).await?;
 
@@ -609,7 +618,7 @@ async fn insert_capped(
     .bind(execution_ms)
     .bind(rows_returned)
     .bind(error)
-    .execute(&*pool).await?
+    .execute(pool).await?
     .last_insert_rowid();
     // Retention: delete everything older than the cap-th newest row. With
     // fewer rows the subquery yields NULL and `id <= NULL` matches nothing.
@@ -621,7 +630,7 @@ async fn insert_capped(
              (SELECT id FROM query_history ORDER BY id DESC LIMIT 1 OFFSET ?)"
         )
         .bind(cap)
-        .execute(&*pool).await?;
+        .execute(pool).await?;
     }
     Ok(id)
 }
@@ -643,7 +652,7 @@ pub async fn search(
                  ORDER BY created_at DESC LIMIT ?"
             )
             .bind(cid).bind(pattern).bind(limit)
-            .fetch_all(&*pool).await?
+            .fetch_all(pool).await?
         }
         (Some(cid), None) => {
             sqlx::query(
@@ -652,7 +661,7 @@ pub async fn search(
                  ORDER BY created_at DESC LIMIT ?"
             )
             .bind(cid).bind(limit)
-            .fetch_all(&*pool).await?
+            .fetch_all(pool).await?
         }
         (None, Some(q)) => {
             let pattern = format!("%{}%", q);
@@ -662,7 +671,7 @@ pub async fn search(
                  ORDER BY created_at DESC LIMIT ?"
             )
             .bind(pattern).bind(limit)
-            .fetch_all(&*pool).await?
+            .fetch_all(pool).await?
         }
         (None, None) => {
             sqlx::query(
@@ -670,7 +679,7 @@ pub async fn search(
                  FROM query_history ORDER BY created_at DESC LIMIT ?"
             )
             .bind(limit)
-            .fetch_all(&*pool).await?
+            .fetch_all(pool).await?
         }
     };
 
@@ -690,7 +699,7 @@ pub async fn delete_entry(store: &HistoryStore, id: i64) -> Result<()> {
     let pool = store;
     sqlx::query("DELETE FROM query_history WHERE id = ?")
         .bind(id)
-        .execute(&*pool).await?;
+        .execute(pool).await?;
     Ok(())
 }
 
@@ -698,7 +707,7 @@ pub async fn clear_connection(store: &HistoryStore, connection_id: &str) -> Resu
     let pool = store;
     sqlx::query("DELETE FROM query_history WHERE connection_id = ?")
         .bind(connection_id)
-        .execute(&*pool).await?;
+        .execute(pool).await?;
     Ok(())
 }
 
@@ -885,7 +894,7 @@ pub async fn digest_stats(
     )
     .bind(connection_id)
     .bind(DIGEST_SCAN_ROWS)
-    .fetch_all(&*pool).await?;
+    .fetch_all(pool).await?;
 
     let mut times: Vec<i64> = Vec::new();
     let mut last_seen = String::new();
@@ -1100,7 +1109,7 @@ pub async fn list_digest_snapshots(
          ORDER BY s.created_at DESC, s.id DESC"
     )
     .bind(connection_id)
-    .fetch_all(&*pool).await?;
+    .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| DigestSnapshotMeta {
         id:            r.get(0),
         connection_id: r.get(1),
@@ -1123,7 +1132,7 @@ pub async fn get_digest_snapshot(store: &HistoryStore, id: i64) -> Result<Digest
          FROM digest_snapshots s WHERE s.id = ?"
     )
     .bind(id)
-    .fetch_one(&*pool).await?;
+    .fetch_one(pool).await?;
     let meta = DigestSnapshotMeta {
         id:            meta_row.get(0),
         connection_id: meta_row.get(1),
@@ -1144,7 +1153,7 @@ pub async fn get_digest_snapshot(store: &HistoryStore, id: i64) -> Result<Digest
     )
     .bind(&meta.connection_id)
     .bind(id)
-    .fetch_all(&*pool).await?;
+    .fetch_all(pool).await?;
 
     Ok(DigestSnapshotStored {
         meta,
@@ -1163,7 +1172,7 @@ pub async fn get_digest_snapshot(store: &HistoryStore, id: i64) -> Result<Digest
 
 pub async fn delete_digest_snapshot(store: &HistoryStore, id: i64) -> Result<()> {
     let pool = store;
-    delete_digest_snapshot_locked(&pool, id).await
+    delete_digest_snapshot_locked(pool, id).await
 }
 
 async fn delete_digest_snapshot_locked(pool: &SqlitePool, id: i64) -> Result<()> {
@@ -1253,7 +1262,7 @@ async fn record_deadlock_event_capped(
         "SELECT raw FROM deadlock_events WHERE connection_id = ? ORDER BY id DESC LIMIT 1"
     )
     .bind(connection_id)
-    .fetch_optional(&*pool).await?;
+    .fetch_optional(pool).await?;
     if latest_raw.as_deref() == Some(raw) {
         return Ok(None);
     }
@@ -1270,7 +1279,7 @@ async fn record_deadlock_event_capped(
     .bind(txn_count)
     .bind(raw)
     .bind(parsed)
-    .execute(&*pool).await?
+    .execute(pool).await?
     .last_insert_rowid();
 
     // Retention: roll off the oldest events beyond the cap.
@@ -1282,7 +1291,7 @@ async fn record_deadlock_event_capped(
     .bind(connection_id)
     .bind(connection_id)
     .bind(cap)
-    .execute(&*pool).await?;
+    .execute(pool).await?;
 
     Ok(Some(id))
 }
@@ -1298,7 +1307,7 @@ pub async fn list_deadlock_events(
          ORDER BY created_at DESC, id DESC"
     )
     .bind(connection_id)
-    .fetch_all(&*pool).await?;
+    .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| DeadlockEventMeta {
         id:            r.get(0),
         connection_id: r.get(1),
@@ -1317,7 +1326,7 @@ pub async fn get_deadlock_event(store: &HistoryStore, id: i64) -> Result<Deadloc
          FROM deadlock_events WHERE id = ?"
     )
     .bind(id)
-    .fetch_one(&*pool).await?;
+    .fetch_one(pool).await?;
     Ok(DeadlockEvent {
         id:            r.get(0),
         connection_id: r.get(1),
@@ -1335,7 +1344,7 @@ pub async fn delete_deadlock_event(store: &HistoryStore, id: i64) -> Result<()> 
     let pool = store;
     sqlx::query("DELETE FROM deadlock_events WHERE id = ?")
         .bind(id)
-        .execute(&*pool).await?;
+        .execute(pool).await?;
     Ok(())
 }
 
@@ -1540,7 +1549,7 @@ mod migration_tests {
                 (started_at, ended_at, duration_ms, connection_name, db_user, engine, ok, \
                  rows_out, rows_affected, error, sql) \
                  VALUES ('t','t',1,'c','u','mysql',0,0,NULL,'Lost connection','SELECT 1')")
-                .execute(&*pool).await.expect("insert old-shape row");
+                .execute(pool).await.expect("insert old-shape row");
         }
 
         // Re-opening runs the migrations again — the ALTER for a column that
@@ -1549,10 +1558,73 @@ mod migration_tests {
         let pool = &store2;
         let (code, err): (String, String) = sqlx::query_as(
             "SELECT error_code, error FROM audit_log ORDER BY id DESC LIMIT 1")
-            .fetch_one(&*pool).await.expect("row survived the migration");
+            .fetch_one(pool).await.expect("row survived the migration");
         assert_eq!(code, "", "an existing row must default to no class, not a wrong one");
         assert_eq!(err, "Lost connection", "the prose must survive");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn migration_scratch_sha256_upgrade_and_unique_rehearsal_claim() {
+        let dir = std::env::temp_dir().join(format!("txui_hist_mig_h6_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Simulate an older history.db whose migration_scratch lacked sql_sha256
+        // and whose migration_deployment lacked UNIQUE(rehearsal_run_key).
+        {
+            let opts = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.join("history.db"))
+                .create_if_missing(true);
+            let legacy = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+            sqlx::query(
+                "CREATE TABLE migration_scratch (
+                    run_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+                    engine TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )"
+            ).execute(&legacy).await.unwrap();
+            sqlx::query(
+                "INSERT INTO migration_scratch (run_key, session_id, connection_id, engine, name, status)
+                 VALUES ('rk1', 's1', 'c1', 'mysql', 'txui_mig_old', 'executed')"
+            ).execute(&legacy).await.unwrap();
+            sqlx::query(
+                "CREATE TABLE migration_deployment (
+                    run_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+                    source_connection_id TEXT NOT NULL, rehearsal_run_key TEXT NOT NULL,
+                    database_name TEXT NOT NULL, engine TEXT NOT NULL, sql_sha256 TEXT NOT NULL,
+                    status TEXT NOT NULL, error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )"
+            ).execute(&legacy).await.unwrap();
+            legacy.close().await;
+        }
+
+        let store = super::open(&dir).await.expect("upgrade open");
+        let sha: Option<String> = sqlx::query_scalar(
+            "SELECT sql_sha256 FROM migration_scratch WHERE run_key = 'rk1'",
+        ).fetch_one(&store).await.expect("sql_sha256 column exists");
+        assert!(sha.is_none());
+
+        sqlx::query(
+            "INSERT INTO migration_deployment
+             (run_key, session_id, connection_id, source_connection_id, rehearsal_run_key,
+              database_name, engine, sql_sha256, status)
+             VALUES ('dep1', 's1', 'c1', 'c1', 'rk1', 'db', 'mysql', 'abc', 'deploying')"
+        ).execute(&store).await.expect("first claim succeeds");
+
+        let dup = sqlx::query(
+            "INSERT INTO migration_deployment
+             (run_key, session_id, connection_id, source_connection_id, rehearsal_run_key,
+              database_name, engine, sql_sha256, status)
+             VALUES ('dep2', 's1', 'c1', 'c1', 'rk1', 'db', 'mysql', 'abc', 'deploying')"
+        ).execute(&store).await;
+        assert!(dup.is_err(), "duplicate rehearsal_run_key must violate unique index");
+
+        store.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -1627,11 +1699,11 @@ mod digest_store_tests {
 
         let pool = &store;
         let texts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM digest_texts WHERE connection_id = 'c'")
-            .fetch_one(&*pool).await.unwrap();
+            .fetch_one(pool).await.unwrap();
         let rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM digest_snapshot_rows r
              JOIN digest_snapshots s ON s.id = r.snapshot_id WHERE s.connection_id = 'c'")
-            .fetch_one(&*pool).await.unwrap();
+            .fetch_one(pool).await.unwrap();
         assert_eq!(rows, 4, "two snapshots × two digests");
         assert_eq!(texts, 2, "the text is stored once per digest, not once per row");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1664,7 +1736,7 @@ mod digest_store_tests {
             let pool = &store;
             sqlx::query("UPDATE digest_snapshots SET created_at = printf('2026-01-01 00:00:0%d', ?) WHERE id = ?")
                 .bind(i).bind(ids[i as usize])
-                .execute(&*pool).await.unwrap();
+                .execute(pool).await.unwrap();
         }
 
         let listed = list_digest_snapshots(&store, "c").await.expect("list");
@@ -1674,12 +1746,12 @@ mod digest_store_tests {
         let pool = &store;
         let orphans: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM digest_snapshot_rows WHERE snapshot_id = ?")
-            .bind(ids[0]).fetch_one(&*pool).await.unwrap();
+            .bind(ids[0]).fetch_one(pool).await.unwrap();
         assert_eq!(orphans, 0);
         // And its digest text, no longer referenced, was cleaned up.
         let stale: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM digest_texts WHERE connection_id = 'c' AND digest_id = 'd0'")
-            .fetch_one(&*pool).await.unwrap();
+            .fetch_one(pool).await.unwrap();
         assert_eq!(stale, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

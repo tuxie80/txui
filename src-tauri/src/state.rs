@@ -318,6 +318,25 @@ impl AppState {
         self.session_meta.read().await.get(session_id).map(|g| g.read_only).unwrap_or(false)
     }
 
+    /// Tear down every active session, pinned transaction connection, and SSH
+    /// tunnel (used when locking Safe Vault so open sessions never outlive an
+    /// unlocked vault).
+    pub async fn close_all(&self) {
+        let mut ids: Vec<Uuid> = {
+            let s = self.sessions.read().await;
+            let t = self.tunnels.read().await;
+            let m = self.session_meta.read().await;
+            let mut set: std::collections::HashSet<Uuid> = s.keys().copied().collect();
+            set.extend(t.keys().copied());
+            set.extend(m.keys().copied());
+            set.into_iter().collect()
+        };
+        ids.sort();
+        for sid in ids {
+            crate::commands::connections::close_one_session(sid, self).await;
+        }
+    }
+
     /// Stop everything a session has running, so `close_connection` never
     /// hangs on it: in-flight queries, watches, data generation, playground
     /// runs, PG listeners and wait samplers all hold pooled connections or
@@ -488,7 +507,15 @@ impl AppState {
     /// write outside a transaction the user believes they are inside: rolling
     /// back afterwards would leave every generated row in place.
     pub async fn has_open_transaction(&self, session_id: &Uuid) -> bool {
-        self.tx_conns.read().await.contains_key(session_id)
+        if self.tx_conns.read().await.contains_key(session_id) {
+            return true;
+        }
+        let session = self.sessions.read().await.get(session_id).cloned();
+        match session.as_deref() {
+            Some(LiveSession::SqlServer(ms)) =>
+                crate::db::sqlserver::trancount(ms).await.unwrap_or(0) > 0,
+            _ => false,
+        }
     }
 
     /// The prod border for a bulk job, which has no single statement to judge.
@@ -677,6 +704,18 @@ mod cancel_work_tests {
     async fn cancel_session_work_on_an_idle_session_is_a_no_op() {
         let state = test_state().await;
         state.cancel_session_work(Uuid::new_v4()).await;
+    }
+
+    #[tokio::test]
+    async fn has_open_transaction_is_false_without_pinned_or_mssql_tx() {
+        let state = test_state().await;
+        let unknown = Uuid::new_v4();
+        assert!(!state.has_open_transaction(&unknown).await);
+
+        let duck_sid = Uuid::new_v4();
+        let duck = crate::db::duckdb::open_memory_sync(false).expect("duckdb memory");
+        state.sessions.write().await.insert(duck_sid, Arc::new(LiveSession::Duckdb(Arc::new(duck))));
+        assert!(!state.has_open_transaction(&duck_sid).await);
     }
 }
 

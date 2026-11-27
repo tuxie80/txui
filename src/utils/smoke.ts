@@ -14,7 +14,7 @@
  * land in the document → run SELECT 42 through the real backend → a result
  * grid with one row must render. Every CSP violation fails the run.
  *
- * Verdict: JSON written via run_os_command to `${TMPDIR}/txui-smoke.json`,
+ * Verdict: JSON written via write_text_file to `/tmp/txui-smoke.json`,
  * then the app exits 0 (pass) / 1 (fail).
  */
 import { invoke } from '@tauri-apps/api/core';
@@ -33,8 +33,7 @@ const REPORT_PATH = '/tmp/txui-smoke.json';
 
 function report(verdict: SmokeVerdict): void {
   try {
-    const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(verdict, null, 1))));
-    void invoke('run_os_command', { command: `echo ${b64} | base64 -D > ${REPORT_PATH}` })
+    void invoke('write_text_file', { path: REPORT_PATH, contents: JSON.stringify(verdict, null, 1) })
       .catch(() => {})
       .finally(() => {
         import('@tauri-apps/plugin-process')

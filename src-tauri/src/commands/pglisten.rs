@@ -175,6 +175,18 @@ pub async fn pg_notify(
     payload: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), AppError> {
+    pg_notify_inner(session_id, channel, payload, &state).await
+}
+
+async fn pg_notify_inner(
+    session_id: Uuid,
+    channel: String,
+    payload: String,
+    state: &AppState,
+) -> Result<(), AppError> {
+    if state.is_read_only(&session_id).await {
+        return Err(crate::apperror::AppError::guard("Connection is read-only — NOTIFY is blocked"));
+    }
     let session = get_session_pub(session_id, &state.sessions).await?;
     let LiveSession::Postgres(pool) = session.as_ref() else {
         return Err(AppError::unsupported("LISTEN / NOTIFY is a PostgreSQL feature"));
@@ -233,6 +245,20 @@ mod tests {
 
         let leftover = map.write().await.remove("tok");
         if let Some(e) = leftover { e.handle.abort(); }
+    }
+
+    #[tokio::test]
+    async fn pg_notify_is_refused_on_read_only_sessions() {
+        let history = crate::history::open_in_memory().await.unwrap();
+        let state = AppState::new(history, std::env::temp_dir(), Default::default());
+        let sid = Uuid::new_v4();
+        let mut cfg = crate::db::types::ConnectionConfig::new(crate::db::types::Engine::Postgres, "ro-pg");
+        cfg.read_only = true;
+        state.session_meta.write().await.insert(sid, crate::state::SessionGuard::from_config(&cfg));
+
+        let err = pg_notify_inner(sid, "events".into(), "hello".into(), &state).await.unwrap_err();
+        assert_eq!(err.code, crate::apperror::ErrorCode::GuardRefused);
+        assert!(err.message.contains("read-only"));
     }
 }
 

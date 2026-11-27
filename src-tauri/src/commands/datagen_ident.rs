@@ -239,7 +239,7 @@ pub(crate) fn sha256(msg: &[u8]) -> [u8; 32] {
         data.push(0);
     }
     data.extend_from_slice(&bit_len.to_be_bytes());
-    for block in data.chunks_exact(64) {
+    for block in data.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for t in 0..16 {
             w[t] = u32::from_be_bytes([
@@ -857,7 +857,7 @@ mod tests {
             sum += d;
             dbl = !dbl;
         }
-        sum % 10 == 0
+        sum.is_multiple_of(10)
     }
 
     fn vin_valid(v: &str) -> bool {

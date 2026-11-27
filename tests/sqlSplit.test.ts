@@ -219,3 +219,84 @@ test('firstCodeOffset is absolute — statements later in the doc stay correct',
   assert.equal(firstCodeOffset(b), doc.lastIndexOf('SELECT'));
   assert.equal(doc.slice(firstCodeOffset(b), firstCodeOffset(b) + 6), 'SELECT');
 });
+
+// ── engine-aware dialect lexing ──────────────────────────────────────────────
+
+test('PostgreSQL, T-SQL, SQLite and DuckDB do not treat # as a line comment', () => {
+  const pgJson = "SELECT '{\"a\":1}'::jsonb #>> '{a}'; SELECT 2;";
+  assert.deepEqual(
+    splitStatements(pgJson, ';', 'postgres').map(s => s.text),
+    ["SELECT '{\"a\":1}'::jsonb #>> '{a}';", 'SELECT 2;'],
+  );
+  // 2-arg convenience call (doc, engine) works too
+  assert.deepEqual(
+    splitStatements(pgJson, 'postgres').map(s => s.text),
+    ["SELECT '{\"a\":1}'::jsonb #>> '{a}';", 'SELECT 2;'],
+  );
+
+  const tsqlTemp = 'CREATE TABLE #tmp (id INT); SELECT * FROM #tmp;';
+  assert.deepEqual(
+    splitStatements(tsqlTemp, ';', 'sqlserver').map(s => s.text),
+    ['CREATE TABLE #tmp (id INT);', 'SELECT * FROM #tmp;'],
+  );
+
+  for (const eng of ['sqlite', 'duckdb'] as const) {
+    assert.equal(splitStatements('SELECT 1 # 2; SELECT 3;', ';', eng).length, 2, eng);
+  }
+
+  // MySQL family and unknown engine still treat # as a line comment
+  assert.deepEqual(
+    splitStatements('SELECT 1; # comment; not a statement\nSELECT 2;', ';', 'mysql').map(s => s.text),
+    ['SELECT 1;', '# comment; not a statement\nSELECT 2;'],
+  );
+  assert.deepEqual(
+    splitStatements('SELECT 1; # comment; not a statement\nSELECT 2;').map(s => s.text),
+    ['SELECT 1;', '# comment; not a statement\nSELECT 2;'],
+  );
+});
+
+test('backslash only escapes quotes on MySQL/ClickHouse or PG/DuckDB E-strings', () => {
+  // Trailing backslash in a plain string literal does NOT swallow the closing quote
+  for (const eng of ['postgres', 'sqlserver', 'sqlite', 'duckdb'] as const) {
+    const doc = String.raw`SELECT 'C:\'; SELECT 2;`;
+    assert.deepEqual(
+      splitStatements(doc, ';', eng).map(s => s.text),
+      [String.raw`SELECT 'C:\';`, 'SELECT 2;'],
+      eng,
+    );
+  }
+  // PostgreSQL and DuckDB E'...' strings DO honour \' escapes
+  for (const eng of ['postgres', 'duckdb'] as const) {
+    const doc = String.raw`SELECT E'it\'s; one'; SELECT 2;`;
+    assert.deepEqual(
+      splitStatements(doc, ';', eng).map(s => s.text),
+      [String.raw`SELECT E'it\'s; one';`, 'SELECT 2;'],
+      eng,
+    );
+  }
+  // MySQL plain strings honour \' escapes
+  const myDoc = String.raw`SELECT 'it\'s; one'; SELECT 2;`;
+  assert.deepEqual(
+    splitStatements(myDoc, ';', 'mysql').map(s => s.text),
+    [String.raw`SELECT 'it\'s; one';`, 'SELECT 2;'],
+  );
+});
+
+test('PostgreSQL and T-SQL support nested block comments, and T-SQL supports [bracket] identifiers', () => {
+  const nested = 'SELECT /* outer /* inner */ ; still comment */ 1; SELECT 2;';
+  for (const eng of ['postgres', 'sqlserver'] as const) {
+    assert.deepEqual(
+      splitStatements(nested, ';', eng).map(s => s.text),
+      ['SELECT /* outer /* inner */ ; still comment */ 1;', 'SELECT 2;'],
+      eng,
+    );
+  }
+  const bracketed = 'SELECT [a;b]]c;d] FROM #t; SELECT 2;';
+  assert.deepEqual(
+    splitStatements(bracketed, ';', 'sqlserver').map(s => s.text),
+    ['SELECT [a;b]]c;d] FROM #t;', 'SELECT 2;'],
+  );
+  const pgDollar = 'CREATE FUNCTION f() RETURNS void AS $fn$ BEGIN PERFORM 1; PERFORM 2; END; $fn$ LANGUAGE plpgsql; SELECT 3;';
+  assert.equal(splitStatements(pgDollar, ';', 'postgres').length, 2);
+  assert.equal(statementAtCaret(pgDollar, pgDollar.length - 3, ';', 'postgres')?.text, 'SELECT 3;');
+});

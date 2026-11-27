@@ -61,14 +61,79 @@ async fn resolve_db_password(
     }
 }
 
+pub(crate) fn ssl_mode_downgraded(
+    saved: &crate::db::types::SslMode,
+    candidate: &crate::db::types::SslMode,
+) -> bool {
+    use crate::db::types::SslMode;
+    match saved {
+        SslMode::Disable => false,
+        SslMode::Preferred => matches!(candidate, SslMode::Disable),
+        SslMode::Require => matches!(candidate, SslMode::Disable | SslMode::Preferred),
+        SslMode::VerifyCa => !matches!(candidate, SslMode::VerifyCa | SslMode::VerifyFull),
+        SslMode::VerifyFull => !matches!(candidate, SslMode::VerifyFull),
+    }
+}
+
+pub(crate) fn normalize_pin_host(host: Option<&str>) -> String {
+    let raw = host.unwrap_or("localhost").trim().to_ascii_lowercase();
+    let unbracketed = raw
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&raw);
+    match unbracketed {
+        "localhost" | "127.0.0.1" | "::1" => "127.0.0.1".to_string(),
+        other => other.to_string(),
+    }
+}
+
+pub(crate) fn ssh_secret_pin_matches(saved: &ConnectionConfig, candidate: &ConnectionConfig) -> bool {
+    saved.use_ssh
+        && candidate.use_ssh
+        && normalize_pin_host(saved.ssh_host.as_deref()) == normalize_pin_host(candidate.ssh_host.as_deref())
+        && saved.ssh_port.unwrap_or(22) == candidate.ssh_port.unwrap_or(22)
+        && saved.ssh_user.as_deref().unwrap_or("") == candidate.ssh_user.as_deref().unwrap_or("")
+}
+
+pub(crate) fn db_secret_pin_matches(saved: &ConnectionConfig, candidate: &ConnectionConfig) -> bool {
+    if saved.engine != candidate.engine {
+        return false;
+    }
+    if ssl_mode_downgraded(&saved.ssl_mode, &candidate.ssl_mode)
+        || (!saved.trust_server_cert && candidate.trust_server_cert)
+    {
+        return false;
+    }
+    if saved.use_ssh != candidate.use_ssh {
+        return false;
+    }
+    if candidate.use_ssh && !ssh_secret_pin_matches(saved, candidate) {
+        return false;
+    }
+    if saved.engine.is_file_backed() {
+        return saved.file_path == candidate.file_path;
+    }
+    if saved.socket_path.as_deref().unwrap_or("").trim()
+        != candidate.socket_path.as_deref().unwrap_or("").trim()
+    {
+        return false;
+    }
+    normalize_pin_host(saved.host.as_deref()) == normalize_pin_host(candidate.host.as_deref())
+        && saved.port.unwrap_or(saved.engine.default_port())
+            == candidate.port.unwrap_or(candidate.engine.default_port())
+        && saved.user.as_deref().unwrap_or("") == candidate.user.as_deref().unwrap_or("")
+}
+
 /// Credential resolution for a Test / staged diagnostic / database listing:
 /// an explicitly typed password wins; then `password_exec` when the config
 /// carries one (the form can set it before the connection is ever saved, so
 /// this is not gated on `saved`); then, for a connection that EXISTS in
-/// storage, the stored secret — test-while-editing (W2.3, resolve_test_secret).
+/// `state.configs` with matching endpoint/user and non-downgraded TLS, the
+/// stored secret — test-while-editing without allowing host-repoint exfiltration.
 /// Pub(crate): the staged-connect diagnostics resolve secrets the same way.
 pub(crate) async fn resolve_test_password(
     config: &ConnectionConfig,
+    saved: Option<&ConnectionConfig>,
     arg: Option<String>,
     data_dir: &std::path::Path,
 ) -> Result<Option<String>, String> {
@@ -78,7 +143,24 @@ pub(crate) async fn resolve_test_password(
     if let Some(p) = crate::password_exec::resolve(config).await? {
         return Ok(Some(p));
     }
-    Ok(if !config.id.is_nil() { get_password(config, data_dir) } else { None })
+    let pinned = !config.id.is_nil()
+        && saved.is_some_and(|s| s.id == config.id && db_secret_pin_matches(s, config));
+    Ok(if pinned { get_password(config, data_dir) } else { None })
+}
+
+pub(crate) fn resolve_test_ssh_password(
+    config: &ConnectionConfig,
+    saved: Option<&ConnectionConfig>,
+    arg: Option<String>,
+    data_dir: &std::path::Path,
+) -> Option<String> {
+    let pinned = !config.id.is_nil()
+        && saved.is_some_and(|s| s.id == config.id && ssh_secret_pin_matches(s, config));
+    resolve_test_secret(
+        arg,
+        if pinned { stored_ssh_password(config, data_dir) } else { None },
+        pinned,
+    )
 }
 
 /// Diagnostic for the connect-failure log — reports store state without
@@ -191,19 +273,27 @@ pub async fn list_connections(state: State<'_, AppState>) -> Result<Vec<Connecti
     Ok(state.configs.read().await.values().cloned().collect())
 }
 
-/// Duplicate a connection: new id, "name (copy)", keychain password copied too.
+/// Duplicate a connection: new id, "name (copy)", keychain + SSH passwords copied too.
 #[tauri::command]
 pub async fn duplicate_connection(id: Uuid, state: State<'_, AppState>) -> Result<ConnectionConfig, crate::apperror::AppError> {
+    duplicate_connection_body(id, &state).await
+}
+
+pub(crate) async fn duplicate_connection_body(id: Uuid, state: &AppState) -> Result<ConnectionConfig, crate::apperror::AppError> {
     let mut config = state.configs.read().await.get(&id).cloned()
         .ok_or_else(|| format!("connection {} not found", id))?;
     let old_key = config.keychain_key();
+    let old_ssh_key = config.ssh_keychain_key();
     config.id = Uuid::new_v4();
     config.name = format!("{} (copy)", config.name);
     if let Some(pw) = crate::secretstore::get(&state.data_dir, &old_key) {
         let _ = crate::secretstore::set(&state.data_dir, &config.keychain_key(), &pw);
     }
+    if let Some(ssh_pw) = crate::secretstore::get(&state.data_dir, &old_ssh_key) {
+        let _ = crate::secretstore::set(&state.data_dir, &config.ssh_keychain_key(), &ssh_pw);
+    }
     state.configs.write().await.insert(config.id, config.clone());
-    persist_configs(&state).await?;
+    persist_configs_state(state).await?;
     Ok(config)
 }
 
@@ -734,7 +824,7 @@ pub async fn close_connection(session_id: Uuid, state: State<'_, AppState>) -> R
 /// The body of `close_connection` on a bare `&AppState`, so
 /// `close_orphaned_connection` can run the same teardown for a session it
 /// found by connection id.
-async fn close_one_session(session_id: Uuid, state: &AppState) -> Vec<u64> {
+pub(crate) async fn close_one_session(session_id: Uuid, state: &AppState) -> Vec<u64> {
     state.cancel_session_work(session_id).await;
     // An open manual transaction dies with the session — dropping the held
     // connection makes the server roll it back.
@@ -908,14 +998,10 @@ pub async fn test_connection_adhoc(
 ) -> Result<String, crate::apperror::AppError> {
     // The app-wide connect timeout, as on every other connect path.
     let config = with_default_timeout(&config, &state);
-    let password = resolve_test_password(&config, password, &state.data_dir).await
+    let saved = state.configs.read().await.get(&config.id).cloned();
+    let password = resolve_test_password(&config, saved.as_ref(), password, &state.data_dir).await
         .map_err(crate::apperror::AppError::from)?;
-    let saved = !config.id.is_nil();
-    let ssh_password = resolve_test_secret(
-        ssh_password,
-        if saved { stored_ssh_password(&config, &state.data_dir) } else { None },
-        saved,
-    );
+    let ssh_password = resolve_test_ssh_password(&config, saved.as_ref(), ssh_password, &state.data_dir);
 
     let start = std::time::Instant::now();
     let version = test_connect_core(&config, password, ssh_password)
@@ -1198,14 +1284,11 @@ pub(crate) async fn connect_list_databases_body(
             config.engine.wire_name()
         ).into());
     }
-    let config = with_default_timeout(&config, &state);
-    let password = resolve_test_password(&config, password, &state.data_dir).await
+    let config = with_default_timeout(&config, state);
+    let saved = state.configs.read().await.get(&config.id).cloned();
+    let password = resolve_test_password(&config, saved.as_ref(), password, &state.data_dir).await
         .map_err(crate::apperror::AppError::from)?;
-    let ssh_password = if !config.id.is_nil() {
-        stored_ssh_password(&config, &state.data_dir)
-    } else {
-        None
-    };
+    let ssh_password = resolve_test_ssh_password(&config, saved.as_ref(), None, &state.data_dir);
 
     let sessions: connection::SessionMap = Default::default();
     let tunnel = open_tunnel(&config, ssh_password.as_deref()).await?;
@@ -1391,7 +1474,8 @@ mod tests {
 
     /// Quiet open: no session_starts record, no audit rows — but the guard
     /// registration (session_meta) is NOT skipped, or an ephemeral session
-    /// would slip past the read-only/prod border. The loud open keeps both.    #[tokio::test]
+    /// would slip past the read-only/prod border. The loud open keeps both.
+    #[tokio::test]
     async fn ephemeral_open_is_quiet_regular_open_is_audited() {
         let state = test_state().await;
         let cfg = scratch_config();
@@ -1616,37 +1700,98 @@ mod tests {
         d
     }
 
-    /// Resolution order: typed > password-exec > stored (saved only).
+    /// Resolution order: typed > password-exec > stored (saved + endpoint-pinned only).
     #[tokio::test]
     async fn test_password_resolution_order() {
         let dir = unique_dir("pworder");
 
         // No exec, saved config with a stored secret → stored (W2.3).
         let mut c = ConnectionConfig::new(Engine::Postgres, "t");
+        c.host = Some("db.internal".into());
+        c.port = Some(5432);
+        c.user = Some("app".into());
+        c.ssl_mode = crate::db::types::SslMode::Require;
+        let saved = c.clone();
         crate::secretstore::set(&dir, &c.keychain_key(), "stored-pw").unwrap();
-        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap().as_deref(), Some("stored-pw"));
+        assert_eq!(resolve_test_password(&c, Some(&saved), None, &dir).await.unwrap().as_deref(), Some("stored-pw"));
         // Blank/whitespace arg behaves like None.
-        assert_eq!(resolve_test_password(&c, Some("  ".into()), &dir).await.unwrap().as_deref(), Some("stored-pw"));
+        assert_eq!(resolve_test_password(&c, Some(&saved), Some("  ".into()), &dir).await.unwrap().as_deref(), Some("stored-pw"));
         // Typed wins over the store.
-        assert_eq!(resolve_test_password(&c, Some("typed".into()), &dir).await.unwrap().as_deref(), Some("typed"));
+        assert_eq!(resolve_test_password(&c, Some(&saved), Some("typed".into()), &dir).await.unwrap().as_deref(), Some("typed"));
+
+        // Endpoint/user/SSL pinning (M12.1): changing host, port, user, or
+        // downgrading TLS refuses stored secret fallback.
+        let mut repointed = c.clone();
+        repointed.host = Some("evil.example".into());
+        assert_eq!(resolve_test_password(&repointed, Some(&saved), None, &dir).await.unwrap(), None);
+        let mut wrong_port = c.clone();
+        wrong_port.port = Some(15432);
+        assert_eq!(resolve_test_password(&wrong_port, Some(&saved), None, &dir).await.unwrap(), None);
+        let mut wrong_user = c.clone();
+        wrong_user.user = Some("other".into());
+        assert_eq!(resolve_test_password(&wrong_user, Some(&saved), None, &dir).await.unwrap(), None);
+        let mut downgraded_ssl = c.clone();
+        downgraded_ssl.ssl_mode = crate::db::types::SslMode::Disable;
+        assert_eq!(resolve_test_password(&downgraded_ssl, Some(&saved), None, &dir).await.unwrap(), None);
+        // Unsaved non-nil ID also refuses stored secret fallback.
+        assert_eq!(resolve_test_password(&c, None, None, &dir).await.unwrap(), None);
+
+        // SSH password pinning: only matching ssh_host/ssh_port/ssh_user reuses stored SSH secret.
+        let mut ssh_saved = c.clone();
+        ssh_saved.use_ssh = true;
+        ssh_saved.use_ssh_password = true;
+        ssh_saved.ssh_host = Some("bastion.internal".into());
+        ssh_saved.ssh_port = Some(22);
+        ssh_saved.ssh_user = Some("jump".into());
+        crate::secretstore::set(&dir, &ssh_saved.ssh_keychain_key(), "stored-ssh-pw").unwrap();
+        assert_eq!(resolve_test_ssh_password(&ssh_saved, Some(&ssh_saved), None, &dir).as_deref(), Some("stored-ssh-pw"));
+        let mut ssh_repointed = ssh_saved.clone();
+        ssh_repointed.ssh_host = Some("evil-bastion.example".into());
+        assert_eq!(resolve_test_ssh_password(&ssh_repointed, Some(&ssh_saved), None, &dir), None);
 
         // password-exec wins over the store (and works for an UNSAVED config).
         c.password_exec = Some("echo minted".into());
-        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap().as_deref(), Some("minted"));
+        assert_eq!(resolve_test_password(&c, Some(&saved), None, &dir).await.unwrap().as_deref(), Some("minted"));
         c.id = Uuid::nil(); // adhoc, never saved — the command still runs
-        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap().as_deref(), Some("minted"));
+        assert_eq!(resolve_test_password(&c, None, None, &dir).await.unwrap().as_deref(), Some("minted"));
 
         // A failing exec is an ERROR, never a silent fall-back to the store.
         let mut c = ConnectionConfig::new(Engine::Postgres, "t");
+        let saved2 = c.clone();
         crate::secretstore::set(&dir, &c.keychain_key(), "stored-pw").unwrap();
         c.password_exec = Some("exit 7".into());
-        let err = resolve_test_password(&c, None, &dir).await.unwrap_err();
+        let err = resolve_test_password(&c, Some(&saved2), None, &dir).await.unwrap_err();
         assert!(err.contains("exit 7"), "{err}");
 
         // Unsaved, no exec, no arg → honestly nothing.
         let mut c = ConnectionConfig::new(Engine::Postgres, "t");
         c.id = Uuid::nil();
-        assert_eq!(resolve_test_password(&c, None, &dir).await.unwrap(), None);
+        assert_eq!(resolve_test_password(&c, None, None, &dir).await.unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn duplicate_connection_copies_both_db_and_ssh_secrets() {
+        let dir = unique_dir("dupconn");
+        let history = crate::history::open_in_memory().await.unwrap();
+        let mut orig = ConnectionConfig::new(Engine::Mysql, "primary");
+        orig.use_ssh = true;
+        orig.use_ssh_password = true;
+        orig.ssh_host = Some("bastion.internal".into());
+        orig.ssh_user = Some("ops".into());
+        let orig_id = orig.id;
+        let mut map = std::collections::HashMap::new();
+        map.insert(orig_id, orig.clone());
+        let state = AppState::new(history, dir.clone(), map);
+        crate::secretstore::set(&dir, &orig.keychain_key(), "db-secret").unwrap();
+        crate::secretstore::set(&dir, &orig.ssh_keychain_key(), "ssh-secret").unwrap();
+
+        let copy = duplicate_connection_body(orig_id, &state).await.unwrap();
+        assert_ne!(copy.id, orig_id);
+        assert_eq!(copy.name, "primary (copy)");
+        assert_eq!(crate::secretstore::get(&dir, &copy.keychain_key()).as_deref(), Some("db-secret"));
+        assert_eq!(crate::secretstore::get(&dir, &copy.ssh_keychain_key()).as_deref(), Some("ssh-secret"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

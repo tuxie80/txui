@@ -132,14 +132,21 @@ export function toMarkdown(columns: string[], rows: Cells): string {
  */
 export function toInsertStatements(table: string, columns: string[], rows: Cells, engine: IdentEngine = 'mysql'): string[] {
   const ident = (s: string) => quoteIdent(s, engine);
+  const parts = table.split('.').filter(Boolean);
+  const quotedTable = parts.length > 0 ? parts.map(ident).join('.') : ident(table);
   const lit = (v: unknown): string => {
     if (v === null || v === undefined) return 'NULL';
-    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (typeof v === 'boolean') {
+      return engine === 'sqlserver' ? (v ? '1' : '0') : String(v);
+    }
+    if (typeof v === 'number') {
+      return Number.isFinite(v) ? String(v) : sqlLiteral(String(v), engine);
+    }
     const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
     return sqlLiteral(s, engine);
   };
   const cols = columns.map(ident).join(', ');
-  return rows.map(r => `INSERT INTO ${ident(table)} (${cols}) VALUES (${r.map(lit).join(', ')})`);
+  return rows.map(r => `INSERT INTO ${quotedTable} (${cols}) VALUES (${r.map(lit).join(', ')})`);
 }
 
 export function toInserts(table: string, columns: string[], rows: Cells, engine: IdentEngine = 'mysql'): string {

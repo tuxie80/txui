@@ -140,7 +140,14 @@ pub async fn execute_query(
     webview:       tauri::Webview,
     state:         State<'_, AppState>,
 ) -> Result<QueryResult, crate::apperror::AppError> {
-    let cancel_key = format!("{}-{}", session_id, tab_id);
+    // Non-tab callers (object panels, TxShell, TableDesigner) pass `tab_id: 0`;
+    // minting a unique key prevents concurrent `tab_id: 0` runs from colliding
+    // in `state.cancels` and spuriously cancelling each other.
+    let cancel_key = if tab_id == 0 {
+        format!("{}-anon-{}", session_id, Uuid::new_v4())
+    } else {
+        format!("{}-{}", session_id, tab_id)
+    };
 
     let row_cap = match max_rows {
         Some(0) => None,
@@ -496,11 +503,10 @@ async fn race_query(
         r = connection::execute_query(session_id, sql, sessions, kills, ch_kills, cancel_key, fetch_warnings, ch_db, max_rows) => {
             r.map_err(crate::apperror::AppError::from)
         }
-        // A typed code, not a sentence. The frontend used to decide whether to
-        // stop a multi-statement run by matching this text, and so did the
-        // history check in the caller — two string comparisons on a string
-        // nothing stopped anyone from rewording.
-        _ = rx => Err(crate::apperror::AppError::cancelled()),
+        // A typed code, not a sentence. Match `Ok(())` rather than `_`: if the
+        // sender was dropped without sending `()`, `tokio::select!` disables
+        // this branch instead of falsely aborting the running query as cancelled.
+        Ok(()) = rx => Err(crate::apperror::AppError::cancelled()),
         // Dropping our side of the query does NOT stop the server working on
         // it, so the deadline issues the same KILL the Stop button does.
         // Without this the ceiling would only make the UI *look* bounded while
@@ -568,7 +574,14 @@ async fn begin_transaction_on(
             if manual_commit {
                 let _ = crate::db::mysql::execute(&mut *conn, "SET SESSION autocommit = 0").await;
             }
-            crate::db::mysql::execute(&mut *conn, "BEGIN").await?;
+            if let Err(e) = crate::db::mysql::execute(&mut *conn, "BEGIN").await {
+                if manual_commit
+                    && crate::db::mysql::execute(&mut *conn, "SET SESSION autocommit = 1").await.is_err()
+                {
+                    let _ = conn.close().await;
+                }
+                return Err(e.into());
+            }
             crate::state::TxConn::My(conn)
         }
         crate::db::types::LiveSession::Postgres(pool) => {
@@ -615,15 +628,48 @@ async fn end_transaction(
     let Some(txc) = state.tx_conns.write().await.remove(&session_id) else {
         return Err("No open transaction on this session.".into());
     };
-    let mut guard = txc.lock().await;
-    let r = match &mut *guard {
-        crate::state::TxConn::My(conn) =>
-            crate::db::mysql::execute(&mut **conn, verb).await.map(|_| ()),
-        crate::state::TxConn::Pg(conn) =>
-            crate::db::postgres::execute(&mut **conn, verb).await.map(|_| ()),
+    let (verb_res, must_close) = {
+        let mut guard = txc.lock().await;
+        match &mut *guard {
+            crate::state::TxConn::My(conn) => {
+                let r = crate::db::mysql::execute(&mut **conn, verb).await.map(|_| ());
+                // Pooled MySQL connections must always return with `autocommit = 1`.
+                // Reset only after `verb` succeeded: flipping autocommit 0 → 1 in
+                // MySQL implicitly commits an open transaction, so if COMMIT/ROLLBACK
+                // or the reset itself failed, detach/close the connection instead.
+                let reset_ok = if r.is_ok() {
+                    crate::db::mysql::execute(&mut **conn, "SET SESSION autocommit = 1").await.is_ok()
+                } else {
+                    false
+                };
+                (r, !reset_ok)
+            }
+            crate::state::TxConn::Pg(conn) => {
+                let r = crate::db::postgres::execute(&mut **conn, verb).await.map(|_| ());
+                let failed = r.is_err();
+                (r, failed)
+            }
+        }
     };
-    // The connection drops with `txc` and returns to the pool either way.
-    r.map_err(crate::apperror::AppError::from)
+    if must_close {
+        let mut txc_opt = Some(txc);
+        for _ in 0..4 {
+            match std::sync::Arc::try_unwrap(txc_opt.take().unwrap()) {
+                Ok(mutex) => {
+                    match mutex.into_inner() {
+                        crate::state::TxConn::My(conn) => { let _ = conn.close().await; }
+                        crate::state::TxConn::Pg(conn) => { let _ = conn.close().await; }
+                    }
+                    break;
+                }
+                Err(arc) => {
+                    txc_opt = Some(arc);
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    }
+    verb_res.map_err(crate::apperror::AppError::from)
 }
 
 #[tauri::command]
@@ -655,13 +701,27 @@ pub async fn tx_exec(
     sql: String,
     state: State<'_, AppState>,
 ) -> Result<(), crate::apperror::AppError> {
+    tx_exec_on(session_id, &sql, &state).await
+}
+
+async fn tx_exec_on(
+    session_id: Uuid,
+    sql: &str,
+    state: &AppState,
+) -> Result<(), crate::apperror::AppError> {
+    state.guard_statement(&session_id, sql).await?;
+
     // SQL Server: every statement is already on the one connection the
     // transaction lives on, so a savepoint needs no pinned entry — the reason
     // this command exists at all (landing on the wrong pooled connection)
-    // cannot happen here.
+    // cannot happen here. Still refuse when no transaction is open, matching
+    // `end_transaction` and the MySQL/PG `No pinned connection` behavior.
     if let Ok(session) = crate::db::connection::get_session_pub(session_id, &state.sessions).await {
         if let crate::db::types::LiveSession::SqlServer(s) = session.as_ref() {
-            return crate::db::sqlserver::execute(s, &sql).await
+            if crate::db::sqlserver::trancount(s).await.unwrap_or(0) == 0 {
+                return Err("No open transaction on this session.".into());
+            }
+            return crate::db::sqlserver::execute(s, sql).await
                 .map(|_| ())
                 .map_err(Into::into);
         }
@@ -672,9 +732,9 @@ pub async fn tx_exec(
     let mut guard = txc.lock().await;
     match &mut *guard {
         crate::state::TxConn::My(conn) =>
-            crate::db::mysql::execute(&mut **conn, &sql).await.map(|_| ()),
+            crate::db::mysql::execute(&mut **conn, sql).await.map(|_| ()),
         crate::state::TxConn::Pg(conn) =>
-            crate::db::postgres::execute(&mut **conn, &sql).await.map(|_| ()),
+            crate::db::postgres::execute(&mut **conn, sql).await.map(|_| ()),
     }
     .map_err(Into::into)
 }
@@ -850,7 +910,7 @@ pub async fn panel_query(
             panel_db.as_deref(), Some(DEFAULT_MAX_ROWS)) => {
             r.map_err(crate::apperror::AppError::from)
         }
-        _ = rx => Err(crate::apperror::AppError::cancelled()),
+        Ok(()) = rx => Err(crate::apperror::AppError::cancelled()),
     };
 
     state.cancels.write().await.remove(&cancel_key);
@@ -1259,6 +1319,109 @@ mod begin_tx_tests {
         let err = begin_transaction_on(id, &state).await.expect_err("second begin");
         assert!(err.message.contains("already open"), "got: {err}");
         end_transaction(id, "ROLLBACK", &state).await.expect("rollback");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs local MySQL on 3306"]
+    async fn manual_commit_restores_autocommit_on_pooled_connection() {
+        let (id, state) = mysql_state(1).await;
+        let mut cfg = ConnectionConfig::new(Engine::Mysql, "t");
+        cfg.autocommit = false;
+        state.session_meta.write().await.insert(id, crate::state::SessionGuard::from_config(&cfg));
+
+        begin_transaction_on(id, &state).await.expect("begin");
+        end_transaction(id, "ROLLBACK", &state).await.expect("rollback");
+
+        let guard = state.sessions.read().await;
+        let LiveSession::Mysql(pool) = guard.get(&id).unwrap().as_ref() else { unreachable!() };
+        let r = crate::db::mysql::execute(pool, "SELECT @@autocommit").await.expect("autocommit");
+        assert_eq!(read_autocommit(Some(r)), Some(true), "pooled connection leaked autocommit = 0");
+    }
+}
+
+#[cfg(test)]
+mod cancel_and_guard_tests {
+    use super::*;
+    use crate::db::types::{ConnectionConfig, Engine, LiveSession};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn dropped_cancel_sender_does_not_abort_race_query() {
+        let duck = Arc::new(crate::db::duckdb::open_memory_sync(false).expect("duckdb memory"));
+        let id = Uuid::new_v4();
+        let sessions: crate::state::SessionMap = Arc::new(RwLock::new(Default::default()));
+        sessions.write().await.insert(id, Arc::new(LiveSession::Duckdb(duck)));
+        let kills: crate::state::KillMap = Arc::new(RwLock::new(Default::default()));
+        let ch_kills: crate::state::ChKillMap = Arc::new(RwLock::new(Default::default()));
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // Drop sender WITHOUT sending `()`: simulates a replaced cancel entry.
+        drop(tx);
+
+        let res = race_query(
+            id, "SELECT 42 AS answer", &sessions, &kills, &ch_kills,
+            "k-dropped", false, None, rx, None, None,
+        )
+        .await
+        .expect("dropped sender must not cancel the query");
+        assert_eq!(res.rows[0][0], serde_json::json!(42));
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_signal_aborts_race_query_with_cancelled() {
+        let duck = Arc::new(crate::db::duckdb::open_memory_sync(false).expect("duckdb memory"));
+        let id = Uuid::new_v4();
+        let sessions: crate::state::SessionMap = Arc::new(RwLock::new(Default::default()));
+        sessions.write().await.insert(id, Arc::new(LiveSession::Duckdb(duck.clone())));
+        let kills: crate::state::KillMap = Arc::new(RwLock::new(Default::default()));
+        let ch_kills: crate::state::ChKillMap = Arc::new(RwLock::new(Default::default()));
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tx.send(()).unwrap();
+
+        let err = race_query(
+            id,
+            "SELECT count(*) FROM range(10000000) a, range(10000000) b WHERE a.range = b.range",
+            &sessions, &kills, &ch_kills, "k-cancelled", false, None, rx, None, None,
+        )
+        .await
+        .expect_err("explicit tx.send(()) must cancel");
+        duck.interrupt();
+        assert_eq!(err.code, crate::apperror::ErrorCode::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn tx_exec_enforces_guard_statement_for_readonly_and_prod() {
+        let history = crate::history::open_in_memory().await.expect("in-memory history");
+        let state = AppState::new(history, std::env::temp_dir(), Default::default());
+
+        let ro_id = Uuid::new_v4();
+        let mut ro_cfg = ConnectionConfig::new(Engine::Postgres, "ro");
+        ro_cfg.read_only = true;
+        state.session_meta.write().await.insert(ro_id, crate::state::SessionGuard::from_config(&ro_cfg));
+
+        let err = tx_exec_on(ro_id, "DELETE FROM orders WHERE id = 1", &state)
+            .await
+            .expect_err("read-only session must reject writes in tx_exec");
+        assert_eq!(err.code, crate::apperror::ErrorCode::GuardRefused);
+
+        // Savepoint bookkeeping is not a write, so it passes the guard and hits the
+        // missing-pinned-connection check.
+        let sp_err = tx_exec_on(ro_id, "SAVEPOINT sp1", &state)
+            .await
+            .expect_err("no pinned connection");
+        assert!(sp_err.message.contains("No pinned connection"), "got: {sp_err}");
+
+        let prod_id = Uuid::new_v4();
+        let mut prod_cfg = ConnectionConfig::new(Engine::SqlServer, "prod");
+        prod_cfg.environment = Some("prod".into());
+        state.session_meta.write().await.insert(prod_id, crate::state::SessionGuard::from_config(&prod_cfg));
+
+        let ddl_err = tx_exec_on(prod_id, "DROP TABLE dbo.orders", &state)
+            .await
+            .expect_err("prod session must reject destructive DDL in tx_exec");
+        assert_eq!(ddl_err.code, crate::apperror::ErrorCode::GuardRefused);
     }
 }
 

@@ -41,7 +41,8 @@ import { preflightScript, shouldPreflight } from '../utils/preflight';
 import type { PreflightReport } from '../utils/preflight';
 import { findVariables } from '../utils/sqlVars';
 import {
-  isCancellation, isAbortedTransaction, txEffect, needsSavepoint, summarise,
+  isCancellation, isAbortedTransaction, txEffect, txEndCommand, isCommentOnlyStatement,
+  needsSavepoint, summarise,
   needsDecision, defaultChoice, applyChoice, tally, scriptResultTabs, scriptResultFor,
   SAVEPOINT_SQL, SAVEPOINT_RELEASE, SAVEPOINT_ROLLBACK,
 } from '../utils/scriptRun';
@@ -81,12 +82,13 @@ export interface QueryRunnerDeps {
 
   patchTab: (id: number, patch: Partial<QueryTab>) => void;
   liveSql: (t: QueryTab) => string;
-  beginTx: () => Promise<void>;
-  endTx: (cmd: 'commit_transaction' | 'rollback_transaction') => Promise<void>;
+  beginTx: () => Promise<{ ok: boolean; error?: string } | void>;
+  endTx: (cmd: 'commit_transaction' | 'rollback_transaction') => Promise<{ ok: boolean; error?: string } | void>;
   recordVersion: (tabId: number, sql: string, reason: 'edit' | 'run' | 'manual') => void;
 
   // ── The modals, staying in QueryTabs ──
   setScriptAsk: (ask: ScriptErrorRequest | null) => void;
+  dismissScriptAsk?: (tabId?: number) => void;
   setWriteAsk: (ask: (WriteConfirmRequest & { tabId: number; from?: number; noResults?: boolean }) | null) => void;
   setVarPrompt: (p: { vars: string[]; sql: string; tabId: number; from?: number; noResults?: boolean } | null) => void;
   setPreflight: (p: { report: PreflightReport; sql: string; tabId: number; from?: number; noResults?: boolean } | null) => void;
@@ -98,7 +100,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     tabsRef, txOpenRef, currentDbRef, dbUserRef,
     defaultLimitRef, limitTouchedRef, aliasesRef,
     patchTab, liveSql, beginTx, endTx, recordVersion,
-    setScriptAsk, setWriteAsk, setVarPrompt, setPreflight,
+    setScriptAsk, dismissScriptAsk, setWriteAsk, setVarPrompt, setPreflight,
   } = deps;
 
   /**
@@ -241,9 +243,12 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       label: 'Running query',
       detail: sql.replace(/\s+/g, ' ').trim().slice(0, 400),
       survives: true,   // the server keeps executing it if the tab goes away
-      kill: () => { invoke('cancel_query', { sessionId: session.sessionId, tabId }).catch(() => {}); },
+      kill: () => {
+        dismissScriptAsk?.(tabId);
+        invoke('cancel_query', { sessionId: session.sessionId, tabId }).catch(() => {});
+      },
     });
-  }, [session.sessionId]);
+  }, [session.sessionId, dismissScriptAsk]);
   const markIdle = useCallback((tabId: number) => {
     clearActivity(sqlTabKey(session.sessionId, tabId), 'query');
   }, [session.sessionId]);
@@ -351,7 +356,19 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
   }, [session, patchTab, tabsRef]);
 
   const executeSql = useCallback(async (sql: string, tabId: number, from?: number, noResults = false) => {
-    const stmts = splitStatements(sql, getPref(PREFS.sqlDelimiter));
+    const delim = getPref(PREFS.sqlDelimiter);
+    const rawStmts = splitStatements(sql, delim, session.engine);
+    const stmts = can(session.engine, 'sql')
+      ? rawStmts.filter(s => !isCommentOnlyStatement(s.text, session.engine, delim))
+      : rawStmts;
+    if (can(session.engine, 'sql') && stmts.length === 0) {
+      patchTab(tabId, { running: false, error: null });
+      addLog(sid, {
+        level: 'info', action: 'QUERY', detail: 'Nothing to execute (comments only)',
+        line: 'Nothing to execute (comments only)',
+      });
+      return;
+    }
     const startedMs = Date.now();
     // Claim the tab's run generation. From here on, `stale()` is the first
     // question every completion-side effect asks — see runGenRef above.
@@ -361,6 +378,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
 
     // ── single statement — straight to the grid ──
     if (stmts.length <= 1) {
+      const execText = stmts.length === 1 && rawStmts.length > 1 ? stmts[0].text : sql;
       // The gutter marker needs the statement's buffer position, not the text
       // (variable substitution has already rewritten the text). Resolve the
       // offset to a statement INDEX once, HERE, against the buffer as it is
@@ -369,32 +387,32 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       // the only sane read then.
       const tabNow = tabsRef.current.find(t => t.id === tabId);
       const idx = from == null || !tabNow ? 0
-        : Math.max(0, statementIndexAt(liveSql(tabNow), from, getPref(PREFS.sqlDelimiter)));
+        : Math.max(0, statementIndexAt(liveSql(tabNow), from, delim));
       const locationFrom = from == null || !tabNow ? from
-        : statementAtCaret(liveSql(tabNow), from, getPref(PREFS.sqlDelimiter))?.from ?? from;
+        : statementAtCaret(liveSql(tabNow), from, delim, session.engine)?.from ?? from;
       // A single run updates ONLY its statement's gutter entry — the others
       // persist (a script run's finished markers fold in first, so replacing
       // the script result view doesn't take its chips with it).
       const acc = foldScriptInto(tabNow?.scriptResults, tabNow?.stmtRuns ?? {}, tabNow?.scriptBase ?? 0);
       patchTab(tabId, { running: true, error: null, result: null, resultSql: null, scriptResults: null,
-        scriptResultView: null, autoLimited: null, prodCap: null, runningSql: sql, runStartedAt: startedMs,
+        scriptResultView: null, autoLimited: null, prodCap: null, runningSql: execText, runStartedAt: startedMs,
         resultStmtIdx: idx,
         stmtRuns: { ...acc, [idx]: { status: 'running', startedAt: startedMs, at: from } } });
-      markRunning(tabId, sql);
+      markRunning(tabId, execText);
       try {
         // Streamed results render as they arrive: each page patch shows the
         // rows so far in the grid while the backend ships the rest. Same
         // patchTab + generation-guard contract as the completion patch below.
-        const { result, limit, prodCapped } = await executeOne(sql, tabId, undefined, partial => {
+        const { result, limit, prodCapped } = await executeOne(execText, tabId, undefined, partial => {
           if (stale()) return;
-          patchTab(tabId, { result: partial, resultSql: sql, view: 'grid' });
+          patchTab(tabId, { result: partial, resultSql: execText, view: 'grid' });
         });
         // A newer run started on this tab while this one was in flight — the
         // result slot, the running flag and the marker belong to it now.
         if (stale()) return;
         const ms = Date.now() - startedMs;
         patchTab(tabId, {
-          result, resultSql: sql, running: false, view: 'grid',
+          result, resultSql: execText, running: false, view: 'grid',
           autoLimited: limit, prodCap: prodCapped ? limit : null, resultStmtIdx: idx,
           stmtRuns: { ...acc, [idx]: { status: 'ok', ms, startedAt: startedMs, at: from } },
         });
@@ -402,11 +420,11 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         notifyIfLong(startedMs, true, { statements: 1 });
         // Background enrichments of the marker that just landed — both async,
         // both silent on failure, neither blocks the next keystroke.
-        maybeAutoExplain(sql, tabId, idx, ms);
-        maybeDigestStats(sql, tabId, idx, startedMs, ms);
+        maybeAutoExplain(execText, tabId, idx, ms);
+        maybeDigestStats(execText, tabId, idx, startedMs, ms);
       } catch (err) {
         if (stale()) return;
-        patchTab(tabId, { error: errorDisplay(err), errorLocation: { sql, from: locationFrom ?? 0 }, running: false,
+        patchTab(tabId, { error: errorDisplay(err), errorLocation: { sql: execText, from: locationFrom ?? 0 }, running: false,
           stmtRuns: { ...acc, [idx]: { status: 'error', ms: Date.now() - startedMs, startedAt: startedMs, at: from } } });
         beepIfLong(startedMs, false);
         notifyIfLong(startedMs, false, { statements: 1, error: errorDisplay(err) });
@@ -494,6 +512,44 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     const txExec = (sql: string) =>
       invoke('tx_exec', { sessionId: session.sessionId, sql });
 
+    // A failure halfway through a script — including a failed BEGIN or COMMIT —
+    // honours scriptErrorMode (stop / ask / ignore) rather than ploughing on in
+    // autocommit or silently pretending the transaction committed.
+    const decideAfterFailure = async (
+      idx: number,
+      sqlText: string,
+      errMsg: string,
+      savepointed: boolean,
+    ): Promise<boolean> => {
+      if (stale()) return false;
+      const mode = getPref(PREFS.scriptErrorMode) as ScriptErrorMode;
+      let choice = defaultChoice(mode, ignoreAll);
+      if (needsDecision(mode, ignoreAll)) {
+        choice = await new Promise<ScriptErrorChoice>(resolve => {
+          setScriptAsk({
+            tabId,
+            stmtNo: idx + 1, total: stmts.length,
+            sql: sqlText, error: errMsg,
+            // Whether ignoring is actually safe here depends on the engine
+            // and on being inside a transaction; the prompt says which.
+            inTransaction: inTx,
+            savepointed,
+            resolve,
+          });
+        });
+        setScriptAsk(null);
+      }
+      if (stale()) return false;
+      const { keepGoing, ignoreRest } = applyChoice(choice);
+      if (ignoreRest) ignoreAll = true;
+      if (!keepGoing) {
+        for (let j = idx + 1; j < stmts.length; j++) lines[j] = { ...lines[j], status: 'skipped' };
+        setLines(lines);
+        return false;
+      }
+      return true;
+    };
+
     for (let i = 0; i < stmts.length; i++) {
       // A newer run claimed this tab while a statement (or the error prompt)
       // was awaited: stop here, silently — no summary patch, no markIdle, no
@@ -510,21 +566,40 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       // and autocommit — on others, with the final COMMIT settling nothing.
       // Routing it through the same pinning the toolbar uses is what makes an
       // explicit transaction in a script actually hold.
-      const eff0 = txEffect(stmts[i].text);
+      const eff0 = txEffect(stmts[i].text, session.engine);
       if (eff0 === 'begin' && !txOpenRef.current) {
-        await beginTx();
+        const out = await beginTx();
         inTx = txOpenRef.current;
-        lines[i] = { ...lines[i], status: inTx ? 'ok' : 'error',
-          ms: Math.round(performance.now() - t0),
-          error: inTx ? undefined : 'could not open a transaction' };
+        if (!inTx || (out && !out.ok)) {
+          const errMsg = (out && !out.ok ? out.error : undefined) ?? 'could not open a transaction';
+          lines[i] = {
+            ...lines[i], status: 'error',
+            ms: Math.round(performance.now() - t0),
+            error: errMsg,
+          };
+          setLines(lines);
+          if (!await decideAfterFailure(i, stmts[i].text, errMsg, false)) break;
+          continue;
+        }
+        lines[i] = { ...lines[i], status: 'ok', ms: Math.round(performance.now() - t0) };
         setLines(lines);
         continue;
       }
       if (eff0 === 'end' && txOpenRef.current) {
-        const verb = /^\s*(commit|end)\b/i.test(stmts[i].text)
-          ? 'commit_transaction' as const : 'rollback_transaction' as const;
-        await endTx(verb);
+        const verb = txEndCommand(stmts[i].text, session.engine);
+        const out = await endTx(verb);
         inTx = txOpenRef.current;
+        if (out && !out.ok) {
+          const errMsg = out.error ?? (verb === 'commit_transaction' ? 'COMMIT failed' : 'ROLLBACK failed');
+          lines[i] = {
+            ...lines[i], status: 'error',
+            ms: Math.round(performance.now() - t0),
+            error: errMsg,
+          };
+          setLines(lines);
+          if (!await decideAfterFailure(i, stmts[i].text, errMsg, false)) break;
+          continue;
+        }
         lines[i] = { ...lines[i], status: 'ok', ms: Math.round(performance.now() - t0) };
         setLines(lines);
         continue;
@@ -539,7 +614,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
         const { result, limit, prodCapped } = await executeOne(
           stmts[i].text, tabId, { runId, index: i + 1, total: stmts.length });
         if (guarded) { try { await txExec(SAVEPOINT_RELEASE); } catch { /* not fatal */ } }
-        const eff = txEffect(stmts[i].text);
+        const eff = txEffect(stmts[i].text, session.engine);
         if (eff === 'begin') inTx = true;
         else if (eff === 'end') inTx = false;
         anyLimit = anyLimit ?? limit;
@@ -589,42 +664,16 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
           // Back to just before this statement, so the transaction survives it.
           try { await txExec(SAVEPOINT_ROLLBACK); } catch { /* nothing left to save */ }
         }
+        const errMsg = errorDisplay(err);
         lines[i] = {
           ...lines[i],
           status: 'error',
           ms: Math.round(performance.now() - t0),
-          error: errorDisplay(err),
+          error: errMsg,
         };
         setLines(lines);
 
-        // A failure halfway through a script is a decision, not a verdict:
-        // some scripts are a batch of independent statements where one bad
-        // one should not bin the rest, and some are a sequence where step 4
-        // is meaningless without step 3. Only the person running it knows.
-        const mode = getPref(PREFS.scriptErrorMode) as ScriptErrorMode;
-        let choice = defaultChoice(mode, ignoreAll);
-        if (needsDecision(mode, ignoreAll)) {
-          choice = await new Promise<ScriptErrorChoice>(resolve => {
-            setScriptAsk({
-              stmtNo: i + 1, total: stmts.length,
-              sql: stmts[i].text, error: errorDisplay(err),
-              // Whether ignoring is actually safe here depends on the engine
-              // and on being inside a transaction; the prompt says which.
-              inTransaction: inTx,
-              savepointed: guarded,
-              resolve,
-            });
-          });
-          setScriptAsk(null);
-        }
-        const { keepGoing, ignoreRest } = applyChoice(choice);
-        if (ignoreRest) ignoreAll = true;
-
-        if (!keepGoing) {
-          for (let j = i + 1; j < stmts.length; j++) lines[j] = { ...lines[j], status: 'skipped' };
-          setLines(lines);
-          break;
-        }
+        if (!await decideAfterFailure(i, stmts[i].text, errMsg, guarded)) break;
         // ignored — fall through and keep running the rest
       }
       setLines(lines);
@@ -689,7 +738,7 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
     let sql = input;
     const delim = getPref(PREFS.sqlDelimiter);
     {
-      const parts = splitStatements(input, delim);
+      const parts = splitStatements(input, delim, session.engine);
       let any = false;
       const rebuilt = parts.map(p => {
         const e = expandAlias(p.text, aliasesRef.current);
@@ -700,7 +749,21 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       // turned a custom-delimiter script into one unsplittable statement.
       if (any) sql = rebuilt.join(`${delim}\n`);
     }
-    const stmts = splitStatements(sql, delim);
+    const rawStmts = splitStatements(sql, delim, session.engine);
+    const stmts = can(session.engine, 'sql')
+      ? rawStmts.filter(s => !isCommentOnlyStatement(s.text, session.engine, delim))
+      : rawStmts;
+    if (can(session.engine, 'sql') && stmts.length === 0) {
+      patchTab(tabId, { error: null });
+      addLog(sid, {
+        level: 'info', action: 'QUERY', detail: 'Nothing to execute (comments only)',
+        line: 'Nothing to execute (comments only)',
+      });
+      return;
+    }
+    if (stmts.length === 1 && rawStmts.length > 1) {
+      sql = stmts[0].text;
+    }
 
     // ── Pre-flight: judge the WHOLE script before running any of it ─────────
     // A twenty-statement script used to fail at whichever statement first
@@ -803,13 +866,13 @@ export function useQueryRunner(deps: QueryRunnerDeps) {
       }
     }
     // :name variables → prompt, then execute the substituted statement
-    const vars = can(session.engine, 'sqlVariables') ? findVariables(sql) : [];
+    const vars = can(session.engine, 'sqlVariables') ? findVariables(sql, session.engine) : [];
     if (vars.length > 0) {
       setVarPrompt({ vars, sql, tabId, from, noResults });
       return;
     }
     executeSql(sql, tabId, from, noResults);
-  }, [activeTabId, session, executeSql, currentDb, supportsDbSelect, txOpen, connCfg, tabsRef,
+  }, [activeTabId, session, sid, executeSql, currentDb, supportsDbSelect, txOpen, connCfg, tabsRef,
       recordVersion, patchTab, aliasesRef, setPreflight, setVarPrompt, setWriteAsk]);
 
   return { runQuery, executeSql, executeOne };

@@ -655,11 +655,14 @@ export function SqlQualityPanel({ session, onClose }: Props) {
 
           {mode === 'schema' && (
             <button
-              className="primary"
+              className={`primary${running || !dbOverride.trim() ? ' unavail' : ''}`}
               style={{ marginTop: 10 }}
-              disabled={running || !dbOverride.trim()}
-              data-tip={dbOverride.trim() ? undefined : 'Choose the database to review in the DB box above'}
-              onClick={runSchemaReview}
+              aria-disabled={running || !dbOverride.trim()}
+              data-tip={running ? 'Schema review is already running' : dbOverride.trim() ? undefined : 'Choose the database to review in the DB box above'}
+              onClick={() => {
+                if (running || !dbOverride.trim()) return;
+                void runSchemaReview();
+              }}
             >{running ? 'Reviewing…' : '▶ Review schema'}</button>
           )}
 

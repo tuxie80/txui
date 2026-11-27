@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn included_columns_go_in_INCLUDE_not_in_the_key() {
+    fn included_columns_go_in_include_not_in_the_key() {
         // A covering column in the key makes the index wider and no more
         // seekable — INCLUDE stores it at the leaf only.
         let sql = mi("[status]", "", "[total]").create_sql();

@@ -1,15 +1,31 @@
 /**
  * Lightweight SQL statement splitter — string/comment/quote aware.
- * Handles: 'strings' (with '' and \' escapes), "quoted idents", `backticks`,
- * `--` line comments, `#` line comments (MySQL), block comments,
- * PostgreSQL dollar-quoting ($$ … $$, $tag$ … $tag$), and the MySQL
- * `DELIMITER` directive. Good enough for run-at-caret; not a full parser.
+ * Handles: 'strings' (with '' and dialect-aware \' escapes), "quoted idents",
+ * `backticks`, [T-SQL brackets], `--` line comments, `#` line comments
+ * (MySQL family), nested block comments (PG/T-SQL), PostgreSQL/DuckDB
+ * dollar-quoting ($$ … $$, $tag$ … $tag$), and the MySQL `DELIMITER`
+ * directive. Good enough for run-at-caret; not a full parser.
  */
+
+import { dollarQuotedStrings, hashLineComments, nestedBlockComments } from './sqlAlias.ts';
+import { backslashEscapesStrings } from './sqlIdent.ts';
 
 export interface Statement {
   from: number;   // doc offset of first char
   to: number;     // doc offset AFTER last char (semicolon included)
   text: string;
+}
+
+const KNOWN_ENGINES = new Set([
+  'mysql', 'mariadb', 'percona', 'postgres', 'redis', 'clickhouse',
+  'sqlite', 'parquet', 'duckdb', 'mongodb', 'sqlserver',
+]);
+
+function resolveSplitArgs(delimiter: string, engine?: string): { delimiter: string; engine?: string } {
+  if (engine === undefined && KNOWN_ENGINES.has(delimiter)) {
+    return { delimiter: ';', engine: delimiter };
+  }
+  return { delimiter, engine };
 }
 
 /**
@@ -39,12 +55,18 @@ function delimiterFits(doc: string, i: number, delim: string): boolean {
  * on. An empty or whitespace delimiter falls back to `;`: it would otherwise
  * match at every offset and split the document into nothing.
  */
-export function splitStatements(doc: string, delimiter = ';'): Statement[] {
+export function splitStatements(doc: string, delimiter = ';', engine?: string): Statement[] {
+  const resolved = resolveSplitArgs(delimiter, engine);
+  const effEngine = resolved.engine;
+  const hashOk = hashLineComments(effEngine);
+  const bsInStrings = backslashEscapesStrings(effEngine);
+  const nestedComments = nestedBlockComments(effEngine);
+  const dollarOk = effEngine == null || effEngine === '' || dollarQuotedStrings(effEngine);
   const out: Statement[] = [];
   const n = doc.length;
   let i = 0;
   let start = 0;
-  let delim = delimiter.trim() || ';';   // DELIMITER directive can change this mid-script
+  let delim = resolved.delimiter.trim() || ';';   // DELIMITER directive can change this mid-script
 
   const push = (end: number) => {
     const raw = doc.slice(start, end);
@@ -74,22 +96,36 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
     }
 
     // line comments
-    if ((ch === '-' && next === '-') || ch === '#') {
+    if ((ch === '-' && next === '-') || (ch === '#' && hashOk)) {
       const nl = doc.indexOf('\n', i);
       i = nl === -1 ? n : nl + 1;
       continue;
     }
     // block comment
     if (ch === '/' && next === '*') {
-      const end = doc.indexOf('*/', i + 2);
-      i = end === -1 ? n : end + 2;
+      if (nestedComments) {
+        let depth = 1;
+        i += 2;
+        while (i < n && depth > 0) {
+          if (doc[i] === '/' && doc[i + 1] === '*') { depth++; i += 2; }
+          else if (doc[i] === '*' && doc[i + 1] === '/') { depth--; i += 2; }
+          else i++;
+        }
+      } else {
+        const end = doc.indexOf('*/', i + 2);
+        i = end === -1 ? n : end + 2;
+      }
       continue;
     }
     // single-quoted string
     if (ch === "'") {
+      const eString = (effEngine === 'postgres' || effEngine === 'duckdb')
+        && i > 0 && (doc[i - 1] === 'E' || doc[i - 1] === 'e')
+        && (i < 2 || !/[\w$]/.test(doc[i - 2]));
+      const bs = bsInStrings || eString;
       i++;
       while (i < n) {
-        if (doc[i] === '\\') { i += 2; continue; }
+        if (bs && doc[i] === '\\') { i += 2; continue; }
         if (doc[i] === "'") {
           if (i + 1 < n && doc[i + 1] === "'") { i += 2; continue; } // '' escape
           i++; break;
@@ -103,7 +139,7 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
     if (ch === '"') {
       i++;
       while (i < n) {
-        if (doc[i] === '\\') { i += 2; continue; }
+        if (bsInStrings && doc[i] === '\\') { i += 2; continue; }
         if (doc[i] === '"') {
           if (i + 1 < n && doc[i + 1] === '"') { i += 2; continue; } // "" escape
           i++; break;
@@ -124,6 +160,18 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
       }
       continue;
     }
+    // bracketed identifier (T-SQL). `]]` doubles to a literal closing bracket.
+    if (ch === '[' && effEngine === 'sqlserver') {
+      i++;
+      while (i < n) {
+        if (doc[i] === ']') {
+          if (i + 1 < n && doc[i + 1] === ']') { i += 2; continue; }
+          i++; break;
+        }
+        i++;
+      }
+      continue;
+    }
     // custom delimiter boundary — evaluated AFTER the string/comment skips so
     // the delimiter occurring inside a literal or comment is consumed by those
     // branches and never splits mid-string (mirrors the `;` fast path below).
@@ -134,8 +182,8 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
       i += delim.length;
       continue;
     }
-    // dollar quoting (PG): $$ or $tag$
-    if (ch === '$') {
+    // dollar quoting (PG / DuckDB): $$ or $tag$
+    if (ch === '$' && dollarOk) {
       const m = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(doc.slice(i, i + 64));
       if (m) {
         const tag = m[0];
@@ -168,20 +216,34 @@ export function splitStatements(doc: string, delimiter = ';'): Statement[] {
  * Used for anchor math (run-marker gutter, statement navigation) — never for
  * deciding what text executes.
  */
-export function firstCodeOffset(stmt: { from: number; text: string }): number {
+export function firstCodeOffset(stmt: { from: number; text: string }, engine?: string): number {
+  const hashOk = hashLineComments(engine);
+  const nestedComments = nestedBlockComments(engine);
   const t = stmt.text;
   const wsOnly = stmt.from + (t.length - t.trimStart().length);
   let i = 0;
   for (;;) {
     while (i < t.length && /\s/.test(t[i])) i++;
-    if (t.startsWith('--', i) || t.startsWith('#', i)) {
+    if (t.startsWith('--', i) || (hashOk && t.startsWith('#', i))) {
       const nl = t.indexOf('\n', i);
       if (nl === -1) return wsOnly;             // comment runs to the end: comment-only
       i = nl + 1;
     } else if (t.startsWith('/*', i) && !t.startsWith('/*+', i) && !t.startsWith('/*!', i)) {
-      const end = t.indexOf('*/', i + 2);
-      if (end === -1) return wsOnly;            // unterminated comment: comment-only
-      i = end + 2;
+      if (nestedComments) {
+        let depth = 1;
+        let j = i + 2;
+        while (j < t.length && depth > 0) {
+          if (t[j] === '/' && t[j + 1] === '*') { depth++; j += 2; }
+          else if (t[j] === '*' && t[j + 1] === '/') { depth--; j += 2; }
+          else j++;
+        }
+        if (depth > 0) return wsOnly;
+        i = j;
+      } else {
+        const end = t.indexOf('*/', i + 2);
+        if (end === -1) return wsOnly;            // unterminated comment: comment-only
+        i = end + 2;
+      }
     } else {
       break;
     }
@@ -224,8 +286,8 @@ function looksLikeStatementStart(text: string): boolean {
  * block reads as a clause continuation (`FROM …`, `WHERE …`), the statement is
  * returned whole, so ⌘↵ never runs a fragment.
  */
-export function statementAtCaret(doc: string, pos: number, delimiter = ';'): Statement | null {
-  const stmt = statementAt(doc, pos, delimiter);
+export function statementAtCaret(doc: string, pos: number, delimiter = ';', engine?: string): Statement | null {
+  const stmt = statementAt(doc, pos, delimiter, engine);
   if (!stmt) return null;
   if (!/\n[ \t]*\n/.test(stmt.text)) return stmt; // single block — done
 
@@ -267,8 +329,8 @@ export function statementAtCaret(doc: string, pos: number, delimiter = ';'): Sta
  * whitespace/comments between two statements, the previous statement wins —
  * matches the "run what I just typed" intuition.
  */
-export function statementAt(doc: string, pos: number, delimiter = ';'): Statement | null {
-  const stmts = splitStatements(doc, delimiter);
+export function statementAt(doc: string, pos: number, delimiter = ';', engine?: string): Statement | null {
+  const stmts = splitStatements(doc, delimiter, engine);
   if (stmts.length === 0) return null;
   for (const s of stmts) {
     if (pos >= s.from && pos <= s.to) return s;

@@ -159,15 +159,17 @@ fn source_reader(source: &ScriptSource, hash: SourceHash) -> Result<Box<dyn Read
     })
 }
 
+pub type ScanStream = (
+    tokio::sync::mpsc::Receiver<Result<ScriptScanEvent, String>>,
+    tokio::task::JoinHandle<Result<ScanSummary, String>>,
+);
+
 /// Start a bounded streaming scan. The receiver closes when the reader exits;
 /// the join handle owns the final checksum and counters.
 pub fn spawn_scan(
     source: ScriptSource,
     max_statement_bytes: usize,
-) -> (
-    tokio::sync::mpsc::Receiver<Result<ScriptScanEvent, String>>,
-    tokio::task::JoinHandle<Result<ScanSummary, String>>,
-) {
+) -> ScanStream {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let join = tokio::task::spawn_blocking(move || scan_blocking(source, max_statement_bytes, tx));
     (rx, join)
@@ -551,7 +553,7 @@ impl MysqlSplitter {
             {
                 match self.directive(&self.pending[i..], final_input)? {
                     Directive::Wait => break,
-                    Directive::NotDirective => {}
+                    Directive::Plain => {}
                     Directive::Delimiter { value, consumed } => {
                         if self.has_code {
                             return Err(format!("DELIMITER at line {} appears inside a statement", self.line));
@@ -559,7 +561,15 @@ impl MysqlSplitter {
                         self.current.clear();
                         self.reset_statement();
                         self.delimiter = value;
-                        for b in self.pending[i..i + consumed].to_vec() { self.consume(b); }
+                        for b in self.pending[i..i + consumed].iter().copied() {
+                            Self::consume_byte(
+                                &mut self.absolute,
+                                &mut self.previous,
+                                &mut self.line,
+                                &mut self.line_start,
+                                b,
+                            );
+                        }
                         i += consumed;
                         continue;
                     }
@@ -713,9 +723,9 @@ impl MysqlSplitter {
         };
         let line = std::str::from_utf8(&bytes[..end]).unwrap_or("").trim_end_matches('\r');
         let mut words = line.split_ascii_whitespace();
-        let Some(first) = words.next() else { return Ok(Directive::NotDirective); };
+        let Some(first) = words.next() else { return Ok(Directive::Plain); };
         if !first.eq_ignore_ascii_case("delimiter") {
-            return Ok(Directive::NotDirective);
+            return Ok(Directive::Plain);
         }
         let value = words.next().ok_or_else(|| format!("DELIMITER at line {} needs a value", self.line))?;
         if words.next().is_some() {
@@ -745,15 +755,19 @@ impl MysqlSplitter {
         Ok(())
     }
 
-    fn consume(&mut self, b: u8) {
-        self.absolute += 1;
-        self.previous = Some(b);
+    fn consume_byte(absolute: &mut u64, previous: &mut Option<u8>, line: &mut u64, line_start: &mut bool, b: u8) {
+        *absolute += 1;
+        *previous = Some(b);
         if b == b'\n' {
-            self.line += 1;
-            self.line_start = true;
+            *line += 1;
+            *line_start = true;
         } else {
-            self.line_start = false;
+            *line_start = false;
         }
+    }
+
+    fn consume(&mut self, b: u8) {
+        Self::consume_byte(&mut self.absolute, &mut self.previous, &mut self.line, &mut self.line_start, b);
     }
 
     fn reset_statement(&mut self) {
@@ -780,7 +794,7 @@ fn is_word(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'_' }
 
 enum Directive {
     Wait,
-    NotDirective,
+    Plain,
     Delimiter { value: Vec<u8>, consumed: usize },
 }
 

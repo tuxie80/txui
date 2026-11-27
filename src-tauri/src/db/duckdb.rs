@@ -218,22 +218,36 @@ impl DuckDbSession {
             let conn = if let Some(quack) = quack {
                 open_quack_blocking(&quack)?
             } else if path == ":memory:" {
-                duckdb::Connection::open_in_memory()?
+                duckdb::Connection::open_in_memory_with_flags(local_config(None)?)?
             } else {
-                let cfg = duckdb::Config::default()
-                    .access_mode(if read_only {
-                        duckdb::AccessMode::ReadOnly
-                    } else {
-                        duckdb::AccessMode::Automatic
-                    })
-                    .map_err(|e| anyhow!("invalid DuckDB configuration: {e}"))?;
-                duckdb::Connection::open_with_flags(&path, cfg)?
+                duckdb::Connection::open_with_flags(&path, local_config(Some(read_only))?)?
             };
             let v: String = conn.query_row("SELECT version()", [], |r| r.get(0))?;
             Ok(v)
         })
         .await
         .map_err(|e| anyhow!("DuckDB probe task failed: {e}"))?
+    }
+}
+
+/// Configuration for local (non-Quack) DuckDB connections: disables runtime
+/// network extension downloads (`autoinstall_known_extensions = false`) while
+/// leaving `autoload_known_extensions` at DuckDB's default (`true`) so
+/// statically linked extensions (`parquet`, `json`) load from the binary and
+/// unbundled extensions fail closed instead of phoning home.
+fn local_config(read_only: Option<bool>) -> Result<duckdb::Config> {
+    let cfg = duckdb::Config::default()
+        .with("autoinstall_known_extensions", "false")
+        .map_err(|e| anyhow!("invalid DuckDB configuration: {e}"))?;
+    match read_only {
+        Some(ro) => cfg
+            .access_mode(if ro {
+                duckdb::AccessMode::ReadOnly
+            } else {
+                duckdb::AccessMode::Automatic
+            })
+            .map_err(|e| anyhow!("invalid DuckDB configuration: {e}")),
+        None => Ok(cfg),
     }
 }
 
@@ -263,13 +277,7 @@ pub async fn open_authenticated(
         if let Some(quack) = quack_for_open {
             return open_quack_blocking(&quack);
         }
-        let duckdb_config = duckdb::Config::default()
-            .access_mode(if read_only {
-                duckdb::AccessMode::ReadOnly
-            } else {
-                duckdb::AccessMode::Automatic
-            })
-            .map_err(|e| anyhow!("invalid DuckDB configuration: {e}"))?;
+        let duckdb_config = local_config(Some(read_only))?;
         if path_owned == ":memory:" {
             return Ok(duckdb::Connection::open_in_memory_with_flags(duckdb_config)?);
         }
@@ -306,13 +314,7 @@ pub async fn open_authenticated(
 /// passes false (its read-only posture is structural: no user text ever
 /// reaches this session).
 pub fn open_memory_sync(read_only: bool) -> Result<DuckDbSession> {
-    let config = duckdb::Config::default()
-        .access_mode(if read_only {
-            duckdb::AccessMode::ReadOnly
-        } else {
-            duckdb::AccessMode::Automatic
-        })
-        .map_err(|e| anyhow!("invalid DuckDB configuration: {e}"))?;
+    let config = local_config(Some(read_only))?;
     let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
     let interrupt = conn.interrupt_handle();
     Ok(DuckDbSession {
@@ -602,6 +604,9 @@ fn prepare_decodable<'conn>(
     Ok((conn.prepare(&wrapped)?, logical_types))
 }
 
+/// (columns, rows, time-to-first-row relative to `start`, truncated).
+type CollectedRows = (Vec<ColumnInfo>, Vec<Row>, Option<u64>, bool);
+
 /// Drain one executed statement's rows, decoding each cell. `max_rows` caps
 /// the collection: past it iteration stops and the last tuple element is true.
 /// Returns (columns, rows, time-to-first-row relative to `start`, truncated).
@@ -610,7 +615,7 @@ fn collect_rows(
     start: &Instant,
     max_rows: Option<usize>,
     logical_types: &[duckdb::core::LogicalTypeId],
-) -> Result<(Vec<ColumnInfo>, Vec<Row>, Option<u64>, bool)> {
+) -> Result<CollectedRows> {
     let stmt = rows_it.as_ref().ok_or_else(|| anyhow!("statement gone"))?;
     let ncols = stmt.column_count();
     if ncols == 0 {
@@ -1453,6 +1458,10 @@ mod tests {
         assert_eq!(execute(&s, "SELECT 1").await.unwrap().rows.len(), 1);
     }
 
+    // Holding the std::sync::MutexGuard across `probe_version().await` is the
+    // exact scenario under test: proving the probe opens a fresh connection
+    // instead of waiting on `self.conn`.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn probe_version_does_not_wait_for_the_session_mutex() {
         // The whole point of the fresh-connection probe: the sidebar ping
@@ -1908,6 +1917,44 @@ mod tests {
         assert_eq!(result.rows[0][0], serde_json::json!(42));
         assert_eq!(result.rows[0][1], serde_json::json!("ok"));
         let _ = std::fs::remove_file(&pq);
+    }
+
+    #[tokio::test]
+    async fn json_is_static_and_local_sessions_disable_autoinstall() {
+        let s = mem().await;
+        let sync_s = open_memory_sync(false).unwrap();
+        for session in [&s, &sync_s] {
+            let setting = execute(
+                session,
+                "SELECT value FROM duckdb_settings() WHERE name = 'autoinstall_known_extensions'",
+            )
+            .await
+            .unwrap();
+            assert_eq!(setting.rows[0][0], serde_json::json!("false"));
+
+            let autoload = execute(
+                session,
+                "SELECT value FROM duckdb_settings() WHERE name = 'autoload_known_extensions'",
+            )
+            .await
+            .unwrap();
+            assert_eq!(autoload.rows[0][0], serde_json::json!("true"));
+        }
+
+        let json_val = execute(&s, "SELECT to_json({'ok': 1}::VARIANT)").await.unwrap();
+        assert_eq!(json_val.rows[0][0], serde_json::json!("{\"ok\":1}"));
+
+        let ext = execute(
+            &s,
+            "SELECT loaded, installed, install_mode FROM duckdb_extensions() \
+             WHERE extension_name = 'json'",
+        )
+        .await
+        .unwrap();
+        assert_eq!(ext.rows.len(), 1);
+        assert_eq!(ext.rows[0][0], serde_json::json!(true));
+        assert_eq!(ext.rows[0][1], serde_json::json!(true));
+        assert_eq!(ext.rows[0][2], serde_json::json!("STATICALLY_LINKED"));
     }
 
     #[tokio::test]

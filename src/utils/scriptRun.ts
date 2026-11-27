@@ -29,6 +29,7 @@
 import { errorDisplay } from './appError.ts';
 import { isCancelled } from './appError.ts';
 import { resultKind } from './resultKind.ts';
+import { blank } from './sqlAlias.ts';
 import type { QueryResult } from '../types/index.ts';
 
 export type Engine = string;
@@ -118,6 +119,31 @@ export function scriptResultTabs(
 
 const BEGIN_RE = /^\s*(BEGIN|START\s+TRANSACTION)\b/i;
 const END_RE = /^\s*(COMMIT|ROLLBACK|END)\b/i;
+const ROLLBACK_TO_RE = /^\s*rollback\s+(?:(?:work|transaction)\s+)?to\b/i;
+const AND_CHAIN_RE = /\band\s+chain\b/i;
+
+/**
+ * Expose MySQL versioned comments (`/*!...`) and optimizer hints (`/*+...`)
+ * before blanking so they remain visible as executable SQL tokens rather than
+ * being stripped as ordinary block comments. Mirrors `sqlGuard.ts`.
+ */
+export function exposeVersionedComments(sql: string): string {
+  return sql.replace(/\/\*[!+]\d*/g, m => ' '.repeat(m.length));
+}
+
+/**
+ * True when `sql` contains only whitespace, comments and statement terminators
+ * (no executable tokens — MySQL rejects such a chunk with ERROR 1065
+ * "Query was empty"). MySQL slash-star-bang conditional comments stay executable.
+ */
+export function isCommentOnlyStatement(sql: string, engine?: Engine, delimiter = ';'): boolean {
+  let body = blank(exposeVersionedComments(sql), engine);
+  const d = delimiter.trim();
+  if (d && d !== ';' && body.endsWith(d)) {
+    body = body.slice(0, -d.length);
+  }
+  return body.replace(/;/g, '').trim() === '';
+}
 
 /**
  * Does this statement open or close a transaction?
@@ -126,11 +152,34 @@ const END_RE = /^\s*(COMMIT|ROLLBACK|END)\b/i;
  * toggle: a user who types `BEGIN;` at the top of their script is just as much
  * inside a transaction as one who clicked the button, and it is the *engine*
  * that poisons on error either way.
+ *
+ * Comments and string literals are blanked first so `-- comment\nBEGIN;` is
+ * recognized and keywords inside literals/comments never misfire. Rolling back
+ * to a savepoint (`ROLLBACK [WORK|TRANSACTION] TO ...`) and chained endings
+ * (`COMMIT AND CHAIN` / `ROLLBACK AND CHAIN`) leave a transaction open, so
+ * they return `null` rather than `'end'`.
  */
-export function txEffect(sql: string): 'begin' | 'end' | null {
-  if (BEGIN_RE.test(sql)) return 'begin';
-  if (END_RE.test(sql)) return 'end';
+export function txEffect(sql: string, engine?: Engine): 'begin' | 'end' | null {
+  const b = blank(exposeVersionedComments(sql), engine);
+  if (BEGIN_RE.test(b)) return 'begin';
+  if (END_RE.test(b)) {
+    if (ROLLBACK_TO_RE.test(b)) return null;
+    if (AND_CHAIN_RE.test(b)) return null;
+    return 'end';
+  }
   return null;
+}
+
+/**
+ * Which backend transaction-settlement command corresponds to an `'end'`
+ * statement, evaluated after stripping leading comments.
+ */
+export function txEndCommand(
+  sql: string,
+  engine?: Engine,
+): 'commit_transaction' | 'rollback_transaction' {
+  const b = blank(exposeVersionedComments(sql), engine);
+  return /^\s*(commit|end)\b/i.test(b) ? 'commit_transaction' : 'rollback_transaction';
 }
 
 /**

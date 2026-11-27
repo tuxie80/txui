@@ -1325,7 +1325,10 @@ fn read_target_token(s: &str) -> (String, Option<String>) {
 fn parse_mv_target(create_query: &str, mv_db: &str, mv_name: &str, uuid: &str) -> (String, String) {
     // The `TO` clause sits in the header, before the `AS SELECT` body — search
     // only there so a `TO` inside the query text can never be mistaken for it.
-    let upper = create_query.to_uppercase();
+    // ASCII uppercase preserves UTF-8 byte lengths and char boundaries (unlike
+    // `.to_uppercase()`, where `ı` → `I`, `ß` → `SS`, `ȿ` → `Ɀ` change byte
+    // offsets and panic when slicing `create_query`).
+    let upper = create_query.to_ascii_uppercase();
     let head_end = upper.find(" AS SELECT").unwrap_or(create_query.len());
     if let Some(pos) = upper[..head_end].find(" TO ") {
         let (a, b) = read_target_token(&create_query[pos + 4..]);
@@ -2523,5 +2526,54 @@ mod distributed_live_tests {
         execute(&s, "DROP TABLE txui_dist.dist_all").await.expect("cleanup dist");
         execute(&s, "DROP TABLE txui_dist.dist_local").await.expect("cleanup local");
         println!("  schema tree, DDL and EXPLAIN all fine; fixture cleaned up");
+    }
+}
+
+#[cfg(test)]
+mod mv_target_tests {
+    use super::parse_mv_target;
+
+    #[test]
+    fn non_ascii_unicode_case_changes_do_not_panic_or_misalign_mv_target() {
+        // `ı` (2 bytes → 1 byte `I`), `ß` (2 bytes → 2 bytes `SS`), `ȿ` (2 bytes → 3 bytes `Ɀ`),
+        // plus Cyrillic/CJK characters before `TO` and before `AS SELECT`.
+        assert_eq!(
+            parse_mv_target(
+                "CREATE MATERIALIZED VIEW mv_ı TO analytics_ı.events_ı AS SELECT ' TO ignored.tbl' AS ı",
+                "default",
+                "mv_ı",
+                "",
+            ),
+            ("analytics_ı".to_string(), "events_ı".to_string()),
+        );
+        assert_eq!(
+            parse_mv_target(
+                "CREATE MATERIALIZED VIEW straße_mv TO `db_ß`.`tbl_ß` (a UInt64) AS SELECT 1",
+                "default",
+                "straße_mv",
+                "",
+            ),
+            ("db_ß".to_string(), "tbl_ß".to_string()),
+        );
+        assert_eq!(
+            parse_mv_target(
+                "CREATE MATERIALIZED VIEW mv_ȿ_привет_日本語 TO target_ȿ AS SELECT ' TO fake.x'",
+                "analytics",
+                "mv_ȿ",
+                "",
+            ),
+            ("analytics".to_string(), "target_ȿ".to_string()),
+        );
+        // No `AS SELECT` at all + `ı` shrinking under `.to_uppercase()` used to panic
+        // on `upper[..head_end]` when `head_end == create_query.len()`.
+        assert_eq!(
+            parse_mv_target(
+                "ATTACH MATERIALIZED VIEW mv_ıßȿ UUID '11111111-2222-3333-4444-555555555555' (x Int32)",
+                "default",
+                "mv_ıßȿ",
+                "11111111-2222-3333-4444-555555555555",
+            ),
+            ("default".to_string(), ".inner_id.11111111-2222-3333-4444-555555555555".to_string()),
+        );
     }
 }

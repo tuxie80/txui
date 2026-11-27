@@ -105,8 +105,20 @@ export function SqlScriptPanel({ session, schema, onClose, onSchemaChanged }: Pr
     setRunning(true);
     setCancelling(false);
     setState(initialSqlScriptState());
+    setActivity(activityKey, {
+      id: 'sqlscript',
+      label: 'SQL script validating',
+      detail: `${basename(path)} · 0 ok · 0 failed · 0 B`,
+      survives: true,
+      kill: () => {
+        invoke('cancel_sql_script', { runKey }).catch(() => {});
+      },
+    });
     const channel = new Channel<SqlScriptEvent>();
     channel.onmessage = event => {
+      if (event.type === 'done' && runKeyRef.current === runKey) {
+        clearTabActivities(activityKey);
+      }
       if (!mountedRef.current) return;
       setState(previous => applySqlScriptEvent(previous, event));
       if (event.type === 'done') {
@@ -148,6 +160,9 @@ export function SqlScriptPanel({ session, schema, onClose, onSchemaChanged }: Pr
         uncompressed_bytes: previous.uncompressedBytes,
         error: errorDisplay(error),
       }));
+    } finally {
+      if (runKeyRef.current === runKey) runKeyRef.current = null;
+      clearTabActivities(activityKey);
     }
   }
 

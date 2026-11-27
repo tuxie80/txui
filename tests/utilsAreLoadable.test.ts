@@ -16,11 +16,22 @@ import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
 
 /**
- * The five modules that deliberately import Tauri — they hold the I/O so their
- * callers stay pure (see AGENTS.md). They cannot load outside the app, and that
- * is the point of them, so they are excluded rather than fixed.
+ * Thin I/O, Tauri, DOM and WebAudio glue modules that hold side effects so
+ * their callers stay pure (see AGENTS.md). Each entry is excluded deliberately
+ * rather than accidentally hiding an extensionless import in a pure module.
  */
-const IMPURE = new Set(['aiClient.ts', 'killExec.ts', 'exportersIo.ts', 'themes.ts', 'audit.ts']);
+const IMPURE = new Set([
+  'aiClient.ts',     // Tauri invoke + preferences bridge for AI completion calls
+  'killExec.ts',     // Tauri invoke + session/audit logging for KILL execution
+  'exportersIo.ts',  // Tauri save dialog/file writers + clipboard (split from pure exporters.ts)
+  'themes.ts',       // DOM root CSS custom-property writer + Tauri set_active_theme sync
+  'audit.ts',        // Tauri audit_insert + store/logStore writer
+  'panelAudit.ts',   // Thin panel action wrapper over audit.ts + store/logStore
+  'smoke.ts',        // In-app DOM/Tauri release self-test runner (smokeVerdict tested in smoke.test.ts)
+  'tooltip.ts',      // Delegated DOM tooltip overlay + store/preferences lifetime lookup
+  'beep.ts',         // WebAudio (AudioContext) notification tone synthesizer
+  'measure.ts',      // Cached DOM <canvas> 2D text-width measurement
+]);
 
 const modules = readdirSync('src/utils')
   .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && !IMPURE.has(f));

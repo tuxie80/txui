@@ -398,6 +398,186 @@ fn drop_first_statements<'a>(drop_sql: &'a str, create_sql: &'a str) -> Vec<&'a 
     v
 }
 
+/// Leading ASCII SQL keywords (up to `limit`), skipping whitespace and SQL comments.
+fn leading_sql_keywords(engine: crate::db::types::Engine, sql: &str, limit: usize) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut words = Vec::with_capacity(limit);
+    let mut i = 0usize;
+    while i < bytes.len() && words.len() < limit {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if (c == b'-' && bytes.get(i + 1) == Some(&b'-'))
+            || (c == b'#' && engine == crate::db::types::Engine::Mysql)
+        {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            // Do not skip MySQL executable comments `/*! ... */`: treat them as non-comment tokens.
+            if engine == crate::db::types::Engine::Mysql && matches!(bytes.get(i + 2), Some(b'!') | Some(b'+')) {
+                break;
+            }
+            i += 2;
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                if engine == crate::db::types::Engine::Postgres && bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            words.push(sql[start..i].to_ascii_uppercase());
+            continue;
+        }
+        break;
+    }
+    words
+}
+
+fn validate_routine_drop_stmt(
+    engine: crate::db::types::Engine,
+    sql: &str,
+) -> Result<(), crate::apperror::AppError> {
+    if crate::sqlguard::split_statements_for(Some(engine), sql).len() != 1 {
+        return Err(crate::apperror::AppError::bad_request(
+            "routine drop_sql must be a single DROP FUNCTION, DROP PROCEDURE, or DROP TRIGGER statement",
+        ));
+    }
+    let words = leading_sql_keywords(engine, sql, 2);
+    let ok = words.len() == 2
+        && words[0] == "DROP"
+        && matches!(words[1].as_str(), "FUNCTION" | "PROCEDURE" | "TRIGGER");
+    if !ok {
+        return Err(crate::apperror::AppError::bad_request(
+            "routine drop_sql must start with DROP FUNCTION, DROP PROCEDURE, or DROP TRIGGER",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_routine_restore_ddl(
+    engine: crate::db::types::Engine,
+    sql: &str,
+) -> Result<(), crate::apperror::AppError> {
+    let blanked = crate::sqlguard::blank_for(Some(engine), sql);
+    // Tokenize words and `;` at top-level (outside parentheses), tracking
+    // compound `BEGIN ... END` blocks for MySQL / SQL Server routine bodies so
+    // semicolons inside `BEGIN ...; END` are allowed while any statement after
+    // the routine ends (or after `;` at compound depth 0) is rejected.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Tok { Word(String), Semi }
+    let bytes = blanked.as_bytes();
+    let mut toks = Vec::new();
+    let mut paren = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'(' { paren += 1; i += 1; continue; }
+        if b == b')' { paren = paren.saturating_sub(1); i += 1; continue; }
+        if paren == 0 && b == b';' {
+            toks.push(Tok::Semi);
+            i += 1;
+            continue;
+        }
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            if paren == 0 {
+                toks.push(Tok::Word(blanked[start..i].to_ascii_uppercase()));
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    if !matches!(toks.first(), Some(Tok::Word(w)) if w == "CREATE") {
+        return Err(crate::apperror::AppError::bad_request(
+            "routine original_ddl must start with CREATE",
+        ));
+    }
+    let has_routine_kind = toks.iter().take(12).any(|t| {
+        matches!(t, Tok::Word(w) if matches!(w.as_str(), "FUNCTION" | "PROCEDURE" | "TRIGGER"))
+    });
+    if !has_routine_kind {
+        return Err(crate::apperror::AppError::bad_request(
+            "routine original_ddl must be a CREATE FUNCTION, PROCEDURE, or TRIGGER statement",
+        ));
+    }
+
+    let mut compound_depth = 0usize;
+    let mut case_depth = 0usize;
+    let mut ended_top_stmt = false;
+    let mut idx = 0usize;
+    while idx < toks.len() {
+        if ended_top_stmt {
+            // Only trailing semicolons are permitted once the top-level CREATE finished.
+            if toks[idx] != Tok::Semi {
+                return Err(crate::apperror::AppError::bad_request(
+                    "routine original_ddl must be a single CREATE statement",
+                ));
+            }
+            idx += 1;
+            continue;
+        }
+        match &toks[idx] {
+            Tok::Word(w) if w == "BEGIN" => {
+                compound_depth += 1;
+            }
+            Tok::Word(w) if w == "CASE" => {
+                case_depth += 1;
+            }
+            Tok::Word(w) if w == "END" => {
+                let next_word = match toks.get(idx + 1) {
+                    Some(Tok::Word(nw)) => Some(nw.as_str()),
+                    _ => None,
+                };
+                if next_word == Some("CASE") {
+                    case_depth = case_depth.saturating_sub(1);
+                    idx += 2;
+                    continue;
+                }
+                if matches!(next_word, Some("IF" | "LOOP" | "WHILE" | "REPEAT")) {
+                    idx += 2;
+                    continue;
+                }
+                if case_depth > 0 {
+                    case_depth -= 1;
+                } else if compound_depth > 0 {
+                    compound_depth -= 1;
+                    if compound_depth == 0 {
+                        ended_top_stmt = true;
+                    }
+                }
+            }
+            Tok::Semi if compound_depth == 0 => {
+                ended_top_stmt = true;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    Ok(())
+}
+
 /// Create or replace a routine.
 ///
 /// `drop_sql` carries the `DROP …` for MySQL (no `CREATE OR REPLACE` for
@@ -415,15 +595,28 @@ pub async fn save_routine(
     original_ddl: String,
     state: State<'_, AppState>,
 ) -> Result<SaveOutcome, crate::apperror::AppError> {
-    let session = get_session_pub(session_id, &state.sessions)
-        .await
-        ?;
+    save_routine_inner(session_id, drop_sql, create_sql, original_ddl, &state).await
+}
+
+async fn save_routine_inner(
+    session_id: Uuid,
+    drop_sql: String,
+    create_sql: String,
+    original_ddl: String,
+    state: &AppState,
+) -> Result<SaveOutcome, crate::apperror::AppError> {
+    let session = get_session_pub(session_id, &state.sessions).await?;
+    let engine = match session.as_ref() {
+        LiveSession::Mysql(_) => crate::db::types::Engine::Mysql,
+        LiveSession::Postgres(_) => crate::db::types::Engine::Postgres,
+        LiveSession::SqlServer(_) => crate::db::types::Engine::SqlServer,
+        _ => return Err("stored routines are only available on MySQL, PostgreSQL and SQL Server".into()),
+    };
     let mut executed = Vec::new();
 
     match session.as_ref() {
         LiveSession::Mysql(_) | LiveSession::Postgres(_) | LiveSession::SqlServer(_)
-            if save_needs_drop_first(
-                matches!(session.as_ref(), LiveSession::Mysql(_)), &drop_sql) =>
+            if save_needs_drop_first(engine == crate::db::types::Engine::Mysql, &drop_sql) =>
         {
             // A DDL statement on MySQL implicitly commits, so there is no
             // transaction to roll back — the restore below IS the safety net.
@@ -435,7 +628,38 @@ pub async fn save_routine(
             // then collided with it: every save of an existing PG trigger
             // failed.
             let stmts = drop_first_statements(&drop_sql, &create_sql);
-            for drop in &stmts[..stmts.len() - 1] {
+            let drop_stmts = &stmts[..stmts.len() - 1];
+            for drop in drop_stmts {
+                validate_routine_drop_stmt(engine, drop)?;
+            }
+            if !drop_stmts.is_empty() {
+                // Guard-check the replacement CREATE (and any restore DDL) BEFORE
+                // dropping the live routine on the server: if read-only or prod
+                // limits would reject CREATE, refusing upfront keeps the existing
+                // routine intact and never reaches run_unguarded_restore.
+                if let Err(e) = state.guard_statement(&session_id, &create_sql).await {
+                    return Ok(SaveOutcome {
+                        ok: false,
+                        executed,
+                        restored: false,
+                        error: Some(e.display()),
+                    });
+                }
+                if !original_ddl.trim().is_empty() {
+                    validate_routine_restore_ddl(engine, &original_ddl)?;
+                    if let Err(e) = state.guard_statement(&session_id, &original_ddl).await {
+                        return Ok(SaveOutcome {
+                            ok: false,
+                            executed,
+                            restored: false,
+                            error: Some(e.display()),
+                        });
+                    }
+                }
+            }
+
+            let mut dropped_on_server = false;
+            for drop in drop_stmts {
                 if let Err(e) = state.run_guarded(&session_id, drop).await {
                     return Ok(SaveOutcome {
                         ok: false,
@@ -444,6 +668,7 @@ pub async fn save_routine(
                         error: Some(format!("drop failed, nothing changed: {e}")),
                     });
                 }
+                dropped_on_server = true;
                 executed.push((*drop).to_string());
             }
 
@@ -453,15 +678,17 @@ pub async fn save_routine(
                     Ok(SaveOutcome { ok: true, executed, restored: false, error: None })
                 }
                 Err(create_err) => {
-                    // The routine is gone and the replacement did not compile.
-                    // Put the original back before reporting anything.
+                    // Restore ONLY when a verified DROP actually succeeded on the
+                    // server in this call and CREATE failed on the server (never on
+                    // GuardRefused).
                     let mut restored = false;
                     let mut detail = create_err.display();
-                    if !original_ddl.trim().is_empty() {
-                        // Deliberately NOT guarded: this is TxUI putting back
-                        // what it just removed. A prod border that blocks the
-                        // restore after allowing the drop leaves the user
-                        // strictly worse off than if nothing had run.
+                    if dropped_on_server
+                        && create_err.code != crate::apperror::ErrorCode::GuardRefused
+                        && !original_ddl.trim().is_empty()
+                        && validate_routine_restore_ddl(engine, &original_ddl).is_ok()
+                        && state.guard_statement(&session_id, &original_ddl).await.is_ok()
+                    {
                         match state.run_unguarded_restore(&session_id, &original_ddl).await {
                             Ok(_) => {
                                 restored = true;
@@ -1081,6 +1308,78 @@ mod mysql_debug_tests {
         assert!(debug_gate(Some(&pg)).is_ok());
     }
 
+    #[test]
+    fn drop_and_restore_validators_reject_non_routine_statements() {
+        assert!(validate_routine_drop_stmt(Engine::Mysql, "DROP PROCEDURE IF EXISTS `db`.`p`").is_ok());
+        assert!(validate_routine_drop_stmt(Engine::Postgres, "-- header\nDROP TRIGGER IF EXISTS \"t\" ON \"tbl\"").is_ok());
+        assert!(validate_routine_drop_stmt(Engine::Mysql, "DROP FUNCTION `f`").is_ok());
+
+        assert!(validate_routine_drop_stmt(Engine::Mysql, "SELECT 1").is_err());
+        assert!(validate_routine_drop_stmt(Engine::Mysql, "DROP TABLE users").is_err());
+        assert!(validate_routine_drop_stmt(Engine::Mysql, "DROP PROCEDURE p; SELECT 1").is_err());
+
+        assert!(validate_routine_restore_ddl(Engine::Mysql, "CREATE PROCEDURE p() BEGIN SELECT 1; END").is_ok());
+        assert!(validate_routine_restore_ddl(
+            Engine::Mysql,
+            "CREATE PROCEDURE p() BEGIN SELECT CASE WHEN 1=1 THEN 'a' ELSE 'b' END; IF 1=1 THEN SELECT 2; END IF; END;",
+        ).is_ok());
+        assert!(validate_routine_restore_ddl(Engine::Mysql, "DROP TABLE users").is_err());
+        assert!(validate_routine_restore_ddl(Engine::Mysql, "CREATE TABLE users (id INT)").is_err());
+        assert!(validate_routine_restore_ddl(Engine::Mysql, "CREATE PROCEDURE p() BEGIN END; DROP TABLE users").is_err());
+    }
+
+    #[tokio::test]
+    async fn save_routine_never_restores_on_guard_refusal_or_unexecuted_drop() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let history = crate::history::open_in_memory().await.expect("history");
+        let state = AppState::new(history, std::env::temp_dir(), HashMap::new());
+        let session_id = Uuid::new_v4();
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("mysql://root@127.0.0.1:1/test")
+            .expect("lazy pool");
+        state.sessions.write().await.insert(session_id, Arc::new(LiveSession::Mysql(pool)));
+        state.session_meta.write().await.insert(session_id, guard(None, true));
+
+        // Brand-new MySQL save (`drop_sql` empty) on a read-only connection:
+        // CREATE is refused by the guard and `original_ddl` must NEVER run.
+        let no_drop = save_routine_inner(
+            session_id,
+            String::new(),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 1; END".into(),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 2; END".into(),
+            &state,
+        ).await.expect("outcome");
+        assert!(!no_drop.ok);
+        assert!(!no_drop.restored);
+        assert!(no_drop.executed.is_empty());
+
+        // Existing routine save on a read-only connection: pre-flight guard on
+        // `create_sql` refuses BEFORE `DROP` can run, and never runs restore.
+        let with_drop = save_routine_inner(
+            session_id,
+            "DROP PROCEDURE IF EXISTS `p`".into(),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 1; END".into(),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 2; END".into(),
+            &state,
+        ).await.expect("outcome");
+        assert!(!with_drop.ok);
+        assert!(!with_drop.restored);
+        assert!(with_drop.executed.is_empty());
+
+        // Smuggled `SELECT 1` as `drop_sql` is rejected outright as BadRequest.
+        let bad_drop = save_routine_inner(
+            session_id,
+            "SELECT 1".into(),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 1; END".into(),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 2; END".into(),
+            &state,
+        ).await.expect_err("non-DROP drop_sql must fail");
+        assert_eq!(bad_drop.code, crate::apperror::ErrorCode::BadRequest);
+    }
+
     // ── live runner mechanics, against a real MySQL ─────────────────────────
     //
     // Gated like the ClickHouse fleet: `#[ignore]`d AND skipped unless the
@@ -1245,8 +1544,8 @@ mod mysql_debug_tests {
         // drop the copy (reported in `swept`) and purge the old row.
         {
             let mut c = pool.acquire().await.unwrap();
-            mysql::execute(&mut *c, &format!(
-                "CREATE PROCEDURE `txui_debug_test`.`__txui_dbg_leftover`() BEGIN END")).await.unwrap();
+            mysql::execute(&mut *c,
+                "CREATE PROCEDURE `txui_debug_test`.`__txui_dbg_leftover`() BEGIN END").await.unwrap();
             mysql::execute(&mut *c, &format!(
                 "INSERT INTO {TABLE} (run, seq, line, var, val, ts) VALUES \
                  ('ancient', 1, 1, '__txui_step', NULL, NOW() - INTERVAL 2 DAY)")).await.unwrap();

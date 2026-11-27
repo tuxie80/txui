@@ -1067,9 +1067,9 @@ mod tests {
     fn accepts_plain_identifiers() {
         assert!(valid_session_param("sql_mode", "STRICT_ALL_TABLES"));
         assert!(valid_session_param("wait_timeout", "600"));
-        assert!(valid_session_param("optimizer_switch", "'index_merge=off'") == false); // quotes rejected
+        assert!(!valid_session_param("optimizer_switch", "'index_merge=off'")); // quotes rejected
         assert!(valid_session_param("_private", "1"));
-        assert!(valid_session_param("session.transaction_isolation", "'READ-COMMITTED'") == false);
+        assert!(!valid_session_param("session.transaction_isolation", "'READ-COMMITTED'"));
     }
 
     #[test]

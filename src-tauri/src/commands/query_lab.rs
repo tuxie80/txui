@@ -189,12 +189,6 @@ async fn validate_input(input: &QueryLabBaselineInput, state: &AppState) -> Resu
     if input.spec_sha256.len() != 64 || !input.spec_sha256.chars().all(|character| character.is_ascii_hexdigit()) {
         return Err(AppError::bad_request("Query Lab spec hash must be 64 hexadecimal characters"));
     }
-    let statements = crate::sqlguard::split_statements_for(None, &input.sql);
-    if statements.len() != 1 || !crate::sqlguard::is_read_family(&input.sql)
-        || crate::sqlguard::is_write_for(None, &input.sql)
-    {
-        return Err(AppError::guard("Query Lab baseline accepts exactly one read-only statement"));
-    }
     let guard = state.session_meta.read().await.get(&input.session_id).cloned()
         .ok_or_else(|| AppError::bad_request("Query Lab session is not open"))?;
     if !matches!(guard.engine, Engine::Mysql | Engine::Postgres) {
@@ -202,6 +196,12 @@ async fn validate_input(input: &QueryLabBaselineInput, state: &AppState) -> Resu
     }
     if guard.engine.wire_name() != input.engine {
         return Err(AppError::guard("Query Lab engine changed between specification and execution"));
+    }
+    let statements = crate::sqlguard::split_statements_for(Some(guard.engine), &input.sql);
+    if statements.len() != 1 || !crate::sqlguard::is_read_family(&input.sql)
+        || crate::sqlguard::is_write_for(Some(guard.engine), &input.sql)
+    {
+        return Err(AppError::guard("Query Lab baseline accepts exactly one read-only statement"));
     }
     let starts = state.session_starts.read().await;
     let start = starts.get(&input.session_id)
@@ -319,6 +319,43 @@ async fn pg_measured_statement(
     }
 }
 
+fn is_cancel_or_timeout(error: &AppError) -> bool {
+    matches!(error.code, ErrorCode::Cancelled | ErrorCode::Timeout)
+}
+
+async fn cancel_mysql_backend_best_effort(pool: &sqlx::MySqlPool, backend_id: u64) {
+    if backend_id == 0 {
+        return;
+    }
+    let sql = format!("KILL QUERY {backend_id}");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query(AssertSqlSafe(sql)).execute(pool),
+    ).await;
+}
+
+async fn cancel_pg_backend_best_effort(pool: &sqlx::PgPool, backend_id: u64) {
+    let Ok(pid) = i32::try_from(backend_id) else { return };
+    if pid <= 0 {
+        return;
+    }
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query("SELECT pg_cancel_backend($1)").bind(pid).execute(pool),
+    ).await;
+}
+
+async fn cancel_session_backend_best_effort(state: &AppState, session_id: Uuid, backend_id: u64) {
+    let Ok(session) = crate::db::connection::get_session_pub(session_id, &state.sessions).await else {
+        return;
+    };
+    match session.as_ref() {
+        LiveSession::Mysql(pool) => cancel_mysql_backend_best_effort(pool, backend_id).await,
+        LiveSession::Postgres(pool) => cancel_pg_backend_best_effort(pool, backend_id).await,
+        _ => {}
+    }
+}
+
 async fn mysql_capture(
     input: &QueryLabBaselineInput,
     pool: &sqlx::MySqlPool,
@@ -335,9 +372,9 @@ async fn mysql_capture(
     } else {
         sqlx::query_scalar::<_, f64>("SELECT CAST(@@max_execution_time AS DOUBLE)").fetch_one(&mut conn).await? / 1000.0
     };
+    let backend_id = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
+        .fetch_one(&mut conn).await?;
     let result: Result<CaptureParts, AppError> = async {
-        let backend_id = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
-            .fetch_one(&mut conn).await?;
         crate::db::mysql::execute(&mut conn, &format!("USE `{}`", validated.execution_database.replace('`', "``"))).await?;
         let buffer_pool = sqlx::query_scalar::<_, Option<String>>("SELECT CAST(@@innodb_buffer_pool_size AS CHAR)")
             .fetch_one(&mut conn).await?;
@@ -368,6 +405,15 @@ async fn mysql_capture(
             ],
         })
     }.await;
+    if let Err(error) = result {
+        if is_cancel_or_timeout(&error) {
+            cancel_mysql_backend_best_effort(pool, backend_id).await;
+            drop(conn);
+            return Err(error);
+        }
+        let _ = conn.close().await;
+        return Err(error);
+    }
     let restored = async {
         let seconds = previous_timeout;
         if version.to_lowercase().contains(maria) {
@@ -402,9 +448,9 @@ async fn pg_capture(
         .fetch_one(&mut conn).await?;
     let previous_timeout = sqlx::query_scalar::<_, String>("SHOW statement_timeout")
         .fetch_one(&mut conn).await?;
+    let backend_id = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut conn).await? as u64;
     let result: Result<CaptureParts, AppError> = async {
-        let backend_id = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(&mut conn).await? as u64;
         crate::db::postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", validated.execution_database.replace('"', "\"\""))).await?;
         crate::db::postgres::execute(&mut conn, &format!("SET statement_timeout = {}", validated.timeout_ms)).await?;
         let started = Instant::now();
@@ -439,10 +485,23 @@ async fn pg_capture(
             ],
         })
     }.await;
+    let mut parts = match result {
+        Ok(parts) => parts,
+        Err(error) => {
+            if is_cancel_or_timeout(&error) {
+                cancel_pg_backend_best_effort(pool, backend_id).await;
+                drop(conn);
+                return Err(error);
+            }
+            let _ = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                .bind(previous_timeout).execute(&mut conn).await;
+            let _ = conn.close().await;
+            return Err(error);
+        }
+    };
     let restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
         .bind(previous_timeout).execute(&mut conn).await;
     let closed = conn.close().await.is_ok();
-    let mut parts = result?;
     if restored.is_err() || !closed {
         return Err(AppError::local("Query Lab connection cleanup was incomplete"));
     }
@@ -771,6 +830,13 @@ async fn hypopg_inner(
         let candidate_plan = estimated("hypothetical", "json", plan_text(&candidate_result)?, started.elapsed().as_millis() as u64);
         Ok((baseline_plan, candidate_plan, created_index_names))
     }.await;
+    if let Err(ref error) = result {
+        if is_cancel_or_timeout(error) {
+            cancel_pg_backend_best_effort(pool, backend_id).await;
+            drop(conn);
+            return Err(result.unwrap_err());
+        }
+    }
     fail_step(HypopgFail::FinalReset, injected)?;
     let reset = pg_statement(&mut conn, "SELECT public.hypopg_reset()", cancel).await;
     let restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
@@ -1233,6 +1299,17 @@ async fn real_index_inner(
         let index_used = candidate_plan.content.contains(&index_name);
         Ok(RealIndexParts { baseline_plan, candidate_plan, index_build_ms, index_used })
     }.await;
+    if let Err(ref error) = result {
+        if is_cancel_or_timeout(error) {
+            // Issue server-side query cancel and drop the tainted dedicated
+            // connection BEFORE `finish_real_index` drops the scratch schema/db,
+            // so `DROP DATABASE` / `DROP SCHEMA CASCADE` never stalls behind an
+            // orphaned in-flight `CREATE INDEX` or `EXPLAIN ANALYZE`.
+            cancel_session_backend_best_effort(state, input.baseline.session_id, backend_id).await;
+            drop(conn);
+            return finish_real_index(Err(result.err().unwrap()), state, &scratch_run_key).await;
+        }
+    }
     if create_started {
         if let Err(error) = real_fail(RealIndexFail::Drop, injected) {
             if result.is_ok() { result = Err(error); }
@@ -1654,6 +1731,13 @@ async fn rewrite_inner(
         let (correctness, reason) = rewrite_correctness(&baseline, &candidate);
         Ok((correctness, reason, baseline, candidate))
     }.await;
+    if let Err(ref error) = result {
+        if is_cancel_or_timeout(error) {
+            cancel_session_backend_best_effort(state, input.baseline.session_id, backend_id).await;
+            drop(conn);
+            return Err(result.unwrap_err());
+        }
+    }
     if let Err(error) = conn.restore().await {
         if result.is_ok() { result = Err(error); }
     }
@@ -1896,6 +1980,13 @@ async fn benchmark_inner(
         let candidate = timing_summary(&candidate_ms)?;
         Ok((pairs, baseline_ms, candidate_ms, baseline, candidate))
     }.await;
+    if let Err(ref error) = result {
+        if is_cancel_or_timeout(error) {
+            cancel_session_backend_best_effort(state, input.rewrite.baseline.session_id, backend_id).await;
+            drop(conn);
+            return Err(result.unwrap_err());
+        }
+    }
     if let Err(error) = conn.restore().await {
         if result.is_ok() { result = Err(error); }
     }
@@ -2140,6 +2231,16 @@ mod tests {
         let mut engine = input(session, connection, Engine::Mysql, "estimate");
         engine.engine = "postgres".into();
         assert!(validate_input(&engine, &state).await.is_err());
+
+        // Dialect-aware baseline validation on PostgreSQL: `#` is an operator
+        // (not a MySQL comment) and `\` in plain `'...'` does not escape `'`.
+        let (pg_state, pg_session, pg_connection) = state_with_session(Engine::Postgres, Some("dev"), false).await;
+        let mut pg_smuggle = input(pg_session, pg_connection, Engine::Postgres, "estimate");
+        pg_smuggle.sql = r"SELECT 'x\'; DELETE FROM orders; --'".into();
+        assert!(validate_input(&pg_smuggle, &pg_state).await.is_err());
+        let mut pg_hash = input(pg_session, pg_connection, Engine::Postgres, "estimate");
+        pg_hash.sql = "SELECT 1 # 2; DELETE FROM orders".into();
+        assert!(validate_input(&pg_hash, &pg_state).await.is_err());
     }
 
     #[tokio::test]
@@ -2351,8 +2452,8 @@ mod tests {
         assert_eq!(response.estimated_plan.label, "estimated");
         assert!(response.measured_plan.is_none());
         assert!(!response.estimated_plan.content.is_empty());
-        assert_eq!(response.cleanup.timeout_restored, true);
-        assert_eq!(response.cleanup.connection_closed, true);
+        assert!(response.cleanup.timeout_restored);
+        assert!(response.cleanup.connection_closed);
         assert!(response.backend_id > 0);
         assert!(!response.settings.is_empty());
         assert!(state.ext_jobs.read().await.is_empty());
@@ -2361,7 +2462,7 @@ mod tests {
         let plan = measured.measured_plan.unwrap();
         assert_eq!(plan.label, "executed_query");
         assert!(!plan.content.is_empty());
-        assert_eq!(measured.cleanup.connection_closed, true);
+        assert!(measured.cleanup.connection_closed);
         assert!(measured.cache_observations.iter().any(|line| line.contains("executed")));
 
         let mut timeout = input(session, connection, Engine::Mysql, "measured");
@@ -2411,7 +2512,7 @@ mod tests {
         assert_eq!(response.estimated_plan.label, "estimated");
         assert!(response.measured_plan.is_none());
         assert!(!response.estimated_plan.content.is_empty());
-        assert_eq!(response.cleanup.connection_closed, true);
+        assert!(response.cleanup.connection_closed);
         assert!(response.backend_id > 0);
         assert!(state.ext_jobs.read().await.is_empty());
 
@@ -2419,7 +2520,7 @@ mod tests {
         let plan = measured.measured_plan.unwrap();
         assert_eq!(plan.label, "executed_query");
         assert!(!plan.content.is_empty());
-        assert_eq!(measured.cleanup.timeout_restored, true);
+        assert!(measured.cleanup.timeout_restored);
         assert!(measured.settings.iter().any(|setting| setting.name == "shared_buffers"));
 
         let mut timeout = input(session, connection, Engine::Postgres, "measured");
@@ -2472,8 +2573,8 @@ mod tests {
         assert_eq!(response.verdict, "lower_estimated_cost");
         assert!(response.absolute_delta.is_some_and(|delta| delta < 0.0));
         assert_eq!(response.cleanup.hypopg_reset, Some(true));
-        assert_eq!(response.cleanup.connection_closed, true);
-        assert_eq!(response.comparison_policy.contains("measured runtime comparison is forbidden"), true);
+        assert!(response.cleanup.connection_closed);
+        assert!(response.comparison_policy.contains("measured runtime comparison is forbidden"));
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generate_series(0, 100000) g WHERE public.hypopg_get_indexdef(g) IS NOT NULL").fetch_one(&pool).await.unwrap();
         assert_eq!(remaining, 0);
 

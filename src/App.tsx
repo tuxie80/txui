@@ -37,6 +37,7 @@ import { runUpdateCheck } from './store/updater';
 import { withDeadline, connectDeadlineMs } from './utils/withDeadline';
 import { OPEN_MIGRATION_EVENT, parseMigrationHandoff } from './utils/operationHandoff';
 import type { MigrationHandoff } from './utils/operationHandoff';
+import { OPEN_GENERATE_INSTEAD_EVENT, parseGenerateInsteadHandoff } from './utils/refreshGenerate';
 
 // Engine-specific panels split out of the initial bundle — cold start stays lean
 const RedisBrowser = lazy(() =>
@@ -119,13 +120,18 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: 'welcome' });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [vaultGateKey, setVaultGateKey] = useState(0);
   const [migrationDelivery, setMigrationDelivery] = useState<{
     id: number; targetSessionId: string; handoff: MigrationHandoff;
   } | null>(null);
-  // Mirror for mount-only listeners (dbgui:conn-log) that must read the
-  // CURRENT active session without re-subscribing on every tab switch.
+  // Mirror for mount-only listeners and async session swaps/closes that must
+  // read the CURRENT active session without stale render closures.
   const activeSessionRef = useRef<string | null>(null);
   useEffect(() => { activeSessionRef.current = activeSessionId; }, [activeSessionId]);
+  const updateActiveSessionId = useCallback((id: string | null) => {
+    activeSessionRef.current = id;
+    setActiveSessionId(id);
+  }, []);
 
   // Dolphie replay detection. A SQLite session whose file fingerprints as a
   // recording does NOT auto-open the dashboard — it presents a chooser and the
@@ -133,6 +139,8 @@ export default function App() {
   // 'replay' → dashboard; 'raw' → user chose plain SQLite; 'no' → ordinary file.
   const [replayInfo, setReplayInfo] =
     useState<Record<string, { mode: 'probing' | 'ask' | 'replay' | 'raw' | 'no'; path: string; probe?: ReplayProbe }>>({});
+  const replayInfoRef = useRef(replayInfo);
+  useEffect(() => { replayInfoRef.current = replayInfo; }, [replayInfo]);
   const probedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const s of sessions) {
@@ -310,13 +318,13 @@ export default function App() {
 
   function openUtility(kind: 'multi-exec' | 'audit' | 'compare' | 'dump') {
     setPrevView({ view, activeSessionId });
-    setActiveSessionId(null);
+    updateActiveSessionId(null);
     setView({ kind });
   }
 
   function openReplicaSet(folder: string) {
     setPrevView({ view, activeSessionId });
-    setActiveSessionId(null);
+    updateActiveSessionId(null);
     setView({ kind: 'replicaset', folder });
   }
 
@@ -324,7 +332,7 @@ export default function App() {
   // own session, closed back to wherever the user was via closeUtility().
   function openHypoPG(session: Session) {
     setPrevView({ view, activeSessionId });
-    setActiveSessionId(null);
+    updateActiveSessionId(null);
     setView({ kind: 'hypopg', session });
   }
 
@@ -333,13 +341,13 @@ export default function App() {
     setPrevView(null);
     if (prev?.view.kind === 'query'
         && sessions.some(s => s.sessionId === prev.activeSessionId)) {
-      setActiveSessionId(prev.activeSessionId);
+      updateActiveSessionId(prev.activeSessionId);
       setView(prev.view);
       return;
     }
     const last = sessions[sessions.length - 1];
     if (last) {
-      setActiveSessionId(last.sessionId);
+      updateActiveSessionId(last.sessionId);
       setView({ kind: 'query', session: last });
     } else {
       setView({ kind: 'welcome' });
@@ -367,9 +375,11 @@ export default function App() {
   function openSessionNow(session: Session) {
     setSessions(prev => {
       const exists = prev.find(s => s.sessionId === session.sessionId);
-      return exists ? prev : [...prev, session];
+      const next = exists ? prev : [...prev, session];
+      sessionsRef.current = next;
+      return next;
     });
-    setActiveSessionId(session.sessionId);
+    updateActiveSessionId(session.sessionId);
     setView({ kind: 'query', session });
     // Hand the screen to the workspace, unconditionally: the connections
     // sidebar hides and the database-objects tree shows — you connected to
@@ -416,7 +426,7 @@ export default function App() {
   }
 
   function handleTabClick(session: Session) {
-    setActiveSessionId(session.sessionId);
+    updateActiveSessionId(session.sessionId);
     setView({ kind: 'query', session });
   }
   const sessionHandoffRef = useRef({ open: handleOpenSession, focus: handleTabClick });
@@ -510,7 +520,11 @@ export default function App() {
         case 'file:new-connection': setView({ kind: 'new-conn' }); break;
         case 'file:new-tab':        fire('dbgui:new-tab'); break;
         case 'file:close-tab':      fire('dbgui:close-tab'); break;
-        case 'file:close-session':  fire('dbgui:close-session'); break;
+        case 'file:close-session': {
+          const target = sessionsRef.current.find(s => s.sessionId === activeSessionRef.current);
+          if (target) void handleCloseSessionRef.current(target);
+          break;
+        }
         case 'file:export':         fire('dbgui:export-results'); break;
         case 'file:save-sql':       fire('dbgui:save-sql'); break;
         case 'file:save-sql-as':    fire('dbgui:save-sql-as'); break;
@@ -655,14 +669,14 @@ export default function App() {
         const target = sessions[Number(e.key) - 1];
         if (target) {
           e.preventDefault();
-          setActiveSessionId(target.sessionId);
+          updateActiveSessionId(target.sessionId);
           setView({ kind: 'query', session: target });
         }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sessions]);
+  }, [sessions, updateActiveSessionId]);
 
   // Refresh the active session's schema tree when a panel creates objects
   useEffect(() => {
@@ -681,8 +695,13 @@ export default function App() {
   // a connected session may have zero tabs.
   useEffect(() => {
     const onCloseSession = (e: Event) => {
-      const d = (e as CustomEvent<{ connectionId: string }>).detail;
-      if (d?.connectionId) disconnectConnection(d.connectionId);
+      const d = (e as CustomEvent<{ connectionId?: string; sessionId?: string }>).detail;
+      if (d?.sessionId) {
+        const target = sessionsRef.current.find(s => s.sessionId === d.sessionId);
+        if (target) void handleCloseSessionRef.current(target);
+      } else if (d?.connectionId) {
+        void disconnectConnection(d.connectionId);
+      }
     };
     const onSwitchSession = (e: Event) => {
       const d = (e as CustomEvent<{ sessionId: string }>).detail;
@@ -862,7 +881,7 @@ export default function App() {
         hint: 'open session',
         icon: ENGINE_ICON[s.engine],
         section: 'session',
-        action: () => { setActiveSessionId(s.sessionId); setView({ kind: 'query', session: s }); },
+        action: () => { updateActiveSessionId(s.sessionId); setView({ kind: 'query', session: s }); },
       });
     }
     for (const c of savedConns) {
@@ -1039,6 +1058,47 @@ export default function App() {
     window.addEventListener(OPEN_MIGRATION_EVENT, onOpenMigration);
     return () => window.removeEventListener(OPEN_MIGRATION_EVENT, onOpenMigration);
   }, []);
+  useEffect(() => {
+    const onOpenGenerateInstead = (event: Event) => {
+      try {
+        const handoff = parseGenerateInsteadHandoff((event as CustomEvent<unknown>).detail);
+        const target = sessionsRef.current.find(
+          item => item.sessionId === handoff.targetSessionId
+               && item.connectionId === handoff.targetConnectionId,
+        );
+        if (target) sessionHandoffRef.current.focus(target);
+      } catch {
+        // Invalid handoff payloads are ignored; QueryTabs also validates independently.
+      }
+    };
+    window.addEventListener(OPEN_GENERATE_INSTEAD_EVENT, onOpenGenerateInstead);
+    return () => window.removeEventListener(OPEN_GENERATE_INSTEAD_EVENT, onOpenGenerateInstead);
+  }, []);
+  useEffect(() => {
+    const onVaultLocked = () => {
+      for (const s of sessionsRef.current) {
+        stopSessionRuns(s.sessionId);
+        clearSessionActivities(s.sessionId);
+        forgetKillPickerState(s.sessionId);
+        forgetPrivileges(s.sessionId);
+        forgetDuckdbSpatial(s.sessionId);
+        forgetFlavor(s.sessionId);
+        clearSchemaScan(s.sessionId);
+      }
+      sessionsRef.current = [];
+      setSessions([]);
+      updateActiveSessionId(null);
+      setMigrationDelivery(null);
+      setDisconnectAsk(null);
+      setProdAckAsk(null);
+      setPaletteOpen(false);
+      setSettingsOpen(false);
+      setView({ kind: 'welcome' });
+      setVaultGateKey(k => k + 1);
+    };
+    window.addEventListener('dbgui:vault-locked', onVaultLocked);
+    return () => window.removeEventListener('dbgui:vault-locked', onVaultLocked);
+  }, [updateActiveSessionId]);
   async function openScratch() {
     try {
       const sessionId = await ConnectionsStore.openScratch();
@@ -1087,6 +1147,7 @@ export default function App() {
         environment: session.environment,
         readOnly: session.readOnly,
         color: session.color,
+        filePath: session.filePath,
       });
     } catch (err) {
       await alertDialog(`Could not duplicate session: ${errorDisplay(err)}`);
@@ -1095,7 +1156,7 @@ export default function App() {
 
   /** Close every open session for a given saved connection (sidebar Disconnect). */
   async function disconnectConnection(connectionId: string) {
-    const victims = sessions.filter(s => s.connectionId === connectionId);
+    const victims = sessionsRef.current.filter(s => s.connectionId === connectionId);
     if (victims.length === 0) return;
     // The same guard as the tab-X: anything still running on the connection
     // (a query, a generation job, a Playground full of live threads) is named
@@ -1170,7 +1231,7 @@ export default function App() {
         const list = sessionsRef.current.map(s => s.sessionId === old.sessionId ? next : s);
         sessionsRef.current = list;
         setSessions(list);
-        if (activeSessionId === old.sessionId) setActiveSessionId(sessionId);
+        if (activeSessionRef.current === old.sessionId) updateActiveSessionId(sessionId);
         setView(v => v.kind === 'query' && v.session.sessionId === old.sessionId
           ? { kind: 'query', session: next } : v);
         bumpSchemaRefresh(sessionId);
@@ -1222,7 +1283,7 @@ export default function App() {
       // A Dolphie recording keeps a columnar cache + a read-only pool warm across
       // Raw↔Replay toggles; a real session close is where we free it. Log the
       // release to the audit log so the memory lifecycle is visible.
-      const rp = replayInfo[session.sessionId];
+      const rp = replayInfoRef.current[session.sessionId];
       if (rp?.probe?.is_recording && rp.path) {
         probedRef.current.delete(session.sessionId);
         const rpath = rp.path;
@@ -1277,13 +1338,13 @@ export default function App() {
       const next = sessionsRef.current.filter(s => s.sessionId !== session.sessionId);
       sessionsRef.current = next;
       setSessions(next);
-      if (activeSessionId === session.sessionId) {
+      if (activeSessionRef.current === session.sessionId) {
         const remaining = next[next.length - 1];
         if (remaining) {
-          setActiveSessionId(remaining.sessionId);
+          updateActiveSessionId(remaining.sessionId);
           setView({ kind: 'query', session: remaining });
         } else {
-          setActiveSessionId(null);
+          updateActiveSessionId(null);
           setView({ kind: 'welcome' });
         }
       }
@@ -1297,8 +1358,8 @@ export default function App() {
    * of live threads) has to be named first — and stopped deliberately, never
    * silently.
    */
-  async function handleCloseSession(session: Session, e: React.MouseEvent) {
-    e.stopPropagation();
+  async function handleCloseSession(session: Session, e?: React.MouseEvent) {
+    e?.stopPropagation();
     const running = getSessionActivities(session.sessionId);
     if (running.length > 0) {
       setDisconnectAsk({ victims: [session], activities: running, fromSidebar: false });
@@ -1306,6 +1367,8 @@ export default function App() {
     }
     await closeSession(session);
   }
+  const handleCloseSessionRef = useRef(handleCloseSession);
+  useEffect(() => { handleCloseSessionRef.current = handleCloseSession; });
 
 
   /**
@@ -1340,7 +1403,7 @@ export default function App() {
     <GridSettingsProvider>
     {/* Nothing behind this is usable until the vault is open — the connection
         list is inside it. */}
-    <UnlockGate onOpened={() => window.dispatchEvent(new CustomEvent('dbgui:connections-changed'))} />
+    <UnlockGate key={vaultGateKey} onOpened={() => window.dispatchEvent(new CustomEvent('dbgui:connections-changed'))} />
     {/* In-DOM confirm/prompt/alert host — native script dialogs auto-accept
         on WebKitGTK and do not exist on WKWebView (utils/appDialog.ts). */}
     <AppDialogHost />
@@ -1727,12 +1790,12 @@ export default function App() {
           )}
           <ContextMenuItem
             label="Duplicate session"
-            onClick={() => { setTabMenu(null); duplicateSession(tabMenu.session); }}
+            onClick={() => { const s = tabMenu.session; setTabMenu(null); void duplicateSession(s); }}
           />
           <ContextMenuItem
             label="Disconnect"
             danger
-            onClick={() => { setTabMenu(null); closeSession(tabMenu.session); }}
+            onClick={() => { const s = tabMenu.session; setTabMenu(null); void handleCloseSession(s); }}
           />
         </ContextMenu>
       )}

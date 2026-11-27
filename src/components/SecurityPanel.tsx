@@ -175,7 +175,12 @@ export function SecurityPanel() {
             className="toolbar-btn"
             disabled={busy || !open}
             title="Close the vault without quitting — connections stay shut until it is reopened"
-            onClick={() => act(async () => { await invoke('vault_lock'); return 'Locked.'; })}
+            onClick={() => act(async () => {
+              await invoke('vault_lock');
+              window.dispatchEvent(new CustomEvent('dbgui:connections-changed'));
+              window.dispatchEvent(new CustomEvent('dbgui:vault-locked'));
+              return 'Locked.';
+            })}
           >Lock now</button>
         </div>
         {form === 'change' && (

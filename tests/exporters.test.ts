@@ -33,6 +33,26 @@ test('toInserts quotes identifiers and escapes literals per engine', async () =>
   assert.match(ms, /'C:\\path ''quoted'''/);
 });
 
+test('toInsertStatements splits qualified table names, maps T-SQL booleans to 1/0, and quotes non-finite numbers', async () => {
+  const { toInsertStatements } = await import('../src/utils/exporters.ts');
+  assert.equal(
+    toInsertStatements('public.order', ['id', 'ok'], [[1, true]], 'postgres')[0],
+    'INSERT INTO "public"."order" ("id", "ok") VALUES (1, true)',
+  );
+  assert.equal(
+    toInsertStatements('shop.order', ['id', 'ok'], [[1, false]], 'mysql')[0],
+    'INSERT INTO `shop`.`order` (`id`, `ok`) VALUES (1, false)',
+  );
+  assert.equal(
+    toInsertStatements('sales.dbo.order', ['id', 'ok', 'off'], [[1, true, false]], 'sqlserver')[0],
+    'INSERT INTO [sales].[dbo].[order] ([id], [ok], [off]) VALUES (1, 1, 0)',
+  );
+  assert.equal(
+    toInsertStatements('metrics', ['a', 'b', 'c', 'd'], [[42, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]], 'postgres')[0],
+    `INSERT INTO "metrics" ("a", "b", "c", "d") VALUES (42, 'NaN', 'Infinity', '-Infinity')`,
+  );
+});
+
 test('insert statements preserve semicolon-newline text without SQL splitting', async () => {
   const { toInsertStatements, toInserts } = await import('../src/utils/exporters.ts');
   const rows = [[1, 'before;\nafter'], [2, 'ordinary']];

@@ -4,8 +4,168 @@
  * a false "confirm" beats a silent prod write.
  */
 
-import { blank } from './sqlAlias.ts';
 import { confirmDialog } from './appDialog.ts';
+
+interface Dialect {
+  readonly hashComment: boolean;
+  readonly backslashEscape: boolean;
+  readonly eStrings: boolean;
+  readonly bracketIdents: boolean;
+  readonly nestedComments: boolean;
+  readonly dollarStrings: boolean;
+  readonly pgSetReadonly: boolean;
+  readonly tsqlBatch: boolean;
+}
+
+const DIALECT_OFF: Dialect = {
+  hashComment: false,
+  backslashEscape: false,
+  eStrings: false,
+  bracketIdents: false,
+  nestedComments: false,
+  dollarStrings: false,
+  pgSetReadonly: false,
+  tsqlBatch: false,
+};
+
+const DIALECT_LEGACY: Dialect = {
+  hashComment: true,
+  backslashEscape: true,
+  eStrings: true,
+  bracketIdents: false,
+  nestedComments: false,
+  dollarStrings: true,
+  pgSetReadonly: false,
+  tsqlBatch: false,
+};
+
+function dialectForEngine(engine?: string): Dialect {
+  switch (engine) {
+    case undefined:
+      return DIALECT_LEGACY;
+    case 'mysql':
+    case 'mariadb':
+      return { ...DIALECT_OFF, hashComment: true, backslashEscape: true };
+    case 'postgres':
+    case 'postgresql':
+      return { ...DIALECT_OFF, eStrings: true, nestedComments: true, dollarStrings: true, pgSetReadonly: true };
+    case 'sqlserver':
+    case 'mssql':
+      return { ...DIALECT_OFF, bracketIdents: true, nestedComments: true, tsqlBatch: true };
+    case 'clickhouse':
+      return { ...DIALECT_OFF, backslashEscape: true };
+    case 'duckdb':
+      return { ...DIALECT_OFF, eStrings: true, dollarStrings: true };
+    default:
+      return DIALECT_OFF;
+  }
+}
+
+function isIdentBeforeEString(c: string): boolean {
+  return /[A-Za-z0-9_$@#]/.test(c);
+}
+
+/** Mirror of `blank_dialect` in src-tauri/src/sqlguard.rs — preserves string
+ *  length 1-for-1 so `splitAligned` cuts raw and blanked SQL at identical `;`
+ *  positions. */
+function blankDialect(sql: string, d: Dialect): string {
+  const n = sql.length;
+  let out = '';
+  let i = 0;
+  while (i < n) {
+    const c = sql[i];
+    if (c === '-' && sql[i + 1] === '-') {
+      while (i < n && sql[i] !== '\n') { out += ' '; i++; }
+      continue;
+    }
+    if (c === '#' && d.hashComment) {
+      while (i < n && sql[i] !== '\n') { out += ' '; i++; }
+      continue;
+    }
+    if (c === '/' && sql[i + 1] === '*') {
+      if (i + 2 < n && (sql[i + 2] === '!' || sql[i + 2] === '+')) {
+        out += '   ';
+        i += 3;
+        while (i < n && sql[i] >= '0' && sql[i] <= '9') { out += ' '; i++; }
+        continue;
+      }
+      out += '  ';
+      i += 2;
+      let depth = 1;
+      while (i < n && depth > 0) {
+        if (d.nestedComments && sql[i] === '/' && sql[i + 1] === '*') {
+          depth++; out += '  '; i += 2; continue;
+        }
+        if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--; out += '  '; i += 2; continue;
+        }
+        out += ' '; i++;
+      }
+      continue;
+    }
+    if (c === '$' && d.dollarStrings) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_]/.test(sql[j])) j++;
+      if (j < n && sql[j] === '$') {
+        const tag = sql.slice(i, j + 1);
+        const close = sql.indexOf(tag, j + 1);
+        const end = close === -1 ? n : close + tag.length;
+        out += ' '.repeat(end - i);
+        i = end;
+        continue;
+      }
+    }
+    if (c === '[' && d.bracketIdents) {
+      out += ' ';
+      i++;
+      while (i < n) {
+        if (sql[i] === ']') {
+          if (i + 1 < n && sql[i + 1] === ']') { out += '  '; i += 2; continue; }
+          out += ' '; i++; break;
+        }
+        out += ' '; i++;
+      }
+      continue;
+    }
+    if (
+      d.eStrings &&
+      (c === 'e' || c === 'E') &&
+      i + 1 < n &&
+      sql[i + 1] === "'" &&
+      (i === 0 || !isIdentBeforeEString(sql[i - 1]))
+    ) {
+      out += '  ';
+      i += 2;
+      while (i < n) {
+        if (sql[i] === '\\' && i + 1 < n) { out += '  '; i += 2; continue; }
+        if (sql[i] === "'") {
+          if (i + 1 < n && sql[i + 1] === "'") { out += '  '; i += 2; continue; }
+          out += ' '; i++; break;
+        }
+        out += ' '; i++;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      out += ' ';
+      i++;
+      while (i < n) {
+        if (d.backslashEscape && sql[i] === '\\' && c !== '`' && i + 1 < n) {
+          out += '  '; i += 2; continue;
+        }
+        if (sql[i] === c) {
+          if (i + 1 < n && sql[i + 1] === c) { out += '  '; i += 2; continue; }
+          out += ' '; i++; break;
+        }
+        out += ' '; i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
 
 // Mirror of WRITE_KEYWORDS in src-tauri/src/sqlguard.rs — the two lists are
 // kept identical, and tests/sqlGuardDrift.test.ts fails when they drift.
@@ -35,16 +195,6 @@ const WRITE_RE = new RegExp(
   'i',
 );
 
-// MySQL versioned comments ("slash-star-bang", optionally with version
-// digits) are EXECUTED by the server, and optimizer hints (slash-star-plus)
-// carry live tokens: strip only the opener token (plus version digits) so
-// the body stays visible to keyword scanning — the stray comment closer is
-// punctuation no word check matches. Mirrors the same handling in
-// src-tauri/src/sqlguard.rs blank().
-function exposeVersionedComments(sql: string): string {
-  return sql.replace(/\/\*[!+]\d*/g, m => ' '.repeat(m.length));
-}
-
 /** Direction of a COPY statement: true when it loads data in. Mirrors
  *  `copy_writes` in src-tauri/src/sqlguard.rs — only a top-level FROM/TO
  *  counts, and the first one wins. */
@@ -65,6 +215,157 @@ function copyWrites(blanked: string): boolean {
   return depth === 0 && word === 'from';
 }
 
+function hasTopLevelWord(blanked: string, target: string): boolean {
+  let depth = 0;
+  let word = '';
+  for (const c of blanked + '\n') {
+    if (/[a-z0-9_]/i.test(c)) { word += c.toLowerCase(); continue; }
+    if (word) {
+      if (depth === 0 && word === target) return true;
+      word = '';
+    }
+    if (c === '(') depth++;
+    else if (c === ')' && depth > 0) depth--;
+  }
+  return false;
+}
+
+interface TsqlTok {
+  readonly word: string;
+  readonly depth: number;
+  readonly afterDot: boolean;
+}
+
+function tsqlTokens(blanked: string): TsqlTok[] {
+  const out: TsqlTok[] = [];
+  let depth = 0;
+  let word = '';
+  let afterDot = false;
+  let sawDot = false;
+  for (const c of blanked + '\n') {
+    if (/[A-Za-z0-9_@#$]/.test(c)) {
+      if (!word) {
+        afterDot = sawDot;
+        sawDot = false;
+      }
+      word += c.toLowerCase();
+      continue;
+    }
+    if (word) {
+      out.push({ word, depth, afterDot });
+      word = '';
+      afterDot = false;
+    }
+    if (c === '.') sawDot = true;
+    else if (!/\s/.test(c)) sawDot = false;
+    if (c === '(') depth++;
+    else if (c === ')' && depth > 0) depth--;
+  }
+  return out;
+}
+
+const TSQL_READ_DBCC = new Set([
+  'show_statistics', 'showcontig', 'sqlperf', 'tracestatus', 'useroptions',
+  'opentran', 'inputbuffer', 'memorystatus', 'proccache', 'help',
+]);
+
+const TSQL_WRITE_VERBS = new Set([
+  'insert', 'update', 'delete', 'create', 'alter', 'drop',
+  'truncate', 'rename', 'exec', 'execute', 'grant', 'revoke',
+  'deny', 'backup', 'restore', 'reconfigure', 'shutdown',
+  'kill', 'bulk',
+]);
+
+function tsqlStatementIsWrite(blanked: string): boolean {
+  const toks = tsqlTokens(blanked);
+  for (let i = 0; i < toks.length; i++) {
+    const tok = toks[i];
+    if (tok.afterDot) continue;
+    const next = toks[i + 1];
+    const nextW = next && !next.afterDot ? next.word : undefined;
+    if (TSQL_WRITE_VERBS.has(tok.word)) return true;
+    if (tok.word === 'merge' && nextW !== 'join') return true;
+    if (tok.word === 'dbcc' && (!nextW || !TSQL_READ_DBCC.has(nextW))) return true;
+    if (tok.word === 'select') {
+      for (let j = i + 1; j < toks.length; j++) {
+        const nx = toks[j];
+        if (nx.depth < tok.depth) break;
+        if (nx.depth === tok.depth && !nx.afterDot) {
+          if (nx.word === 'into') return true;
+          if (nx.word === 'select' || nx.word === 'fetch') break;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+const TSQL_DANGEROUS_DDL = new Set([
+  'drop', 'truncate', 'alter', 'rename', 'grant', 'revoke', 'deny', 'restore', 'shutdown',
+]);
+
+function tsqlStatementIsDangerousDdl(blanked: string): boolean {
+  const m = /^\s*([a-z]+)(?:\s+([a-z0-9_]+))?/i.exec(blanked);
+  const kw = m?.[1]?.toLowerCase() ?? '';
+  const second = m?.[2]?.toLowerCase() ?? '';
+  if (kw === 'create' && second !== 'or') return false;
+  return tsqlTokens(blanked).some(tok => !tok.afterDot && TSQL_DANGEROUS_DDL.has(tok.word));
+}
+
+const TSQL_CLAUSE_MODIFIERS = new Set(['on', 'then', 'for', 'after', 'of']);
+const TSQL_STMT_BOUNDARY_VERBS = new Set([
+  'select', 'insert', 'merge', 'drop', 'truncate', 'alter', 'create', 'exec', 'execute', 'declare',
+]);
+
+function tsqlUnfilteredUpdel(s: string): boolean {
+  const kw = /^\s*([a-z]+)/i.exec(s)?.[1].toLowerCase() ?? '';
+  if (kw === 'create') return false;
+  const pending: boolean[] = [false];
+  let depth = 0;
+  let word = '';
+  let prevWord = '';
+  let afterDot = false;
+  let sawDot = false;
+  let unfiltered = false;
+
+  for (const c of s + '\n') {
+    if (/[A-Za-z0-9_@#$]/.test(c)) {
+      if (!word) {
+        afterDot = sawDot;
+        sawDot = false;
+      }
+      word += c.toLowerCase();
+      continue;
+    }
+    if (word) {
+      if (!afterDot) {
+        const isModifier = TSQL_CLAUSE_MODIFIERS.has(prevWord);
+        if ((word === 'update' || word === 'delete') && !isModifier) {
+          if (pending[depth]) unfiltered = true;
+          pending[depth] = true;
+        } else if (word === 'where') {
+          pending[depth] = false;
+        } else if (pending[depth] && TSQL_STMT_BOUNDARY_VERBS.has(word)) {
+          unfiltered = true;
+          pending[depth] = false;
+        }
+      }
+      prevWord = word;
+      word = '';
+      afterDot = false;
+    }
+    if (c === '.') sawDot = true;
+    else if (!/\s/.test(c)) sawDot = false;
+    if (c === '(') { depth++; pending[depth] = false; }
+    else if (c === ')') {
+      if (pending[depth]) unfiltered = true;
+      pending[depth] = false;
+      if (depth > 0) depth--;
+    }
+  }
+  return unfiltered || pending.some(Boolean);
+}
+
 /**
  * True if any `;`-separated statement in `sql` writes — mirrors
  * `sqlguard::is_write_for` in Rust, which splits on `;` and classifies each
@@ -72,29 +373,27 @@ function copyWrites(blanked: string): boolean {
  * Beyond a leading write keyword this also catches two bypasses that inspect
  * only the first token would miss:
  *   • data-modifying CTEs — `WITH x AS (DELETE …) SELECT …` (the write sits
- *     inside the CTE parens), and `WITH … UPDATE …`;
+ *     inside the CTE parens), and `WITH … SELECT … INTO …`;
  *   • `EXPLAIN [ANALYZE] <write>` — on PostgreSQL EXPLAIN ANALYZE executes
  *     the statement, so `EXPLAIN ANALYZE DELETE …` is a real write.
  *
- * `engine` is threaded into `blank`, which decides what is text and what is
+ * `engine` selects the `Dialect`, which decides what is text and what is
  * code (nested comments on PG/T-SQL, `#` comments on MySQL-family only,
- * backslash escapes, dollar quotes). Without it the historical MySQL-leaning
- * defaults apply.
+ * backslash escapes, PG `E'…'` strings, T-SQL `[…]` identifiers and
+ * semicolon-less batches, dollar quotes). Without it the historical
+ * MySQL-leaning defaults apply.
  */
 export function isWriteStatement(sql: string, engine?: string): boolean {
-  // exposeVersionedComments and blank both preserve string length, so raw and
-  // blanked indices align — the PG branch relies on that to cut both at the
-  // same `;`s (mirrors split_aligned in sqlguard.rs).
-  const src = exposeVersionedComments(sql);
-  const b = blank(src, engine);
-  if (engine === 'postgres') {
+  const d = dialectForEngine(engine);
+  const b = blankDialect(sql, d);
+  if (d.pgSetReadonly) {
     // The read-only-backstop flips hide from blanked text (quoted GUC names,
     // SET SESSION CHARACTERISTICS), so PG SETs are additionally judged on the
     // RAW statement — mirrors is_write_for in sqlguard.rs.
-    return splitAligned(src, b).some(([raw, bl]) =>
-      statementIsWrite(bl, engine) || (/^\s*set\b/i.test(bl) && pgSetFlipsReadonly(raw)));
+    return splitAligned(sql, b).some(([raw, bl]) =>
+      statementIsWrite(bl, d) || (/^\s*set\b/i.test(bl) && pgSetFlipsReadonly(raw)));
   }
-  return b.split(';').some(s => statementIsWrite(s, engine));
+  return b.split(';').some(s => statementIsWrite(s, d));
 }
 
 /** Cut `raw` and its blanked form into per-statement pairs — the blanked
@@ -149,11 +448,16 @@ function pgSetTokens(raw: string): PgTok[] {
     // '…' string, incl. the E'…' prefix whose backslash escapes — a SET
     // target never contains one, but the VALUE does, and an escaped quote
     // mis-skipped would leak string content into the token stream.
-    if (c === "'" || ((c === 'E' || c === 'e') && raw[i + 1] === "'")) {
+    if (
+      c === "'" ||
+      ((c === 'E' || c === 'e') &&
+        raw[i + 1] === "'" &&
+        (i === 0 || !isIdentBeforeEString(raw[i - 1])))
+    ) {
       const escaped = c !== "'";
       i += escaped ? 2 : 1;
       while (i < n) {
-        if (escaped && raw[i] === '\\') { i += 2; continue; }
+        if (escaped && raw[i] === '\\' && i + 1 < n) { i += 2; continue; }
         if (raw[i] === "'") {
           if (raw[i + 1] === "'") { i += 2; continue; }
           i++;
@@ -248,8 +552,9 @@ function pgSetFlipsReadonly(raw: string): boolean {
 }
 
 /** One blanked statement — mirror of `statement_is_write` in sqlguard.rs. */
-function statementIsWrite(blanked: string, engine?: string): boolean {
+function statementIsWrite(blanked: string, d: Dialect): boolean {
   const head = blanked.trimStart();
+  if (d.tsqlBatch && tsqlStatementIsWrite(head)) return true;
   if (WRITE_RE.test(head)) return true;
   const kw = /^[a-z]+/i.exec(head)?.[0].toLowerCase() ?? '';
 
@@ -278,9 +583,9 @@ function statementIsWrite(blanked: string, engine?: string): boolean {
     return /\binto\b/i.test(head);
   }
   if (kw === 'with') {
-    // The write can sit inside the CTE parens — look for a modifying keyword
-    // anywhere in the (already blanked) statement.
-    return /\b(insert|update|delete|merge)\b/i.test(head);
+    // The write can sit inside the CTE parens (`WITH d AS (DELETE …)`) or feed
+    // an outer table-creating `SELECT … INTO new_table`.
+    return /\b(insert|update|delete|merge)\b/i.test(head) || hasTopLevelWord(head, 'into');
   }
   if (kw === 'explain' || kw === 'describe' || kw === 'desc') {
     // Drop the EXPLAIN keyword, ALL ANALYZE/VERBOSE/FORMAT option words and a
@@ -288,7 +593,7 @@ function statementIsWrite(blanked: string, engine?: string): boolean {
     // `strip_explain` in sqlguard.rs (the previous single-regex pass removed
     // only one option word, so EXPLAIN ANALYZE VERBOSE DELETE slipped by).
     const rest = stripExplain(head);
-    return rest !== '' && statementIsWrite(rest, engine);
+    return rest !== '' && statementIsWrite(rest, d);
   }
   return false;
 }
@@ -331,7 +636,7 @@ function stripExplain(blanked: string): string {
  *  statements fall through to "completed in". `bulk` is T-SQL's BULK INSERT. */
 const DML_RE = /^(insert|update|delete|replace|merge|load|bulk)\b/i;
 export function isDmlStatement(sql: string, engine?: string): boolean {
-  const head = blank(sql, engine).trimStart();
+  const head = blankDialect(sql, dialectForEngine(engine)).trimStart();
   if (DML_RE.test(head)) return true;
   const kw = /^[a-z]+/i.exec(head)?.[0].toLowerCase() ?? '';
   // data-modifying CTE — the DML sits inside the CTE parens
@@ -344,7 +649,7 @@ export function isDmlStatement(sql: string, engine?: string): boolean {
  *  whose later statements write. */
 const READ_FAMILY_RE = /^(select|with|table|values|show|describe|desc|explain)\b/i;
 export function isReadFamilyStatement(sql: string, engine?: string): boolean {
-  const head = blank(exposeVersionedComments(sql), engine).trimStart();
+  const head = blankDialect(sql, dialectForEngine(engine)).trimStart();
   return READ_FAMILY_RE.test(head) && !isWriteStatement(sql, engine);
 }
 
@@ -354,7 +659,11 @@ export function isReadFamilyStatement(sql: string, engine?: string): boolean {
  * doesn't hide the danger. (A data-modifying CTE outer UPDATE/DELETE counts.)
  */
 export function isUnfilteredWrite(sql: string, engine?: string): boolean {
-  return blank(exposeVersionedComments(sql), engine).split(';').some(unfilteredUpdel);
+  const d = dialectForEngine(engine);
+  const b = blankDialect(sql, d);
+  return d.tsqlBatch
+    ? b.split(';').some(tsqlUnfilteredUpdel)
+    : b.split(';').some(unfilteredUpdel);
 }
 
 /** One blanked statement: does it contain an UPDATE/DELETE with no WHERE at
@@ -399,15 +708,18 @@ export const DANGEROUS_DDL_KEYWORDS = new Set([
 /**
  * True if any `;`-separated statement starts with a destructive DDL/DCL
  * keyword (DROP, TRUNCATE, ALTER, RENAME, GRANT, REVOKE). Mirrors
- * `is_dangerous_ddl` in src-tauri/src/sqlguard.rs exactly: blanked SQL (so a
+ * `is_dangerous_ddl_for` in src-tauri/src/sqlguard.rs: blanked SQL (so a
  * `drop` inside a string/comment doesn't count), per-statement first word —
  * a `DROP INDEX` inside a CREATE PROCEDURE body stays invisible at statement
- * level, while `SELECT 1; DROP TABLE t` is caught.
+ * level, while `SELECT 1; DROP TABLE t` and T-SQL control-flow / semicolon-less
+ * `IF … DROP TABLE t` are caught.
  */
 export function isDangerousDdl(sql: string, engine?: string): boolean {
-  return blank(exposeVersionedComments(sql), engine).split(';').some(s => {
+  const d = dialectForEngine(engine);
+  return blankDialect(sql, d).split(';').some(s => {
     const kw = /^\s*([a-z]+)/i.exec(s)?.[1].toLowerCase() ?? '';
     if (DANGEROUS_DDL_KEYWORDS.has(kw)) return true;
+    if (d.tsqlBatch && tsqlStatementIsDangerousDdl(s)) return true;
     // PostgreSQL maintenance that takes an ACCESS EXCLUSIVE lock and rewrites
     // the relation — stalls every reader for the duration on a prod server.
     // The CONCURRENTLY variants are online and stay allowed.
@@ -454,8 +766,10 @@ export async function confirmWriteIfNeeded(
   }
   // Independent of environment: a WHERE-less UPDATE/DELETE affects every row.
   if (isUnfilteredWrite(sql, opts.engine)) {
+    const b = blankDialect(sql, dialectForEngine(opts.engine));
+    const isDel = /^\s*delete/i.test(b) || (!/^\s*update/i.test(b) && /\bdelete\b/i.test(b));
     const ok = await confirmDialog(
-      `⚠ NO WHERE CLAUSE\n\nThis ${/^\s*delete/i.test(blank(sql, opts.engine)) ? 'DELETE' : 'UPDATE'} has no WHERE — it will affect EVERY row:\n\n${sql.slice(0, 300)}${sql.length > 300 ? '…' : ''}\n\nRun it against all rows?`,
+      `⚠ NO WHERE CLAUSE\n\nThis ${isDel ? 'DELETE' : 'UPDATE'} has no WHERE — it will affect EVERY row:\n\n${sql.slice(0, 300)}${sql.length > 300 ? '…' : ''}\n\nRun it against all rows?`,
       { danger: true },
     );
     return ok ? { ok: true } : { ok: false, reason: 'Cancelled.' };

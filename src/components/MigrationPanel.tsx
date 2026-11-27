@@ -155,9 +155,10 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
       setCreating(false);
       setCancelling(false);
       runKeyRef.current = null;
+      clearTabActivities(activityKey);
       await refreshScratch();
     }
-  }, [creating, result, draft, preflight, preflightError, rehearsalSessionId, refreshScratch]);
+  }, [creating, result, draft, preflight, preflightError, rehearsalSessionId, refreshScratch, activityKey]);
 
   const cloneScratch = useCallback(async (record: MigrationScratchRecord) => {
     if (!result?.catalog || cloning || scratchBlocked) return;
@@ -183,9 +184,10 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
         : `Clone into ${record.name} failed: ${errorDisplay(e)}`]);
     } finally {
       setCloning(null);
+      clearTabActivities(activityKey);
       await refreshScratch();
     }
-  }, [result, cloning, scratchBlocked, session.sessionId, schema, refreshScratch]);
+  }, [result, cloning, scratchBlocked, session.sessionId, schema, refreshScratch, activityKey]);
 
   const executeScratch = useCallback(async (record: MigrationScratchRecord) => {
     const cloned = cloneResults[record.run_key];
@@ -218,9 +220,10 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
     } finally {
       setExecuting(null);
       setExecutionCancelling(false);
+      clearTabActivities(activityKey);
       await refreshScratch();
     }
-  }, [result, draft, preflight, preflightError, executing, cloneResults, executionResults, refreshScratch]);
+  }, [result, draft, preflight, preflightError, executing, cloneResults, executionResults, refreshScratch, activityKey]);
 
   const verifyScratch = useCallback(async (record: MigrationScratchRecord) => {
     const execution = executionResults[record.run_key];
@@ -362,8 +365,9 @@ export function MigrationPanel({ session, openSessions = [session], schema = nul
       setDeploying(false);
       setDeploymentCancelling(false);
       deploymentRunRef.current = null;
+      clearTabActivities(activityKey);
     }
-  }, [draft, result, preflight, preflightError, deploying, schema, session.sessionId]);
+  }, [draft, result, preflight, preflightError, deploying, schema, session.sessionId, activityKey]);
 
   const verifyTarget = useCallback(async () => {
     if (!result?.catalog || !draft || draft.phase !== 'verifying' || !deploymentResult?.ok

@@ -134,6 +134,10 @@ function localDate(date: Date, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${parts.month.toString().padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`;
 }
 
+function mysqlUtcTimestamp(isoUtc: string): string {
+  return isoUtc.slice(0, 19).replace('T', ' ') + isoUtc.slice(19).replace(/Z$/, '');
+}
+
 export function refreshTimePredicate(
   policy: Extract<RefreshTablePolicy, { policy: 'time_window' }>,
   columnType: RefreshTimeColumn = 'datetime',
@@ -151,7 +155,7 @@ export function refreshTimePredicate(
   } else {
     const startOffset = offsetLiteral(offsetMs(start, policy.timeZone));
     const cutoffOffset = offsetLiteral(offsetMs(cutoff, policy.timeZone));
-    sql = `BETWEEN CONVERT_TZ(${sqlLiteral(window.startUtc)}, '+00:00', ${sqlLiteral(startOffset)}) AND CONVERT_TZ(${sqlLiteral(window.cutoffUtc)}, '+00:00', ${sqlLiteral(cutoffOffset)})`;
+    sql = `BETWEEN CONVERT_TZ(${sqlLiteral(mysqlUtcTimestamp(window.startUtc))}, '+00:00', ${sqlLiteral(startOffset)}) AND CONVERT_TZ(${sqlLiteral(mysqlUtcTimestamp(window.cutoffUtc))}, '+00:00', ${sqlLiteral(cutoffOffset)})`;
     note = `DATETIME/TIMESTAMP values use ${policy.timeZone}; boundary offsets ${startOffset}/${cutoffOffset} are frozen independently of session/server timezone`;
   }
   return { sql, startUtc: window.startUtc, cutoffUtc: window.cutoffUtc, note };

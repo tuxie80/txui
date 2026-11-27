@@ -43,8 +43,145 @@ fn copy_opts(format: &str, header: bool) -> String {
 /// keyword — a parenthesised `(DELETE … RETURNING *)` is a write the
 /// statement guard cannot see through the parens. Data-modifying CTEs and
 /// `SELECT … INTO` pass this shape check and are the statement guard's job.
+/// Blank PostgreSQL comments, quoted identifiers, dollar-quoted strings,
+/// standard `'...'` strings (no backslash escapes), and `E'...'` C-escape
+/// strings so `check_copy_source` lexes identically to PostgreSQL itself.
+fn blank_pg(source: &str) -> Result<String, AppError> {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            out.push_str("  ");
+            i += 2;
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else {
+                    let ch = source[i..].chars().next().expect("utf-8 boundary");
+                    out.push(if ch == '\n' { '\n' } else { ' ' });
+                    i += ch.len_utf8();
+                }
+            }
+            if depth != 0 {
+                return Err(AppError::guard("COPY export source has an unterminated comment"));
+            }
+            continue;
+        }
+        if matches!(c, b'e' | b'E')
+            && bytes.get(i + 1) == Some(&b'\'')
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'$')))
+        {
+            out.push_str("  ");
+            i += 2;
+            let mut closed = false;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    if i + 1 >= bytes.len() {
+                        break;
+                    }
+                    out.push(' ');
+                    i += 1;
+                    let ch = source[i..].chars().next().expect("utf-8 boundary");
+                    out.push(if ch == '\n' { '\n' } else { ' ' });
+                    i += ch.len_utf8();
+                    continue;
+                }
+                if bytes[i] == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') {
+                        out.push_str("  ");
+                        i += 2;
+                        continue;
+                    }
+                    out.push(' ');
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                let ch = source[i..].chars().next().expect("utf-8 boundary");
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+                i += ch.len_utf8();
+            }
+            if !closed {
+                return Err(AppError::guard("COPY export source has an unterminated string literal"));
+            }
+            continue;
+        }
+        if matches!(c, b'\'' | b'"') {
+            let quote = c;
+            out.push(' ');
+            i += 1;
+            let mut closed = false;
+            while i < bytes.len() {
+                if bytes[i] == quote {
+                    if bytes.get(i + 1) == Some(&quote) {
+                        out.push_str("  ");
+                        i += 2;
+                        continue;
+                    }
+                    out.push(' ');
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                let ch = source[i..].chars().next().expect("utf-8 boundary");
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+                i += ch.len_utf8();
+            }
+            if !closed {
+                return Err(AppError::guard("COPY export source has an unterminated quoted token"));
+            }
+            continue;
+        }
+        if c == b'$' && !bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+            let mut end = i + 1;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'$' {
+                let tag = &source[i..=end];
+                let content = end + 1;
+                let Some(rel) = source[content..].find(tag) else {
+                    return Err(AppError::guard("COPY export source has an unterminated dollar-quoted string"));
+                };
+                let stop = content + rel + tag.len();
+                for ch in source[i..stop].chars() {
+                    out.push(if ch == '\n' { '\n' } else { ' ' });
+                }
+                i = stop;
+                continue;
+            }
+        }
+        let ch = source[i..].chars().next().expect("utf-8 boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    Ok(out)
+}
+
 fn check_copy_source(source: &str) -> Result<(), AppError> {
-    let blanked = crate::sqlguard::blank(source);
+    use crate::db::types::Engine;
+
+    if crate::sqlguard::split_statements_for(Some(Engine::Postgres), source).len() != 1 {
+        return Err(AppError::guard(
+            "COPY export source must be a single statement"));
+    }
+    let blanked = blank_pg(source)?;
     let body = blanked.trim_end().trim_end_matches(';');
     if body.contains(';') {
         return Err(AppError::guard(
@@ -74,6 +211,10 @@ fn check_copy_source(source: &str) -> Result<(), AppError> {
     if !matches!(kw.as_str(), "select" | "with" | "values" | "table") {
         return Err(AppError::guard(
             "COPY export source must be a SELECT"));
+    }
+    if crate::sqlguard::is_write_for(Some(Engine::Postgres), source) {
+        return Err(AppError::guard(
+            "COPY export source must be read-only"));
     }
     Ok(())
 }
@@ -126,10 +267,17 @@ pub async fn pg_copy_export(
         LiveSession::Postgres(pool) => {
             let s = source.trim();
             let up = s.to_uppercase();
-            let src = if up.starts_with("SELECT") || up.starts_with("WITH") || s.starts_with('(') {
+            let src = if up.starts_with("SELECT")
+                || up.starts_with("WITH")
+                || up.starts_with("VALUES")
+                || up.starts_with("TABLE")
+                || s.starts_with('(')
+                || s.starts_with("--")
+                || s.starts_with("/*")
+            {
                 // Interpolated raw over the simple query protocol — validate
-                // the shape, then run the same guard as any other statement
-                // (a data-modifying CTE or SELECT … INTO is a write).
+                // the shape and read-only status under PostgreSQL's own lexer
+                // rules, then run the session guard.
                 check_copy_source(s)?;
                 state.guard_statement(&session_id, s).await?;
                 format!("({})", s.trim_end_matches(';'))
@@ -211,15 +359,24 @@ mod tests {
     }
 
     #[test]
-    fn shape_clean_writes_are_the_statement_guards_job() {
-        // check_copy_source judges shape only; these pass it and must be
-        // refused by guard_statement (is_write) before the COPY is built.
+    fn writable_ctes_select_into_and_pg_quote_smuggling_are_rejected() {
         for s in [
             "WITH x AS (DELETE FROM t RETURNING *) SELECT 1",
             "SELECT * INTO new_table FROM t",
+            // Standard PG strings do NOT treat `\` as an escape: `'x\'` closes at the second quote!
+            r"SELECT 'x\') TO STDOUT; DELETE FROM users; --'",
+            // `#` is an operator in PG, not a comment: `; DELETE` after `#` is real SQL!
+            "SELECT 1 # ); DELETE FROM users",
+            // Nested block comments in PG: the first `*/` only closes the inner comment,
+            // leaving the outer comment unterminated instead of exposing trailing tokens.
+            "SELECT /* outer /* inner */ 1",
         ] {
-            assert!(check_copy_source(s).is_ok(), "{s}");
-            assert!(crate::sqlguard::is_write(s), "{s}");
+            assert!(check_copy_source(s).is_err(), "{s}");
         }
+
+        // Valid PG `E'...'` escape strings, nested block comments, and `#` operators pass.
+        assert!(check_copy_source(r"SELECT E'it\'s ) ; fine' FROM t").is_ok());
+        assert!(check_copy_source("SELECT /* outer /* inner */ ) ; */ 1 FROM t").is_ok());
+        assert!(check_copy_source("SELECT 3 # 1 FROM t").is_ok());
     }
 }

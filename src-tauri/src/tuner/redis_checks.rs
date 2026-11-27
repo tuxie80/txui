@@ -364,9 +364,12 @@ fn check_slowlog(d: &RedisTunerData, out: &mut Vec<Finding>) {
     let mut detail = String::new();
     for e in top {
         let head = e.command.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
-        let _ = writeln!(detail, "  {:.1} ms  {}", e.duration_us as f64 / 1000.0,
-                         if e.command.len() > 90 { format!("{}…", &e.command[..90]) }
-                         else { e.command.clone() });
+        let cmd_preview = if e.command.chars().count() > 90 {
+            format!("{}…", e.command.chars().take(90).collect::<String>())
+        } else {
+            e.command.clone()
+        };
+        let _ = writeln!(detail, "  {:.1} ms  {cmd_preview}", e.duration_us as f64 / 1000.0);
         let _ = head;
     }
     let blocking: Vec<&str> = top.iter()
@@ -589,11 +592,14 @@ mod tests {
     use crate::tuner::redis_collectors::{RedisTunerData, SlowEntry};
 
     fn data(info: &[(&str, &str)], config: &[(&str, &str)]) -> RedisTunerData {
-        let mut d = RedisTunerData::default();
-        d.version = "8.10.0".into();
-        d.major = 8; d.minor = 10;
-        d.mode = "standalone".into();
-        d.uptime_secs = 7 * 86400;
+        let mut d = RedisTunerData {
+            version: "8.10.0".into(),
+            major: 8,
+            minor: 10,
+            mode: "standalone".into(),
+            uptime_secs: 7 * 86400,
+            ..Default::default()
+        };
         for (k, v) in info { d.info.insert((*k).into(), (*v).into()); }
         for (k, v) in config { d.config.insert((*k).into(), (*v).into()); }
         d
@@ -882,5 +888,18 @@ mod tests {
         assert!(bs.total < gs.total, "bad {} should score below good {}", bs.total, gs.total);
         assert!(bs.total <= 50, "an unauthenticated, unpersisted, swapping instance scored {}", bs.total);
         assert!(gs.total >= 85, "a well-configured instance scored only {}", gs.total);
+    }
+
+    #[test]
+    fn slowlog_command_truncation_is_utf8_char_safe() {
+        let mut d = data(&[], &[("slowlog-log-slower-than", "10000")]);
+        // Byte index 90 sits inside 3-byte '€' (bytes 89..92).
+        let cmd = format!("SET {}€{}", "k".repeat(85), "v".repeat(20));
+        assert!(!cmd.is_char_boundary(90));
+        d.slowlog = vec![SlowEntry { duration_us: 250_000, command: cmd }];
+        let mut out = Vec::new();
+        check_slowlog(&d, &mut out);
+        assert_eq!(sev(&out, "r-slow-commands"), Some("warn"));
+        assert!(out[0].detail.contains('…'));
     }
 }

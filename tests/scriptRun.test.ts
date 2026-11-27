@@ -10,7 +10,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  isCancellation, isAbortedTransaction, txEffect, needsSavepoint, summarise, fmt,
+  isCancellation, isAbortedTransaction, txEffect, txEndCommand, isCommentOnlyStatement,
+  needsSavepoint, summarise, fmt,
   CANCEL_MESSAGE, needsDecision, defaultChoice, applyChoice, tally,
   scriptResultTabs, scriptResultFor } from '../src/utils/scriptRun.ts';
 import type { RunLine } from '../src/utils/scriptRun.ts';
@@ -77,6 +78,46 @@ test('a word merely STARTING with begin is not a BEGIN', () => {
   // every later statement pays for savepoints it does not need.
   assert.equal(txEffect('SELECT beginning FROM t'), null);
   assert.equal(txEffect('SELECT commits FROM t'), null);
+});
+
+test('txEffect strips leading comments and ignores keywords inside strings or comments', () => {
+  assert.equal(txEffect('-- open tx\nBEGIN;'), 'begin');
+  assert.equal(txEffect('/* header */\n  START TRANSACTION;', 'postgres'), 'begin');
+  assert.equal(txEffect('# mysql note\nCOMMIT;', 'mysql'), 'end');
+  assert.equal(txEffect('/*!40101 BEGIN */', 'mysql'), 'begin');
+  assert.equal(txEffect("SELECT 'BEGIN'"), null);
+  assert.equal(txEffect("SELECT 'COMMIT'"), null);
+  assert.equal(txEffect('/* BEGIN */ SELECT 1', 'postgres'), null);
+  assert.equal(txEffect('/* outer /* inner */ COMMIT */ SELECT 1', 'postgres'), null);
+});
+
+test('ROLLBACK TO SAVEPOINT and AND CHAIN keep a transaction open', () => {
+  assert.equal(txEffect('ROLLBACK TO sp1', 'postgres'), null);
+  assert.equal(txEffect('ROLLBACK TO SAVEPOINT sp1;', 'postgres'), null);
+  assert.equal(txEffect('ROLLBACK WORK TO SAVEPOINT sp1;', 'postgres'), null);
+  assert.equal(txEffect('ROLLBACK TRANSACTION TO sp1;', 'sqlite'), null);
+  assert.equal(txEffect('-- revert step\nROLLBACK TO sp1;', 'mysql'), null);
+  assert.equal(txEffect('COMMIT AND CHAIN;', 'postgres'), null);
+  assert.equal(txEffect('COMMIT WORK AND CHAIN;', 'mysql'), null);
+  assert.equal(txEffect('ROLLBACK AND CHAIN;', 'postgres'), null);
+  assert.equal(txEffect('COMMIT AND NO CHAIN;', 'postgres'), 'end');
+  assert.equal(txEffect('ROLLBACK AND NO CHAIN;', 'postgres'), 'end');
+  assert.equal(txEffect('COMMIT -- and chain\n;', 'postgres'), 'end');
+});
+
+test('txEndCommand resolves COMMIT/END vs ROLLBACK past leading comments', () => {
+  assert.equal(txEndCommand('-- all good\nCOMMIT;', 'postgres'), 'commit_transaction');
+  assert.equal(txEndCommand('/* done */ END;', 'postgres'), 'commit_transaction');
+  assert.equal(txEndCommand('-- abort\nROLLBACK;', 'postgres'), 'rollback_transaction');
+});
+
+test('isCommentOnlyStatement detects trailing/standalone comments while keeping MySQL conditional SQL', () => {
+  assert.equal(isCommentOnlyStatement('-- trailing note', 'mysql'), true);
+  assert.equal(isCommentOnlyStatement('/* block */ ; \n -- line', 'postgres'), true);
+  assert.equal(isCommentOnlyStatement('# mysql comment', 'mysql'), true);
+  assert.equal(isCommentOnlyStatement('#temp_table_fragment', 'sqlserver'), false);
+  assert.equal(isCommentOnlyStatement('/*!40101 SET @OLD=@@SQL_MODE */;', 'mysql'), false);
+  assert.equal(isCommentOnlyStatement('SELECT 1;', 'mysql'), false);
 });
 
 // ── savepoints, only where they are needed ──────────────────────────────────

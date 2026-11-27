@@ -576,6 +576,64 @@ fn plan_text(result: &QueryResult) -> String {
 /// when EXPLAIN alone doesn't say enough. Runs on one connection with the trace
 /// enabled, plans the statement with EXPLAIN (so a SELECT is optimized but NOT
 /// executed), reads the JSON trace, then disables tracing. MySQL/MariaDB only.
+/// Strip a leading MySQL `EXPLAIN [ANALYZE] [EXTENDED|PARTITIONS] [FORMAT = <mode>]`
+/// prefix if present and re-wrap as plain `EXPLAIN <stmt>` so `optimizer_trace`
+/// plans a single read-only statement without ever executing `EXPLAIN ANALYZE`.
+fn prepare_optimizer_trace_sql(sql: &str) -> Result<String, crate::apperror::AppError> {
+    use crate::apperror::AppError;
+    use crate::db::types::Engine;
+
+    let trimmed = sql.trim();
+    if crate::sqlguard::split_statements_for(Some(Engine::Mysql), trimmed).len() != 1 {
+        return Err(AppError::bad_request("Optimizer trace accepts a single SQL statement."));
+    }
+    if crate::sqlguard::is_write_for(Some(Engine::Mysql), trimmed) {
+        return Err(AppError::guard("Optimizer trace accepts read-only queries only."));
+    }
+
+    fn take_word(s: &str) -> Option<(&str, &str)> {
+        let s = s.trim_start();
+        let end = s.bytes().take_while(|b| b.is_ascii_alphabetic() || *b == b'_').count();
+        if end == 0 { None } else { Some((&s[..end], &s[end..])) }
+    }
+
+    if let Some((first, mut rest)) = take_word(trimmed) {
+        if first.eq_ignore_ascii_case("EXPLAIN") {
+            while let Some((kw, after_kw)) = take_word(rest) {
+                if kw.eq_ignore_ascii_case("ANALYZE")
+                    || kw.eq_ignore_ascii_case("EXTENDED")
+                    || kw.eq_ignore_ascii_case("PARTITIONS")
+                {
+                    rest = after_kw;
+                    continue;
+                }
+                if kw.eq_ignore_ascii_case("FORMAT") {
+                    let eq = after_kw.trim_start();
+                    if let Some(after_eq) = eq.strip_prefix('=') {
+                        if let Some((_mode, after_mode)) = take_word(after_eq) {
+                            rest = after_mode;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            let inner = rest.trim();
+            if inner.is_empty() {
+                return Err(AppError::bad_request("Optimizer trace requires a query after EXPLAIN."));
+            }
+            if crate::sqlguard::is_write_for(Some(Engine::Mysql), inner) {
+                return Err(AppError::guard("Optimizer trace accepts read-only queries only."));
+            }
+            return Ok(format!("EXPLAIN {inner}"));
+        }
+        if first.eq_ignore_ascii_case("DESC") || first.eq_ignore_ascii_case("DESCRIBE") {
+            return Ok(trimmed.to_string());
+        }
+    }
+    Ok(format!("EXPLAIN {trimmed}"))
+}
+
 #[tauri::command]
 pub async fn optimizer_trace(
     session_id: Uuid,
@@ -583,6 +641,9 @@ pub async fn optimizer_trace(
     db: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, crate::apperror::AppError> {
+    let trimmed = sql.trim();
+    let planned = prepare_optimizer_trace_sql(trimmed)?;
+    state.guard_statement(&session_id, trimmed).await?;
     let session = get_session_pub(session_id, &state.sessions).await?;
     match session.as_ref() {
         LiveSession::Mysql(pool) => {
@@ -597,15 +658,6 @@ pub async fn optimizer_trace(
             }
             let _ = mysql::execute(&mut *conn, "SET SESSION optimizer_trace = 'enabled=on'").await;
             let _ = mysql::execute(&mut *conn, "SET SESSION optimizer_trace_max_mem_size = 16777216").await;
-            // Plan without executing: prefix EXPLAIN unless the statement is
-            // already an EXPLAIN/DESCRIBE.
-            let trimmed = sql.trim_start();
-            let up = trimmed.get(..7).unwrap_or("").to_uppercase();
-            let planned = if up.starts_with("EXPLAIN") || up.starts_with("DESC") {
-                sql.clone()
-            } else {
-                format!("EXPLAIN {sql}")
-            };
             let run = async {
                 mysql::execute(&mut *conn, &planned).await?;
                 let r = mysql::execute(&mut *conn,
@@ -805,5 +857,43 @@ pub async fn explain_query(
             let r = crate::db::duckdb::execute(s, &stmt).await?;
             Ok(ExplainResult { format: "text".into(), engine: "duckdb".into(), content: plan_text(&r) })
         }
+    }
+}
+
+#[cfg(test)]
+mod optimizer_trace_tests {
+    use super::prepare_optimizer_trace_sql;
+    use crate::apperror::ErrorCode;
+
+    #[test]
+    fn optimizer_trace_accepts_single_read_and_strips_explain_analyze() {
+        assert_eq!(
+            prepare_optimizer_trace_sql("SELECT * FROM orders WHERE id = 1").unwrap(),
+            "EXPLAIN SELECT * FROM orders WHERE id = 1"
+        );
+        assert_eq!(
+            prepare_optimizer_trace_sql("EXPLAIN ANALYZE FORMAT = TREE SELECT * FROM orders").unwrap(),
+            "EXPLAIN SELECT * FROM orders"
+        );
+    }
+
+    #[test]
+    fn optimizer_trace_rejects_stacked_statements_and_writes() {
+        assert_eq!(
+            prepare_optimizer_trace_sql("SELECT 1; DROP TABLE users").unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+        assert_eq!(
+            prepare_optimizer_trace_sql("DELETE FROM orders WHERE id = 1").unwrap_err().code,
+            ErrorCode::GuardRefused
+        );
+        assert_eq!(
+            prepare_optimizer_trace_sql("EXPLAIN ANALYZE DELETE FROM orders WHERE id = 1").unwrap_err().code,
+            ErrorCode::GuardRefused
+        );
+        assert_eq!(
+            prepare_optimizer_trace_sql("WITH d AS (DELETE FROM orders RETURNING *) SELECT * FROM d").unwrap_err().code,
+            ErrorCode::GuardRefused
+        );
     }
 }

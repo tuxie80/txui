@@ -600,8 +600,8 @@ async fn read_grid(
     let mut bytes = 0usize;
     for row in &rows {
         let mut values = Vec::with_capacity(row.columns().len());
-        for index in 0..row.columns().len() {
-            let class = crate::db::mysql::classify_mysql_type(&types[index]);
+        for (index, ty) in types.iter().enumerate() {
+            let class = crate::db::mysql::classify_mysql_type(ty);
             let raw_null = row.try_get_raw(index)
                 .map_err(|_| failed("Refresh value metadata could not be inspected"))?
                 .is_null();
@@ -1290,6 +1290,14 @@ fn frontier_key_after(
     }
 }
 
+type ClosureGroup = (
+    String,
+    String,
+    ExecuteForeignKey,
+    BTreeMap<String, Vec<Value>>,
+);
+
+#[allow(clippy::too_many_arguments)]
 async fn process_closure(
     input: &ExecuteInput,
     source: &mut sqlx::MySqlConnection,
@@ -1308,15 +1316,7 @@ async fn process_closure(
             ));
         }
         let current = std::mem::take(frontier);
-        let mut groups: BTreeMap<
-            String,
-            (
-                String,
-                String,
-                ExecuteForeignKey,
-                BTreeMap<String, Vec<Value>>,
-            ),
-        > = BTreeMap::new();
+        let mut groups: BTreeMap<String, ClosureGroup> = BTreeMap::new();
         for (child_key, record) in current {
             let child = input
                 .tables
@@ -1478,6 +1478,7 @@ async fn process_closure(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn copy_tables(
     input: &ExecuteInput,
     source: &mut sqlx::MySqlConnection,
@@ -2451,7 +2452,7 @@ mod tests {
         predicate: impl Fn(&Value) -> bool,
     ) {
         for _ in 0..300 {
-            if events.lock().unwrap().iter().any(|event| predicate(event)) {
+            if events.lock().unwrap().iter().any(&predicate) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;

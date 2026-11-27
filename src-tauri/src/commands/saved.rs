@@ -20,7 +20,7 @@ pub async fn list_saved_queries(state: State<'_, AppState>) -> Result<Vec<SavedQ
     let rows = sqlx::query(
         "SELECT id, name, folder, sql, updated_at FROM saved_queries ORDER BY folder, name"
     )
-    .fetch_all(&*pool).await
+    .fetch_all(pool).await
     ?;
     Ok(rows.iter().map(|r| SavedQuery {
         id: r.get(0), name: r.get(1), folder: r.get(2), sql: r.get(3), updated_at: r.get(4),
@@ -44,7 +44,7 @@ pub async fn save_query(
                 "UPDATE saved_queries SET name=?, folder=?, sql=?, updated_at=datetime('now') WHERE id=?"
             )
             .bind(&name).bind(&folder).bind(&sql).bind(id)
-            .execute(&*pool).await
+            .execute(pool).await
             ?;
             Ok(id)
         }
@@ -53,7 +53,7 @@ pub async fn save_query(
                 "INSERT INTO saved_queries (name, folder, sql) VALUES (?, ?, ?)"
             )
             .bind(&name).bind(&folder).bind(&sql)
-            .execute(&*pool).await
+            .execute(pool).await
             ?;
             Ok(res.last_insert_rowid())
         }
@@ -65,7 +65,7 @@ pub async fn delete_saved_query(id: i64, state: State<'_, AppState>) -> Result<(
     let pool = &state.history;
     sqlx::query("DELETE FROM saved_queries WHERE id=?")
         .bind(id)
-        .execute(&*pool).await
+        .execute(pool).await
         ?;
     Ok(())
 }

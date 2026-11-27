@@ -32,7 +32,7 @@ use crate::db::{clickhouse, connection, duckdb, mongodb, mysql, parquet, postgre
 use crate::state::AppState;
 
 use super::connections::{
-    open_tunnel, resolve_test_password, resolve_test_secret, stored_ssh_password, with_default_timeout,
+    open_tunnel, resolve_test_password, resolve_test_ssh_password, with_default_timeout,
 };
 
 /// One stage's outcome, exactly as serialized to the frontend.
@@ -273,15 +273,11 @@ pub async fn connect_test_staged(
 ) -> Result<StagedConnectResult, crate::apperror::AppError> {
     // The app-wide connect timeout, as on every connect path.
     let config = with_default_timeout(&config, &state);
-    let saved = !config.id.is_nil();
+    let saved = state.configs.read().await.get(&config.id).cloned();
     // A password-exec mint failure is not a command error — it becomes the
     // auth stage's failure detail (a failed verdict is DATA, above).
-    let password = resolve_test_password(&config, password, &state.data_dir).await;
-    let ssh_password = resolve_test_secret(
-        ssh_password,
-        if saved { stored_ssh_password(&config, &state.data_dir) } else { None },
-        saved,
-    );
+    let password = resolve_test_password(&config, saved.as_ref(), password, &state.data_dir).await;
+    let ssh_password = resolve_test_ssh_password(&config, saved.as_ref(), ssh_password, &state.data_dir);
     Ok(run_staged(&config, password, ssh_password).await)
 }
 

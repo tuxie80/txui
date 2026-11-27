@@ -75,12 +75,19 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const unavailable = safeOperationUnavailableReason(session.engine, 'refresh');
   const candidates = openSessions.filter(candidate => candidate.engine === 'mysql');
   const [spec, setSpec] = useState<RefreshSpec>(() => {
+    const initialSource = (session.engine === 'mysql' && session.readOnly === true ? session : null)
+      ?? candidates.find(candidate => candidate.readOnly === true)
+      ?? null;
     const initial = createDefaultRefreshSpec({
-      source: { connectionId: session.connectionId, sessionId: session.sessionId },
+      source: initialSource
+        ? { connectionId: initialSource.connectionId, sessionId: initialSource.sessionId }
+        : { connectionId: '', sessionId: null },
       schema: 'shop', cutoffUtc: new Date().toISOString(),
     });
-    const target = candidates.find(candidate => candidate.sessionId !== session.sessionId);
-    if (target) initial.target = { connectionId: target.connectionId, sessionId: target.sessionId };
+    const initialTarget = (session.engine === 'mysql' && session.readOnly === false && session.sessionId !== initialSource?.sessionId ? session : null)
+      ?? candidates.find(candidate => candidate.readOnly === false && candidate.sessionId !== initialSource?.sessionId)
+      ?? null;
+    if (initialTarget) initial.target = { connectionId: initialTarget.connectionId, sessionId: initialTarget.sessionId };
     return initial;
   });
   const [confirmed, setConfirmed] = useState(false);
@@ -105,8 +112,17 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   const [cancelling, setCancelling] = useState(false);
   const [progress, setProgress] = useState(initialRefreshProgress);
   const runKeyRef = useRef<string | null>(null);
+  const activeKeysRef = useRef<string[]>([]);
   const mountedRef = useRef(true);
   const activityKey = panelTabKey(session.sessionId, 'refresh');
+  const sourceSession = candidates.find(candidate => candidate.sessionId === spec.source.sessionId) ?? null;
+  const targetSession = candidates.find(candidate => candidate.sessionId === spec.target.sessionId) ?? null;
+  const prevEndpointsRef = useRef({
+    sourceId: spec.source.sessionId,
+    sourceReadOnly: sourceSession?.readOnly,
+    targetId: spec.target.sessionId,
+    targetReadOnly: targetSession?.readOnly,
+  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -114,8 +130,54 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
   }, []);
 
   useEffect(() => {
-    if (!running) { clearTabActivities(activityKey); return; }
-    setActivity(activityKey, {
+    const prev = prevEndpointsRef.current;
+    const sourceMissing = Boolean(spec.source.sessionId) && !sourceSession;
+    const targetMissing = Boolean(spec.target.sessionId) && !targetSession;
+    const sourceReadOnlyChanged = Boolean(spec.source.sessionId)
+      && prev.sourceId === spec.source.sessionId
+      && prev.sourceReadOnly !== sourceSession?.readOnly;
+    const targetReadOnlyChanged = Boolean(spec.target.sessionId)
+      && prev.targetId === spec.target.sessionId
+      && prev.targetReadOnly !== targetSession?.readOnly;
+    const safetyViolated = (Boolean(spec.source.sessionId) && sourceSession?.readOnly !== true)
+      || (Boolean(spec.target.sessionId) && targetSession?.readOnly !== false);
+    prevEndpointsRef.current = {
+      sourceId: spec.source.sessionId,
+      sourceReadOnly: sourceSession?.readOnly,
+      targetId: spec.target.sessionId,
+      targetReadOnly: targetSession?.readOnly,
+    };
+    const hasProofs = confirmed || analysis !== null || rowSetPlan !== null
+      || rustMaskReport !== null || preflightReport !== null
+      || analyzing || planningRows || planningRust || planningPreflight;
+    if (sourceMissing || targetMissing || sourceReadOnlyChanged || targetReadOnlyChanged || (safetyViolated && hasProofs)) {
+      analysisGeneration.current += 1;
+      setConfirmed(false);
+      setAnalysis(null);
+      setAnalyzing(false);
+      setRowSetPlan(null);
+      setPlanningRows(false);
+      setRowProgress(null);
+      setPlanningRust(false);
+      setRustMaskReport(null);
+      setPlanningPreflight(false);
+      setPreflightReport(null);
+      setPreflightConsumed(false);
+    }
+  }, [
+    openSessions, sourceSession, targetSession,
+    spec.source.sessionId, spec.target.sessionId,
+    confirmed, analysis, rowSetPlan, rustMaskReport, preflightReport,
+    analyzing, planningRows, planningRust, planningPreflight,
+  ]);
+
+  useEffect(() => {
+    if (!running) {
+      clearTabActivities(activityKey);
+      return;
+    }
+    const keys = activeKeysRef.current.length > 0 ? activeKeysRef.current : [activityKey];
+    const payload = {
       id: 'refresh-execute',
       label: cancelling ? 'Cancelling environment refresh' : `Environment refresh · ${progress.phase}`,
       detail: `${progress.table ?? 'preparing snapshot'} · ${progress.chunkOutcome ?? progress.phase} · ${progress.committedRows.toLocaleString()} committed · ${progress.inFlightRows.toLocaleString()} in flight · ${progress.remainingRows?.toLocaleString() ?? 'unknown'} remaining · ${progress.rowsPerSecond?.toFixed(1) ?? '—'} rows/s`,
@@ -124,7 +186,8 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
       kill: () => {
         if (runKeyRef.current) void invoke('refresh_cancel', { runKey: runKeyRef.current }).catch(() => {});
       },
-    });
+    };
+    for (const key of keys) setActivity(key, payload);
   }, [activityKey, running, cancelling, progress]);
 
   const validationError = useMemo(() => {
@@ -158,8 +221,13 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         : planningRust ? 'The optional Rust masking sample is already running'
           : planningPreflight ? 'Target-empty preflight is already running' : null;
   const confirmBlockReason = waitReason ?? (confirmed ? 'Source and target are already reconfirmed; edit an endpoint to confirm again'
-    : validationError ?? (!spec.source.sessionId || !spec.target.sessionId || spec.source.sessionId === spec.target.sessionId
-      ? 'Choose two different open source and target sessions first' : null));
+    : validationError ?? (!spec.source.sessionId || !spec.target.sessionId || spec.source.sessionId === spec.target.sessionId || !sourceSession || !targetSession
+      ? 'Choose two different open source and target sessions first'
+      : sourceSession.readOnly !== true
+        ? 'Source session must be read-only for Environment Refresh'
+        : targetSession.readOnly !== false
+          ? 'Target connection is read-only — Environment Refresh requires a writable target'
+          : null));
   const analyzeBlockReason = waitReason ?? validationError
     ?? (!confirmed ? 'Reconfirm source and target above first' : null);
   const catalogProofReason = validationError
@@ -286,8 +354,14 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
     if (confirmBlockReason) return;
     try {
       serializeRefreshSpec(spec);
-      if (!spec.source.sessionId || !spec.target.sessionId || spec.source.sessionId === spec.target.sessionId) {
+      if (!spec.source.sessionId || !spec.target.sessionId || spec.source.sessionId === spec.target.sessionId || !sourceSession || !targetSession) {
         throw new Error('choose two different open sessions before confirming endpoints');
+      }
+      if (sourceSession.readOnly !== true) {
+        throw new Error('source session must be read-only for Environment Refresh');
+      }
+      if (targetSession.readOnly !== false) {
+        throw new Error('target connection is read-only — Environment Refresh requires a writable target');
       }
       setConfirmed(true);
       setLogs(current => [...current,
@@ -487,8 +561,14 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
 
   const runRefresh = async () => {
     if (runBlockReason || !analysis || !executionPlan || !maskPlan) return;
-    const targetSession = candidates.find(candidate => candidate.sessionId === spec.target.sessionId);
     const runKey = crypto.randomUUID();
+    const runActivityKeys = [activityKey];
+    if (spec.source.sessionId && spec.source.sessionId !== session.sessionId) {
+      runActivityKeys.push(panelTabKey(spec.source.sessionId, 'refresh-source'));
+    }
+    if (spec.target.sessionId && spec.target.sessionId !== session.sessionId && spec.target.sessionId !== spec.source.sessionId) {
+      runActivityKeys.push(panelTabKey(spec.target.sessionId, 'refresh-target'));
+    }
     let finished = false;
     try {
       if (targetSession?.environment === 'prod' && (!isProdAcked(targetSession.connectionId) || productionConfirmation !== 'I understand — production')) {
@@ -499,6 +579,17 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         productionConfirmation: targetSession?.environment === 'prod' ? productionConfirmation : null,
       });
       runKeyRef.current = runKey;
+      activeKeysRef.current = runActivityKeys;
+      const initialActivity = {
+        id: 'refresh-execute',
+        label: 'Environment refresh · starting',
+        detail: 'preparing snapshot · starting · 0 committed · 0 in flight · unknown remaining · — rows/s',
+        survives: true,
+        kill: () => {
+          void invoke('refresh_cancel', { runKey }).catch(() => {});
+        },
+      };
+      for (const key of runActivityKeys) setActivity(key, initialActivity);
       finished = false;
       setPreflightConsumed(true);
       setRunning(true);
@@ -512,7 +603,7 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         if (mountedRef.current) setProgress(current => applyRefreshExecutionEvent(current, event));
         if (event.type === 'done') {
           finished = true;
-          clearTabActivities(activityKey);
+          for (const key of runActivityKeys) clearTabActivities(key);
           if (!mountedRef.current) return;
           setRunning(false);
           setCancelling(false);
@@ -535,6 +626,12 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
         }));
         setLogs(current => [...current, `Refresh failed before a terminal backend event: ${message}`]);
       }
+    } finally {
+      if (runKeyRef.current === runKey) {
+        runKeyRef.current = null;
+        activeKeysRef.current = [];
+      }
+      for (const key of runActivityKeys) clearTabActivities(key);
     }
   };
 
@@ -624,13 +721,13 @@ export function EnvironmentRefreshPanel({ session, openSessions = [session], onC
                   <label className="dg-field-inline"><span>Source session</span>
                     <select className="toolbar-select" disabled={running} value={spec.source.sessionId ?? ''} onChange={event => selectEndpoint('source', event.target.value)}>
                       <option value="">— choose source —</option>
-                      {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'}</option>)}
+                      {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'} · {candidate.readOnly === true ? 'read-only' : 'writable (source must be read-only)'}</option>)}
                     </select>
                   </label>
                   <label className="dg-field-inline"><span>Target session</span>
                     <select className="toolbar-select" disabled={running} value={spec.target.sessionId ?? ''} onChange={event => selectEndpoint('target', event.target.value)}>
                       <option value="">— choose target —</option>
-                      {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'}</option>)}
+                      {candidates.map(candidate => <option key={candidate.sessionId} value={candidate.sessionId}>{candidate.connectionName} · {candidate.environment ?? 'unspecified'} · {candidate.readOnly === false ? 'writable' : 'read-only (target must be writable)'}</option>)}
                     </select>
                   </label>
                   <div className="row-actions">

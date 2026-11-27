@@ -38,6 +38,22 @@ describe('LIMIT dialect', () => {
   test('leaves a query that limits itself', () => {
     assert.equal(lim('SELECT * FROM t LIMIT 3').applied, false);
   });
+  test('leaves a query that uses SQL-standard FETCH FIRST / FETCH NEXT at top level', () => {
+    for (const s of [
+      'SELECT * FROM t FETCH FIRST 10 ROWS ONLY',
+      'SELECT * FROM t ORDER BY id OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY',
+      'SELECT * FROM t FETCH FIRST ROW ONLY',
+      'SELECT * FROM t ORDER BY score DESC FETCH FIRST 5 ROWS WITH TIES',
+    ]) {
+      const r = lim(s, 1000);
+      assert.equal(r.applied, false, s);
+      assert.equal(r.sql, s, s);
+    }
+  });
+  test('a FETCH FIRST inside a subquery or string literal still caps the outer SELECT', () => {
+    assert.equal(lim('SELECT * FROM (SELECT * FROM t FETCH FIRST 3 ROWS ONLY) x').applied, true);
+    assert.equal(lim("SELECT 'FETCH FIRST 10 ROWS ONLY' FROM t").applied, true);
+  });
   test('a LIMIT inside a subquery does not count as the caller having one', () => {
     assert.equal(lim('SELECT * FROM (SELECT * FROM t LIMIT 3) x').applied, true);
   });

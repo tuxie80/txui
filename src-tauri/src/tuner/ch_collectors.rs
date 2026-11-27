@@ -416,8 +416,7 @@ mod tests {
 
     #[test]
     fn cycle_is_major_minor_for_endoflife_lookup() {
-        let mut d = ChTunerData::default();
-        d.major = 24; d.minor = 8;
+        let d = ChTunerData { major: 24, minor: 8, ..Default::default() };
         assert_eq!(d.cycle(), "24.8");
         assert!(d.at_least(24, 0) && d.at_least(24, 8) && !d.at_least(24, 9));
         assert!(!d.at_least(25, 0));

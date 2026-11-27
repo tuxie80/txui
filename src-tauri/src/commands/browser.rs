@@ -393,15 +393,7 @@ pub async fn column_value_counts(
             Err("Data browser not available for Redis".into()),
         LiveSession::Clickhouse(ch) => {
             let types = browser::ch_column_types(ch, &table).await;
-            let mut q = browser::build_select_clickhouse(&table, &filters, &[], limit, 0, &types);
-            // Reshape the SELECT * into the value-count aggregate the popover
-            // wants. ClickHouse has no LIMIT-in-subquery restriction, so the
-            // grouped form is built directly.
-            let col = format!("`{}`", column.replace('`', "``"));
-            let from = q.sql.split(" FROM ").nth(1).unwrap_or("").to_string();
-            let from = from.split(" LIMIT ").next().unwrap_or(&from).to_string();
-            q.sql = format!("SELECT {col} AS value, count() AS cnt FROM {from} \
-                             GROUP BY {col} ORDER BY cnt DESC LIMIT {}", limit.max(0));
+            let q = browser::build_value_counts_clickhouse(&table, &column, &filters, limit, &types);
             crate::db::clickhouse::execute_with_params(ch, &q.sql, &q.params)
                 .await.map_err(Into::into)
         }

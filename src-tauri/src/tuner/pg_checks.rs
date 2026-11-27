@@ -933,10 +933,12 @@ mod tests {
 
     /// Build data from (name, setting, unit) triples.
     fn data(pairs: &[(&str, &str, &str)]) -> PgTunerData {
-        let mut d = PgTunerData::default();
-        d.major = 16;
-        d.version_num = 160010;
-        d.uptime_secs = 7 * 86400;
+        let mut d = PgTunerData {
+            major: 16,
+            version_num: 160010,
+            uptime_secs: 7 * 86400,
+            ..Default::default()
+        };
         for (k, v, u) in pairs {
             d.settings.insert((*k).into(), (*v).into());
             if !u.is_empty() { d.units.insert((*k).into(), (*u).into()); }

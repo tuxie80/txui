@@ -234,7 +234,7 @@ const GridRow = memo(function GridRow(p: RowProps) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-interface EditingCell { r: number; c: number; value: string }
+interface EditingCell { r: number; c: number; value: string; initialText: string; changed: boolean }
 
 export function FastGrid({
   columns, rows, sort, onSortCol, onFilterCol, filteredCols, pinnedCols, onLayoutCol,
@@ -322,6 +322,46 @@ export function FastGrid({
     setActive(null);
     setEditing(null);
   }, [columns]);
+
+  // Clamp or clear selection/active/editing when rows or columns shrink (e.g. client-side filter)
+  useEffect(() => {
+    if (nRows === 0 || nCols === 0) {
+      if (selection !== null) {
+        setSelection(null);
+        onSelectionChange?.(null, false);
+      }
+      if (active !== null) setActive(null);
+      if (editing !== null) setEditing(null);
+      return;
+    }
+    if (active && (active.r < 0 || active.r >= nRows || active.c < 0 || active.c >= nCols)) {
+      setActive({
+        r: Math.max(0, Math.min(nRows - 1, active.r)),
+        c: Math.max(0, Math.min(nCols - 1, active.c)),
+      });
+    }
+    if (selection && (
+      selection.r1 < 0 || selection.r1 >= nRows || selection.r2 < 0 || selection.r2 >= nRows ||
+      selection.c1 < 0 || selection.c1 >= nCols || selection.c2 < 0 || selection.c2 >= nCols
+    )) {
+      const clamped: SelRect = {
+        r1: Math.max(0, Math.min(nRows - 1, selection.r1)),
+        c1: Math.max(0, Math.min(nCols - 1, selection.c1)),
+        r2: Math.max(0, Math.min(nRows - 1, selection.r2)),
+        c2: Math.max(0, Math.min(nCols - 1, selection.c2)),
+      };
+      setSelection(clamped);
+      onSelectionChange?.({
+        r1: Math.min(clamped.r1, clamped.r2),
+        r2: Math.max(clamped.r1, clamped.r2),
+        c1: Math.min(clamped.c1, clamped.c2),
+        c2: Math.max(clamped.c1, clamped.c2),
+      }, false);
+    }
+    if (editing && (editing.r < 0 || editing.r >= nRows || editing.c < 0 || editing.c >= nCols)) {
+      setEditing(null);
+    }
+  }, [nRows, nCols, selection, active, editing, onSelectionChange]);
 
   // Container size tracking
   useEffect(() => {
@@ -511,23 +551,29 @@ export function FastGrid({
   const getSelectionData = useCallback(() => {
     const names = columns.map(c => c.name);
     if (!selection) return { columns: names, rows };
+    if (nRows === 0 || nCols === 0) return { columns: [], rows: [] };
     const s = normSel(selection);
-    const cols = names.slice(s.c1, s.c2 + 1);
+    const c1 = Math.max(0, Math.min(s.c1, nCols - 1));
+    const c2 = Math.max(c1, Math.min(s.c2, nCols - 1));
+    const cols = names.slice(c1, c2 + 1);
     const out: unknown[][] = [];
-    for (let r = s.r1; r <= Math.min(s.r2, nRows - 1); r++) {
-      out.push(rows[r].slice(s.c1, s.c2 + 1));
+    for (let r = Math.max(0, s.r1); r <= Math.min(s.r2, nRows - 1); r++) {
+      if (r >= 0 && r < rows.length) out.push(rows[r].slice(c1, c2 + 1));
     }
     return { columns: cols, rows: out };
-  }, [columns, rows, selection, normSel, nRows]);
+  }, [columns, rows, selection, normSel, nRows, nCols]);
 
   useEffect(() => {
     if (!apiRef) return;
     apiRef.current = {
       getSelectionData,
       hasSelection: () => selection !== null,
-      selectAll: () => setSel({ r1: 0, c1: 0, r2: nRows - 1, c2: nCols - 1 }),
+      selectAll: () => {
+        if (nRows === 0 || nCols === 0) return;
+        setSel({ r1: 0, c1: 0, r2: nRows - 1, c2: nCols - 1 });
+      },
       selectRow: (row: number) => {
-        if (row < 0 || row >= nRows) return;
+        if (nCols === 0 || row < 0 || row >= nRows) return;
         setSel({ r1: row, c1: 0, r2: row, c2: nCols - 1 });
         // Centre it rather than merely revealing it: the caller is pointing at
         // this row from somewhere else, so it should land where the eye is.
@@ -542,6 +588,7 @@ export function FastGrid({
 
   const getPkValues = useCallback((rowIdx: number): Record<string, unknown> => {
     const pk: Record<string, unknown> = {};
+    if (rowIdx < 0 || rowIdx >= rows.length) return pk;
     for (const pkCol of pkColumns ?? []) {
       const ci = columns.findIndex(c => c.name === pkCol);
       if (ci >= 0) pk[pkCol] = rows[rowIdx][ci];
@@ -550,17 +597,27 @@ export function FastGrid({
   }, [pkColumns, columns, rows]);
 
   const startEdit = useCallback((r: number, c: number) => {
-    if (!editable || pkSet.has(columns[c].name)) return;
+    if (!editable || r < 0 || r >= rows.length || c < 0 || c >= columns.length || pkSet.has(columns[c].name)) return;
     const v = rows[r][c];
-    setEditing({ r, c, value: v === null || v === undefined ? '' : String(v) });
+    const initialText = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    setEditing({ r, c, value: initialText, initialText, changed: false });
     setTimeout(() => editInputRef.current?.select(), 0);
   }, [editable, pkSet, columns, rows]);
 
   const commitEdit = useCallback(() => {
-    if (!editing || !onEdit) { setEditing(null); return; }
+    if (!editing || !onEdit || editing.r < 0 || editing.r >= rows.length || editing.c < 0 || editing.c >= columns.length) {
+      setEditing(null);
+      return;
+    }
     const original = rows[editing.r][editing.c];
-    const newVal = editing.value === '' ? null : editing.value;
-    if (String(original ?? '') !== String(newVal ?? '')) {
+    const startedNull = original === null || original === undefined;
+    const newVal = startedNull && !editing.changed ? null : editing.value;
+    const modified = startedNull
+      ? (original ?? null) !== newVal
+      : typeof original === 'string'
+        ? original !== newVal
+        : editing.initialText !== newVal;
+    if (modified) {
       onEdit({
         pk_values: getPkValues(editing.r),
         column: columns[editing.c].name,
@@ -601,9 +658,10 @@ export function FastGrid({
     if (!rn || rn.dataset.rn === undefined) return;
     scrollRef.current?.focus({ preventScroll: true });
     const r = Number(rn.dataset.rn);
+    if (nCols === 0 || r < 0 || r >= nRows) return;
     setSel({ r1: r, c1: 0, r2: r, c2: nCols - 1 });
     setActive({ r, c: 0 });
-  }, [nCols, setSel]);
+  }, [nCols, nRows, setSel]);
 
   // Drag selection is rAF-coalesced (the scroll handler shows the pattern):
   // raw mousemoves arrive faster than frames, and every applied selection
@@ -642,7 +700,7 @@ export function FastGrid({
 
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     const cell = cellFromEvent(e);
-    if (!cell) return;
+    if (!cell || cell.r < 0 || cell.r >= rows.length || cell.c < 0 || cell.c >= columns.length) return;
     const fk = fkCols[cell.c];
     if (fk && onFkClick && !e.altKey) {
       const v = rows[cell.r][cell.c];
@@ -653,7 +711,7 @@ export function FastGrid({
     }
     if (editable) startEdit(cell.r, cell.c);
     else onOpenCell?.(cell.r, cell.c);
-  }, [cellFromEvent, fkCols, onFkClick, rows, editable, startEdit, onOpenCell]);
+  }, [cellFromEvent, fkCols, onFkClick, rows, columns.length, editable, startEdit, onOpenCell]);
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
 
@@ -765,10 +823,10 @@ export function FastGrid({
     }
     if (mod && e.key === 'a') {
       e.preventDefault();
-      setSel({ r1: 0, c1: 0, r2: nRows - 1, c2: nCols - 1 });
+      if (nRows > 0 && nCols > 0) setSel({ r1: 0, c1: 0, r2: nRows - 1, c2: nCols - 1 });
       return;
     }
-    if (!active) return;
+    if (!active || nRows === 0 || nCols === 0 || active.r < 0 || active.r >= nRows || active.c < 0 || active.c >= nCols) return;
 
     if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault();
@@ -885,6 +943,7 @@ export function FastGrid({
     const pkIdx = pkColumns.map(pkCol => columns.findIndex(c => c.name === pkCol));
     // Only visible rows need decoration — bounded work per render
     for (let r = rowStart; r < rowEnd; r++) {
+      if (r < 0 || r >= rows.length) continue;
       const pk = JSON.stringify(
         Object.fromEntries(pkColumns.map((pkCol, k) => {
           const ci = pkIdx[k];
@@ -1101,7 +1160,7 @@ export function FastGrid({
             className="fg-edit"
             style={editStyle}
             value={editing.value}
-            onChange={e => setEditing({ ...editing, value: e.target.value })}
+            onChange={e => setEditing({ ...editing, value: e.target.value, changed: true })}
             onBlur={commitEdit}
             onKeyDown={e => {
               if (e.key === 'Enter')  { e.preventDefault(); commitEdit(); }

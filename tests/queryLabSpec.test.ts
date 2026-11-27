@@ -56,9 +56,52 @@ test('every parameter must be concrete, named and used', () => {
   const unexpected = fixture();
   unexpected.parameters.extra = { kind: 'text', value: 'unused' };
   assert.ok(validateQueryLabExperiment(unexpected).some(error => error.includes('unexpected concrete parameter')));
+  const invalid = stmtInvalid();
+  assert.ok(validateQueryLabExperiment(invalid).some(error => error.includes('finite exact number')));
+});
+
+function stmtInvalid(): QueryLabExperiment {
   const invalid = fixture();
   invalid.parameters.customer_id = { kind: 'number', value: '1e999' };
-  assert.ok(validateQueryLabExperiment(invalid).some(error => error.includes('finite exact number')));
+  return invalid;
+}
+
+test('PostgreSQL jsonb operators, E-strings, plain backslashes and dollar-quotes are scanned by dialect', () => {
+  const pg = fixture('postgres');
+  pg.originalSql = String.raw`SELECT id FROM orders WHERE payload #>> '{tier}' = :tier AND payload ? 'vip' AND payload ?| array['a','b'] AND payload ?& array['a'] AND dir = 'C:\' AND note = E'it\'s $1 ok' AND tag = $q$raw $2 ? text$q$`;
+  pg.parameters = { tier: { kind: 'text', value: 'gold' } };
+  assert.deepEqual(validateQueryLabExperiment(pg), []);
+
+  // Genuine $1 after PG #>> or after 'C:\' is still caught as an unresolved positional parameter
+  const pgPosAfterHash = {
+    ...fixture('postgres'),
+    originalSql: "SELECT id FROM orders WHERE payload #>> '{tier}' = $1",
+    parameters: {},
+  };
+  assert.ok(validateQueryLabExperiment(pgPosAfterHash).some(e => e.includes('unresolved positional parameters: $1')));
+
+  const pgPosAfterBackslash = {
+    ...fixture('postgres'),
+    originalSql: String.raw`SELECT id FROM orders WHERE dir = 'C:\' AND customer_id = $2`,
+    parameters: {},
+  };
+  assert.ok(validateQueryLabExperiment(pgPosAfterBackslash).some(e => e.includes('unresolved positional parameters: $2')));
+
+  // On MySQL, ? is a positional parameter, while ? inside a # comment is ignored
+  const myPos = {
+    ...fixture('mysql'),
+    originalSql: 'SELECT id FROM orders WHERE customer_id = ?',
+    parameters: {},
+    candidates: [],
+  };
+  assert.ok(validateQueryLabExperiment(myPos).some(e => e.includes('unresolved positional parameters: ?')));
+
+  const myHashComment = {
+    ...fixture('mysql'),
+    originalSql: 'SELECT id FROM orders # what about ?\nWHERE customer_id = :customer_id',
+    candidates: [],
+  };
+  assert.deepEqual(validateQueryLabExperiment(myHashComment), []);
 });
 
 test('estimate mode rejects measured evidence, settings and MySQL hypothetical indexes', () => {

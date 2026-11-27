@@ -115,6 +115,39 @@ fn completion_text(anthropic: bool, value: &Value) -> Result<String, AppError> {
         .ok_or_else(|| AppError::from("AI endpoint returned an empty completion."))
 }
 
+fn validate_ai_endpoint_security(base_url: &str, has_key: bool) -> Result<(), AppError> {
+    let base = base_url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(base)
+        .map_err(|_| AppError::from("AI endpoint must be a valid http:// or https:// URL."))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppError::from("AI endpoint URL must not contain embedded credentials."));
+    }
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            if !has_key {
+                return Ok(());
+            }
+            let host = parsed.host_str().unwrap_or("");
+            let unbracketed = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
+            let is_loopback = unbracketed.eq_ignore_ascii_case("localhost")
+                || unbracketed.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+            if is_loopback {
+                Ok(())
+            } else {
+                Err(AppError::guard(
+                    "Refusing to send an AI API key over plaintext http:// to a non-loopback host — use https:// or a localhost endpoint.",
+                ))
+            }
+        }
+        _ => Err(AppError::from("AI endpoint must be an http:// or https:// URL.")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn complete_with_key(
     provider: &str,
     base_url: &str,
@@ -125,15 +158,20 @@ async fn complete_with_key(
     timeout: Duration,
     mut cancelled: oneshot::Receiver<()>,
 ) -> Result<String, AppError> {
+    let non_empty_key = key.filter(|s| !s.is_empty());
     let (anthropic, url, body) = request_parts(provider, base_url, model, system, prompt)?;
-    let client = reqwest::Client::builder().timeout(timeout).build()
+    validate_ai_endpoint_security(base_url, non_empty_key.is_some())?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
         .map_err(|e| AppError::from(format!("could not build HTTP client: {e}")))?;
     let mut request = client.post(&url).json(&body);
     if anthropic {
-        let key = key.filter(|s| !s.is_empty())
+        let key = non_empty_key
             .ok_or_else(|| AppError::from("No AI API key is set — add one in Settings → AI."))?;
         request = request.header("x-api-key", key).header("anthropic-version", "2023-06-01");
-    } else if let Some(key) = key.filter(|s| !s.is_empty()) {
+    } else if let Some(key) = non_empty_key {
         request = request.header("authorization", format!("Bearer {key}"));
     }
 
@@ -163,6 +201,7 @@ async fn complete_with_key(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ai_complete(
     request_id: String,
     provider: String,
@@ -286,5 +325,42 @@ mod tests {
             "openai", &base, "m", None, "p", None, Duration::from_millis(20), rx,
         ).await.unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn api_key_refuses_non_loopback_plaintext_http_and_blocks_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Non-loopback HTTP with an API key is blocked before any network I/O.
+        let (_tx, rx) = oneshot::channel();
+        let err = complete_with_key(
+            "openai", "http://evil.example.com/v1", "m", None, "p",
+            Some("sk-secret"), Duration::from_secs(2), rx,
+        ).await.unwrap_err();
+        assert_eq!(err.code, crate::apperror::ErrorCode::GuardRefused);
+
+        // Loopback HTTP and remote HTTPS remain permitted with an API key.
+        assert!(validate_ai_endpoint_security("http://127.0.0.1:11434/v1", true).is_ok());
+        assert!(validate_ai_endpoint_security("http://localhost:11434/v1", true).is_ok());
+        assert!(validate_ai_endpoint_security("http://[::1]:11434/v1", true).is_ok());
+        assert!(validate_ai_endpoint_security("https://api.openai.com/v1", true).is_ok());
+
+        // Redirects are disabled (`Policy::none()`), so a 302 never forwards headers elsewhere.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://evil.example.com/steal\r\nContent-Length: 0\r\n\r\n"
+            ).await;
+        });
+        let (_tx2, rx2) = oneshot::channel();
+        let redir_err = complete_with_key(
+            "openai", &format!("http://{addr}/v1"), "m", None, "p",
+            Some("sk-local"), Duration::from_secs(2), rx2,
+        ).await.unwrap_err();
+        assert!(redir_err.to_string().contains("302"), "{redir_err}");
     }
 }

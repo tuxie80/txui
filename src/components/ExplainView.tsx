@@ -393,21 +393,21 @@ export function ExplainView({ data, onAnalyze, onAiExplain, aiUnavailableReason,
           </div>
         )}
         {onAiExplain && (
-          <span className={aiUnavailableReason ? 'unavail' : undefined} data-tip={aiUnavailableReason}>
-            <button className="toolbar-btn" title="Ask AI to interpret this plan, its deterministic findings and relevant schema metadata"
-              aria-disabled={Boolean(aiUnavailableReason)}
-              onClick={() => {
-                if (aiUnavailableReason) return;
-                onAiExplain([
-                  `Statement:\n${data.sql}`,
-                  `Plan evidence (${data.analyzed ? 'measured EXPLAIN ANALYZE' : 'estimated EXPLAIN'}):\n${data.content.slice(0, 50_000)}${data.content.length > 50_000 ? '\n… plan truncated' : ''}`,
-                  `TxUI deterministic findings:\n${findings.length
-                    ? findings.slice(0, 20).map(f => `- [${f.finding.level}] ${f.finding.observed} Why: ${f.finding.why} Suggested deterministic action: ${f.finding.action}`).join('\n')
-                    : '- No deterministic findings'}`,
-                ].join('\n\n'));
-              }}
-            >✦ Explain plan</button>
-          </span>
+          <button
+            className={`toolbar-btn${aiUnavailableReason ? ' unavail' : ''}`}
+            data-tip={aiUnavailableReason ?? 'Ask the AI assistant to explain this plan, its deterministic findings and relevant schema metadata'}
+            aria-disabled={Boolean(aiUnavailableReason)}
+            onClick={() => {
+              if (aiUnavailableReason) return;
+              onAiExplain([
+                `Statement:\n${data.sql}`,
+                `Plan evidence (${data.analyzed ? 'measured EXPLAIN ANALYZE' : 'estimated EXPLAIN'}):\n${data.content.slice(0, 50_000)}${data.content.length > 50_000 ? '\n… plan truncated' : ''}`,
+                `TxUI deterministic findings:\n${findings.length
+                  ? findings.slice(0, 20).map(f => `- [${f.finding.level}] ${f.finding.observed} Why: ${f.finding.why} Suggested deterministic action: ${f.finding.action}`).join('\n')
+                  : '- No deterministic findings'}`,
+              ].join('\n\n'));
+            }}
+          >✦ Explain plan</button>
         )}
         {data.engine !== 'clickhouse' && !data.analyzed && onAnalyze && (
           <button

@@ -18,6 +18,7 @@ import type {
   QueryLabExperiment, QueryLabParameter, QueryLabParameterKind,
 } from '../utils/queryLabSpec';
 import type { MigrationScratchRecord } from '../utils/migrationPreflight';
+import { clearActivity, clearTabActivities, panelTabKey, setActivity } from '../store/tabActivity';
 import { StatusIcon } from './StatusIcon';
 
 interface QueryLabPlanEvidence {
@@ -218,6 +219,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   const benchmarkRunKey = useRef<string | null>(null);
   const realRunKey = useRef<string | null>(null);
   const rewriteRunKey = useRef<string | null>(null);
+  const activityKey = panelTabKey(session.sessionId, 'querylab');
   const duplicateParameterNames = useMemo(() => {
     const seen = new Set<string>();
     const dupes = new Set<string>();
@@ -236,10 +238,58 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
   specHashRef.current = specHash;
   const safeCandidateIndex = experiment.candidates.length ? Math.min(selectedCandidateIndex, experiment.candidates.length - 1) : 0;
   const activeCandidate = (validated?.candidates ?? experiment.candidates)[safeCandidateIndex] ?? null;
-  const activeHypopg = activeCandidate && hypopg?.candidate_id === activeCandidate.id ? hypopg : null;
-  const activeRealIndex = activeCandidate && realIndex?.candidate_id === activeCandidate.id ? realIndex : null;
-  const activeRewrite = activeCandidate && rewrite?.candidate_id === activeCandidate.id ? rewrite : null;
-  const activeBenchmark = activeCandidate && benchmark?.candidate_id === activeCandidate.id ? benchmark : null;
+  const activeBaseline = baseline?.spec_sha256 === specHash ? baseline : null;
+  const activeHypopg = activeCandidate && hypopg?.candidate_id === activeCandidate.id && hypopg.spec_sha256 === specHash ? hypopg : null;
+  const activeRealIndex = activeCandidate && realIndex?.candidate_id === activeCandidate.id && realIndex.spec_sha256 === specHash ? realIndex : null;
+  const activeRewrite = activeCandidate && rewrite?.candidate_id === activeCandidate.id && rewrite.spec_sha256 === specHash ? rewrite : null;
+  const activeBenchmark = activeCandidate && benchmark?.candidate_id === activeCandidate.id && benchmark.spec_sha256 === specHash ? benchmark : null;
+
+  useEffect(() => {
+    if (realIndexRunning && realRunKey.current) {
+      const runKey = realRunKey.current;
+      setActivity(activityKey, {
+        id: 'querylab-real-index',
+        label: realIndexCancelling ? 'Cancelling real-index measurement' : 'Building & measuring real index',
+        detail: `${activeCandidate?.id ?? 'index'} · ${runKey}`,
+        survives: true,
+        kill: () => {
+          setRealIndexCancelling(true);
+          void invoke('cancel_watched', { runKey }).catch(() => {});
+        },
+      });
+    }
+    if (rewriteRunning && rewriteRunKey.current) {
+      const runKey = rewriteRunKey.current;
+      setActivity(activityKey, {
+        id: 'querylab-rewrite',
+        label: rewriteCancelling ? 'Cancelling rewrite verification' : 'Checking rewrite results',
+        detail: `${activeCandidate?.id ?? 'rewrite'} · ${runKey}`,
+        survives: true,
+        kill: () => {
+          setRewriteCancelling(true);
+          void invoke('cancel_watched', { runKey }).catch(() => {});
+        },
+      });
+    }
+    if (benchmarkRunning && benchmarkRunKey.current) {
+      const runKey = benchmarkRunKey.current;
+      setActivity(activityKey, {
+        id: 'querylab-benchmark',
+        label: benchmarkCancelling ? 'Cancelling rewrite benchmark' : 'Benchmarking rewrite candidate',
+        detail: `${activeCandidate?.id ?? 'rewrite'} · ${runKey}`,
+        survives: true,
+        kill: () => {
+          setBenchmarkCancelling(true);
+          void invoke('cancel_watched', { runKey }).catch(() => {});
+        },
+      });
+    }
+  }, [
+    activityKey, activeCandidate?.id,
+    realIndexRunning, realIndexCancelling,
+    rewriteRunning, rewriteCancelling,
+    benchmarkRunning, benchmarkCancelling,
+  ]);
   const benchmarkAssessment = useMemo(() => activeBenchmark ? benchmarkVerdict({
     baselineMs: activeBenchmark.baseline_ms,
     candidateMs: activeBenchmark.candidate_ms,
@@ -384,7 +434,11 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       const response = await invoke<QueryLabBaselineResponse>('query_lab_baseline', {
         input: baselinePayload(validated, crypto.randomUUID()),
       });
-      setBaseline(response);
+      if (response.spec_sha256 !== specHashRef.current) {
+        setBaselineError('The experiment changed during execution; the stale result was discarded after connection cleanup.');
+      } else {
+        setBaseline(response);
+      }
     } catch (error) {
       setBaselineError(errorDisplay(error));
     } finally {
@@ -411,7 +465,11 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
           },
         },
       });
-      setHypopg(response);
+      if (response.spec_sha256 !== specHashRef.current) {
+        setHypopgError('The experiment changed during estimation; the stale result was discarded after HypoPG cleanup.');
+      } else {
+        setHypopg(response);
+      }
     } catch (error) {
       setHypopgError(errorDisplay(error));
     } finally {
@@ -427,6 +485,16 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setRealIndexCancelling(false);
     setRealIndexError(null);
     setRealIndex(null);
+    setActivity(activityKey, {
+      id: 'querylab-real-index',
+      label: 'Building & measuring real index',
+      detail: `${candidate.id} · ${runKey}`,
+      survives: true,
+      kill: () => {
+        setRealIndexCancelling(true);
+        void invoke('cancel_watched', { runKey }).catch(() => {});
+      },
+    });
     try {
       const response = await invoke<QueryLabRealIndexResponse>('query_lab_real_index_measure', {
         input: {
@@ -446,6 +514,10 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setRealIndexError(errorDisplay(error));
     } finally {
       if (realRunKey.current === runKey) realRunKey.current = null;
+      clearActivity(activityKey, 'querylab-real-index');
+      if (!realRunKey.current && !rewriteRunKey.current && !benchmarkRunKey.current) {
+        clearTabActivities(activityKey);
+      }
       setRealIndexRunning(false);
       setRealIndexCancelling(false);
       await refreshScratch();
@@ -460,6 +532,16 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setRewriteCancelling(false);
     setRewriteError(null);
     setRewrite(null);
+    setActivity(activityKey, {
+      id: 'querylab-rewrite',
+      label: 'Checking rewrite results',
+      detail: `${candidate.id} · ${runKey}`,
+      survives: true,
+      kill: () => {
+        setRewriteCancelling(true);
+        void invoke('cancel_watched', { runKey }).catch(() => {});
+      },
+    });
     try {
       const response = await invoke<QueryLabRewriteResponse>('query_lab_rewrite_measure', {
         input: {
@@ -479,6 +561,10 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setRewriteError(errorDisplay(error));
     } finally {
       if (rewriteRunKey.current === runKey) rewriteRunKey.current = null;
+      clearActivity(activityKey, 'querylab-rewrite');
+      if (!realRunKey.current && !rewriteRunKey.current && !benchmarkRunKey.current) {
+        clearTabActivities(activityKey);
+      }
       setRewriteRunning(false);
       setRewriteCancelling(false);
     }
@@ -492,6 +578,16 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     setBenchmarkCancelling(false);
     setBenchmarkError(null);
     setBenchmark(null);
+    setActivity(activityKey, {
+      id: 'querylab-benchmark',
+      label: 'Benchmarking rewrite candidate',
+      detail: `${candidate.id} · ${runKey}`,
+      survives: true,
+      kill: () => {
+        setBenchmarkCancelling(true);
+        void invoke('cancel_watched', { runKey }).catch(() => {});
+      },
+    });
     try {
       const response = await invoke<QueryLabBenchmarkResponse>('query_lab_benchmark', {
         input: {
@@ -515,6 +611,10 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
       setBenchmarkError(errorDisplay(error));
     } finally {
       if (benchmarkRunKey.current === runKey) benchmarkRunKey.current = null;
+      clearActivity(activityKey, 'querylab-benchmark');
+      if (!realRunKey.current && !rewriteRunKey.current && !benchmarkRunKey.current) {
+        clearTabActivities(activityKey);
+      }
       setBenchmarkRunning(false);
       setBenchmarkCancelling(false);
     }
@@ -607,9 +707,9 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
           timeoutRestored: activeRealIndex.cleanup.timeout_restored,
           connectionClosed: activeRealIndex.cleanup.connection_closed,
         } : null,
-        cacheObservations: baseline?.cache_observations,
-        timeoutRestored: activeRealIndex?.cleanup.timeout_restored ?? activeRewrite?.cleanup.timeout_restored ?? activeBenchmark?.cleanup.timeout_restored ?? activeHypopg?.cleanup.timeout_restored ?? baseline?.cleanup.timeout_restored,
-        connectionClosed: activeRealIndex?.cleanup.connection_closed ?? activeRewrite?.cleanup.connection_closed ?? activeBenchmark?.cleanup.connection_closed ?? activeHypopg?.cleanup.connection_closed ?? baseline?.cleanup.connection_closed,
+        cacheObservations: activeBaseline?.cache_observations,
+        timeoutRestored: activeRealIndex?.cleanup.timeout_restored ?? activeRewrite?.cleanup.timeout_restored ?? activeBenchmark?.cleanup.timeout_restored ?? activeHypopg?.cleanup.timeout_restored ?? activeBaseline?.cleanup.timeout_restored,
+        connectionClosed: activeRealIndex?.cleanup.connection_closed ?? activeRewrite?.cleanup.connection_closed ?? activeBenchmark?.cleanup.connection_closed ?? activeHypopg?.cleanup.connection_closed ?? activeBaseline?.cleanup.connection_closed,
       });
       const path = await saveTextAs(report, 'query-lab-report.md', 'Markdown', ['md']);
       setReportStatus(path ? `Report saved to ${path}` : 'Report export cancelled');
@@ -629,7 +729,7 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
     : migrationCandidate.kind === 'rewrite' && activeRewrite?.correctness !== 'equal'
       ? `Verify canonical result equality for ${migrationCandidate.id} before handing off to Migration Cockpit`
     : null;
-  const reportBlockReason = !baseline && !activeHypopg && !activeRealIndex && !activeRewrite && !activeBenchmark
+  const reportBlockReason = !activeBaseline && !activeHypopg && !activeRealIndex && !activeRewrite && !activeBenchmark
     ? 'Capture baseline or candidate evidence first before exporting a report' : null;
   const modeEvidenceMismatch = experiment.executionMode === 'measured'
     ? !experiment.evidence.timing || (experiment.candidates.some(candidate => candidate.kind === 'rewrite') && !experiment.evidence.resultEquality)
@@ -942,21 +1042,21 @@ export function QueryLabPanel({ session, schema, onClose }: Props) {
               </section>
 
               <div className="op-stage" hidden={workspace !== 'run'}>
-              {baseline && <section aria-label="Query Lab baseline evidence">
-                <h3>Baseline · {baseline.execution_mode}</h3>
-                <p className="dv-desc">Index evidence: {baseline.index_evidence_mode} · {baseline.comparison_policy}</p>
-                <p className="dv-desc">{baseline.engine} · {baseline.version} · backend {baseline.backend_id} · timeout {baseline.timeout_ms} ms · cost estimates {baseline.cost_estimates ? 'included' : 'not requested'}.</p>
-                <p className="dv-desc">Cleanup: timeout {baseline.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {baseline.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
-                {baseline.cache_observations.map(observation => <div className="sqp-f-evidence" key={observation}>{observation}</div>)}
-                {baseline.settings.map(setting => <div className="sqp-f-evidence" key={setting.name}>{setting.name}: {setting.value ?? 'not available'}</div>)}
+              {activeBaseline && <section aria-label="Query Lab baseline evidence">
+                <h3>Baseline · {activeBaseline.execution_mode}</h3>
+                <p className="dv-desc">Index evidence: {activeBaseline.index_evidence_mode} · {activeBaseline.comparison_policy}</p>
+                <p className="dv-desc">{activeBaseline.engine} · {activeBaseline.version} · backend {activeBaseline.backend_id} · timeout {activeBaseline.timeout_ms} ms · cost estimates {activeBaseline.cost_estimates ? 'included' : 'not requested'}.</p>
+                <p className="dv-desc">Cleanup: timeout {activeBaseline.cleanup.timeout_restored ? 'restored' : 'NOT restored'} · dedicated connection {activeBaseline.cleanup.connection_closed ? 'closed' : 'NOT closed'}.</p>
+                {activeBaseline.cache_observations.map(observation => <div className="sqp-f-evidence" key={observation}>{observation}</div>)}
+                {activeBaseline.settings.map(setting => <div className="sqp-f-evidence" key={setting.name}>{setting.name}: {setting.value ?? 'not available'}</div>)}
                 <details className="op-disclosure">
-                  <summary>Estimated plan · {baseline.estimated_plan.label} · {baseline.estimated_plan.elapsed_ms} ms</summary>
-                  <pre className="sqp-sql">{baseline.estimated_plan.content}</pre>
+                  <summary>Estimated plan · {activeBaseline.estimated_plan.label} · {activeBaseline.estimated_plan.elapsed_ms} ms</summary>
+                  <pre className="sqp-sql">{activeBaseline.estimated_plan.content}</pre>
                 </details>
-                {baseline.measured_plan && <details className="op-disclosure">
-                  <summary>EXECUTED QUERY · {baseline.measured_plan.label} · {baseline.measured_plan.elapsed_ms} ms</summary>
+                {activeBaseline.measured_plan && <details className="op-disclosure">
+                  <summary>EXECUTED QUERY · {activeBaseline.measured_plan.label} · {activeBaseline.measured_plan.elapsed_ms} ms</summary>
                   <p className="dv-desc">EXPLAIN ANALYZE actually executed the read-only statement; this is measured evidence, not a hypothetical estimate.</p>
-                  <pre className="sqp-sql">{baseline.measured_plan.content}</pre>
+                  <pre className="sqp-sql">{activeBaseline.measured_plan.content}</pre>
                 </details>}
               </section>}
               {activeHypopg && <section aria-label="HypoPG candidate evidence">

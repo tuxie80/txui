@@ -192,6 +192,8 @@ export type { ScriptErrorChoice } from '../utils/scriptRun';
 
 /** A paused script run waiting on that decision. */
 export interface ScriptErrorRequest {
+  /** Tab that paused on this script error, so closing/cancelling it stops cleanly. */
+  tabId?: number;
   /** 1-based index of the statement that failed. */
   stmtNo: number;
   total: number;
@@ -941,11 +943,13 @@ interface Props {
   /** Every open session — TxShell writes to another one by name. */
   openSessions?: Session[];
   isActive?: boolean;
-  externalMigrationHandoff?: { id: number; handoff: MigrationHandoff };
+  externalMigrationHandoff?: { id: number; handoff: MigrationHandoff } | null;
   insertTextRef?: React.MutableRefObject<((text: string) => void) | null>;
 }
 
-export function QueryTabs({ session, openSessions, isActive, externalMigrationHandoff, insertTextRef }: Props) {
+export function QueryTabs({
+  session, openSessions, isActive, externalMigrationHandoff, insertTextRef,
+}: Props) {
   // Restore whatever you were writing last time on this connection (utils/bufferStore).
   // One read, used by both initialisers below (it was parsed twice).
   const restoredRef = useRef<StoredBuffer[] | null>(null);
@@ -1042,24 +1046,34 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
   // ROLLBACK, so any settled end — ok or failed — means back to autocommit.
   const [txMode, setTxModeState] = useState<TxMode>('auto');
   const txModeRef = useRef<TxMode>('auto');
-  const setTxMode = useCallback((m: TxMode) => { txModeRef.current = m; setTxModeState(m); }, []);
   const txOpen = txIsOpen(txMode);
   const txOpenRef = useRef(txOpen);
   useEffect(() => { txOpenRef.current = txOpen; }, [txOpen]);
+  const setTxMode = useCallback((m: TxMode) => {
+    txModeRef.current = m;
+    txOpenRef.current = txIsOpen(m);
+    setTxModeState(m);
+  }, []);
   const txBusy = txIsBusy(txMode);
-  const beginTx = useCallback(async () => {
+  const beginTx = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
     const next = txReduce(txModeRef.current, 'begin');
-    if (next === txModeRef.current) return;          // already pending/open
+    if (next === txModeRef.current) {
+      const open = txIsOpen(txModeRef.current);
+      return open ? { ok: true } : { ok: false, error: 'transaction transition already in progress' };
+    }
     setTxMode(next);
     try {
       await invoke('begin_transaction', { sessionId: session.sessionId });
       setTxMode(txReduce(txModeRef.current, 'begin-ok'));
       addLog(session.sessionId, { level: 'info', action: 'TX',
         detail: 'BEGIN — manual transaction opened', line: 'BEGIN' });
+      return { ok: true };
     } catch (e) {
+      const errMsg = errorDisplay(e);
       setTxMode(txReduce(txModeRef.current, 'begin-fail')); // stay AUTO, show the error
-      addLog(session.sessionId, { level: 'err', action: 'TX', detail: errorDisplay(e),
-        line: `! ${errorDisplay(e).replace(/\s+/g, ' ').trim()}` });
+      addLog(session.sessionId, { level: 'err', action: 'TX', detail: errMsg,
+        line: `! ${errMsg.replace(/\s+/g, ' ').trim()}` });
+      return { ok: false, error: errMsg };
     }
   }, [session.sessionId, setTxMode]);
   /**
@@ -1073,18 +1087,26 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
    */
   const [serverAutocommit, setServerAutocommit] = useState<boolean | null>(null);
 
-  const endTx = useCallback(async (cmd: 'commit_transaction' | 'rollback_transaction') => {
+  const endTx = useCallback(async (
+    cmd: 'commit_transaction' | 'rollback_transaction',
+  ): Promise<{ ok: boolean; error?: string }> => {
     const next = txReduce(txModeRef.current, 'end');
-    if (next === txModeRef.current) return;          // not open (or already ending)
+    if (next === txModeRef.current) {
+      const closed = !txIsOpen(txModeRef.current) && !txIsBusy(txModeRef.current);
+      return closed ? { ok: true } : { ok: false, error: 'transaction transition already in progress' };
+    }
     setTxMode(next);
     try {
       await invoke(cmd, { sessionId: session.sessionId });
       addLog(session.sessionId, { level: 'ok', action: 'TX',
         detail: cmd === 'commit_transaction' ? 'COMMIT' : 'ROLLBACK',
         line: cmd === 'commit_transaction' ? 'COMMIT' : 'ROLLBACK' });
+      return { ok: true };
     } catch (e) {
-      addLog(session.sessionId, { level: 'err', action: 'TX', detail: errorDisplay(e),
-        line: `! ${errorDisplay(e).replace(/\s+/g, ' ').trim()}` });
+      const errMsg = errorDisplay(e);
+      addLog(session.sessionId, { level: 'err', action: 'TX', detail: errMsg,
+        line: `! ${errMsg.replace(/\s+/g, ' ').trim()}` });
+      return { ok: false, error: errMsg };
     } finally {
       // Backend dropped the held conn either way (failed COMMIT rolls back on
       // drop) — autocommit is the truth again.
@@ -1126,8 +1148,39 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
   /** A script held at the gate: the verdict, and the SQL to run if approved. */
   const [preflight, setPreflight] = useState<{ report: PreflightReport; sql: string; tabId: number; from?: number; noResults?: boolean } | null>(null);
   // A mid-script failure parks here until the user answers; `resolve` is the
-  // executeSql loop waiting on the promise.
-  const [scriptAsk, setScriptAsk] = useState<ScriptErrorRequest | null>(null);
+  // executeSql loop waiting on the promise. Tracked in a ref and tied to its
+  // tabId so closing/cancelling the tab, unmounting the session, or a second
+  // tab hitting an error resolves the paused coroutine with 'stop' cleanly.
+  const [scriptAsk, setScriptAskState] = useState<ScriptErrorRequest | null>(null);
+  const scriptAskRef = useRef<ScriptErrorRequest | null>(null);
+  const dismissScriptAsk = useCallback((forTabId?: number) => {
+    const cur = scriptAskRef.current;
+    if (!cur) return;
+    if (forTabId !== undefined && cur.tabId !== forTabId) return;
+    scriptAskRef.current = null;
+    setScriptAskState(null);
+    cur.resolve('stop');
+  }, []);
+  const setScriptAsk = useCallback((next: ScriptErrorRequest | null) => {
+    if (!next) return;
+    const prev = scriptAskRef.current;
+    let settled = false;
+    const entry: ScriptErrorRequest = {
+      ...next,
+      resolve: (choice: ScriptErrorChoice) => {
+        if (settled) return;
+        settled = true;
+        if (scriptAskRef.current === entry) {
+          scriptAskRef.current = null;
+          setScriptAskState(null);
+        }
+        next.resolve(choice);
+      },
+    };
+    scriptAskRef.current = entry;
+    setScriptAskState(entry);
+    if (prev) prev.resolve('stop');
+  }, []);
   const [varPrompt, setVarPrompt] = useState<{ vars: string[]; sql: string; tabId: number; from?: number; noResults?: boolean } | null>(null);
   // Quick Definition: peek an object's DDL inline (⌘Y from the editor).
   const [peekDdl, setPeekDdl] = useState<{ title: string; sql: string } | null>(null);
@@ -1972,10 +2025,11 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
   // Disconnecting takes the whole workspace away, so a Playground run would be
   // left with nothing to manage it — stop it here (closing its TAB does not).
   useEffect(() => () => {
+    dismissScriptAsk();
     stopSessionRuns(session.sessionId);
     clearSessionActivities(session.sessionId);
     forgetKillPickerState(session.sessionId);
-  }, [session.sessionId]);
+  }, [session.sessionId, dismissScriptAsk]);
 
   const activityKeyOf = useCallback((tab: QueryTab) => tab.panel
     ? panelTabKey(session.sessionId, tab.panel)
@@ -2017,7 +2071,10 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     const closing = removed.filter(t => !busy.some(b => b.id === t.id));
     if (closing.length === 0) return;
     const closingIds = new Set(closing.map(t => t.id));
-    for (const t of closing) forgetTabRefs(t);
+    for (const t of closing) {
+      dismissScriptAsk(t.id);
+      forgetTabRefs(t);
+    }
     const surviving = prev.filter(t => !closingIds.has(t.id));
     const active = activeIdRef.current;
     const nextActive = active !== null && closingIds.has(active)
@@ -2029,7 +2086,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
         detail: `${busy.length} tab(s) with running work stayed open: `
           + busy.map(t => t.label).join(', ') });
     }
-  }, [activityKeyOf, commitTabs, forgetTabRefs, session.sessionId]);
+  }, [activityKeyOf, commitTabs, dismissScriptAsk, forgetTabRefs, session.sessionId]);
 
   // Re-render when any tab's running work changes (tab bar shows ⟳ per tab).
   const activityVersion = useActivityVersion();
@@ -2177,11 +2234,12 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     // Decision in utils/tabModel (pure, tested); this only performs it.
     // Closing the last tab is ordinary now: the session stays connected with
     // zero tabs, and the active id goes null until the next tab opens.
+    dismissScriptAsk(id);
     const next = tabModel.closeTab(tabsRef.current, activeIdRef.current, id);
     // Only the ids matter from the decision; the list itself is filtered live.
     forgetTabRefs(tabsRef.current.find(t => t.id === id));
     commitTabs(prev => prev.filter(t => t.id !== id), next.activeId);
-  }, [commitTabs, forgetTabRefs]);
+  }, [commitTabs, dismissScriptAsk, forgetTabRefs]);
 
 
   /**
@@ -2453,7 +2511,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
       if (handoff.targetSessionId !== session.sessionId || handoff.targetConnectionId !== session.connectionId) return;
       if (!can(env().engine, 'dataGen') || env().panelBlocked('datagen')) return;
       setDatagenHandoff(current => ({ id: (current?.id ?? 0) + 1, handoff }));
-      openOrFocusPanel('datagen');
+      env().focusPanel('datagen');
     };
     const onToggleSaved = () => env().togglePanel('saved');
     const onToggleCsvImport = () => { if (can(env().engine, 'csvImport')) env().togglePanel('csvimport'); };
@@ -2570,7 +2628,12 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     on('dbgui:toggle-tuner', onToggleTuner);
     on('dbgui:toggle-erdiagram', onToggleErDiagram);
     on('dbgui:toggle-datagen', onToggleDataGen);
-    on(OPEN_GENERATE_INSTEAD_EVENT, onGenerateInstead);
+    // Registered outside `on()` (which gates on `env().isActive`): a cross-session
+    // Environment Refresh handoff dispatches from the active source session while
+    // targeting a second session (`handoff.targetSessionId`), and App.tsx focuses
+    // the target session asynchronously on the same event.
+    window.addEventListener(OPEN_GENERATE_INSTEAD_EVENT, onGenerateInstead);
+    un.push(() => window.removeEventListener(OPEN_GENERATE_INSTEAD_EVENT, onGenerateInstead));
     on('dbgui:toggle-saved', onToggleSaved);
     on('dbgui:toggle-csvimport', onToggleCsvImport);
     on('dbgui:toggle-quality', onToggleQuality);
@@ -2623,7 +2686,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
     tabsRef, txOpenRef, currentDbRef, dbUserRef,
     defaultLimitRef, limitTouchedRef, aliasesRef,
     patchTab, liveSql, beginTx, endTx, recordVersion,
-    setScriptAsk, setWriteAsk, setVarPrompt, setPreflight,
+    setScriptAsk, dismissScriptAsk, setWriteAsk, setVarPrompt, setPreflight,
   });
 
   /**
@@ -2813,6 +2876,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
 
   async function cancelQuery() {
     if (!activeTab) return;
+    dismissScriptAsk(activeTab.id);
     await invoke('cancel_query', {
       sessionId: session.sessionId,
       tabId: activeTab.id,
@@ -3316,16 +3380,16 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
                         ? 'This connection runs with autocommit OFF — a transaction is held open for the whole session. Nothing is durable until you Commit.'
                         : 'Manual transaction open — statements run on one held connection until COMMIT/ROLLBACK')
                       : 'Autocommit — each statement commits immediately. Click to open a manual transaction'}
-                    onClick={txCtl.canBegin ? beginTx : undefined}
+                    onClick={txCtl.canBegin ? () => { void beginTx(); } : undefined}
                   >{txBusy ? '…' : txOpen ? '● TX' : '⚡ AUTO'}</button>
                   <button className="toolbar-btn tx-commit"
                     title={txOpen ? 'COMMIT' : 'Nothing to commit — this connection autocommits every statement'}
                     disabled={!txCtl.canSettle}
-                    onClick={() => endTx('commit_transaction')}>Commit</button>
+                    onClick={() => { void endTx('commit_transaction'); }}>Commit</button>
                   <button className="toolbar-btn tx-rollback"
                     title={txOpen ? 'ROLLBACK' : 'Nothing to roll back — this connection autocommits every statement'}
                     disabled={!txCtl.canSettle}
-                    onClick={() => endTx('rollback_transaction')}>Rollback</button>
+                    onClick={() => { void endTx('rollback_transaction'); }}>Rollback</button>
                   {serverAutocommit !== null && (
                     // Compared against the CONNECTION's setting, not against
                     // whether a transaction is open: `@@autocommit` reports the
@@ -3499,14 +3563,16 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
                       const text = `${tab.error}${guide ? `\n${guide.title}\n${guide.detail}` : ''}\n\n${tab.sql}`;
                       void navigator.clipboard.writeText(text);
                     }}>Copy diagnostics</button>
-                    <span className={aiUnavailableReason ? 'unavail' : undefined} data-tip={aiUnavailableReason}>
-                      <button className="toolbar-btn query-error-fix"
-                        title="Ask the AI assistant for a corrected statement"
-                        aria-disabled={Boolean(aiUnavailableReason)}
-                        onClick={() => openAiAssistant('fix', currentEditorSql(), tab.error ?? '')}>
-                        ✦ Fix with AI
-                      </button>
-                    </span>
+                    <button
+                      className={`toolbar-btn query-error-fix${aiUnavailableReason ? ' unavail' : ''}`}
+                      data-tip={aiUnavailableReason ?? 'Ask the AI assistant to fix this query'}
+                      aria-disabled={aiUnavailableReason ? true : undefined}
+                      onClick={() => {
+                        if (aiUnavailableReason) return;
+                        openAiAssistant('fix', currentEditorSql(), tab.error ?? '');
+                      }}>
+                      ✦ Fix with AI
+                    </button>
                   </div>
                 </div>
               );
@@ -3638,8 +3704,8 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
                       connectionId={session.connectionId}
                       dbUser={dbUserRef.current}
                       txOpen={txOpen}
-                      onBeginTx={beginTx}
-                      onEndTx={endTx}
+                      onBeginTx={async () => { await beginTx(); }}
+                      onEndTx={async cmd => { await endTx(cmd); }}
                       showGraphics={tab.browserGraphics}
                       onToggleGraphics={() => patchTab(tab.id, { browserGraphics: !tab.browserGraphics })}
                       onClose={() => setTabs(prev => prev.map(t => {
@@ -3892,7 +3958,7 @@ export function QueryTabs({ session, openSessions, isActive, externalMigrationHa
             const { sql, tabId, from, noResults } = writeAsk;
             setWriteAsk(null);
             // Past the guard: variables still get their prompt.
-            const vars = can(session.engine, 'sqlVariables') ? findVariables(sql) : [];
+            const vars = can(session.engine, 'sqlVariables') ? findVariables(sql, session.engine) : [];
             if (vars.length > 0) setVarPrompt({ vars, sql, tabId, from, noResults });
             else executeSql(sql, tabId, from, noResults);
           }}

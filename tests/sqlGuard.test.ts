@@ -383,3 +383,91 @@ test('EXPLAIN strips ALL option words before re-testing', () => {
   assert.ok(!isWriteStatement('EXPLAIN ANALYZE VERBOSE SELECT * FROM t'));
   assert.ok(!isWriteStatement('EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM t'));
 });
+
+test('H1: PostgreSQL E\'...\' / e\'...\' C-escape string literals are lexed like PG', () => {
+  const bypass = String.raw`SELECT E'\''; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DROP TABLE t; --'`;
+  assert.ok(isWriteStatement(bypass, 'postgres'));
+  assert.ok(isDangerousDdl(bypass, 'postgres'));
+  assert.ok(isWriteStatement(String.raw`SELECT e'\\'; DROP TABLE t; --'`, 'postgres'));
+  assert.ok(isUnfilteredWrite(String.raw`UPDATE t SET note = E'it\'s WHERE id = 1'`, 'postgres'));
+  assert.ok(!isUnfilteredWrite(String.raw`UPDATE t SET note = E'it\'s' WHERE id = 1`, 'postgres'));
+  assert.ok(!isWriteStatement(String.raw`SELECT E'it\'s; DROP TABLE t'`, 'postgres'));
+  // Plain '...' on PG still does NOT backslash-escape.
+  assert.ok(isWriteStatement(String.raw`'x\'; DROP TABLE t; --'`, 'postgres'));
+});
+
+test('H2: CTE SELECT ... INTO is caught across engines', () => {
+  const sql = 'WITH c AS (SELECT 1 AS a) SELECT a INTO rogue_copy FROM c';
+  for (const engine of ['postgres', 'sqlserver', 'duckdb', undefined]) {
+    assert.ok(isWriteStatement(sql, engine), `missed CTE SELECT INTO on ${engine}`);
+  }
+  assert.ok(isWriteStatement('WITH c AS (SELECT 1 AS a) SELECT a INTO #tmp FROM c', 'sqlserver'));
+  assert.ok(!isWriteStatement('WITH c AS (SELECT 1 AS a) SELECT a FROM c', 'postgres'));
+});
+
+test('H2: T-SQL semicolon-less batches and control-flow prefixes are guarded', () => {
+  for (const sql of [
+    'SELECT 1\nDELETE FROM dbo.orders',
+    '(SELECT 1)\nDELETE FROM dbo.orders',
+    'IF 1 = 1 DROP TABLE dbo.orders',
+    "IF OBJECT_ID('dbo.orders', 'U') IS NOT NULL TRUNCATE TABLE dbo.orders",
+    'DECLARE @x INT = 1\nDELETE FROM dbo.orders',
+    'WHILE @i < 10 UPDATE dbo.orders SET a = 1',
+    "BEGIN EXEC sp_executesql N'DELETE FROM dbo.orders' END",
+    'SELECT 1\nDENY SELECT ON dbo.orders TO public',
+    "SELECT 1\nBACKUP DATABASE shop TO DISK = 'x.bak'",
+    "SELECT 1\nRESTORE DATABASE shop FROM DISK = 'x.bak'",
+    'SELECT 1\nRECONFIGURE WITH OVERRIDE',
+    'SELECT 1\nDBCC FREEPROCCACHE',
+    'DECLARE @x INT = 1\nSELECT @x INTO #tmp',
+  ]) {
+    assert.ok(isWriteStatement(sql, 'sqlserver'), `SqlServer write missed: ${sql}`);
+  }
+
+  for (const ddl of [
+    'IF 1 = 1 DROP TABLE dbo.orders',
+    'SELECT 1\nTRUNCATE TABLE dbo.orders',
+    'DECLARE @x INT = 1\nALTER TABLE dbo.orders DROP COLUMN c',
+    'SELECT 1\nDENY SELECT ON dbo.orders TO public',
+    "SELECT 1\nRESTORE DATABASE shop FROM DISK = 'x.bak'",
+    'CREATE OR ALTER PROCEDURE dbo.p AS SELECT 1',
+  ]) {
+    assert.ok(isDangerousDdl(ddl, 'sqlserver'), `SqlServer dangerous DDL missed: ${ddl}`);
+  }
+  assert.ok(!isDangerousDdl('CREATE PROCEDURE dbo.p AS BEGIN DROP TABLE #tmp END', 'sqlserver'));
+
+  for (const unfilt of [
+    'DECLARE @x INT = 1\nDELETE FROM dbo.orders',
+    'IF 1 = 1 UPDATE dbo.orders SET a = 1',
+    'SELECT 1\nDELETE FROM dbo.orders',
+    'DELETE FROM dbo.orders\nSELECT 1 WHERE 1 = 1',
+    'UPDATE dbo.orders SET a = 1\nUPDATE dbo.orders SET b = 2 WHERE id = 1',
+    'UPDATE dbo.orders SET [where] = 1',
+  ]) {
+    assert.ok(isUnfilteredWrite(unfilt, 'sqlserver'), `SqlServer unfiltered missed: ${unfilt}`);
+  }
+  assert.ok(!isUnfilteredWrite('DECLARE @x INT = 1\nDELETE FROM dbo.orders WHERE id = @x', 'sqlserver'));
+  assert.ok(!isUnfilteredWrite(
+    'MERGE INTO dbo.t USING dbo.s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED BY SOURCE THEN DELETE',
+    'sqlserver',
+  ));
+  assert.ok(!isUnfilteredWrite(
+    "IF OBJECT_ID('dbo.c') IS NULL CREATE TABLE dbo.c (pid INT REFERENCES dbo.p(id) ON DELETE CASCADE)",
+    'sqlserver',
+  ));
+
+  // Pure T-SQL read batches, bracketed identifiers, @vars, #temp names,
+  // OFFSET/FETCH pagination and MERGE JOIN hints stay reads.
+  for (const readSql of [
+    'DECLARE @x INT = 1\nSELECT @x',
+    'SET NOCOUNT ON\nSELECT * FROM dbo.orders ORDER BY id OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY',
+    'SELECT * FROM dbo.a INNER MERGE JOIN dbo.b ON a.id = b.id OPTION (MERGE JOIN)',
+    "DBCC SHOW_STATISTICS('dbo.orders', 'PK_orders')",
+    'SELECT [update], [delete], [drop], [into] FROM [create]',
+    'DECLARE @update INT = 1, @drop INT = 2\nSELECT @update + @drop FROM #delete',
+  ]) {
+    assert.ok(!isWriteStatement(readSql, 'sqlserver'), `false positive on T-SQL read: ${readSql}`);
+    assert.ok(!isDangerousDdl(readSql, 'sqlserver'), `false DDL on T-SQL read: ${readSql}`);
+    assert.ok(!isUnfilteredWrite(readSql, 'sqlserver'), `false unfiltered on T-SQL read: ${readSql}`);
+  }
+});

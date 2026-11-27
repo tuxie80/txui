@@ -349,10 +349,13 @@ impl GenValue {
 // same kind alternate within one row). Content-keyed, so pooled generator
 // threads can never serve a stale entry, and no RNG is involved, so seeded
 // output is unchanged.
+type WeightedChoiceList = std::rc::Rc<Vec<(String, f64)>>;
+type ChoiceCacheMap = std::collections::HashMap<String, WeightedChoiceList>;
+
 thread_local! {
     static DATE_RANGE_CACHE: std::cell::RefCell<std::collections::HashMap<(String, String), (i64, i64)>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
-    static CHOICE_CACHE: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<Vec<(String, f64)>>>> =
+    static CHOICE_CACHE: std::cell::RefCell<ChoiceCacheMap> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
@@ -458,7 +461,7 @@ fn unique_int(i: u64, seed: u32, min: f64, max: f64) -> i64 {
     if hi < lo { std::mem::swap(&mut lo, &mut hi); }
     // A range wider than the cap is served by its first M_CAP values: still
     // inside [min, max], still a bijection, still exact in an f64.
-    let m = hi.saturating_sub(lo).saturating_add(1).min(SCRAMBLE_M_CAP).max(1);
+    let m = hi.saturating_sub(lo).saturating_add(1).clamp(1, SCRAMBLE_M_CAP);
     lo + scramble_index(i, m, seed)
 }
 
@@ -593,11 +596,11 @@ pub fn unique_anchor_capacity(spec: &ColumnSpec) -> u64 {
         // Inverted bounds swap, like unique_int (and the TS metric's abs).
         let (mut lo, mut hi) = (spec.params.min.round() as i64, spec.params.max.round() as i64);
         if hi < lo { std::mem::swap(&mut lo, &mut hi); }
-        return hi.saturating_sub(lo).saturating_add(1).max(1).min(SCRAMBLE_M_CAP) as u64;
+        return hi.saturating_sub(lo).saturating_add(1).clamp(1, SCRAMBLE_M_CAP) as u64;
     }
     if FLOAT_UNIQUE_GENS_RS.contains(&g) {
         let span = ((spec.params.max - spec.params.min) * 100.0).round() as i64 + 1;
-        return span.max(1).min(SCRAMBLE_M_CAP) as u64;
+        return span.clamp(1, SCRAMBLE_M_CAP) as u64;
     }
     u64::MAX   // strings (tagged), sequence, uuid — never exhausted
 }
@@ -992,14 +995,17 @@ struct RidePing { car_id: i64, lat: f64, lon: f64, speed_kmh: f64, heading_deg: 
 // Keys carry the parameters they depend on: generator threads may be pooled,
 // so a later run with different params must never see a stale entry. All
 // inputs are deterministic (no RNG draw), so caching cannot change output.
+type RideDistEntry = ((u32, u32, u64, u64), f64);
+type RidePingEntry = ((u64, u64, u64, i64), RidePing);
+
 thread_local! {
     static RIDE_ROUTE: std::cell::RefCell<Option<(u32, RideRoute)>> =
         const { std::cell::RefCell::new(None) };
     /// (ride_idx, k, pings, ping_sec bits) → distance travelled at ping k.
-    static RIDE_D: std::cell::Cell<Option<((u32, u32, u64, u64), f64)>> =
+    static RIDE_D: std::cell::Cell<Option<RideDistEntry>> =
         const { std::cell::Cell::new(None) };
     /// (row_idx, pings, ping_sec bits, base_epoch) → the row's ping.
-    static RIDE_PING_CACHE: std::cell::Cell<Option<((u64, u64, u64, i64), RidePing)>> =
+    static RIDE_PING_CACHE: std::cell::Cell<Option<RidePingEntry>> =
         const { std::cell::Cell::new(None) };
     /// date_from → base epoch (chrono parse memo).
     static RIDE_EPOCH: std::cell::RefCell<Option<(String, i64)>> =
@@ -1414,8 +1420,8 @@ fn gen_value(id: &str, rng: &mut Rng, row_idx: u64, seq_start: i64, p: &GenParam
         "btcAddress" => GenValue::Str(datagen_ident::btc_address(&mut || rng.next())),
         "ethAddress" => GenValue::Str(datagen_ident::eth_address(&mut || rng.next())),
         "cardExpiry" => {
-            let fy: i64 = p.date_from[..4].parse().unwrap_or(2026);
-            let ty: i64 = p.date_to[..4].parse().unwrap_or(2030);
+            let fy: i64 = p.date_from.get(..4).and_then(|s| s.parse().ok()).unwrap_or(2026);
+            let ty: i64 = p.date_to.get(..4).and_then(|s| s.parse().ok()).unwrap_or(2030);
             GenValue::Str(datagen_ident::card_expiry(&mut || rng.next(), fy, ty, fy, 1))
         }
         "cardCvv" => GenValue::Str(datagen_ident::card_cvv(
@@ -1714,10 +1720,96 @@ pub(crate) fn generate_value_at(spec: ColumnSpec, seed: u32, row_index: u64) -> 
     gen_row(&[spec], &mut rng, row_index, 1, "default", &empty, 1, seed, 0)[0].to_json()
 }
 
+#[cfg(test)]
+pub(crate) fn datagen_quote_char(engine: crate::db::types::Engine) -> Option<char> {
+    use crate::db::types::Engine;
+    match engine {
+        Engine::Mysql | Engine::Clickhouse => Some('`'),
+        Engine::Postgres | Engine::Sqlite | Engine::Duckdb => Some('"'),
+        Engine::SqlServer => Some('['),
+        Engine::Redis | Engine::Parquet | Engine::MongoDb => None,
+    }
+}
+
+fn quote_datagen_part(quote: char, part: &str) -> String {
+    match quote {
+        '[' => format!("[{}]", part.replace(']', "]]")),
+        q => format!("{q}{}{q}", part.replace(q, &format!("{q}{q}"))),
+    }
+}
+
+/// Parse a bare (`orders` / `schema.orders`) or strictly pre-quoted
+/// (`` `schema`.`orders` `` / `"schema"."orders"` / `[dbo].[orders]`) table
+/// reference and re-emit every identifier part quoted for `quote`. Rejects
+/// empty names, NUL bytes, or trailing unquoted text after a quoted identifier.
+pub(crate) fn quote_datagen_table(
+    quote: char,
+    raw: &str,
+) -> Result<String, crate::apperror::AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return Err(crate::apperror::AppError::bad_request("invalid datagen table name"));
+    }
+    let parts: Vec<String> = if trimmed.starts_with(quote) {
+        let close = if quote == '[' { ']' } else { quote };
+        let chars: Vec<char> = trimmed.chars().collect();
+        let mut i = 0usize;
+        let mut parsed = Vec::new();
+        loop {
+            if chars.get(i) != Some(&quote) {
+                return Err(crate::apperror::AppError::bad_request("malformed quoted table name"));
+            }
+            i += 1;
+            let mut name = String::new();
+            let mut closed = false;
+            while i < chars.len() {
+                if chars[i] == close {
+                    if chars.get(i + 1) == Some(&close) {
+                        name.push(close);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                name.push(chars[i]);
+                i += 1;
+            }
+            if !closed || name.is_empty() {
+                return Err(crate::apperror::AppError::bad_request("unterminated or empty quoted table name"));
+            }
+            parsed.push(name);
+            if i == chars.len() {
+                break;
+            }
+            if chars[i] == '.' {
+                i += 1;
+                if i == chars.len() {
+                    return Err(crate::apperror::AppError::bad_request("trailing dot in table name"));
+                }
+            } else {
+                return Err(crate::apperror::AppError::bad_request("unexpected text after quoted table name"));
+            }
+        }
+        parsed
+    } else {
+        let split: Vec<&str> = trimmed.split('.').collect();
+        if split.iter().any(|p| p.is_empty()) {
+            return Err(crate::apperror::AppError::bad_request("empty identifier part in table name"));
+        }
+        split.into_iter().map(str::to_string).collect()
+    };
+    if parts.is_empty() || parts.len() > 3 {
+        return Err(crate::apperror::AppError::bad_request("table name must have at most 3 identifier parts"));
+    }
+    Ok(parts.iter().map(|p| quote_datagen_part(quote, p)).collect::<Vec<_>>().join("."))
+}
+
 /// `SELECT COUNT(*)` — the cross-run continuation base for unique columns on a
 /// fill-existing run: the scramble/tag start at row index `i + count`, past
 /// the permutation slots the previous same-seed runs occupied (see the
-/// uniqueness header above). `table` arrives pre-quoted.
+/// uniqueness header above).
 #[tauri::command]
 pub async fn resolve_unique_offset(
     session_id: Uuid,
@@ -1725,12 +1817,19 @@ pub async fn resolve_unique_offset(
     state: State<'_, AppState>,
 ) -> Result<u64, crate::apperror::AppError> {
     let session = get_session_pub(session_id, &state.sessions).await?;
-    let query = format!("SELECT COUNT(*) FROM {table}");
+    let quote = match session.as_ref() {
+        LiveSession::Mysql(_) => '`',
+        LiveSession::Postgres(_) => '"',
+        LiveSession::SqlServer(_) => '[',
+        _ => return Err("not supported for this engine".into()),
+    };
+    let quoted_table = quote_datagen_table(quote, &table)?;
+    let query = format!("SELECT COUNT(*) FROM {quoted_table}");
     let r = match session.as_ref() {
         LiveSession::Mysql(pool) => crate::db::mysql::execute(pool, &query).await,
         LiveSession::Postgres(pool) => crate::db::postgres::execute(pool, &query).await,
         LiveSession::SqlServer(s) => crate::db::sqlserver::execute(s, &query).await,
-        _ => return Err("not supported for this engine".into()),
+        _ => unreachable!(),
     }?;
     let v = r.rows.first().and_then(|row| row.first()).cloned().unwrap_or(serde_json::json!(0));
     Ok(v.as_u64()
@@ -1740,7 +1839,7 @@ pub async fn resolve_unique_offset(
 }
 
 /// `COALESCE(MAX(col), 0) + 1` — fill-existing runs start sequences after the
-/// data already there instead of colliding at 1. `table` arrives pre-quoted.
+/// data already there instead of colliding at 1.
 #[tauri::command]
 pub async fn resolve_sequence_start(
     session_id: Uuid,
@@ -1749,20 +1848,18 @@ pub async fn resolve_sequence_start(
     state: State<'_, AppState>,
 ) -> Result<i64, crate::apperror::AppError> {
     let session = get_session_pub(session_id, &state.sessions).await?;
-    let (quote, sql) = match session.as_ref() {
-        LiveSession::Mysql(_) => ('`', "`"),
-        LiveSession::Postgres(_) => ('"', "\""),
-        // Brackets are not a symmetric pair, so the shared formatting below
-        // cannot express them; SQL Server takes its own line.
-        LiveSession::SqlServer(_) => (']', "]"),
+    let quote = match session.as_ref() {
+        LiveSession::Mysql(_) => '`',
+        LiveSession::Postgres(_) => '"',
+        LiveSession::SqlServer(_) => '[',
         _ => return Err("not supported for this engine".into()),
     };
-    let col = if matches!(session.as_ref(), LiveSession::SqlServer(_)) {
-        ms_ident(&column)
-    } else {
-        format!("{q}{}{q}", column.replace(quote, &format!("{q}{q}", q = sql)), q = sql)
-    };
-    let query = format!("SELECT COALESCE(MAX({col}), 0) + 1 FROM {table}");
+    if column.trim().is_empty() || column.contains('\0') {
+        return Err(crate::apperror::AppError::bad_request("invalid datagen column name"));
+    }
+    let quoted_table = quote_datagen_table(quote, &table)?;
+    let col = quote_datagen_part(quote, &column);
+    let query = format!("SELECT COALESCE(MAX({col}), 0) + 1 FROM {quoted_table}");
     let r = match session.as_ref() {
         LiveSession::Mysql(pool) => crate::db::mysql::execute(pool, &query).await,
         LiveSession::Postgres(pool) => crate::db::postgres::execute(pool, &query).await,
@@ -2375,6 +2472,7 @@ async fn load_fk_pools_ms(
 }
 
 /// One chunk, in its own transaction.
+#[allow(clippy::too_many_arguments)]
 async fn write_chunk_ms<F: Fn(u64) + Send + Sync>(
     session: &crate::db::sqlserver::SqlServerSession,
     table: &str,
@@ -4851,5 +4949,54 @@ mod persona_formula_phase4_tests {
         let mut rng = Rng(1);
         let row = gen_row(&specs, &mut rng, 0, 1, "default", &fk, 1, 1, 0);
         assert_eq!(row[1].sql_literal(true), "NULL");
+    }
+
+    #[test]
+    fn quote_datagen_table_handles_bare_qualified_prequoted_and_rejects_injection() {
+        use crate::db::types::Engine;
+
+        assert_eq!(datagen_quote_char(Engine::Mysql), Some('`'));
+        assert_eq!(datagen_quote_char(Engine::Clickhouse), Some('`'));
+        assert_eq!(datagen_quote_char(Engine::Postgres), Some('"'));
+        assert_eq!(datagen_quote_char(Engine::Sqlite), Some('"'));
+        assert_eq!(datagen_quote_char(Engine::Duckdb), Some('"'));
+        assert_eq!(datagen_quote_char(Engine::SqlServer), Some('['));
+
+        // Bare and schema-qualified names are quoted per engine.
+        assert_eq!(quote_datagen_table('`', "orders").unwrap(), "`orders`");
+        assert_eq!(quote_datagen_table('`', "shop.or`ders").unwrap(), "`shop`.`or``ders`");
+        assert_eq!(quote_datagen_table('"', "public.ord\"ers").unwrap(), "\"public\".\"ord\"\"ers\"");
+        assert_eq!(quote_datagen_table('[', "dbo.ord]ers").unwrap(), "[dbo].[ord]]ers]");
+
+        // Pre-quoted identifiers from DataGenPanel remain intact (no double-quoting).
+        assert_eq!(quote_datagen_table('`', "`shop`.`orders`").unwrap(), "`shop`.`orders`");
+        assert_eq!(quote_datagen_table('"', "\"public\".\"orders\"").unwrap(), "\"public\".\"orders\"");
+        assert_eq!(quote_datagen_table('[', "[dbo].[orders]").unwrap(), "[dbo].[orders]");
+
+        // Unquoted injection payloads become safely quoted single identifiers;
+        // pre-quoted breakout payloads with trailing SQL are rejected outright.
+        assert_eq!(
+            quote_datagen_table('`', "orders; DROP TABLE users").unwrap(),
+            "`orders; DROP TABLE users`"
+        );
+        assert!(quote_datagen_table('`', "`orders` WHERE 1=1; DROP TABLE users").is_err());
+        assert!(quote_datagen_table('[', "[dbo].[orders]; DROP TABLE users").is_err());
+        assert!(quote_datagen_table('"', "").is_err());
+        assert!(quote_datagen_table('"', "public.").is_err());
+    }
+
+    #[test]
+    fn card_expiry_tolerates_short_empty_and_multibyte_date_bounds() {
+        let mut p = geo_params();
+        p.date_from = String::new();
+        p.date_to = "20".into();
+        let mut rng = Rng(42);
+        let v = gen_value("cardExpiry", &mut rng, 0, 1, &p, "default");
+        assert!(matches!(v, GenValue::Str(ref s) if s.len() == 5 && s.as_bytes()[2] == b'/'), "{v:?}");
+
+        p.date_from = "ééé".into(); // 6 bytes, multi-byte boundary at byte 4? (2 bytes each -> boundary at 4, try 3-byte char!)
+        p.date_to = "€€".into();    // 3 bytes per '€' -> byte 4 is mid-character!
+        let v2 = gen_value("cardExpiry", &mut rng, 1, 1, &p, "default");
+        assert!(matches!(v2, GenValue::Str(ref s) if s.len() == 5), "{v2:?}");
     }
 }

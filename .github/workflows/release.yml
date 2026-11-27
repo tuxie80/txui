@@ -91,7 +91,7 @@ jobs:
           cache: npm
 
       # ── Rust ────────────────────────────────────────────────────────
-      # rust-toolchain.toml in the repo pins the actual compiler (1.97.1);
+      # rust-toolchain.toml in the repo pins the actual compiler (1.100.0);
       # rustup auto-installs it on first use. The `stable` here is only a
       # bootstrap so rustup exists.
       - uses: dtolnay/rust-toolchain@stable
@@ -100,7 +100,7 @@ jobs:
 
       # The `targets` above land on the bootstrap `stable` toolchain, but
       # rust-toolchain.toml overrides the actual build to the pinned compiler
-      # (1.97.1) — so the extra targets must be installed there too. Only the
+      # (1.100.0) — so the extra targets must be installed there too. Only the
       # macOS universal build needs a second architecture.
       - name: Install pinned-toolchain targets (macOS universal)
         if: matrix.platform == 'macos-latest'

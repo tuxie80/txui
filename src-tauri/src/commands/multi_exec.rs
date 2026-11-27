@@ -25,6 +25,7 @@ const MAX_ROWS_PER_SERVER: usize = 10_000;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum MultiExecEvent {
     Started {
         connection_id: Uuid,
@@ -291,7 +292,7 @@ pub async fn list_multi_runs(
          FROM multi_runs ORDER BY id DESC LIMIT ?"
     )
     .bind(limit.unwrap_or(100))
-    .fetch_all(&*pool).await
+    .fetch_all(pool).await
     ?;
 
     Ok(rows.iter().map(|r| MultiRunSummary {
@@ -316,7 +317,7 @@ pub async fn get_multi_run(
          FROM multi_run_results WHERE run_id = ? ORDER BY connection_name"
     )
     .bind(run_id)
-    .fetch_all(&*pool).await
+    .fetch_all(pool).await
     ?;
 
     Ok(rows.iter().map(|r| MultiRunDetail {

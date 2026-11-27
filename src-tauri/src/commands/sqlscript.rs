@@ -124,6 +124,7 @@ impl RunStats {
 /// Validate and execute a local plain/gzipped MySQL script on an OPEN session.
 /// No external client, shell, temporary SQL file or second SSH tunnel is used.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sql_script(
     session_id: Uuid,
     path: String,
@@ -306,7 +307,7 @@ async fn execute_pass(
 
     if let Some(db) = database.filter(|db| !db.is_empty()) {
         let use_sql = format!("USE `{}`", db.replace('`', "``"));
-        if let Err(e) = drain_statement(&mut **conn, &use_sql).await {
+        if let Err(e) = drain_statement(conn, &use_sql).await {
             return Err(fail(on_event, started, stats, e.into(), false, false));
         }
     }
@@ -337,7 +338,7 @@ async fn execute_pass(
                             fingerprint: connection::statement_fingerprint(&stmt.sql),
                         });
                         let result = tokio::select! {
-                            result = drain_statement(&mut **conn, &stmt.sql) => result,
+                            result = drain_statement(conn, &stmt.sql) => result,
                             _ = &mut *cancel_rx => {
                                 crate::commands::query::stop_in_flight(
                                     session_id, cancel_key, &state.sessions, &state.kills, &state.ch_kills,

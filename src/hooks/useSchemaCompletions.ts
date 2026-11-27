@@ -281,21 +281,30 @@ export function useSchemaCompletions(
   const fkCache = useRef<Map<string, FkEdge[]>>(new Map());
   /** Lazily-fetched tables of schemas outside the object sweep (mysql, pg_catalog, …). */
   const schemaTablesCache = useRef<Map<string, SchemaCompletion[]>>(new Map());
+  const varsCache = useRef<Promise<{ name: string; value: string }[]> | null>(null);
+  const indexCache = useRef<Map<string, Promise<Set<string>>>>(new Map());
+  const routineCache = useRef<Map<string, Promise<string | null>>>(new Map());
+  const refreshGenRef = useRef(0);
   const objectsRef = useRef<ObjectMeta[]>([]);
   useEffect(() => { objectsRef.current = objects; }, [objects]);
   const dbRef = useRef(currentDb ?? '');
   useEffect(() => { dbRef.current = currentDb ?? ''; }, [currentDb]);
 
   const refresh = useCallback(async () => {
+    const gen = ++refreshGenRef.current;
     try {
       columnCache.current.clear();
       fkCache.current.clear();
       schemaTablesCache.current.clear();
+      indexCache.current.clear();
+      routineCache.current.clear();
+      varsCache.current = null;
       const [objs, schemas, path] = await Promise.all([
         sweep(session.sessionId, session.engine),
         sweepSchemas(session.sessionId, session.engine),
         fetchSearchPath(session.sessionId, session.engine, dbRef.current),
       ]);
+      if (gen !== refreshGenRef.current) return;
       setObjects(objs);
       setAllSchemas(schemas);
       setSearchPath(path);
@@ -420,7 +429,6 @@ export function useSchemaCompletions(
   }, []);
 
   // ── extra lazy providers, each cached for the session ─────────────────────
-  const varsCache = useRef<Promise<{ name: string; value: string }[]> | null>(null);
   const getServerVariables = useCallback(() => {
     if (!varsCache.current) {
       // SQLite has no server variables and no `@@name` syntax at all.
@@ -434,20 +442,24 @@ export function useSchemaCompletions(
             : engine === 'sqlserver'
               ? "SELECT name, CAST(value_in_use AS nvarchar(256)) FROM sys.configurations ORDER BY name"
               : "SELECT name, setting FROM pg_settings ORDER BY name";
-      varsCache.current = invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql })
+      const p = invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql })
         .then(r => r.rows.map(row => ({ name: String(row[0] ?? ''), value: String(row[1] ?? '') })))
-        .catch(() => []);
+        .catch(() => {
+          if (varsCache.current === p) varsCache.current = null;
+          return [];
+        });
+      varsCache.current = p;
     }
     return varsCache.current;
   }, [session.sessionId, engine]);
 
-  const indexCache = useRef<Map<string, Promise<Set<string>>>>(new Map());
   const getIndexedColumns = useCallback((table: string) => {
     const q = qualify(table);
     const parent = q ? `${q.schema}.${q.name}` : table;
     const key = parent.toLowerCase();
     const hit = indexCache.current.get(key);
     if (hit) return hit;
+    const swept = objectsRef.current.length > 0;
     const [schema, name] = [q?.schema ?? '', q?.name ?? table];
     // Only the FIRST column of each index (plus every PK column): a predicate on
     // a later column of a composite index cannot drive a lookup.
@@ -504,16 +516,24 @@ export function useSchemaCompletions(
          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
          WHERE n.nspname = ${sqlLiteral(schema, 'postgres')} AND c.relname = ${sqlLiteral(name, 'postgres')}`;
     const p = invoke<QueryResult>('monitor_query', { sessionId: session.sessionId, sql })
-      .then(r => new Set(r.rows.map(row => String(row[0] ?? '').toLowerCase())))
-      .catch(() => new Set<string>());
+      .then(r => {
+        const cols = new Set(r.rows.map(row => String(row[0] ?? '').toLowerCase()));
+        if (cols.size === 0 && (!swept || objectsRef.current.length === 0)) {
+          if (indexCache.current.get(key) === p) indexCache.current.delete(key);
+        }
+        return cols;
+      })
+      .catch(() => {
+        if (indexCache.current.get(key) === p) indexCache.current.delete(key);
+        return new Set<string>();
+      });
     indexCache.current.set(key, p);
     return p;
   }, [session.sessionId, engine, qualify]);
 
-  const routineCache = useRef<Map<string, Promise<string | null>>>(new Map());
   const getRoutineSignature = useCallback((name: string) => {
     const bare = name.split('.').pop() ?? name;
-    const key = bare.toLowerCase();
+    const key = `${(dbRef.current || '').toLowerCase()}:${bare.toLowerCase()}`;
     const hit = routineCache.current.get(key);
     if (hit) return hit;
     const esc = escapeLiteral(bare, engine);
@@ -559,7 +579,10 @@ export function useSchemaCompletions(
         if (engine === 'clickhouse') return args || `${row[0]}()`;
         return `${row[0]}(${args})`;
       })
-      .catch(() => null);
+      .catch(() => {
+        if (routineCache.current.get(key) === promise) routineCache.current.delete(key);
+        return null;
+      });
     routineCache.current.set(key, promise);
     return promise;
   }, [session.sessionId, engine]);
@@ -569,6 +592,8 @@ export function useSchemaCompletions(
   useEffect(() => {
     columnCache.current.clear();
     fkCache.current.clear();
+    indexCache.current.clear();
+    routineCache.current.clear();
   }, [currentDb]);
 
   /** Lazy, cached column lookup for alias-aware completion (`alias.` → columns). */

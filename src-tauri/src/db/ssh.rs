@@ -388,10 +388,12 @@ impl SshTunnel {
         let ssh_target   = format!("{}@{}", ssh_user, ssh_host);
 
         // Password auth: askpass script + env, spawn through setsid when available.
-        let askpass = match ssh_password {
+        // Wrapped in an RAII guard so dropping/cancelling this future at any `.await`
+        // still removes the 0700 temp helper script from disk.
+        let askpass = AskpassGuard(match ssh_password {
             Some(_) => Some(write_askpass_script()?),
             None => None,
-        };
+        });
 
         let use_setsid = ssh_password.is_some() && setsid_available();
         let mut cmd = if use_setsid {
@@ -415,7 +417,7 @@ impl SshTunnel {
 
         if let Some(password) = ssh_password {
             // BatchMode intentionally omitted: it disables password prompts.
-            let script = askpass.as_ref().ok_or_else(|| anyhow::anyhow!(
+            let script = askpass.path().ok_or_else(|| anyhow::anyhow!(
                 "internal error: SSH password given but no askpass script was written"))?;
             cmd.env("SSH_ASKPASS", script)
                .env("SSH_ASKPASS_REQUIRE", "force")
@@ -439,17 +441,14 @@ impl SshTunnel {
            // Captured, not nulled: when the tunnel dies at birth, ssh's own
            // words ("Permission denied", "Connection refused", a host-key
            // complaint) are the diagnosis — "exit code Some(255)" was not.
-           .stderr(std::process::Stdio::piped());
+           .stderr(std::process::Stdio::piped())
+           .kill_on_drop(true);
 
         suppress_console_window(&mut cmd);
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                cleanup_askpass(&askpass);
-                return Err(anyhow::anyhow!("Failed to spawn ssh: {}. {}", e, install_hint()));
-            }
-        };
+        let mut child = cmd.spawn().map_err(|e| {
+            anyhow::anyhow!("Failed to spawn ssh: {}. {}", e, install_hint())
+        })?;
 
         // stderr is drained from the start (host-key TOFU note + quick-exit
         // tail), not read once on failure — see spawn_stderr_scan.
@@ -488,6 +487,8 @@ impl SshTunnel {
                 }
                 Ok(None) => {}
                 Err(e) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
                     result = Err(anyhow::anyhow!("SSH process error: {}", e));
                     break;
                 }
@@ -496,6 +497,11 @@ impl SshTunnel {
                 break;
             }
             if wait_start.elapsed() >= ready_timeout {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                if let Some(t) = scan_task {
+                    let _ = tokio::time::timeout(Duration::from_millis(100), t).await;
+                }
                 result = Err(anyhow::anyhow!(
                     "SSH tunnel did not accept connections on 127.0.0.1:{local_port} \
                      within {}s — the ssh handshake (auth, host key, jump host) is \
@@ -507,7 +513,7 @@ impl SshTunnel {
         }
 
         // ssh has settled (or failed) — the askpass helper is no longer needed.
-        cleanup_askpass(&askpass);
+        drop(askpass);
         host_key_result(result, ssh_accept_new_host)?;
 
         log::info!(
@@ -576,6 +582,20 @@ fn install_hint() -> &'static str {
     }
 }
 
+struct AskpassGuard(Option<std::path::PathBuf>);
+
+impl AskpassGuard {
+    fn path(&self) -> Option<&std::path::Path> {
+        self.0.as_deref()
+    }
+}
+
+impl Drop for AskpassGuard {
+    fn drop(&mut self) {
+        cleanup_askpass(&self.0);
+    }
+}
+
 fn cleanup_askpass(askpass: &Option<std::path::PathBuf>) {
     if let Some(p) = askpass {
         let _ = std::fs::remove_file(p);
@@ -641,10 +661,10 @@ pub async fn spawn_ssh_exec(
         validate_jump(jump)?;
     }
 
-    let askpass = match ssh_password {
+    let askpass = AskpassGuard(match ssh_password {
         Some(_) => Some(write_askpass_script()?),
         None => None,
-    };
+    });
     let use_setsid = ssh_password.is_some() && setsid_available();
     let mut cmd = if use_setsid {
         let mut c = tokio::process::Command::new("setsid");
@@ -666,7 +686,7 @@ pub async fn spawn_ssh_exec(
 
     if let Some(password) = ssh_password {
         // BatchMode intentionally omitted: it disables password prompts.
-        let script = askpass.as_ref().ok_or_else(|| anyhow::anyhow!(
+        let script = askpass.path().ok_or_else(|| anyhow::anyhow!(
             "internal error: SSH password given but no askpass script was written"))?;
         cmd.env("SSH_ASKPASS", script)
            .env("SSH_ASKPASS_REQUIRE", "force")
@@ -691,17 +711,14 @@ pub async fn spawn_ssh_exec(
        // which is also where a first-contact host-key warning (accept-new
        // TOFU) surfaces on this path — the tunnel path scans it in-band
        // instead (spawn_stderr_scan).
-       .stderr(std::process::Stdio::piped());
+       .stderr(std::process::Stdio::piped())
+       .kill_on_drop(true);
 
     suppress_console_window(&mut cmd);
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            cleanup_askpass(&askpass);
-            return Err(anyhow::anyhow!("Failed to spawn ssh: {}. {}", e, install_hint()));
-        }
-    };
+    let mut child = cmd.spawn().map_err(|e| {
+        anyhow::anyhow!("Failed to spawn ssh: {}. {}", e, install_hint())
+    })?;
 
     // Quick-exit = failure; read ssh's own words from stderr for the message.
     let mut result = Ok(());
@@ -730,6 +747,8 @@ pub async fn spawn_ssh_exec(
             Ok(None) if attempt >= 4 => break,
             Ok(None) => continue,
             Err(e) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
                 result = Err(anyhow::anyhow!("SSH process error: {}", e));
                 break;
             }
@@ -737,7 +756,7 @@ pub async fn spawn_ssh_exec(
     }
 
     // ssh has settled (or failed) — the askpass helper is no longer needed.
-    cleanup_askpass(&askpass);
+    drop(askpass);
     host_key_result(result, ssh_accept_new_host)?;
     Ok(child)
 }
@@ -947,5 +966,16 @@ mod tests {
         // watcher must return quiet either way.
         let code = watch_child_exit(child, disarmed, Duration::from_millis(20)).await;
         assert_eq!(code, None);
+    }
+
+    #[test]
+    fn askpass_guard_deletes_temp_script_when_dropped() {
+        let path = write_askpass_script().expect("write askpass script");
+        assert!(path.exists(), "script should exist before guard drop");
+        {
+            let guard = AskpassGuard(Some(path.clone()));
+            assert_eq!(guard.path(), Some(path.as_path()));
+        }
+        assert!(!path.exists(), "AskpassGuard Drop must delete the temp script");
     }
 }

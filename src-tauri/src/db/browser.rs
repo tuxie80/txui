@@ -313,16 +313,19 @@ pub fn get_table_meta_parquet_dataset(d: &crate::db::parquet::ParquetDataset) ->
     TableMeta { columns, pk_columns: vec![], total_rows: Some(d.num_rows()) }
 }
 
+fn ch_escape_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 pub async fn get_table_meta_clickhouse(
     session: &crate::db::clickhouse::ChSession,
     database: &str,
     table: &str,
 ) -> Result<TableMeta> {
-    let esc = |s: &str| s.replace('\'', "\\'");
     let rows = crate::db::clickhouse::execute(session, &format!(
         "SELECT name, type, is_in_primary_key FROM system.columns \
          WHERE database = '{}' AND table = '{}' ORDER BY position",
-        esc(database), esc(table)
+        ch_escape_literal(database), ch_escape_literal(table)
     )).await?;
 
     let mut pk_columns = Vec::new();
@@ -348,7 +351,7 @@ pub async fn get_table_meta_clickhouse(
     let total = crate::db::clickhouse::execute(session, &format!(
         "SELECT sum(rows) FROM system.parts \
          WHERE database = '{}' AND table = '{}' AND active",
-        esc(database), esc(table)
+        ch_escape_literal(database), ch_escape_literal(table)
     )).await.ok()
         .and_then(|r| r.rows.first().and_then(|row| row.first()).cloned())
         .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
@@ -397,6 +400,33 @@ fn ch_param_type(col_type: &str) -> String {
     }
 }
 
+/// Build the parameterised WHERE clause (`" WHERE ..."` or `""`) and bound
+/// ClickHouse parameters for `filters`.
+pub fn build_where_clickhouse(
+    filters: &[FilterClause],
+    col_types: &ColTypes,
+) -> (String, Vec<(String, String, String)>) {
+    if filters.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let mut params: Vec<(String, String, String)> = Vec::new();
+    let parts: Vec<String> = filters.iter().enumerate().map(|(i, f)| {
+        let col = ch_ident(&f.column);
+        if !f.op.has_value() {
+            // ClickHouse has no NULL for a non-Nullable column, but the
+            // operators still parse and are correct for Nullable ones.
+            return format!("{} {}", col, f.op.to_sql());
+        }
+        let name = format!("p{i}");
+        let ty = col_types.get(&f.column.to_ascii_lowercase())
+            .map(|t| ch_param_type(t))
+            .unwrap_or_else(|| "String".to_string());
+        params.push((name.clone(), ty.clone(), f.value.clone().unwrap_or_default()));
+        format!("{} {} {{{}:{}}}", col, f.op.to_sql(), name, ty)
+    }).collect();
+    (format!(" WHERE {}", parts.join(" AND ")), params)
+}
+
 /// Build a parameterised SELECT for the ClickHouse data browser.
 pub fn build_select_clickhouse(
     table: &str,
@@ -406,27 +436,7 @@ pub fn build_select_clickhouse(
     offset: i64,
     col_types: &ColTypes,
 ) -> ChBrowseQuery {
-    let mut params: Vec<(String, String, String)> = Vec::new();
-
-    let where_clause = if filters.is_empty() {
-        String::new()
-    } else {
-        let parts: Vec<String> = filters.iter().enumerate().map(|(i, f)| {
-            let col = ch_ident(&f.column);
-            if !f.op.has_value() {
-                // ClickHouse has no NULL for a non-Nullable column, but the
-                // operators still parse and are correct for Nullable ones.
-                return format!("{} {}", col, f.op.to_sql());
-            }
-            let name = format!("p{i}");
-            let ty = col_types.get(&f.column.to_ascii_lowercase())
-                .map(|t| ch_param_type(t))
-                .unwrap_or_else(|| "String".to_string());
-            params.push((name.clone(), ty.clone(), f.value.clone().unwrap_or_default()));
-            format!("{} {} {{{}:{}}}", col, f.op.to_sql(), name, ty)
-        }).collect();
-        format!(" WHERE {}", parts.join(" AND "))
-    };
+    let (where_clause, params) = build_where_clickhouse(filters, col_types);
 
     let order_clause = if sort.is_empty() {
         String::new()
@@ -447,6 +457,28 @@ pub fn build_select_clickhouse(
     }
 }
 
+/// Build a parameterised top-N value-count query for ClickHouse without string
+/// splitting `SELECT *` SQL.
+pub fn build_value_counts_clickhouse(
+    table: &str,
+    column: &str,
+    filters: &[FilterClause],
+    limit: i64,
+    col_types: &ColTypes,
+) -> ChBrowseQuery {
+    let (where_clause, params) = build_where_clickhouse(filters, col_types);
+    let col = ch_ident(column);
+    let tbl = ch_table(table);
+    ChBrowseQuery {
+        sql: format!(
+            "SELECT {col} AS value, count() AS cnt FROM {tbl}{where_clause} \
+             GROUP BY {col} ORDER BY cnt DESC LIMIT {}",
+            limit.max(0)
+        ),
+        params,
+    }
+}
+
 /// Column name (lowercased) → declared ClickHouse type, for typing the bound
 /// parameters above.
 pub async fn ch_column_types(
@@ -457,10 +489,9 @@ pub async fn ch_column_types(
         Some((d, t)) => (d, t),
         None => ("default", table),
     };
-    let esc = |s: &str| s.replace('\'', "\\'");
     let Ok(r) = crate::db::clickhouse::execute(session, &format!(
         "SELECT lower(name), type FROM system.columns WHERE database = '{}' AND table = '{}'",
-        esc(db), esc(tbl)
+        ch_escape_literal(db), ch_escape_literal(tbl)
     )).await else { return ColTypes::new() };
 
     r.rows.iter().filter_map(|row| {
@@ -798,5 +829,30 @@ mod tests {
         ];
         let q = build_select("t", &filters, &[], 10, 0, true, &types(&[("userid", "integer")]));
         assert_eq!(q.sql, "SELECT * FROM \"t\" WHERE \"UserId\" = $1::integer LIMIT 10 OFFSET 0");
+    }
+
+    #[test]
+    fn clickhouse_literal_escaping_and_value_counts_builder_are_injection_safe() {
+        // Escaping backslashes BEFORE single quotes prevents `\'` -> `\\'` breakout.
+        assert_eq!(ch_escape_literal(r"x\' OR 1=1 --"), r"x\\\' OR 1=1 --");
+        assert_eq!(ch_escape_literal(r"trailing\"), r"trailing\\");
+
+        // Table/column names containing " FROM ", " LIMIT ", or backticks stay quoted.
+        let filters = vec![
+            FilterClause { column: "col FROM evil".into(), op: FilterOp::Eq, value: Some("v".into()) },
+        ];
+        let q = build_value_counts_clickhouse(
+            "db`1.tbl LIMIT 1; --",
+            "st`atus",
+            &filters,
+            25,
+            &types(&[("col from evil", "UInt64")]),
+        );
+        assert_eq!(
+            q.sql,
+            "SELECT `st``atus` AS value, count() AS cnt FROM `db``1`.`tbl LIMIT 1; --` \
+             WHERE `col FROM evil` = {p0:UInt64} GROUP BY `st``atus` ORDER BY cnt DESC LIMIT 25"
+        );
+        assert_eq!(q.params, vec![("p0".into(), "UInt64".into(), "v".into())]);
     }
 }

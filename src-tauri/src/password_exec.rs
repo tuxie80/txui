@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use zeroize::Zeroize;
 
 use crate::db::types::ConnectionConfig;
 
@@ -112,6 +113,12 @@ struct Cached {
     minted: Instant,
 }
 
+impl Drop for Cached {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
 /// One entry per substituted command. The cache is deliberately NOT persisted
 /// and NOT shared with the secret store: a password-exec password is minted,
 /// held, and dies with the process.
@@ -149,12 +156,27 @@ impl Cache {
             map.insert(key, Cached { password, minted: now });
         }
     }
+
+    fn clear(&self) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for cached in map.values_mut() {
+            cached.password.zeroize();
+        }
+        map.clear();
+    }
 }
 
 static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
 
 fn cache() -> &'static Cache {
     CACHE.get_or_init(Cache::new)
+}
+
+/// Zeroize and drop every cached password-exec credential (called on vault lock).
+pub fn clear_all() {
+    if let Some(c) = CACHE.get() {
+        c.clear();
+    }
 }
 
 /// The password from the connection's `password_exec` command, or `Ok(None)`
@@ -398,5 +420,20 @@ mod tests {
         let mut c = cfg();
         c.password_exec = Some("   ".into());
         assert_eq!(resolve(&c).await.unwrap(), None);
+    }
+
+    #[test]
+    fn clear_all_zeroizes_and_evicts_cached_passwords() {
+        let local = Cache::new();
+        let now = Instant::now();
+        local.put("k".into(), "super-secret-token".into(), now);
+        assert_eq!(local.get("k", None, now).as_deref(), Some("super-secret-token"));
+        local.clear();
+        assert_eq!(local.get("k", None, now), None);
+
+        let key = format!("clear-test-{}", uuid::Uuid::new_v4());
+        cache().put(key.clone(), "ephemeral".into(), now);
+        clear_all();
+        assert_eq!(cache().get(&key, None, now), None);
     }
 }

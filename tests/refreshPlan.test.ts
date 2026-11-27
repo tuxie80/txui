@@ -30,8 +30,8 @@ test('independent policies compile into deterministic read, generate and exclude
   assert.deepEqual(plan.blockers, []);
   assert.deepEqual(plan.tables.map(table => table.action), ['read', 'read', 'read', 'read', 'read', 'read', 'generate', 'exclude']);
   assert.equal(plan.tables[0].sourceSql, 'SELECT * FROM `shop`.`countries`');
-  assert.equal(plan.tables[1].sourceSql, "SELECT * FROM `shop`.`orders` WHERE `created_at` BETWEEN CONVERT_TZ('2026-10-30T12:00:00.000Z', '+00:00', '+00:00') AND CONVERT_TZ('2026-11-06T12:00:00.000Z', '+00:00', '+00:00') AND `created_at` IS NOT NULL");
-  assert.equal(plan.tables[2].sourceSql, "SELECT * FROM `shop`.`events` WHERE `created_at` BETWEEN CONVERT_TZ('2026-11-05T12:00:00.000Z', '+00:00', '+00:00') AND CONVERT_TZ('2026-11-06T12:00:00.000Z', '+00:00', '+00:00') AND `created_at` IS NOT NULL");
+  assert.equal(plan.tables[1].sourceSql, "SELECT * FROM `shop`.`orders` WHERE `created_at` BETWEEN CONVERT_TZ('2026-10-30 12:00:00.000', '+00:00', '+00:00') AND CONVERT_TZ('2026-11-06 12:00:00.000', '+00:00', '+00:00') AND `created_at` IS NOT NULL");
+  assert.equal(plan.tables[2].sourceSql, "SELECT * FROM `shop`.`events` WHERE `created_at` BETWEEN CONVERT_TZ('2026-11-05 12:00:00.000', '+00:00', '+00:00') AND CONVERT_TZ('2026-11-06 12:00:00.000', '+00:00', '+00:00') AND `created_at` IS NOT NULL");
   assert.equal(plan.tables[3].sourceSql, 'SELECT * FROM `shop`.`recent` ORDER BY `created_at` DESC, `id` DESC LIMIT 20');
   assert.equal(plan.tables[4].sourceSql, "SELECT * FROM `shop`.`sample_items` ORDER BY MD5(CONCAT('refresh-v1', ':', '42', ':', `id`)), `id` LIMIT 10");
   assert.equal(plan.tables[5].sourceSql, 'SELECT * FROM `shop`.`tenant_items` WHERE tenant_id = 7');
@@ -92,8 +92,10 @@ test('DATETIME predicates freeze independent offsets on each side of a DST trans
     amount: 72, unit: 'hours', timeZone: 'America/New_York', nullPolicy: 'exclude', cutoffUtc: '2026-03-10T12:00:00.123Z',
   });
   assert.equal(predicate.startUtc, '2026-03-07T12:00:00.123Z');
-  assert.ok(predicate.sql.includes("'2026-03-07T12:00:00.123Z', '+00:00', '-05:00'"));
-  assert.ok(predicate.sql.includes("'2026-03-10T12:00:00.123Z', '+00:00', '-04:00'"));
+  assert.ok(predicate.sql.includes("'2026-03-07 12:00:00.123', '+00:00', '-05:00'"));
+  assert.ok(predicate.sql.includes("'2026-03-10 12:00:00.123', '+00:00', '-04:00'"));
+  assert.ok(!predicate.sql.includes('T12:00:00'));
+  assert.ok(!predicate.sql.includes('Z\''));
   assert.ok(predicate.note.includes('-05:00/-04:00'));
 });
 
@@ -132,12 +134,13 @@ test('session and server timezone changes cannot alter the compiled plan', () =>
   }
 });
 
-test('fractional milliseconds are preserved and unsupported excess precision is rejected', () => {
+test('fractional milliseconds are preserved in MariaDB-compatible CONVERT_TZ literals and excess precision is rejected', () => {
   const predicate = refreshTimePredicate({
     table: 'events', policy: 'time_window', column: 'created_at', mode: 'rolling',
     amount: 1, unit: 'hours', timeZone: 'UTC', nullPolicy: 'exclude', cutoffUtc: '2026-11-06T12:00:00.123Z',
   });
   assert.equal(predicate.cutoffUtc, '2026-11-06T12:00:00.123Z');
+  assert.equal(predicate.sql, "BETWEEN CONVERT_TZ('2026-11-06 11:00:00.123', '+00:00', '+00:00') AND CONVERT_TZ('2026-11-06 12:00:00.123', '+00:00', '+00:00')");
   const value = spec();
   value.tables = [{
     table: 'events', policy: 'time_window', column: 'created_at', mode: 'rolling',

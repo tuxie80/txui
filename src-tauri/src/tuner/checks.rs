@@ -492,7 +492,11 @@ fn perf_statement_checks(d: &TunerData, out: &mut Vec<Finding>) {
     // 18. Top statement by cumulative time (when P_S digest consumer is on).
     if let Some(stmts) = &d.top_statements {
         if let Some(top) = stmts.first() {
-            let digest = if top.digest.len() > 120 { format!("{}…", &top.digest[..120]) } else { top.digest.clone() };
+            let digest = if top.digest.chars().count() > 120 {
+                format!("{}…", top.digest.chars().take(120).collect::<String>())
+            } else {
+                top.digest.clone()
+            };
             out.push(f("perf.top_statement", "performance", Sev::Info,
                 format!("Hottest statement class: {:.1} s total", top.total_secs),
                 format!("{} executions — {}", top.count, digest),
@@ -1520,5 +1524,22 @@ mod tests {
         assert!(s.total >= 85, "healthy server should score high, got {} ({:?})",
             s.total, out.iter().filter(|f| f.points_lost > 0).map(|f| f.id.clone()).collect::<Vec<_>>());
         assert!(out.iter().any(|f| f.severity == "ok"), "panel needs passing checks too");
+    }
+
+    #[test]
+    fn top_statement_digest_truncation_is_utf8_char_safe() {
+        let mut d = base();
+        // 119 ASCII bytes + multi-byte '€' (bytes 119..122) + tail > 120 chars:
+        // byte index 120 sits mid-codepoint and used to panic.
+        let digest = format!("{}€{}", "a".repeat(119), "b".repeat(20));
+        assert!(!digest.is_char_boundary(120));
+        d.top_statements = Some(vec![crate::tuner::collectors::TopStmt {
+            digest,
+            count: 42,
+            total_secs: 12.3,
+        }]);
+        let out = run_checks(&d, None);
+        let top = by_id(&out, "perf.top_statement").expect("top_statement finding");
+        assert!(top.detail.ends_with('…'));
     }
 }

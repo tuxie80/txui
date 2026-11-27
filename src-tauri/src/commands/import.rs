@@ -62,11 +62,13 @@ fn looks_int(s: &str) -> bool {
 fn looks_date(s: &str) -> bool {
     let t = s.trim();
     t.len() == 10 && t.as_bytes().get(4) == Some(&b'-') && t.as_bytes().get(7) == Some(&b'-')
-        && t[0..4].parse::<u16>().is_ok()
+        && t.get(0..4).is_some_and(|y| y.parse::<u16>().is_ok())
 }
 fn looks_timestamp(s: &str) -> bool {
     let t = s.trim();
-    t.len() >= 19 && looks_date(&t[0..10]) && (t.as_bytes()[10] == b' ' || t.as_bytes()[10] == b'T')
+    t.len() >= 19
+        && t.get(0..10).is_some_and(looks_date)
+        && matches!(t.as_bytes().get(10), Some(b' ' | b'T'))
 }
 fn looks_bool(s: &str) -> bool {
     matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "false" | "t" | "f" | "0" | "1" | "yes" | "no")
@@ -785,7 +787,10 @@ mod mssql_import_live_tests {
 
         // BATCH_ROWS must stay inside it — raising it would break SQL Server
         // and nothing else, which is the kind of change that ships.
-        assert!(BATCH_ROWS <= 1000, "BATCH_ROWS is {BATCH_ROWS}");
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(BATCH_ROWS <= 1000, "BATCH_ROWS is {BATCH_ROWS}");
+        }
         let ok = builder_sql(BATCH_ROWS).replace("zz_csv_live", "zz_csv_cap");
         sqlserver::execute(&s, &ok).await.expect("a full BATCH_ROWS batch must load");
 
@@ -1137,5 +1142,23 @@ mod tests {
         assert!(stmt.starts_with("INSERT INTO \"t\" (\"a\", \"b\") VALUES\n('x', NULL)"), "{stmt}");
         // …and SQLite's upsert spelling is the PG one: skip, not update.
         assert!(stmt.ends_with("ON CONFLICT DO NOTHING"), "{stmt}");
+    }
+
+    #[test]
+    fn looks_timestamp_and_date_never_panic_on_multibyte_utf8() {
+        // 9 ASCII bytes + 3-byte '€' straddles byte index 10 (>= 19 bytes total).
+        let straddle_10 = "2026-01-0€12:34:56789";
+        assert!(!straddle_10.is_char_boundary(10));
+        assert!(!looks_timestamp(straddle_10));
+        assert_eq!(infer_type(&[straddle_10]), "VARCHAR(255)");
+
+        // 3-byte '€' straddling byte index 4 in a 10-byte string ("ab€-01-2" = 10 bytes).
+        let straddle_4 = "ab€-01-2";
+        assert_eq!(straddle_4.len(), 10);
+        assert!(!straddle_4.is_char_boundary(4));
+        assert!(!looks_date(straddle_4));
+
+        assert!(looks_timestamp("2026-11-27 18:30:00"));
+        assert!(looks_timestamp("2026-11-27T18:30:00Z"));
     }
 }

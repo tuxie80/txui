@@ -281,14 +281,18 @@ export function ProcessListPanel({ session, onClose }: Props) {
         {interactiveKill ? (
           <>
             <button
-              className={`toolbar-btn proc-kill${killBlocked ? ' unavail' : ''}`}
-              disabled={isCh ? selectedQid === null : selectedPid === null}
-              aria-disabled={killBlocked ? true : undefined}
-              data-tip={killBlocked ?? undefined}
-              onClick={() => { if (!killBlocked) kill(false); }}
-              title={killBlocked ?? (isCh
-                ? 'Abort the running query (KILL QUERY WHERE query_id = …)'
-                : 'Abort the running statement, keep the connection (KILL QUERY / pg_cancel_backend)')}
+              className={`toolbar-btn proc-kill${killBlocked || (isCh ? selectedQid === null : selectedPid === null) ? ' unavail' : ''}`}
+              aria-disabled={Boolean(killBlocked) || (isCh ? selectedQid === null : selectedPid === null)}
+              data-tip={killBlocked ?? ((isCh ? selectedQid === null : selectedPid === null) ? 'Select a process row first' : undefined)}
+              onClick={() => {
+                if (killBlocked || (isCh ? selectedQid === null : selectedPid === null)) return;
+                void kill(false);
+              }}
+              title={killBlocked ?? ((isCh ? selectedQid === null : selectedPid === null)
+                ? 'Select a process row first'
+                : isCh
+                  ? 'Abort the running query (KILL QUERY WHERE query_id = …)'
+                  : 'Abort the running statement, keep the connection (KILL QUERY / pg_cancel_backend)')}
             >Kill query{isCh
               ? (selectedQid !== null ? ` ${selectedQid.slice(0, 8)}…` : '')
               : (selectedPid !== null ? ` ${selectedPid}` : '')}</button>
@@ -301,12 +305,16 @@ export function ProcessListPanel({ session, onClose }: Props) {
               >Kill connection</button>
             ) : (
               <button
-                className={`toolbar-btn proc-kill-hard${killBlocked ? ' unavail' : ''}`}
-                disabled={selectedPid === null}
-                aria-disabled={killBlocked ? true : undefined}
-                data-tip={killBlocked ?? undefined}
-                onClick={() => { if (!killBlocked) kill(true); }}
-                title={killBlocked ?? 'Terminate the whole connection (KILL / pg_terminate_backend)'}
+                className={`toolbar-btn proc-kill-hard${killBlocked || selectedPid === null ? ' unavail' : ''}`}
+                aria-disabled={Boolean(killBlocked) || selectedPid === null}
+                data-tip={killBlocked ?? (selectedPid === null ? 'Select a process row first' : undefined)}
+                onClick={() => {
+                  if (killBlocked || selectedPid === null) return;
+                  void kill(true);
+                }}
+                title={killBlocked ?? (selectedPid === null
+                  ? 'Select a process row first'
+                  : 'Terminate the whole connection (KILL / pg_terminate_backend)')}
               >Kill connection</button>
             )}
           </>

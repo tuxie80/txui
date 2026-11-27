@@ -1,5 +1,6 @@
-import { blank } from './sqlAlias.ts';
+import { blank, dollarQuotedStrings, hashLineComments, nestedBlockComments } from './sqlAlias.ts';
 import { sha256Hex } from './datagenStandards.ts';
+import { backslashEscapesStrings } from './sqlIdent.ts';
 import { findVariables, substituteVariables } from './sqlVars.ts';
 import { isWriteStatement } from './sqlGuard.ts';
 import { splitStatements } from './sqlSplit.ts';
@@ -142,27 +143,45 @@ function sqlBytes(sql: string): number {
   return new TextEncoder().encode(sql).byteLength;
 }
 
-function positionalParameters(sql: string): string[] {
+function positionalParameters(sql: string, engine: SafeOperationEngine): string[] {
+  const hashOk = hashLineComments(engine);
+  const bsInStrings = backslashEscapesStrings(engine);
+  const nestedComments = nestedBlockComments(engine);
+  const dollarOk = dollarQuotedStrings(engine);
   const found: string[] = [];
   let index = 0;
   while (index < sql.length) {
     const character = sql[index];
     const next = sql[index + 1] ?? '';
-    if ((character === '-' && next === '-') || character === '#') {
+    if ((character === '-' && next === '-') || (character === '#' && hashOk)) {
       const end = sql.indexOf('\n', index);
       index = end === -1 ? sql.length : end + 1;
       continue;
     }
     if (character === '/' && next === '*') {
-      const end = sql.indexOf('*/', index + 2);
-      index = end === -1 ? sql.length : end + 2;
+      if (nestedComments) {
+        let depth = 1;
+        index += 2;
+        while (index < sql.length && depth > 0) {
+          if (sql[index] === '/' && sql[index + 1] === '*') { depth++; index += 2; }
+          else if (sql[index] === '*' && sql[index + 1] === '/') { depth--; index += 2; }
+          else index++;
+        }
+      } else {
+        const end = sql.indexOf('*/', index + 2);
+        index = end === -1 ? sql.length : end + 2;
+      }
       continue;
     }
     if (character === "'" || character === '"' || character === '`') {
       const quote = character;
+      const eString = quote === "'" && engine === 'postgres'
+        && index > 0 && (sql[index - 1] === 'E' || sql[index - 1] === 'e')
+        && (index < 2 || !/[\w$]/.test(sql[index - 2]));
+      const bs = quote !== '`' && (bsInStrings || eString);
       index++;
       while (index < sql.length) {
-        if (sql[index] === '\\') { index += 2; continue; }
+        if (bs && sql[index] === '\\') { index += 2; continue; }
         if (sql[index] === quote) {
           if (sql[index + 1] === quote) { index += 2; continue; }
           index++;
@@ -173,20 +192,26 @@ function positionalParameters(sql: string): string[] {
       continue;
     }
     if (character === '$') {
-      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index, index + 64));
-      if (tag) {
-        const end = sql.indexOf(tag[0], index + tag[0].length);
-        index = end === -1 ? sql.length : end + tag[0].length;
-        continue;
+      if (dollarOk) {
+        const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index, index + 64));
+        if (tag) {
+          const end = sql.indexOf(tag[0], index + tag[0].length);
+          index = end === -1 ? sql.length : end + tag[0].length;
+          continue;
+        }
       }
-      const positional = /^\$[1-9][0-9]*/.exec(sql.slice(index, index + 12));
-      if (positional) {
-        found.push(positional[0]);
-        index += positional[0].length;
-        continue;
+      if (engine === 'postgres' && (index === 0 || !/[A-Za-z0-9_$]/.test(sql[index - 1]))) {
+        const positional = /^\$[1-9][0-9]*/.exec(sql.slice(index, index + 12));
+        if (positional) {
+          found.push(positional[0]);
+          index += positional[0].length;
+          continue;
+        }
       }
     }
-    if (character === '?') found.push('?');
+    // On PostgreSQL, `?`, `?|`, and `?&` are jsonb existence operators, not
+    // positional parameters; on MySQL, `?` is a positional placeholder.
+    if (engine !== 'postgres' && character === '?') found.push('?');
     index++;
   }
   return found;
@@ -206,7 +231,7 @@ function resolveStatement(
     return '';
   }
   if (/^\s*delimiter\s/i.test(source)) errors.push(`${label} must not contain client DELIMITER commands`);
-  const statements = splitStatements(source);
+  const statements = splitStatements(source, ';', engine);
   if (statements.length !== 1) {
     errors.push(`${label} must contain exactly one statement; found ${statements.length}`);
     return '';
@@ -216,9 +241,9 @@ function resolveStatement(
     errors.push(`${label} must be one SELECT or read-only WITH statement`);
   }
   if (isWriteStatement(statement, engine)) errors.push(`${label} is not read-only`);
-  const positional = positionalParameters(statement);
+  const positional = positionalParameters(statement, engine);
   if (positional.length) errors.push(`${label} has unresolved positional parameters: ${[...new Set(positional)].join(', ')}; use named :parameters`);
-  const required = findVariables(statement);
+  const required = findVariables(statement, engine);
   for (const name of required) {
     if (!parameters[name]) errors.push(`${label} has unresolved parameter :${name}`);
   }

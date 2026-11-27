@@ -238,7 +238,7 @@ pub fn lock_setup(engine: Engine, db: Option<&str>) -> Vec<String> {
         Engine::SqlServer => vec![
             format!("IF OBJECT_ID('{}') IS NULL CREATE TABLE {} \
                      (id int PRIMARY KEY, n bigint NOT NULL DEFAULT 0)",
-                    t.replace('[', "").replace(']', "").replace('\'', "''"), t),
+                    t.replace(['[', ']'], "").replace('\'', "''"), t),
             format!("IF NOT EXISTS (SELECT 1 FROM {} WHERE id = 1) \
                      INSERT INTO {} (id, n) VALUES (1, 0)", t, t),
         ],
@@ -531,6 +531,49 @@ async fn session_pool(state: &State<'_, AppState>, session_id: Uuid) -> Option<P
 
 /// Spawn the mess. Streams one event per worker start/finish; returns when all
 /// workers are done, the run is stopped, or the caller closes the channel.
+fn apply_mssql_host_override(
+    config: &ConnectionConfig,
+    host_override: Option<(&str, u16)>,
+) -> ConnectionConfig {
+    let mut cfg = config.clone();
+    if let Some((host, port)) = host_override {
+        cfg.host = Some(host.to_string());
+        cfg.port = Some(port);
+    }
+    cfg
+}
+
+async fn validate_playground_session(
+    state: &AppState,
+    session_id: Uuid,
+    connection_id: Uuid,
+    config: &ConnectionConfig,
+    scenario: Scenario,
+) -> Result<(), crate::apperror::AppError> {
+    let meta = state.session_meta.read().await.get(&session_id).cloned()
+        .ok_or_else(|| crate::apperror::AppError::bad_request("playground session is not open"))?;
+    let start = state.session_starts.read().await.get(&session_id).cloned()
+        .ok_or_else(|| crate::apperror::AppError::bad_request("playground session connection identity is unavailable"))?;
+    if start.connection_id != connection_id {
+        return Err(crate::apperror::AppError::guard(
+            "playground session does not belong to the requested connection",
+        ));
+    }
+    if config.environment.as_deref() == Some("prod") || meta.environment.as_deref() == Some("prod") {
+        return Err(crate::apperror::AppError::guard(
+            "the Playground is disabled on prod-tagged connections — it \
+             manufactures load, lock chains and sleeping connections",
+        ));
+    }
+    if scenario.writes() && (config.read_only || meta.read_only) {
+        return Err(crate::apperror::AppError::guard(
+            "this connection is read-only — the lock and Galera scenarios need to create \
+             a playground table and write rows. Use the Sleep scenario, or a writable connection.",
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn playground_spawn(
     session_id: Uuid,
@@ -546,25 +589,10 @@ pub async fn playground_spawn(
     if config.engine == Engine::Redis {
         return Err("the Playground needs MySQL or PostgreSQL".into());
     }
-    // Prod border: the playground manufactures load, lock chains and
-    // minutes-long sleeping connections — there is no legitimate use for it
-    // against a production server, so it refuses outright (same posture as
-    // routines::debug_gate; the destructive-DDL opt-out is explicitly
-    // not a sufficient signal here).
-    if let Some(g) = state.session_meta.read().await.get(&session_id) {
-        if g.environment.as_deref() == Some("prod") {
-            return Err(crate::apperror::AppError::guard(
-                "the Playground is disabled on prod-tagged connections — it \
-                 manufactures load, lock chains and sleeping connections"));
-        }
-    }
-    // Write scenarios (lock chain, Galera storms) create a table and update
-    // rows — a read-only connection refuses them.
-    if plan.scenario.writes() && state.is_read_only(&session_id).await {
-        return Err("this connection is read-only — the lock and Galera scenarios need to create \
-                    a playground table and write rows. Use the Sleep scenario, or \
-                    a writable connection.".into());
-    }
+    // Prod and read-only border: verify the session is open, belongs to
+    // `connection_id`, and neither `config` nor `session_meta` violates the
+    // scenario's prod / write constraints.
+    validate_playground_session(&state, session_id, connection_id, &config, plan.scenario).await?;
 
     // Galera scenarios: MySQL-family only, and the session must be an actual
     // Galera node. Detection reads the wsrep_on VARIABLE on the session's own
@@ -631,8 +659,10 @@ pub async fn playground_spawn(
             return Err("the playground supports MySQL, PostgreSQL and SQL Server".into()),
         Engine::SqlServer => {
             // No pool: each worker opens its own connection, which is what N
-            // distinct server sessions requires.
-            run_ms(config.clone(), password, plan.clone(), workers, on_event.clone(),
+            // distinct server sessions requires. Apply any active SSH tunnel
+            // override so SQL Server workers dial the forwarded port too.
+            let mssql_cfg = apply_mssql_host_override(&config, host_override);
+            run_ms(mssql_cfg, password, plan.clone(), workers, on_event.clone(),
                    cancel_rx, spawned_ids.clone()).await
         }
         Engine::Mysql => {
@@ -1643,5 +1673,52 @@ mod galera_playground_live_tests {
         assert_eq!(left, 0, "the conflict table must be dropped at the end of the run");
         run_pool.close().await;
         probe.close().await;
+    }
+
+    #[tokio::test]
+    async fn playground_gate_enforces_session_binding_prod_and_readonly_on_config() {
+        use std::collections::HashMap;
+        let history = crate::history::open_in_memory().await.unwrap();
+        let state = AppState::new(history, std::env::temp_dir(), HashMap::new());
+        let sid = Uuid::new_v4();
+        let mut cfg = ConnectionConfig::new(Engine::Mysql, "pg-test");
+
+        // Missing session_meta -> refused.
+        assert!(validate_playground_session(&state, sid, cfg.id, &cfg, Scenario::Lock).await.is_err());
+
+        state.session_meta.write().await.insert(sid, crate::state::SessionGuard::from_config(&cfg));
+        state.session_starts.write().await.insert(sid, crate::commands::audit::session_start(&cfg));
+        assert!(validate_playground_session(&state, sid, cfg.id, &cfg, Scenario::Lock).await.is_ok());
+
+        // Mismatched connection_id -> GuardRefused.
+        assert_eq!(
+            validate_playground_session(&state, sid, Uuid::new_v4(), &cfg, Scenario::Lock).await.unwrap_err().code,
+            crate::apperror::ErrorCode::GuardRefused
+        );
+
+        // Saved config flipped to read_only or prod after session open -> GuardRefused for write scenarios,
+        // while read-only Sleep remains allowed on non-prod read-only connections.
+        let mut ro_cfg = cfg.clone();
+        ro_cfg.read_only = true;
+        assert_eq!(
+            validate_playground_session(&state, sid, cfg.id, &ro_cfg, Scenario::Lock).await.unwrap_err().code,
+            crate::apperror::ErrorCode::GuardRefused
+        );
+        assert!(validate_playground_session(&state, sid, cfg.id, &ro_cfg, Scenario::Sleep).await.is_ok());
+
+        let mut prod_cfg = cfg.clone();
+        prod_cfg.environment = Some("prod".into());
+        assert_eq!(
+            validate_playground_session(&state, sid, cfg.id, &prod_cfg, Scenario::Sleep).await.unwrap_err().code,
+            crate::apperror::ErrorCode::GuardRefused
+        );
+
+        // SQL Server host_override rewrites host and port to the SSH tunnel endpoint.
+        cfg.engine = Engine::SqlServer;
+        cfg.host = Some("sql.internal".into());
+        cfg.port = Some(1433);
+        let overridden = apply_mssql_host_override(&cfg, Some(("127.0.0.1", 51433)));
+        assert_eq!(overridden.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(overridden.port, Some(51433));
     }
 }

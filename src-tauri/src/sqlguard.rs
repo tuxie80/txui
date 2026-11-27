@@ -30,6 +30,12 @@ pub(crate) struct Dialect {
     /// DuckDB and T-SQL it is data, so `'x\'; DROP TABLE t; --'` is a
     /// complete string followed by a real DROP.
     backslash_escape: bool,
+    /// PostgreSQL/DuckDB `E'…'` / `e'…'` C-escape string literals — backslash
+    /// escapes inside `E'…'` even when plain `'…'` has `backslash_escape` off.
+    e_strings: bool,
+    /// T-SQL `[…]` delimited identifiers (`]]` escapes `]`). Off on engines
+    /// where `[…]` is array subscripting.
+    bracket_idents: bool,
     /// Block comments nest (`/* /* */ */`) — PostgreSQL and T-SQL. MySQL,
     /// SQLite, ClickHouse and DuckDB end the comment at the first `*/`, and
     /// counting depth there would blank the live SQL that follows it
@@ -50,6 +56,11 @@ pub(crate) struct Dialect {
     /// `SET SESSION transaction_read_only = 0` is deliberately NOT blocked —
     /// a DBA tool must let the user manage that switch explicitly.
     pg_set_readonly: bool,
+    /// Semantic, not lexical: T-SQL allows statement boundaries without `;`
+    /// and prefixes writes/DDL with control-flow (`IF`, `ELSE`, `WHILE`,
+    /// `BEGIN`, `DECLARE`), so SQL Server batches are additionally scanned at
+    /// token level rather than relying on `;` + `first_word` alone.
+    tsql_batch: bool,
 }
 
 impl Dialect {
@@ -60,9 +71,12 @@ impl Dialect {
         Dialect {
             hash_comment: true,
             backslash_escape: true,
+            e_strings: true,
+            bracket_idents: false,
             nested_comments: false,
             dollar_strings: true,
             pg_set_readonly: false,
+            tsql_batch: false,
         }
     }
 
@@ -71,9 +85,12 @@ impl Dialect {
         Dialect {
             hash_comment: false,
             backslash_escape: false,
+            e_strings: false,
+            bracket_idents: false,
             nested_comments: false,
             dollar_strings: false,
             pg_set_readonly: false,
+            tsql_batch: false,
         }
     }
 
@@ -81,16 +98,20 @@ impl Dialect {
         use crate::db::types::Engine as E;
         match engine {
             Some(E::Mysql) => Dialect { hash_comment: true, backslash_escape: true, ..Dialect::off() },
-            Some(E::Postgres) => Dialect { nested_comments: true, dollar_strings: true, pg_set_readonly: true, ..Dialect::off() },
-            Some(E::SqlServer) => Dialect { nested_comments: true, ..Dialect::off() },
+            Some(E::Postgres) => Dialect { e_strings: true, nested_comments: true, dollar_strings: true, pg_set_readonly: true, ..Dialect::off() },
+            Some(E::SqlServer) => Dialect { bracket_idents: true, nested_comments: true, tsql_batch: true, ..Dialect::off() },
             Some(E::Clickhouse) => Dialect { backslash_escape: true, ..Dialect::off() },
-            Some(E::Duckdb) => Dialect { dollar_strings: true, ..Dialect::off() },
+            Some(E::Duckdb) => Dialect { e_strings: true, dollar_strings: true, ..Dialect::off() },
             // Sqlite/Parquet/Redis/MongoDb: everything off — reveal the text,
             // let the keyword scan see it.
             Some(_) => Dialect::off(),
             None => Dialect::legacy(),
         }
     }
+}
+
+fn is_ident_before_estring(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '@' | '#')
 }
 
 /// Replace the contents of string literals, quoted identifiers, dollar-quoted
@@ -102,6 +123,10 @@ impl Dialect {
 /// comment-only "statement" as effectively empty.
 pub(crate) fn blank(sql: &str) -> String {
     blank_dialect(sql, &Dialect::legacy())
+}
+
+pub(crate) fn blank_for(engine: Option<crate::db::types::Engine>, sql: &str) -> String {
+    blank_dialect(sql, &Dialect::for_engine(engine))
 }
 
 pub(crate) fn blank_dialect(sql: &str, d: &Dialect) -> String {
@@ -163,6 +188,44 @@ pub(crate) fn blank_dialect(sql: &str, d: &Dialect) -> String {
                 i = end;
                 continue;
             }
+        }
+        // T-SQL bracket-quoted identifier: [...] with ]] escape
+        if c == '[' && d.bracket_idents {
+            out.push(' ');
+            i += 1;
+            while i < n {
+                if cs[i] == ']' {
+                    if i + 1 < n && cs[i + 1] == ']' {
+                        out.push(' '); out.push(' '); i += 2; continue;
+                    }
+                    out.push(' '); i += 1; break;
+                }
+                out.push(' '); i += 1;
+            }
+            continue;
+        }
+        // PostgreSQL/DuckDB C-escape string literal: E'...' / e'...'
+        if d.e_strings
+            && (c == 'e' || c == 'E')
+            && i + 1 < n
+            && cs[i + 1] == '\''
+            && (i == 0 || !is_ident_before_estring(cs[i - 1]))
+        {
+            out.push(' '); out.push(' ');
+            i += 2;
+            while i < n {
+                if cs[i] == '\\' && i + 1 < n {
+                    out.push(' '); out.push(' '); i += 2; continue;
+                }
+                if cs[i] == '\'' {
+                    if i + 1 < n && cs[i + 1] == '\'' {
+                        out.push(' '); out.push(' '); i += 2; continue;
+                    }
+                    out.push(' '); i += 1; break;
+                }
+                out.push(' '); i += 1;
+            }
+            continue;
         }
         // quotes: '...'  "..."  `...`
         if c == '\'' || c == '"' || c == '`' {
@@ -336,8 +399,219 @@ fn copy_writes(blanked: &str) -> bool {
     depth == 0 && word == "from"
 }
 
+/// Whole-word search at paren depth 0 on already-blanked text.
+fn has_top_level_word(blanked: &str, target: &str) -> bool {
+    let mut depth = 0i32;
+    let mut word = String::new();
+    for c in blanked.chars().chain(std::iter::once('\n')) {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c.to_ascii_lowercase());
+            continue;
+        }
+        if !word.is_empty() {
+            if depth == 0 && word == target {
+                return true;
+            }
+            word.clear();
+        }
+        match c {
+            '(' => depth += 1,
+            ')' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+    }
+    false
+}
+
+struct TsqlTok {
+    word: String,
+    depth: usize,
+    after_dot: bool,
+}
+
+/// Tokenise already-blanked T-SQL keeping `@var`, `@@sys`, `#tmp` and `$action`
+/// sigils attached to their words (so `@update` or `#drop` never look like
+/// statement keywords) and recording paren depth + leading `.`.
+fn tsql_tokens(blanked: &str) -> Vec<TsqlTok> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut word = String::new();
+    let mut after_dot = false;
+    let mut saw_dot = false;
+
+    for c in blanked.chars().chain(std::iter::once('\n')) {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '#' | '$') {
+            if word.is_empty() {
+                after_dot = saw_dot;
+                saw_dot = false;
+            }
+            word.push(c.to_ascii_lowercase());
+            continue;
+        }
+        if !word.is_empty() {
+            out.push(TsqlTok {
+                word: std::mem::take(&mut word),
+                depth,
+                after_dot,
+            });
+            after_dot = false;
+        }
+        if c == '.' {
+            saw_dot = true;
+        } else if !c.is_whitespace() {
+            saw_dot = false;
+        }
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    out
+}
+
+const TSQL_READ_DBCC: &[&str] = &[
+    "show_statistics", "showcontig", "sqlperf", "tracestatus", "useroptions",
+    "opentran", "inputbuffer", "memorystatus", "proccache", "help",
+];
+
+/// SQL Server batch scan: T-SQL needs no `;` between statements and allows
+/// `IF` / `ELSE` / `WHILE` / `BEGIN` / `DECLARE` before writes/DDL, so every
+/// reserved mutating/admin/exec verb (plus `SELECT … INTO`) in the blanked
+/// segment counts.
+fn tsql_statement_is_write(blanked: &str) -> bool {
+    let toks = tsql_tokens(blanked);
+    for (i, tok) in toks.iter().enumerate() {
+        if tok.after_dot {
+            continue;
+        }
+        let next_w = toks.get(i + 1).filter(|t| !t.after_dot).map(|t| t.word.as_str());
+        match tok.word.as_str() {
+            "insert" | "update" | "delete" | "create" | "alter" | "drop"
+            | "truncate" | "rename" | "exec" | "execute" | "grant" | "revoke"
+            | "deny" | "backup" | "restore" | "reconfigure" | "shutdown"
+            | "kill" | "bulk" => return true,
+            // `INNER MERGE JOIN` and `OPTION (MERGE JOIN)` are read query hints.
+            "merge" if next_w != Some("join") => return true,
+            "dbcc" if !next_w.is_some_and(|nw| TSQL_READ_DBCC.contains(&nw)) => return true,
+            "select" => {
+                for next in &toks[i + 1..] {
+                    if next.depth < tok.depth {
+                        break;
+                    }
+                    if next.depth == tok.depth && !next.after_dot {
+                        if next.word == "into" {
+                            return true;
+                        }
+                        if matches!(next.word.as_str(), "select" | "fetch") {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn tsql_statement_is_dangerous_ddl(blanked: &str) -> bool {
+    let kw = first_word(blanked);
+    // Plain `CREATE PROCEDURE … BEGIN DROP TABLE #t; END` stays non-destructive
+    // at statement level; `CREATE OR ALTER …` overwrites an existing object.
+    if kw == "create" && word_after(blanked, kw.len()) != "or" {
+        return false;
+    }
+    tsql_tokens(blanked).iter().any(|tok| {
+        !tok.after_dot
+            && matches!(
+                tok.word.as_str(),
+                "drop" | "truncate" | "alter" | "rename" | "grant"
+                    | "revoke" | "deny" | "restore" | "shutdown"
+            )
+    })
+}
+
+fn tsql_unfiltered_updel(s: &str) -> bool {
+    if first_word(s) == "create" {
+        return false;
+    }
+    let mut pending: Vec<bool> = vec![false];
+    let mut depth: usize = 0;
+    let mut word = String::new();
+    let mut prev_word = String::new();
+    let mut after_dot = false;
+    let mut saw_dot = false;
+    let mut unfiltered = false;
+
+    for c in s.chars().chain(std::iter::once('\n')) {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '#' | '$') {
+            if word.is_empty() {
+                after_dot = saw_dot;
+                saw_dot = false;
+            }
+            word.push(c.to_ascii_lowercase());
+            continue;
+        }
+        if !word.is_empty() {
+            if !after_dot {
+                let is_clause_modifier = matches!(
+                    prev_word.as_str(),
+                    "on" | "then" | "for" | "after" | "of"
+                );
+                if (word == "update" || word == "delete") && !is_clause_modifier {
+                    if pending[depth] {
+                        unfiltered = true;
+                    }
+                    pending[depth] = true;
+                } else if word == "where" {
+                    pending[depth] = false;
+                } else if pending[depth]
+                    && matches!(
+                        word.as_str(),
+                        "select" | "insert" | "merge" | "drop" | "truncate"
+                            | "alter" | "create" | "exec" | "execute" | "declare"
+                    )
+                {
+                    unfiltered = true;
+                    pending[depth] = false;
+                }
+            }
+            prev_word.clear();
+            prev_word.push_str(&word);
+            word.clear();
+            after_dot = false;
+        }
+        if c == '.' {
+            saw_dot = true;
+        } else if !c.is_whitespace() {
+            saw_dot = false;
+        }
+        match c {
+            '(' => {
+                depth += 1;
+                if pending.len() <= depth {
+                    pending.push(false);
+                } else {
+                    pending[depth] = false;
+                }
+            }
+            ')' => {
+                if pending[depth] {
+                    unfiltered = true;
+                }
+                pending[depth] = false;
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    unfiltered || pending.iter().any(|&p| p)
+}
+
 /// Detect whether a single (already-blanked) statement writes.
 fn statement_is_write(blanked: &str, d: &Dialect) -> bool {
+    if d.tsql_batch && tsql_statement_is_write(blanked) { return true; }
     let kw = first_word(blanked);
     if kw.is_empty() { return false; }
     if WRITE_KEYWORDS.contains(&kw.as_str()) { return true; }
@@ -360,9 +634,10 @@ fn statement_is_write(blanked: &str, d: &Dialect) -> bool {
         return word_after(blanked, kw.len()) != "transaction";
     }
     if kw == "with" {
-        // data-modifying CTE: the write can sit inside the CTE parens, so
-        // scan the whole (blanked) statement for a modifying keyword.
-        return ["insert", "update", "delete", "merge"].iter().any(|w| has_word(blanked, w));
+        // data-modifying CTE (`WITH d AS (DELETE …)`) or a CTE feeding an outer
+        // table-creating `SELECT … INTO new_table`.
+        return ["insert", "update", "delete", "merge"].iter().any(|w| has_word(blanked, w))
+            || has_top_level_word(blanked, "into");
     }
     if kw == "copy" {
         // PostgreSQL COPY goes both ways: `COPY t FROM …` bulk-loads rows,
@@ -518,7 +793,12 @@ fn pg_set_tokens(raw: &str) -> Vec<PgTok> {
         // '…' string, incl. the E'…' prefix whose backslash escapes — a SET
         // target never contains one, but the VALUE does, and an escaped quote
         // mis-skipped would leak string content into the token stream.
-        if c == '\'' || ((c == 'E' || c == 'e') && i + 1 < n && cs[i + 1] == '\'') {
+        if c == '\''
+            || ((c == 'E' || c == 'e')
+                && i + 1 < n
+                && cs[i + 1] == '\''
+                && (i == 0 || !is_ident_before_estring(cs[i - 1])))
+        {
             let escaped = c != '\'';
             i += if escaped { 2 } else { 1 };
             while i < n {
@@ -651,10 +931,12 @@ pub fn is_dangerous_ddl(sql: &str) -> bool {
 
 /// `is_dangerous_ddl` with the session engine — see `is_write_for`.
 pub fn is_dangerous_ddl_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool {
-    let blanked = blank_dialect(sql, &Dialect::for_engine(engine));
+    let d = Dialect::for_engine(engine);
+    let blanked = blank_dialect(sql, &d);
     blanked.split(';').any(|s| {
         let kw = first_word(s);
         if DANGEROUS_DDL_KEYWORDS.contains(&kw.as_str()) { return true; }
+        if d.tsql_batch && tsql_statement_is_dangerous_ddl(s) { return true; }
         match kw.as_str() {
             // VACUUM FULL rewrites the table; plain VACUUM is routine.
             "vacuum"  => has_word(s, "full"),
@@ -683,8 +965,13 @@ pub fn is_unfiltered_write(sql: &str) -> bool {
 
 /// `is_unfiltered_write` with the session engine — see `is_write_for`.
 pub fn is_unfiltered_write_for(engine: Option<crate::db::types::Engine>, sql: &str) -> bool {
-    let blanked = blank_dialect(sql, &Dialect::for_engine(engine));
-    blanked.split(';').any(unfiltered_updel)
+    let d = Dialect::for_engine(engine);
+    let blanked = blank_dialect(sql, &d);
+    if d.tsql_batch {
+        blanked.split(';').any(tsql_unfiltered_updel)
+    } else {
+        blanked.split(';').any(unfiltered_updel)
+    }
 }
 
 /// One blanked statement: does it contain an UPDATE/DELETE with no WHERE at
@@ -1307,6 +1594,103 @@ mod dialect_tests {
         // leads with `c` and the DROP — though visible text — is not leading.
         // This is the residual gap only engine threading closes.
         assert!(!is_write("/* a /* b */ c */ DROP TABLE t"));
+    }
+
+    #[test]
+    fn pg_e_strings_respect_backslash_escapes_without_weakening_plain_strings() {
+        let bypass = "SELECT E'\\''; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DROP TABLE t; --'";
+        assert!(is_write_for(Some(Postgres), bypass));
+        assert!(super::is_dangerous_ddl_for(Some(Postgres), bypass));
+        assert!(is_write_for(Some(Postgres), "SELECT e'\\\\'; DROP TABLE t; --'"));
+        assert!(is_unfiltered_write_for(Some(Postgres), "UPDATE t SET note = E'it\\'s WHERE id = 1'"));
+        assert!(!is_unfiltered_write_for(Some(Postgres), "UPDATE t SET note = E'it\\'s' WHERE id = 1"));
+        // Inside an actual E'...' string, semicolons and write verbs are inert data.
+        assert!(!is_write_for(Some(Postgres), "SELECT E'it\\'s; DROP TABLE t'"));
+        // Plain '...' on PG still does NOT backslash-escape.
+        assert!(is_write_for(Some(Postgres), "'x\\'; DROP TABLE t; --'"));
+    }
+
+    #[test]
+    fn cte_select_into_is_caught_across_engines() {
+        let sql = "WITH c AS (SELECT 1 AS a) SELECT a INTO rogue_copy FROM c";
+        for eng in [Some(Postgres), Some(SqlServer), Some(Duckdb), None] {
+            assert!(is_write_for(eng, sql), "{eng:?} missed CTE SELECT INTO");
+        }
+        assert!(is_write_for(Some(SqlServer), "WITH c AS (SELECT 1 AS a) SELECT a INTO #tmp FROM c"));
+        assert!(!is_write_for(Some(Postgres), "WITH c AS (SELECT 1 AS a) SELECT a FROM c"));
+    }
+
+    #[test]
+    fn tsql_semicolon_less_batches_and_control_flow_are_guarded() {
+        use super::is_dangerous_ddl_for;
+
+        for sql in [
+            "SELECT 1\nDELETE FROM dbo.orders",
+            "(SELECT 1)\nDELETE FROM dbo.orders",
+            "IF 1 = 1 DROP TABLE dbo.orders",
+            "IF OBJECT_ID('dbo.orders', 'U') IS NOT NULL TRUNCATE TABLE dbo.orders",
+            "DECLARE @x INT = 1\nDELETE FROM dbo.orders",
+            "WHILE @i < 10 UPDATE dbo.orders SET a = 1",
+            "BEGIN EXEC sp_executesql N'DELETE FROM dbo.orders' END",
+            "SELECT 1\nDENY SELECT ON dbo.orders TO public",
+            "SELECT 1\nBACKUP DATABASE shop TO DISK = 'x.bak'",
+            "SELECT 1\nRESTORE DATABASE shop FROM DISK = 'x.bak'",
+            "SELECT 1\nRECONFIGURE WITH OVERRIDE",
+            "SELECT 1\nDBCC FREEPROCCACHE",
+            "DECLARE @x INT = 1\nSELECT @x INTO #tmp",
+        ] {
+            assert!(is_write_for(Some(SqlServer), sql), "SqlServer write missed: {sql}");
+        }
+
+        for ddl in [
+            "IF 1 = 1 DROP TABLE dbo.orders",
+            "SELECT 1\nTRUNCATE TABLE dbo.orders",
+            "DECLARE @x INT = 1\nALTER TABLE dbo.orders DROP COLUMN c",
+            "SELECT 1\nDENY SELECT ON dbo.orders TO public",
+            "SELECT 1\nRESTORE DATABASE shop FROM DISK = 'x.bak'",
+            "CREATE OR ALTER PROCEDURE dbo.p AS SELECT 1",
+        ] {
+            assert!(is_dangerous_ddl_for(Some(SqlServer), ddl), "SqlServer dangerous DDL missed: {ddl}");
+        }
+        assert!(!is_dangerous_ddl_for(
+            Some(SqlServer),
+            "CREATE PROCEDURE dbo.p AS BEGIN DROP TABLE #tmp END",
+        ));
+
+        for unfilt in [
+            "DECLARE @x INT = 1\nDELETE FROM dbo.orders",
+            "IF 1 = 1 UPDATE dbo.orders SET a = 1",
+            "SELECT 1\nDELETE FROM dbo.orders",
+            "DELETE FROM dbo.orders\nSELECT 1 WHERE 1 = 1",
+            "UPDATE dbo.orders SET a = 1\nUPDATE dbo.orders SET b = 2 WHERE id = 1",
+            "UPDATE dbo.orders SET [where] = 1",
+        ] {
+            assert!(is_unfiltered_write_for(Some(SqlServer), unfilt), "SqlServer unfiltered missed: {unfilt}");
+        }
+        assert!(!is_unfiltered_write_for(Some(SqlServer), "DECLARE @x INT = 1\nDELETE FROM dbo.orders WHERE id = @x"));
+        assert!(!is_unfiltered_write_for(
+            Some(SqlServer),
+            "MERGE INTO dbo.t USING dbo.s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED BY SOURCE THEN DELETE",
+        ));
+        assert!(!is_unfiltered_write_for(
+            Some(SqlServer),
+            "IF OBJECT_ID('dbo.c') IS NULL CREATE TABLE dbo.c (pid INT REFERENCES dbo.p(id) ON DELETE CASCADE)",
+        ));
+
+        // Pure T-SQL read batches, bracketed identifiers, @vars, #temp names,
+        // OFFSET/FETCH pagination and MERGE JOIN hints must stay reads.
+        for read_sql in [
+            "DECLARE @x INT = 1\nSELECT @x",
+            "SET NOCOUNT ON\nSELECT * FROM dbo.orders ORDER BY id OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY",
+            "SELECT * FROM dbo.a INNER MERGE JOIN dbo.b ON a.id = b.id OPTION (MERGE JOIN)",
+            "DBCC SHOW_STATISTICS('dbo.orders', 'PK_orders')",
+            "SELECT [update], [delete], [drop], [into] FROM [create]",
+            "DECLARE @update INT = 1, @drop INT = 2\nSELECT @update + @drop FROM #delete",
+        ] {
+            assert!(!is_write_for(Some(SqlServer), read_sql), "false positive on T-SQL read: {read_sql}");
+            assert!(!is_dangerous_ddl_for(Some(SqlServer), read_sql), "false DDL on T-SQL read: {read_sql}");
+            assert!(!is_unfiltered_write_for(Some(SqlServer), read_sql), "false unfiltered on T-SQL read: {read_sql}");
+        }
     }
 }
 

@@ -52,14 +52,14 @@ export function applyDefaultLimit(
 
   if (dialect === 'top') return applyTop(sql, b, limit);
 
-  // existing top-level LIMIT (outside parens)?
+  // existing top-level LIMIT or SQL-standard FETCH FIRST / FETCH NEXT (outside parens)?
   let depth = 0;
-  const re = /[()]|\blimit\b/gi;
+  const re = /[()]|\blimit\b|\bfetch\s+(?:first|next)\b/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(b)) !== null) {
     if (m[0] === '(') depth++;
     else if (m[0] === ')') depth--;
-    else if (depth === 0) return { sql, applied: false }; // has own LIMIT
+    else if (depth === 0) return { sql, applied: false }; // has own row cap
   }
 
   // insert before a trailing locking clause, else append

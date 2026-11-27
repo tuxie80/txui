@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.6.0"
+version = "1.6.1"
 # One bin now (the mssql-spike probe was retired once the live tests covered it)
 default-run = "TxUI"
 description = "TxUI — fast native database GUI"
@@ -109,7 +109,7 @@ redis            = { version = "0.26", features = ["tokio-comp", "connection-man
 
 # MongoDB driver (DBA-first push, workstream 4: connect + tree + find editor + JSON
 # grid; read-only by design — see db/mongodb.rs). 3.8 is the line whose MSRV
-# (1.88) fits the pinned toolchain (1.97.1). mongodb 3.x needs a bson line
+# (1.88) fits the pinned toolchain (1.100.0). mongodb 3.x needs a bson line
 # chosen explicitly: `bson-2` is the bson 2.x crate, re-exported as
 # `mongodb::bson` — no separate dependency entry needed. Tokio-native;
 # `rustls-tls` only, matching the house TLS stance (no openssl-tls).
@@ -141,7 +141,9 @@ tokio-util       = { version = "0.7", features = ["compat"] } # tiberius speaks 
 # DuckDB engine (in-process OLAP). `bundled` compiles DuckDB's C++ from source —
 # the first build is slow (~20-40 min), and this is the one dependency that
 # makes the binary meaningfully larger. `parquet` statically links its patched
-# native Parquet/Brotli path instead of downloading a separate extension.
+# native Parquet/Brotli path instead of downloading a separate extension; `json`
+# is also statically linked so `VARIANT` (`to_json`) and Parquet dataset JSON
+# exports never trigger runtime network extension downloads.
 #
 # duckdb-rs versions after the bundled engine: `1.20000.x` bundles DuckDB
 # v2.0.x. The tilde requirement lets duckdb-rs PATCH releases flow (Rust-side
@@ -149,7 +151,7 @@ tokio-util       = { version = "0.7", features = ["compat"] } # tiberius speaks 
 # `1.20001`+ is a deliberate act that moves the DuckDB version every file is
 # read with, on every platform, so it is done by hand. (See the duckdb-rs
 # README's versioning section.)
-duckdb           = { version = "~1.20000.1", features = ["bundled", "parquet"] }
+duckdb           = { version = "~1.20000.1", features = ["bundled", "parquet", "json"] }
 
 # Secrets: encrypted-at-rest file (src/secretstore.rs) — see AGENTS.md; the OS
 # keychain was dropped as unreliable for unsigned desktop builds.

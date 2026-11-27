@@ -19,6 +19,25 @@ pub struct ExplainWarnings {
     pub warnings: Option<QueryResult>,
 }
 
+fn validate_explain_with_warnings_sql(
+    engine: crate::db::types::Engine,
+    sql: &str,
+) -> Result<String, crate::apperror::AppError> {
+    use crate::apperror::AppError;
+
+    let trimmed = sql.trim();
+    if crate::sqlguard::split_statements_for(Some(engine), trimmed).len() != 1 {
+        return Err(AppError::bad_request("EXPLAIN with warnings accepts a single SQL statement."));
+    }
+    if crate::sqlguard::is_write_for(Some(engine), trimmed) {
+        return Err(AppError::guard("EXPLAIN with warnings accepts read-only queries only."));
+    }
+    if !crate::sqlguard::is_read_family(trimmed) {
+        return Err(AppError::guard("EXPLAIN with warnings accepts read-only queries only."));
+    }
+    Ok(trimmed.to_string())
+}
+
 #[tauri::command]
 pub async fn explain_with_warnings(
     session_id: Uuid,
@@ -26,11 +45,14 @@ pub async fn explain_with_warnings(
     db: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ExplainWarnings, crate::apperror::AppError> {
+    let trimmed = sql.trim();
     let session = get_session_pub(session_id, &state.sessions)
         .await
         ?;
     match session.as_ref() {
         LiveSession::Mysql(pool) => {
+            let clean = validate_explain_with_warnings_sql(crate::db::types::Engine::Mysql, trimmed)?;
+            state.guard_statement(&session_id, trimmed).await?;
             // detach() → the connection is dropped (closed) rather than
             // returned to the pool, so a `USE` never bleeds onto the next query.
             let mut conn = pool.acquire().await?.detach();
@@ -38,7 +60,7 @@ pub async fn explain_with_warnings(
                 mysql::execute(&mut conn, &format!("USE `{}`", d.replace('`', "``")))
                     .await.map_err(|e| format!("cannot use `{}`: {}", d, e))?;
             }
-            let stmt = format!("EXPLAIN {}", sql);
+            let stmt = format!("EXPLAIN {clean}");
             let explain = mysql::execute(&mut conn, &stmt)
                 .await?;
             let warnings = mysql::execute(&mut conn, "SHOW WARNINGS")
@@ -46,12 +68,14 @@ pub async fn explain_with_warnings(
             Ok(ExplainWarnings { explain, warnings })
         }
         LiveSession::Postgres(pool) => {
+            let clean = validate_explain_with_warnings_sql(crate::db::types::Engine::Postgres, trimmed)?;
+            state.guard_statement(&session_id, trimmed).await?;
             let mut conn = pool.acquire().await?.detach();
             if let Some(d) = db.as_deref() {
                 postgres::execute(&mut conn, &format!("SET search_path TO \"{}\"", d.replace('"', "\"\"")))
                     .await.map_err(|e| format!("cannot set search_path to \"{}\": {}", d, e))?;
             }
-            let stmt = format!("EXPLAIN {}", sql);
+            let stmt = format!("EXPLAIN {clean}");
             let explain = postgres::execute(&mut conn, &stmt)
                 .await?;
             Ok(ExplainWarnings { explain, warnings: None })
@@ -493,6 +517,30 @@ mod tests {
         // 0.1..=600 — a zero here would silently DISABLE the guard.
         let (set, _) = mysql_analyze_statements("11.8.8-MariaDB", "SELECT 1", 100);
         assert_eq!(set, "SET SESSION max_statement_time=0.1");
+    }
+
+    #[test]
+    fn explain_with_warnings_validator_rejects_stacking_writes_and_analyze_options() {
+        use super::validate_explain_with_warnings_sql;
+        use crate::apperror::ErrorCode;
+        use crate::db::types::Engine;
+
+        assert_eq!(
+            validate_explain_with_warnings_sql(Engine::Mysql, "  SELECT * FROM orders  ").unwrap(),
+            "SELECT * FROM orders"
+        );
+        assert_eq!(
+            validate_explain_with_warnings_sql(Engine::Mysql, "SELECT 1; DROP TABLE orders").unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+        assert_eq!(
+            validate_explain_with_warnings_sql(Engine::Mysql, "UPDATE orders SET status = 'paid'").unwrap_err().code,
+            ErrorCode::GuardRefused
+        );
+        assert_eq!(
+            validate_explain_with_warnings_sql(Engine::Postgres, "(ANALYZE) SELECT 1").unwrap_err().code,
+            ErrorCode::GuardRefused
+        );
     }
 }
 

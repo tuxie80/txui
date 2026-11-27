@@ -155,6 +155,7 @@ pub struct MigrationScratchRecord {
     pub name: String,
     pub status: String,
     pub error: Option<String>,
+    pub sql_sha256: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -277,11 +278,22 @@ async fn insert_scratch(state: &AppState, run_key: &str, session_id: Uuid, engin
 }
 
 async fn scratch_status(state: &AppState, run_key: &str, status: &str, error: Option<&str>) -> Result<(), AppError> {
+    scratch_execution_status(state, run_key, status, error, None).await
+}
+
+async fn scratch_execution_status(
+    state: &AppState,
+    run_key: &str,
+    status: &str,
+    error: Option<&str>,
+    sql_sha256: Option<&str>,
+) -> Result<(), AppError> {
     sqlx::query(
-        "UPDATE migration_scratch SET status = ?, error = ?, updated_at = datetime('now') WHERE run_key = ?",
+        "UPDATE migration_scratch SET status = ?, error = ?, sql_sha256 = ?, updated_at = datetime('now') WHERE run_key = ?",
     )
         .bind(status)
         .bind(error)
+        .bind(sql_sha256)
         .bind(run_key)
         .execute(&state.history).await?;
     Ok(())
@@ -289,7 +301,7 @@ async fn scratch_status(state: &AppState, run_key: &str, status: &str, error: Op
 
 pub(crate) async fn scratch_record(state: &AppState, run_key: &str) -> Result<MigrationScratchRecord, AppError> {
     sqlx::query_as::<_, MigrationScratchRecord>(
-        "SELECT run_key, session_id, connection_id, engine, name, status, error, created_at, updated_at
+        "SELECT run_key, session_id, connection_id, engine, name, status, error, sql_sha256, created_at, updated_at
          FROM migration_scratch WHERE run_key = ?",
     )
         .bind(run_key)
@@ -415,13 +427,129 @@ fn pg_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn parse_pg_action_columns(inner: &str) -> Result<Vec<String>, AppError> {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request("referential action column list cannot be empty"));
+    }
+    let bytes = trimmed.as_bytes();
+    let mut cols = Vec::new();
+    let mut i = 0usize;
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+        if i >= bytes.len() {
+            return Err(AppError::bad_request("invalid referential action column list"));
+        }
+        let col = if bytes[i] == b'"' {
+            i += 1;
+            let mut out = String::new();
+            let mut closed = false;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if bytes.get(i + 1) == Some(&b'"') {
+                        out.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                let ch = trimmed[i..].chars().next().expect("valid utf-8 boundary");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            if !closed || out.is_empty() || out.contains('\0') {
+                return Err(AppError::bad_request("invalid quoted column in referential action"));
+            }
+            out
+        } else {
+            let start = i;
+            let first = trimmed[i..].chars().next().expect("non-empty");
+            if !(first.is_ascii_alphabetic() || first == '_') {
+                return Err(AppError::bad_request("invalid identifier in referential action"));
+            }
+            i += first.len_utf8();
+            while i < bytes.len() {
+                let ch = trimmed[i..].chars().next().expect("valid utf-8 boundary");
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+                    i += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            trimmed[start..i].to_string()
+        };
+        cols.push(col);
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b',' {
+            i += 1;
+        } else {
+            return Err(AppError::bad_request("unexpected token in referential action column list"));
+        }
+    }
+    Ok(cols)
+}
+
+fn normalize_referential_action(engine: Engine, raw: &str) -> Result<String, AppError> {
+    let trimmed = raw.trim();
+    let collapsed = trimmed.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    let upper = collapsed.to_ascii_uppercase();
+    match upper.as_str() {
+        "NO ACTION" | "RESTRICT" | "CASCADE" | "SET NULL" | "SET DEFAULT" => return Ok(upper),
+        _ => {}
+    }
+    if engine == Engine::Postgres {
+        let bytes = trimmed.as_bytes();
+        let mut i = 0usize;
+        let take_kw = |pos: &mut usize, kw: &str| -> bool {
+            let b = kw.as_bytes();
+            if *pos + b.len() > bytes.len() { return false; }
+            if !bytes[*pos..*pos + b.len()].eq_ignore_ascii_case(b) { return false; }
+            if *pos + b.len() < bytes.len()
+                && (bytes[*pos + b.len()].is_ascii_alphanumeric() || bytes[*pos + b.len()] == b'_')
+            {
+                return false;
+            }
+            *pos += b.len();
+            true
+        };
+        if take_kw(&mut i, "SET") {
+            let ws_start = i;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+            if i > ws_start {
+                let kind = if take_kw(&mut i, "NULL") {
+                    Some("SET NULL")
+                } else if take_kw(&mut i, "DEFAULT") {
+                    Some("SET DEFAULT")
+                } else {
+                    None
+                };
+                if let Some(prefix) = kind {
+                    while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+                    if bytes.get(i) == Some(&b'(') && trimmed.ends_with(')') && i < trimmed.len() - 1 {
+                        let inner = &trimmed[i + 1..trimmed.len() - 1];
+                        let cols = parse_pg_action_columns(inner)?;
+                        let quoted = cols.iter().map(|c| pg_ident(c)).collect::<Vec<_>>().join(", ");
+                        return Ok(format!("{prefix} ({quoted})"));
+                    }
+                }
+            }
+        }
+    }
+    Err(AppError::bad_request(format!("unsupported foreign key referential action: {trimmed}")))
+}
+
 fn clone_statements(
     engine: Engine,
     source_schema: &str,
     scratch_schema: &str,
     tables: &[MigrationCloneTable],
     foreign_keys: &[MigrationCloneForeignKey],
-) -> Vec<String> {
+) -> Result<Vec<String>, AppError> {
     let q = match engine {
         Engine::Mysql => mysql_ident,
         Engine::Postgres => pg_ident,
@@ -462,6 +590,8 @@ fn clone_statements(
     let mut foreign_keys = foreign_keys.to_vec();
     foreign_keys.sort_by(|a, b| a.table.cmp(&b.table).then(a.name.cmp(&b.name)));
     for fk in foreign_keys {
+        let on_delete = normalize_referential_action(engine, &fk.on_delete)?;
+        let on_update = normalize_referential_action(engine, &fk.on_update)?;
         let mut sql = format!(
             "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
             qualified(scratch_schema, &fk.table), q(&fk.name),
@@ -476,7 +606,7 @@ fn clone_statements(
                 _ => {},
             }
         }
-        sql.push_str(&format!(" ON DELETE {} ON UPDATE {}", fk.on_delete, fk.on_update));
+        sql.push_str(&format!(" ON DELETE {on_delete} ON UPDATE {on_update}"));
         if engine == Engine::Postgres {
             if fk.validated == Some(false) { sql.push_str(" NOT VALID"); }
             if fk.deferrable == Some(true) {
@@ -486,7 +616,7 @@ fn clone_statements(
         }
         statements.push(sql);
     }
-    statements
+    Ok(statements)
 }
 
 #[tauri::command]
@@ -580,11 +710,11 @@ async fn clone_scratch_inner(
         .filter(|fk| names.contains(&fk.table) && names.contains(&fk.ref_table)).collect();
     let serial_sequences = tables.iter().map(|table| table.serial_columns.len() as u64).sum();
     let foreign_keys_added = foreign_keys.len() as u64;
-    let statements = clone_statements(guard.engine, &source_schema, &record.name, &tables, &foreign_keys);
+    let statements = clone_statements(guard.engine, &source_schema, &record.name, &tables, &foreign_keys)?;
     let total_statements = statements.len() as u64;
     let tables_cloned = tables.len() as u64;
 
-    let (_, mut admin) = admin_for(&state, session_id).await?;
+    let (_, mut admin) = admin_for(state, session_id).await?;
     if guard.engine == Engine::Postgres {
         let search_path = format!("SET search_path TO {}", pg_ident(&source_schema));
         if let Err(error) = admin.execute(&search_path).await {
@@ -604,19 +734,19 @@ async fn clone_scratch_inner(
             Some(Err(error)) => {
                 admin.close().await;
                 let message = format!("clone stopped at statement {}/{}: {error}; SQL: {statement}; earlier cloned objects remain in {}", executed + 1, total_statements, record.name);
-                scratch_status(&state, &run_key, "active", Some(&message)).await?;
+                scratch_status(state, &run_key, "active", Some(&message)).await?;
                 return Err(AppError::local(message));
             },
             None => {
                 admin.close().await;
                 let message = format!("clone cancelled after {}/{} statements; earlier cloned objects remain in {}", executed, total_statements, record.name);
-                scratch_status(&state, &run_key, "active", Some(&message)).await?;
+                scratch_status(state, &run_key, "active", Some(&message)).await?;
                 return Err(AppError::new(crate::apperror::ErrorCode::Cancelled, message));
             },
         }
     }
     admin.close().await;
-    scratch_status(&state, &run_key, "active", None).await?;
+    scratch_status(state, &run_key, "active", None).await?;
     Ok(MigrationCloneResult {
         run_key,
         tables_cloned,
@@ -718,6 +848,31 @@ fn migration_tokens(engine: Engine, sql: &str) -> Result<Vec<MigrationToken>, Ap
                 }
             }
             if depth != 0 { return Err(AppError::bad_request("unterminated migration comment")); }
+            continue;
+        }
+        if engine == Engine::Postgres
+            && matches!(c, b'e' | b'E')
+            && bytes.get(i + 1) == Some(&b'\'')
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'$')))
+        {
+            i += 2;
+            let mut closed = false;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    if i + 1 >= bytes.len() { break; }
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') { i += 2; continue; }
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !closed { return Err(AppError::bad_request("unterminated quoted text in migration SQL")); }
+            tokens.push(MigrationToken::Other);
             continue;
         }
         if matches!(c, b'\'' | b'"' | b'`') {
@@ -853,7 +1008,8 @@ async fn finish_execution(
     mut summary: MigrationExecutionResult,
 ) -> Result<MigrationExecutionResult, AppError> {
     finalize_execution_counts(&mut summary, started);
-    if let Err(error) = scratch_status(state, run_key, status, summary.error.as_deref()).await {
+    let persisted_hash = (status == "executed").then_some(summary.sql_sha256.as_str());
+    if let Err(error) = scratch_execution_status(state, run_key, status, summary.error.as_deref(), persisted_hash).await {
         summary.ok = false;
         summary.partial = true;
         let message = format!("execution finished, but its scratch registry state could not be saved: {error}");
@@ -892,7 +1048,7 @@ async fn audit_execution_statement(
         engine: record.engine.clone(),
         ok: statement.ok,
         rows_out: 0,
-        rows_affected: statement.ok.then(|| statement.rows_affected as i64),
+        rows_affected: statement.ok.then_some(statement.rows_affected as i64),
         error: statement.error.clone(),
         error_code: statement.error_code.clone(),
         db_code: statement.db_code.clone(),
@@ -1250,7 +1406,7 @@ async fn audit_deployment_statement(
         engine: engine.wire_name().into(),
         ok: statement.ok,
         rows_out: 0,
-        rows_affected: statement.ok.then(|| statement.rows_affected as i64),
+        rows_affected: statement.ok.then_some(statement.rows_affected as i64),
         error: statement.error.clone(),
         error_code: statement.error_code.clone(),
         db_code: statement.db_code.clone(),
@@ -1369,6 +1525,15 @@ async fn execute_deployment_inner(
     let actual_hash = format!("{:x}", Sha256::digest(sql.as_bytes()));
     if actual_hash != expected_sql_sha256 || !catalog_complete || !tables_complete {
         return Err(AppError::bad_request("deployment requires the exact reviewed SQL hash and complete catalog/final-table proof"));
+    }
+    if rehearsal.sql_sha256.as_deref() != Some(actual_hash.as_str()) {
+        return Err(AppError::bad_request("rehearsed SQL hash does not match the deployment SQL; review and rehearsal must be repeated"));
+    }
+    let already_deployed: Option<String> = sqlx::query_scalar(
+        "SELECT run_key FROM migration_deployment WHERE rehearsal_run_key = ? LIMIT 1",
+    ).bind(rehearsal_run_key).fetch_optional(&state.history).await?;
+    if already_deployed.is_some() {
+        return Err(AppError::bad_request("rehearsal run was already used to claim a deployment; create and execute a fresh scratch rehearsal"));
     }
     let plan = preflight(session_id, sql, metadata.clone(), state).await?;
     if plan.unsupported != 0 || plan.sql_sha256 != expected_sql_sha256 {
@@ -1562,7 +1727,7 @@ pub async fn migration_rehearsal_create(
     if Uuid::parse_str(&run_key).is_err() {
         return Err(AppError::bad_request("runKey must be a UUID"));
     }
-    let name = format!("txui_mig_{}", Uuid::new_v4().simple().to_string()[..16].to_string());
+    let name = format!("txui_mig_{}", &Uuid::new_v4().simple().to_string()[..16]);
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
     let job_key = crate::state::ext_job_key(session_id, &run_key);
     state.ext_jobs.write().await.insert(job_key.clone(), cancel_tx);
@@ -1583,7 +1748,7 @@ pub(crate) async fn cleanup_scratch(state: &AppState, run_key: &str) -> Result<M
     let record = scratch_record(state, run_key).await?;
     let session_id = Uuid::parse_str(&record.session_id)
         .map_err(|_| AppError::local("scratch record has an invalid session id"))?;
-    let job_key = crate::state::ext_job_key(session_id, &run_key);
+    let job_key = crate::state::ext_job_key(session_id, run_key);
     if state.ext_jobs.read().await.contains_key(&job_key) {
         return Err(AppError::bad_request("scratch work is still running; cancel it before cleanup"));
     }
@@ -1597,7 +1762,7 @@ pub(crate) async fn cleanup_scratch(state: &AppState, run_key: &str) -> Result<M
         _ => return Err(AppError::local("scratch record has an unsupported engine")),
     };
     state.guard_statement(&session_id, &scratch_drop_sql(engine, &record.name)).await?;
-    let (_, mut admin) = match admin_for(&state, session_id).await {
+    let (_, mut admin) = match admin_for(state, session_id).await {
         Ok(connection) => connection,
         Err(error) => {
             let message = format!("scratch object {} was not dropped: {error}", record.name);
@@ -1609,11 +1774,11 @@ pub(crate) async fn cleanup_scratch(state: &AppState, run_key: &str) -> Result<M
     admin.close().await;
     if let Err(error) = result {
         let message = format!("scratch object {} was not dropped: {error}", record.name);
-        scratch_status(&state, &run_key, "cleanup_failed", Some(&message)).await?;
+        scratch_status(state, run_key, "cleanup_failed", Some(&message)).await?;
         return Err(AppError::local(message));
     }
-    scratch_status(&state, &run_key, "dropped", None).await?;
-    scratch_record(&state, &run_key).await
+    scratch_status(state, run_key, "dropped", None).await?;
+    scratch_record(state, run_key).await
 }
 
 #[tauri::command]
@@ -1621,7 +1786,7 @@ pub async fn migration_scratch_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<MigrationScratchRecord>, AppError> {
     Ok(sqlx::query_as::<_, MigrationScratchRecord>(
-        "SELECT run_key, session_id, connection_id, engine, name, status, error, created_at, updated_at
+        "SELECT run_key, session_id, connection_id, engine, name, status, error, sql_sha256, created_at, updated_at
          FROM migration_scratch
          WHERE status IN ('creating', 'active', 'executing', 'executed', 'execution_failed', 'execution_cancelled', 'cleanup_failed')
          ORDER BY updated_at DESC LIMIT 100",
@@ -1804,10 +1969,10 @@ mod tests {
         config.autocommit = true;
         state.session_starts.write().await.insert(id, crate::commands::audit::session_start(&config));
         let rehearsal_key = Uuid::new_v4().to_string();
-        insert_scratch(&state, &rehearsal_key, id, Engine::Mysql, "txui_mig_deploy_guard").await.unwrap();
-        scratch_status(&state, &rehearsal_key, "executed", None).await.unwrap();
         let sql = "ALTER TABLE orders ADD note text";
         let hash = format!("{:x}", Sha256::digest(sql.as_bytes()));
+        insert_scratch(&state, &rehearsal_key, id, Engine::Mysql, "txui_mig_deploy_guard").await.unwrap();
+        scratch_execution_status(&state, &rehearsal_key, "executed", None, Some(&hash)).await.unwrap();
         let wrong = execute_deployment(
             id, Uuid::new_v4().to_string(), rehearsal_key.clone(), "different-source".into(),
             config.id.to_string(), "shop".into(), sql.into(), hash.clone(), metadata(&["alter-table"]),
@@ -1890,7 +2055,7 @@ mod tests {
             MigrationCloneTable { name: "child".into(), serial_columns: vec![] },
             MigrationCloneTable { name: "parent".into(), serial_columns: vec![] },
         ];
-        let statements = clone_statements(Engine::Mysql, "source", "scratch", &tables, &[clone_fk("fk", "child", "parent")]);
+        let statements = clone_statements(Engine::Mysql, "source", "scratch", &tables, &[clone_fk("fk", "child", "parent")]).unwrap();
         assert_eq!(statements.len(), 3);
         assert!(statements[0].contains("CREATE TABLE `scratch`.`child` LIKE `source`.`child`"));
         assert!(statements[1].contains("CREATE TABLE `scratch`.`parent` LIKE `source`.`parent`"));
@@ -1900,7 +2065,7 @@ mod tests {
     #[test]
     fn postgres_clone_preserves_constraint_options_and_independent_serial_sequences() {
         let tables = vec![MigrationCloneTable { name: "parent".into(), serial_columns: vec!["id".into()] }];
-        let statements = clone_statements(Engine::Postgres, "source", "scratch", &tables, &[clone_fk("fk", "child", "parent")]);
+        let statements = clone_statements(Engine::Postgres, "source", "scratch", &tables, &[clone_fk("fk", "child", "parent")]).unwrap();
         let fk = statements.last().unwrap();
         assert!(fk.contains("MATCH FULL"));
         assert!(fk.contains("NOT VALID"));
@@ -1909,6 +2074,99 @@ mod tests {
         assert!(statements.iter().any(|sql| sql.contains("SET DEFAULT nextval(")));
         assert!(!statements.iter().any(|sql| sql.contains("nextval('source")));
         assert!(statements.iter().position(|sql| sql.contains("ADD CONSTRAINT")).unwrap() > 1);
+    }
+
+    #[test]
+    fn postgres_escape_string_does_not_desynchronize_migration_tokens() {
+        let sql = r#"ALTER TABLE orders ADD COLUMN note text DEFAULT E'\'; DROP DATABASE prod; --'"#;
+        let tokens = migration_tokens(Engine::Postgres, sql).expect("tokens");
+        assert!(
+            !tokens.iter().any(|t| matches!(t, MigrationToken::Word(w) if w == "DATABASE")),
+            "escaped quote inside E'...' must stay inside the string literal: {tokens:?}",
+        );
+        let input = MigrationStatementInput {
+            kind: "alter-table".into(),
+            line: 1,
+            table: Some("orders".into()),
+            supported: true,
+            summary: "add note".into(),
+            destructive: false,
+            lossy: false,
+            cost: None,
+        };
+        assert!(validate_rehearsal_statement(Engine::Postgres, sql, &input).is_ok());
+
+        let unclosed = r#"ALTER TABLE orders ADD COLUMN note text DEFAULT E'\'"#;
+        assert!(migration_tokens(Engine::Postgres, unclosed).is_err());
+    }
+
+    #[test]
+    fn clone_validates_referential_actions_and_quotes_postgres_column_lists() {
+        let tables = vec![
+            MigrationCloneTable { name: "child".into(), serial_columns: vec![] },
+            MigrationCloneTable { name: "parent".into(), serial_columns: vec![] },
+        ];
+        let mut fk = clone_fk("fk", "child", "parent");
+        fk.on_delete = "set   null (tenant_id, \"col\"\"2\")".into();
+        fk.on_update = "no action".into();
+        let pg_stmts = clone_statements(Engine::Postgres, "source", "scratch", &tables, &[fk.clone()]).unwrap();
+        assert!(pg_stmts.last().unwrap().contains("ON DELETE SET NULL (\"tenant_id\", \"col\"\"2\") ON UPDATE NO ACTION"));
+
+        assert!(clone_statements(Engine::Mysql, "source", "scratch", &tables, &[fk]).is_err());
+
+        let mut injected = clone_fk("fk", "child", "parent");
+        injected.on_delete = "CASCADE; DROP TABLE users --".into();
+        assert_eq!(
+            clone_statements(Engine::Postgres, "source", "scratch", &tables, &[injected]).unwrap_err().code,
+            crate::apperror::ErrorCode::BadRequest,
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_refuses_modified_sql_or_reused_rehearsal_run_key() {
+        let (state, id) = state_with(Engine::Mysql, "dev", false, true).await;
+        let mut config = crate::db::types::ConnectionConfig::new(Engine::Mysql, "deployment-target");
+        config.autocommit = true;
+        state.session_starts.write().await.insert(id, crate::commands::audit::session_start(&config));
+
+        let rehearsal_key = Uuid::new_v4().to_string();
+        let rehearsed_sql = "ALTER TABLE orders ADD note text";
+        let rehearsed_hash = format!("{:x}", Sha256::digest(rehearsed_sql.as_bytes()));
+        insert_scratch(&state, &rehearsal_key, id, Engine::Mysql, "txui_mig_h6").await.unwrap();
+        scratch_execution_status(&state, &rehearsal_key, "executed", None, Some(&rehearsed_hash)).await.unwrap();
+
+        let modified_sql = "DROP TABLE orders";
+        let modified_hash = format!("{:x}", Sha256::digest(modified_sql.as_bytes()));
+        let mismatch = execute_deployment(
+            id, Uuid::new_v4().to_string(), rehearsal_key.clone(), config.id.to_string(),
+            config.id.to_string(), "shop".into(), modified_sql.into(), modified_hash,
+            metadata(&["drop-table"]), true, true, None, &state,
+        ).await.expect_err("modified SQL must be refused");
+        assert_eq!(mismatch.code, crate::apperror::ErrorCode::BadRequest);
+        assert!(mismatch.message.contains("rehearsed SQL hash"));
+
+        // Claim the rehearsal once, then prove a second deployment with a fresh run_key cannot reuse it.
+        sqlx::query(
+            "INSERT INTO migration_deployment
+             (run_key, session_id, connection_id, source_connection_id, rehearsal_run_key,
+              database_name, engine, sql_sha256, status)
+             VALUES (?, ?, ?, ?, ?, 'shop', 'mysql', ?, 'executed')",
+        )
+            .bind(Uuid::new_v4().to_string())
+            .bind(id.to_string())
+            .bind(config.id.to_string())
+            .bind(config.id.to_string())
+            .bind(&rehearsal_key)
+            .bind(&rehearsed_hash)
+            .execute(&state.history).await.unwrap();
+
+        let reused = execute_deployment(
+            id, Uuid::new_v4().to_string(), rehearsal_key, config.id.to_string(),
+            config.id.to_string(), "shop".into(), rehearsed_sql.into(), rehearsed_hash,
+            metadata(&["alter-table"]), true, true, None, &state,
+        ).await.expect_err("reused rehearsal_run_key must be refused");
+        assert_eq!(reused.code, crate::apperror::ErrorCode::BadRequest);
+        assert!(reused.message.contains("already used"));
     }
 
     #[test]
@@ -2778,9 +3036,10 @@ mod tests {
                  WHERE k.table_schema = ? AND k.table_name = ? AND k.referenced_table_name IS NOT NULL \
                  ORDER BY k.constraint_name, k.ordinal_position",
             ).bind(schema).bind(&name).fetch_all(pool).await.unwrap();
-            let mut fks: std::collections::BTreeMap<(String, String, String, String), Vec<(i64, String, String)>> = Default::default();
+            type LiveFkMap = std::collections::BTreeMap<(String, String, String, String), Vec<(i64, String, String)>>;
+            let mut fks: LiveFkMap = Default::default();
             for (fk, column, ref_table, ref_column, _table, ordinal, on_delete, on_update) in fk_rows {
-                fks.entry((fk, ref_table, on_delete, on_update)).or_default().push((i64::try_from(ordinal).unwrap(), column, ref_column));
+                fks.entry((fk, ref_table, on_delete, on_update)).or_default().push((ordinal, column, ref_column));
             }
             out.push(live_table_json(
                 name,
@@ -2835,9 +3094,10 @@ mod tests {
                  WHERE con.contype = 'f' AND n.nspname = $1 AND src.relname = $2 \
                  ORDER BY con.conname, u.ord",
             ).bind(schema).bind(&name).fetch_all(pool).await.unwrap();
-            let mut fks: std::collections::BTreeMap<(String, String, String, String), Vec<(i64, String, String)>> = Default::default();
+            type LiveFkMap = std::collections::BTreeMap<(String, String, String, String), Vec<(i64, String, String)>>;
+            let mut fks: LiveFkMap = Default::default();
             for (fk, column, ref_table, ref_column, _table, ordinal, on_delete, on_update) in fk_rows {
-                fks.entry((fk, ref_table, on_delete, on_update)).or_default().push((i64::try_from(ordinal).unwrap(), column, ref_column));
+                fks.entry((fk, ref_table, on_delete, on_update)).or_default().push((ordinal, column, ref_column));
             }
             out.push(live_table_json(
                 name,

@@ -61,15 +61,27 @@ interface Aggregates { count: number; sum: number | null; avg: number | null; mi
 const MAX_AGG_CELLS = 2_000_000; // beyond this only count is shown — keeps selection instant
 
 function computeAggregates(rows: unknown[][], sel: SelRect): Aggregates {
-  const cells = (sel.r2 - sel.r1 + 1) * (sel.c2 - sel.c1 + 1);
+  if (rows.length === 0 || sel.r2 < 0 || sel.c2 < 0 || sel.r1 >= rows.length) {
+    return { count: 0, sum: null, avg: null, min: null, max: null };
+  }
+  const r1 = Math.max(0, sel.r1);
+  const r2 = Math.min(sel.r2, rows.length - 1);
+  const c1 = Math.max(0, sel.c1);
+  const c2 = sel.c2;
+  if (r2 < r1 || c2 < c1) {
+    return { count: 0, sum: null, avg: null, min: null, max: null };
+  }
+  const cells = (r2 - r1 + 1) * (c2 - c1 + 1);
   let count = 0, sum = 0, numeric = 0;
   let min: number | null = null, max: number | null = null;
   if (cells > MAX_AGG_CELLS) {
     return { count: cells, sum: null, avg: null, min: null, max: null };
   }
-  for (let r = sel.r1; r <= Math.min(sel.r2, rows.length - 1); r++) {
-    for (let c = sel.c1; c <= sel.c2; c++) {
-      const v = rows[r][c];
+  for (let r = r1; r <= r2; r++) {
+    const row = rows[r];
+    if (!row) continue;
+    for (let c = c1; c <= Math.min(c2, row.length - 1); c++) {
+      const v = row[c];
       if (v === null || v === undefined) continue;
       count++;
       const n = typeof v === 'number' ? v : NaN;
@@ -206,16 +218,25 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
   }, []);
 
   const handleSelection = useCallback((sel: SelRect | null, dragging?: boolean) => {
-    setHasSel(sel !== null);
+    const valid = sel && displayRows.length > 0 && displayColumns.length > 0
+      && sel.r1 >= 0 && sel.r2 >= 0 && sel.c1 >= 0 && sel.c2 >= 0 ? sel : null;
+    setHasSel(valid !== null);
     // The aggregate scan touches up to 2M cells — run it once on the final
     // selection, not on every intermediate drag update.
-    if (!dragging) setAgg(sel ? computeAggregates(displayRows, sel) : null);
-    if (sel) setRecordRow(Math.min(sel.r1, sel.r2));
-  }, [displayRows]);
+    if (!dragging) setAgg(valid ? computeAggregates(displayRows, valid) : null);
+    if (valid) {
+      const rowIdx = Math.min(valid.r1, valid.r2);
+      setRecordRow(rowIdx >= 0 && rowIdx < sortedRows.length ? rowIdx : null);
+    }
+  }, [displayRows, displayColumns.length, sortedRows.length]);
 
   const handleOpenCell = useCallback((r: number, c: number) => {
+    if (r < 0 || r >= sortedRows.length || c < 0 || c >= displayColumns.length) return;
     const original = displayColumns[c].index;
-    setViewer({ column: result.columns[original].name, value: sortedRows[r][original] });
+    const col = result.columns[original];
+    const row = sortedRows[r];
+    if (!col || !row) return;
+    setViewer({ column: col.name, value: row[original] });
   }, [result.columns, sortedRows, displayColumns]);
 
   const getData = useCallback(() => {
@@ -342,7 +363,7 @@ export function ResultGrid({ result, engine, apiOutRef, sessionId, sourceSql, on
             apiRef={apiRef}
           />
         </div>
-        {showRecord && recordRow !== null && sortedRows[recordRow] && (
+        {showRecord && recordRow !== null && recordRow >= 0 && recordRow < sortedRows.length && sortedRows[recordRow] && (
           <RecordView
             columns={result.columns}
             row={sortedRows[recordRow]}

@@ -116,7 +116,7 @@ pub(crate) async fn insert(
     .bind(&entry.db_code)
     .bind(&entry.sqlstate)
     .bind(&entry.sql)
-    .execute(&*pool).await
+    .execute(pool).await
     ?;
     Ok(())
 }
@@ -277,7 +277,7 @@ pub async fn audit_list(
                  ORDER BY id DESC LIMIT ?2"
             )
             .bind(like).bind(limit)
-            .fetch_all(&*pool).await
+            .fetch_all(pool).await
         }
         None => {
             sqlx::query(
@@ -285,7 +285,7 @@ pub async fn audit_list(
                  FROM audit_log ORDER BY id DESC LIMIT ?"
             )
             .bind(limit)
-            .fetch_all(&*pool).await
+            .fetch_all(pool).await
         }
     }?;
 

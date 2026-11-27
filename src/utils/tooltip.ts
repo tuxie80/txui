@@ -38,7 +38,7 @@ function ensure(): HTMLDivElement {
     el.style.cssText =
       'position:fixed;z-index:9999;pointer-events:none;display:none;' +
       'background:rgba(24,24,32,0.82);color:#eee;border:1px solid rgba(120,120,140,0.35);' +
-      'border-radius:5px;padding:3px 7px;font-size:11px;white-space:nowrap;' +
+      'border-radius:5px;padding:3px 7px;font-size:calc(11px * var(--font-scale, 1));white-space:nowrap;' +
       'box-shadow:0 4px 14px rgba(0,0,0,.35);font-family:-apple-system,sans-serif;' +
       'backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);';
     document.body.appendChild(el);

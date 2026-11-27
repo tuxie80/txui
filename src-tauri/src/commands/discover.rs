@@ -161,10 +161,8 @@ fn parse_mysql_banner(bytes: &[u8]) -> Option<String> {
 fn parse_clickhouse_ping(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     let body = text.split("\r\n\r\n").nth(1)?.trim();
-    if text.starts_with("HTTP/1.0 200") || text.starts_with("HTTP/1.1 200") {
-        if body == "Ok." {
-            return Some("Ok.".to_string());
-        }
+    if (text.starts_with("HTTP/1.0 200") || text.starts_with("HTTP/1.1 200")) && body == "Ok." {
+        return Some("Ok.".to_string());
     }
     None
 }

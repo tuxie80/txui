@@ -41,7 +41,7 @@ pub async fn list_sql_templates(state: State<'_, AppState>) -> Result<Vec<SqlTem
         "SELECT id, name, engine, description, body, builtin, updated_at \
          FROM sql_templates ORDER BY name"
     )
-    .fetch_all(&*pool).await
+    .fetch_all(pool).await
     ?;
     Ok(rows.iter().map(|r| SqlTemplate {
         id: r.get(0),
@@ -74,7 +74,7 @@ pub async fn save_sql_template(
                  updated_at=datetime('now') WHERE id=?"
             )
             .bind(name.trim()).bind(&engine).bind(&description).bind(&body).bind(id)
-            .execute(&*pool).await
+            .execute(pool).await
             ?;
             Ok(id)
         }
@@ -83,7 +83,7 @@ pub async fn save_sql_template(
                 "INSERT INTO sql_templates (name, engine, description, body) VALUES (?, ?, ?, ?)"
             )
             .bind(name.trim()).bind(&engine).bind(&description).bind(&body)
-            .execute(&*pool).await
+            .execute(pool).await
             ?;
             Ok(res.last_insert_rowid())
         }
@@ -95,7 +95,7 @@ pub async fn delete_sql_template(id: i64, state: State<'_, AppState>) -> Result<
     let pool = &state.history;
     sqlx::query("DELETE FROM sql_templates WHERE id=?")
         .bind(id)
-        .execute(&*pool).await
+        .execute(pool).await
         ?;
     Ok(())
 }

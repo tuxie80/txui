@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxUI Help · v1.6.0</title>
+<title>TxUI Help · v1.6.1</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>/* TxUI Help — dark-first, light-aware, red accent. */
 :root{
@@ -218,7 +218,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 </head>
 <body class="show-mac">
 <header class="topbar">
-  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.6.0</span></div>
+  <div class="brand"><span class="logo">Tx</span><span>TxUI Help</span><span class="ver-badge">v1.6.1</span></div>
   <div class="top-actions">
     <input id="globalSearch" class="global-search" placeholder="Search the docs…" oninput="globalSearch(this.value)" autocomplete="off">
     <div class="seg" id="osToggle">
@@ -231,13 +231,13 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <div class="layout">
   <nav class="sidenav">
     <ul><li><a href="#overview">Overview</a></li><li><a href="#engines">Engine support</a></li><li><a href="#guides">Guides</a><ul class="sub"><li><a href="#guide-first-steps">First steps (101)</a></li><li><a href="#guide-ai-assistant">AI assistant</a></li><li><a href="#guide-clickhouse">ClickHouse</a></li><li><a href="#guide-galera">Galera clusters (MariaDB Galera / Percona XtraDB Cluster)</a></li><li><a href="#guide-mysql">MySQL / MariaDB / Percona</a></li><li><a href="#guide-platforms">Platform notes — macOS, Linux, Windows</a></li><li><a href="#guide-postgresql">PostgreSQL</a></li><li><a href="#guide-redis">Redis</a></li><li><a href="#guide-sqlite-parquet">SQLite, DuckDB &amp; Parquet files</a></li><li><a href="#guide-txshell">TxShell</a></li></ul></li><li><a href="#workspace">The workspace</a></li><li><a href="#shortcuts">Keyboard shortcuts</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#coverage">Feature coverage</a></li><li><a href="#panels">Tool panels</a></li><li><a href="#dbaviews">DBA views</a></li><li><a href="#settings">Settings</a></li><li><a href="#notes">Availability & limits</a></li></ul>
-    <div class="nav-foot">Generated from source<br>at v1.6.0 · macOS screenshots</div>
+    <div class="nav-foot">Generated from source<br>at v1.6.1 · macOS screenshots</div>
   </nav>
   <main class="content" id="content">
     
 <section id="overview" class="doc-section">
-  <h1 id="txui-v1-6-0">TxUI <span class="ver">v1.6.0</span></h1>
-  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 41 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.6.0.</p>
+  <h1 id="txui-v1-6-1">TxUI <span class="ver">v1.6.1</span></h1>
+  <p class="lede">A fast, keyboard-first database GUI for MySQL, PostgreSQL, ClickHouse, Redis, SQLite and Parquet — with 41 built-in tool panels, 70 editor commands and 234 ready-made DBA views. This is the complete reference for version 1.6.1.</p>
   <div class="cards">
     <div class="card"><div class="big">9</div><div>database engines</div></div>
     <div class="card"><div class="big">41</div><div>tool panels</div></div>
@@ -255,7 +255,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
     
 <section id="engines" class="doc-section">
   <h1 id="engine-support-matrix">Engine support matrix</h1>
-  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.6.0). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
+  <p class="lede">What TxUI can do on each of the 9 engines it speaks, taken directly from the app's engine-capability table (v1.6.1). Engines are ordered <b>most complete first</b>; each capability says what it means and which tool panels it opens. A dash means the feature is not offered there — TxUI hides or disables it rather than letting you run into an error.</p>
   <div class="toolbar">
     <input id="engFilter" class="filter" placeholder="Filter capabilities…" oninput="filterTable('engFilter','engTable')">
   </div>
@@ -1141,7 +1141,7 @@ th.e-duckdb,th.e-mongodb,th.e-sqlserver{color:inherit}
 <ul><li><b>Object explorer</b> — attached databases → tables, views and macros. Objects are schema-qualified (<code>main.orders</code>) because DuckDB uses <code>db.schema.table</code> and attached databases can share a <code>main</code> schema.</li><li><b>Metadata</b> — columns, indexes, PK/FK information and stored DDL. Double-click a table or view for the read-only data browser.</li><li><b>SQL editor</b> — PostgreSQL-flavoured dialect, double-quoted identifiers and DuckDB vocabulary such as <code>PIVOT</code>, <code>QUALIFY</code> and the file readers. Writes work on a writable connection.</li><li><b>🔬 Explain</b> — <code>EXPLAIN</code> and <code>EXPLAIN ANALYZE</code> render as text plans.</li><li><b>ⓘ Server variables</b> — <code>duckdb_settings()</code> with GLOBAL/LOCAL scope.</li><li><b>Manual transactions</b> — BEGIN / COMMIT / ROLLBACK.</li><li><b>Cancel</b> — uses DuckDB&#39;s interrupt handle, the in-process equivalent of <code>KILL QUERY</code>.</li></ul>
 <p><b>DBA Views includes 11 inspections:</b> attached databases, version/context, settings, extensions, exact table row counts, views, columns, indexes with CREATE statements, enforced constraints, macros and sequences.</p>
 <p><b>Local read-only and file locking:</b></p>
-<ul><li>READ-ONLY opens with <code>access_mode = READ_ONLY</code>; DuckDB itself refuses writes.</li><li>One read-write process may own a file. A second read-write session fails with DuckDB&#39;s lock error.</li><li>Read-only sessions can share the file freely.</li></ul>
+<ul><li>READ-ONLY opens with <code>access_mode = READ_ONLY</code>; DuckDB itself refuses writes.</li><li>One read-write process may own a file. A second read-write session fails with DuckDB&#39;s lock error.</li><li>Read-only sessions can share the file freely.</li><li>Both <code>parquet</code> and <code>json</code> extensions are statically linked into the binary and <code>autoinstall_known_extensions</code> is disabled on local sessions, so <code>VARIANT</code> columns and Parquet dataset JSON exports work completely offline without runtime extension downloads.</li></ul>
 <h4 id="quack-remote">Quack remote</h4>
 <p><b>Connect:</b></p>
 <ol><li>Choose <b>Quack remote</b> in the DuckDB connection form.</li><li>Enter <code>quack:host[:port]</code> or <code>quack://host:port</code>. The default port is <b>9494</b>.</li><li>Enter the server token. TxUI stores it in the active secret store.</li><li>Choose TLS settings appropriate for the endpoint:<ul><li>Localhost defaults to HTTP.</li><li>Non-local endpoints default to HTTPS.</li><li>A self-signed certificate requires its SHA-256 fingerprint; there is no trust-all option.</li></ul></li></ol>
@@ -1230,7 +1230,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
     
 <section id="shortcuts" class="doc-section">
   <h1 id="keyboard-shortcuts">Keyboard shortcuts</h1>
-  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.6.0). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
+  <p class="lede">All 70 SQL-editor commands, straight from the app's command registry (v1.6.1). Filter by action or key. Chords render for your platform — toggle macOS / Windows·Linux above.</p>
   <div class="toolbar"><input id="scFilter" class="filter" placeholder="Filter shortcuts by action or key…" oninput="filterTable('scFilter','scTable')"></div>
   <table class="ref" id="scTable">
     <thead><tr><th>Command</th><th>Category</th><th>Shortcut</th><th>What it does</th></tr></thead>
@@ -2590,7 +2590,7 @@ SELECT * FROM orders WHERE created_at &gt;= $cutoff;</code></pre>
   </ul>
 </section>
     <div id="noresults" class="noresults" hidden>No matches. <a href="#" onclick="clearGlobal();return false">Clear search</a></div>
-    <footer class="foot">TxUI v1.6.0 · 41 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
+    <footer class="foot">TxUI v1.6.1 · 41 panels · 70 commands · 234 DBA views · 9 engines. This help is generated directly from the application source, so it always reflects the shipped version. <a href="../docs-archive/">Older versions</a> · <a href="../dev/">Development docs</a></footer>
   </main>
 </div>
 <script>// TxUI Help — client-side interactivity (no dependencies).

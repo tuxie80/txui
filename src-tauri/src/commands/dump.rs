@@ -451,6 +451,24 @@ fn get_password(config: &crate::db::types::ConnectionConfig, data_dir: &std::pat
     crate::secretstore::get(data_dir, &config.keychain_key())
 }
 
+fn check_dump_tool_guards(
+    config: &crate::db::types::ConnectionConfig,
+    tool: &str,
+) -> Result<(), crate::apperror::AppError> {
+    if config.read_only && is_write_tool(tool) {
+        return Err(crate::apperror::AppError::guard(format!(
+            "'{}' is read-only — restore with {} is blocked", config.name, tool
+        )));
+    }
+    if is_write_tool(tool) && config.environment.as_deref() == Some("prod") && !config.prod_allow_ddl {
+        return Err(crate::apperror::AppError::guard(format!(
+            "blocked on prod: restore with {tool} writes in bulk to '{}' — enable 'Allow destructive DDL' on the connection to permit",
+            config.name
+        )));
+    }
+    Ok(())
+}
+
 /// Run one allowlisted external tool against a saved connection.
 ///
 /// `args` may contain `{{host}}` / `{{port}}` placeholders — they are resolved
@@ -481,11 +499,7 @@ pub async fn run_dump_tool(
             "dump/restore is not supported for {:?} connections", config.engine
         ).into());
     }
-    if config.read_only && is_write_tool(&tool) {
-        return Err(format!(
-            "'{}' is read-only — restore with {} is blocked", config.name, tool
-        ).into());
-    }
+    check_dump_tool_guards(&config, &tool)?;
     // Register the cancel handle BEFORE any slow work (tunnel open can take
     // seconds) — a cancel arriving during startup must not be a silent no-op,
     // especially for write-side restores. The entry is removed on every exit
@@ -817,5 +831,34 @@ mod tests {
         assert!(validate_argv("mariadb", &sv(&["-p", "secret"]), HOST, PORT, USER).is_err());
         assert!(validate_argv("mariadb-dump", &sv(&["--defaults-file=/tmp/x.cnf"]), HOST, PORT, USER).is_err());
         assert!(validate_argv("mariadb-dump", &sv(&["--ssl-mode=DISABLED"]), HOST, PORT, USER).is_err());
+    }
+
+    #[test]
+    fn restore_tools_respect_read_only_and_prod_destructive_ddl_border() {
+        let mut prod = crate::db::types::ConnectionConfig::new(Engine::Mysql, "prod-db");
+        prod.environment = Some("prod".into());
+        prod.prod_allow_ddl = false;
+
+        // Read-only dump tools remain allowed on prod.
+        assert!(check_dump_tool_guards(&prod, "mysqldump").is_ok());
+        assert!(check_dump_tool_guards(&prod, "pg_dump").is_ok());
+
+        // Write-side restore tools are refused on prod unless prod_allow_ddl is enabled.
+        for tool in ["mysql", "mariadb", "myloader", "pg_restore", "psql"] {
+            assert_eq!(
+                check_dump_tool_guards(&prod, tool).unwrap_err().code,
+                crate::apperror::ErrorCode::GuardRefused,
+                "{tool}"
+            );
+        }
+        prod.prod_allow_ddl = true;
+        assert!(check_dump_tool_guards(&prod, "mysql").is_ok());
+
+        // Read-only refuses restore even when prod_allow_ddl is true.
+        prod.read_only = true;
+        assert_eq!(
+            check_dump_tool_guards(&prod, "mysql").unwrap_err().code,
+            crate::apperror::ErrorCode::GuardRefused
+        );
     }
 }

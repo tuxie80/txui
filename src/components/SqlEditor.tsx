@@ -115,7 +115,9 @@ function clipPreview(text: string): string {
  * Keyword case follows the editor preference.
  */
 function formatDocument(view: EditorView, engine: Engine) {
+  const docBefore = view.state.doc;
   import('sql-formatter').then(({ format }) => {
+    if (view.state.doc !== docBefore) return;
     const dialectMap: Record<Engine, 'mysql' | 'postgresql' | 'sql' | 'transactsql'> = {
       mysql: 'mysql', postgres: 'postgresql', redis: 'sql',
       // sql-formatter has no ClickHouse dialect; generic SQL keeps
@@ -1535,6 +1537,7 @@ export function SqlEditor({
         : [...new Set(aliases.values())];
       if (targets.length === 0) return false;
 
+      const docBefore = view.state.doc;
       (async () => {
         const parts: string[] = [];
         for (const table of targets) {
@@ -1547,10 +1550,11 @@ export function SqlEditor({
         }
         if (parts.length === 0) return;
         const v = viewRef.current;
-        if (!v) return;
+        if (!v || v.state.doc !== docBefore) return;
+        const inserted = parts.join(', ');
         v.dispatch({
-          changes: { from: best!.from, to: best!.to, insert: parts.join(', ') },
-          selection: { anchor: best!.from + parts.join(', ').length },
+          changes: { from: best!.from, to: best!.to, insert: inserted },
+          selection: { anchor: best!.from + inserted.length },
         });
         v.focus();
       })();
@@ -1576,6 +1580,7 @@ export function SqlEditor({
       // on WKWebView and returns null on WebKitGTK). Everything that can fail
       // *before* asking is checked above, so from here the key is consumed and
       // the rename — or the user's cancel — lands in the promise.
+      const docBefore = view.state.doc;
       void (async () => {
         // Column classification needs the in-scope tables' columns; they come
         // from the host's lazy, cached provider (the same one completion uses).
@@ -1584,6 +1589,7 @@ export function SqlEditor({
           const cols = await getColumnsRef.current?.(t).catch(() => []) ?? [];
           if (cols.length > 0) tables.push({ name: t, columns: cols.map(c => c.label) });
         }
+        if (view.state.doc !== docBefore) return;
         const plan = planRename(doc, target, { tables }, engine, sqlDelimiter());
         const what = `${target.kind === 'cte' ? 'CTE' : target.kind} ${target.name}`;
         const hint = plan.definite > 0
@@ -1596,6 +1602,7 @@ export function SqlEditor({
           `Rename ${what} to:\n${hint}.\nThis buffer only — the database object is NOT altered (no ALTER TABLE is run), and no other buffer or file is touched.`,
           target.name, { title: 'Rename symbol' });
         if (!newName || newName === target.name) return;
+        if (view.state.doc !== docBefore) return;
 
         const result = applyRename(doc, plan, newName, engine);
         if (!result) return; // unusable new name (empty / dotted / multiline)
@@ -2816,7 +2823,10 @@ export function SqlEditor({
   // Jump to a specific line — how a Find-in-Files hit lands on its match.
   useEffect(() => {
     const go = (e: Event) => {
-      const n = (e as CustomEvent<{ line: number }>).detail?.line;
+      const d = (e as CustomEvent<{ line: number; tabId?: number | string }>).detail;
+      const target = d?.tabId;
+      if (target !== undefined ? target !== tabIdRef.current : !activeRef.current) return;
+      const n = d?.line;
       const v = viewRef.current;
       if (!v || !n) return;
       // Clamp: the file may have changed since the search ran.
@@ -2999,7 +3009,9 @@ export function SqlEditor({
   useEffect(() => {
     const on = (e: Event) => {
       const view = viewRef.current;
-      const d = (e as CustomEvent<{ from: number; to: number }>).detail;
+      const d = (e as CustomEvent<{ from: number; to: number; tabId?: number | string }>).detail;
+      const target = d?.tabId;
+      if (target !== undefined ? target !== tabIdRef.current : !activeRef.current) return;
       if (!view || !d) return;
       const max = view.state.doc.length;
       const from = Math.max(0, Math.min(max, d.from));
@@ -3058,7 +3070,7 @@ export function SqlEditor({
             style={{
               position: 'absolute', top: 4, right: 44, zIndex: 5,
               display: 'flex', alignItems: 'center', gap: 4,
-              fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+              fontSize: 'calc(11px * var(--font-scale, 1))', fontWeight: 600, letterSpacing: 0.5,
               color: '#e5484d', pointerEvents: 'none', userSelect: 'none',
             }}
           >

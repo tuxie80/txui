@@ -50,9 +50,16 @@ pub async fn vault_unlock(password: String, state: State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
-pub async fn vault_lock() -> Result<(), crate::apperror::AppError> {
+pub async fn vault_lock(state: State<'_, AppState>) -> Result<(), crate::apperror::AppError> {
     secretstore::lock();
+    clear_runtime_state(&state).await;
     Ok(())
+}
+
+async fn clear_runtime_state(state: &AppState) {
+    crate::password_exec::clear_all();
+    state.configs.write().await.clear();
+    state.close_all().await;
 }
 
 #[tauri::command]
@@ -123,4 +130,33 @@ pub async fn save_folder_meta(
     crate::storage::save_folders(&state.data_dir, &folders)
         .await
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clear_runtime_state;
+    use crate::db::types::{ConnectionConfig, Engine, LiveSession};
+    use crate::state::AppState;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn vault_lock_clears_configs_sessions_and_password_cache() {
+        let history = crate::history::open_in_memory().await.expect("in-memory history");
+        let dir = std::env::temp_dir().join(format!("txui-vault-lock-{}", Uuid::new_v4()));
+        let mut configs = HashMap::new();
+        let cfg = ConnectionConfig::new(Engine::Duckdb, "secret-conn");
+        configs.insert(cfg.id, cfg);
+        let state = AppState::new(history, dir, configs);
+
+        let sid = Uuid::new_v4();
+        let duck = crate::db::duckdb::open_memory_sync(false).expect("duckdb memory");
+        state.sessions.write().await.insert(sid, Arc::new(LiveSession::Duckdb(Arc::new(duck))));
+
+        clear_runtime_state(&state).await;
+
+        assert!(state.configs.read().await.is_empty(), "in-memory configs must be cleared on lock");
+        assert!(state.sessions.read().await.is_empty(), "open sessions must be closed on lock");
+    }
 }

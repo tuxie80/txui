@@ -133,6 +133,62 @@ fn adhoc_event_id(seed_id: Uuid, host: &str, port: u16) -> Uuid {
 /// connections reach it through `poll_one` (config looked up in
 /// `state.configs`), ad-hoc configs are handed over directly and NEVER touch
 /// `state.configs`.
+/// Verify that a Galera member `config` may reuse stored secrets for `config.id`:
+/// whenever a DB or SSH secret exists in `secretstore` for `config.id`, `config.id`
+/// must exist in `saved_configs` with matching engine, user, SSH tunnel config,
+/// non-downgraded TLS, and an endpoint matching either the seed's saved host or
+/// another saved MySQL-family connection.
+fn validate_galera_member_secret_pin(
+    state: &AppState,
+    config: &ConnectionConfig,
+    saved_configs: &std::collections::HashMap<Uuid, ConnectionConfig>,
+) -> Result<(), String> {
+    let has_db_secret = crate::secretstore::get(&state.data_dir, &config.keychain_key()).is_some();
+    let has_ssh_secret = config.use_ssh
+        && config.use_ssh_password
+        && crate::secretstore::get(&state.data_dir, &config.ssh_keychain_key()).is_some();
+    if !has_db_secret && !has_ssh_secret {
+        return Ok(());
+    }
+    let Some(seed) = saved_configs.get(&config.id) else {
+        return Err("ad-hoc Galera member cannot reuse stored credentials of an unsaved connection".into());
+    };
+    if seed.engine != config.engine {
+        return Err("ad-hoc Galera member engine does not match the saved seed connection".into());
+    }
+    if super::connections::ssl_mode_downgraded(&seed.ssl_mode, &config.ssl_mode)
+        || (!seed.trust_server_cert && config.trust_server_cert)
+    {
+        return Err("ad-hoc Galera member cannot downgrade TLS of the saved seed connection".into());
+    }
+    if seed.use_ssh != config.use_ssh
+        || (config.use_ssh && !super::connections::ssh_secret_pin_matches(seed, config))
+    {
+        return Err("ad-hoc Galera member SSH tunnel target does not match the saved seed connection".into());
+    }
+    if seed.user.as_deref().unwrap_or("") != config.user.as_deref().unwrap_or("") {
+        return Err("ad-hoc Galera member database user does not match the saved seed connection".into());
+    }
+    let cand_host = super::connections::normalize_pin_host(config.host.as_deref());
+    let cand_port = config.port.unwrap_or(config.engine.default_port());
+    let seed_host = super::connections::normalize_pin_host(seed.host.as_deref());
+    let matches_seed_host = cand_host == seed_host;
+    let matches_saved_member = saved_configs.values().any(|c| {
+        is_mysql_family(c.engine)
+            && super::connections::normalize_pin_host(c.host.as_deref()) == cand_host
+            && c.port.unwrap_or(c.engine.default_port()) == cand_port
+            && c.user.as_deref().unwrap_or("") == config.user.as_deref().unwrap_or("")
+            && !super::connections::ssl_mode_downgraded(&c.ssl_mode, &config.ssl_mode)
+            && !(!c.trust_server_cert && config.trust_server_cert)
+    });
+    if !matches_seed_host && !matches_saved_member {
+        return Err(format!(
+            "refusing to send stored seed credentials to unsaved external host '{cand_host}:{cand_port}' — adopt the member as a connection first",
+        ));
+    }
+    Ok(())
+}
+
 async fn poll_one_config(
     state: &AppState,
     config: &ConnectionConfig,
@@ -157,6 +213,12 @@ async fn poll_one_config(
         return done(false, Some(format!(
             "skipped — {} connections have no wsrep status (Galera is MySQL-family)",
             config.engine.wire_name())), vec![], vec![]);
+    }
+    {
+        let configs = state.configs.read().await;
+        if let Err(msg) = validate_galera_member_secret_pin(state, config, &configs) {
+            return done(false, Some(msg), vec![], vec![]);
+        }
     }
 
     let session_id = match super::connections::open_ephemeral_session(config, state).await {
@@ -465,6 +527,12 @@ async fn processlist_one_config(
             "skipped — {} connections have no processlist (Galera is MySQL-family)",
             config.engine.wire_name())), vec![], vec![]);
     }
+    {
+        let configs = state.configs.read().await;
+        if let Err(msg) = validate_galera_member_secret_pin(state, config, &configs) {
+            return done(false, Some(msg), vec![], vec![]);
+        }
+    }
 
     let session_id = match super::connections::open_ephemeral_session(config, state).await {
         Ok(id) => id,
@@ -646,6 +714,12 @@ pub(crate) async fn cluster_kill(
     if config.read_only {
         return Err(AppError::bad_request(
             "Connection is read-only — killing sessions is blocked."));
+    }
+    {
+        let configs = state.configs.read().await;
+        if let Err(msg) = validate_galera_member_secret_pin(state, config, &configs) {
+            return Err(AppError::guard(msg));
+        }
     }
 
     let session_id = super::connections::open_ephemeral_session(config, state).await?;
@@ -1255,6 +1329,12 @@ async fn cluster_sst_tail(
         _ => return Err(AppError::unsupported(
             "this connection has no SSH configured — add SSH to the connection to watch the server log")),
     }
+    {
+        let configs = state.configs.read().await;
+        if let Err(msg) = validate_galera_member_secret_pin(state, config, &configs) {
+            return Err(AppError::guard(msg));
+        }
+    }
 
     // Honest failure: a mid-SST joiner refuses TCP outright (live-verified on
     // MariaDB 11.8 rsync SST) — which is exactly when this tail matters. The
@@ -1398,6 +1478,51 @@ mod cluster_kill_tests {
         assert!(crate::apperror::AppError::display(&err).contains("read-only"));
         assert!(state.sessions.read().await.is_empty(),
             "a read-only refusal must not open a session");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn adhoc_galera_member_pins_stored_seed_credentials_to_saved_endpoints() {
+        let dir = temp_dir_for_kill_test("secret-pin");
+        let history = crate::history::open_in_memory().await.unwrap();
+        let mut seed = ConnectionConfig::new(Engine::Mysql, "seed-node");
+        seed.host = Some("10.0.0.1".into());
+        seed.port = Some(3306);
+        seed.user = Some("galera_admin".into());
+        seed.ssl_mode = crate::db::types::SslMode::Require;
+
+        let mut peer = seed.clone();
+        peer.id = Uuid::new_v4();
+        peer.host = Some("10.0.0.2".into());
+        peer.port = Some(3306);
+
+        let mut saved = std::collections::HashMap::new();
+        saved.insert(seed.id, seed.clone());
+        saved.insert(peer.id, peer.clone());
+        let state = AppState::new(history, dir.clone(), saved.clone());
+        crate::secretstore::set(&dir, &seed.keychain_key(), "cluster-secret").unwrap();
+
+        // Same host (multi-port) or saved peer endpoint -> allowed.
+        let mut same_host = seed.clone();
+        same_host.port = Some(3307);
+        assert!(validate_galera_member_secret_pin(&state, &same_host, &saved).is_ok());
+
+        let mut saved_peer_adhoc = seed.clone();
+        saved_peer_adhoc.host = Some("10.0.0.2".into());
+        assert!(validate_galera_member_secret_pin(&state, &saved_peer_adhoc, &saved).is_ok());
+
+        // Arbitrary unsaved external host -> refused before dialling.
+        let mut evil = seed.clone();
+        evil.host = Some("evil.attacker.example".into());
+        assert!(validate_galera_member_secret_pin(&state, &evil, &saved).is_err());
+        let kill_err = cluster_kill(&state, &evil, 1, "query".into()).await.unwrap_err();
+        assert_eq!(kill_err.code, crate::apperror::ErrorCode::GuardRefused);
+
+        // TLS downgrade on same host -> refused.
+        let mut downgraded = seed.clone();
+        downgraded.ssl_mode = crate::db::types::SslMode::Disable;
+        assert!(validate_galera_member_secret_pin(&state, &downgraded, &saved).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -2117,7 +2242,9 @@ mod cluster_kill_live_tests {
         let victim_cfg = node_config("galera2", 3342);
         crate::secretstore::set(&dir, &victim_cfg.keychain_key(), "root").unwrap();
         let history = crate::history::open_in_memory().await.unwrap();
-        let state = AppState::new(history, dir.clone(), std::collections::HashMap::new());
+        let mut saved_cfgs = std::collections::HashMap::new();
+        saved_cfgs.insert(victim_cfg.id, victim_cfg.clone());
+        let state = AppState::new(history, dir.clone(), saved_cfgs);
 
         // The victim thread: SLEEP(300) on its own connection on galera2.
         let victim = crate::db::mysql::open_pool(

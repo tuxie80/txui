@@ -596,8 +596,9 @@ pub struct ColumnInfo {
     pub nullable:  bool,
 }
 
-/// Live session — one per open connection tab.
+/// Live session — one per open connection tab, always held behind an `Arc`.
 /// Defined here to avoid circular imports between connection.rs and engine modules.
+#[allow(clippy::large_enum_variant)]
 pub enum LiveSession {
     Mysql(sqlx::MySqlPool),
     Postgres(sqlx::PgPool),

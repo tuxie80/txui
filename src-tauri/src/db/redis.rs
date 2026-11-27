@@ -377,6 +377,8 @@ fn db_index(label: &str) -> Option<u32> {
     label.trim_start_matches("db").split_whitespace().next()?.parse().ok()
 }
 
+// Instantiated once per namespace scan on the stack, never stored in bulk.
+#[allow(clippy::large_enum_variant)]
 enum PrefixScanConnection {
     Single(redis::aio::MultiplexedConnection),
     Cluster(RedisConnection),

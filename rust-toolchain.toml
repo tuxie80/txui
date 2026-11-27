@@ -8,5 +8,5 @@
 # Pinned rather than "stable" because the SQLite that ships inside the binary
 # should not change because a build machine happened to update.
 [toolchain]
-channel = "1.97.1"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]

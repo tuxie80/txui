@@ -616,21 +616,31 @@ impl ReplayCache {
         let index = Arc::new(build_index(&names));
         let mut columns: Vec<Vec<f64>> = (0..ncols).map(|_| Vec::with_capacity(total)).collect();
         let mut done = 0usize;
-        let mut last_id = 0i64;
+        let mut last_id: Option<i64> = None;
         // Smaller batches bound peak memory (blobs held in flight) without
         // hurting throughput — rayon still saturates the cores within a batch.
         const BATCH: i64 = 2000;
 
         loop {
-            let rows = sqlx::query("SELECT id, data FROM replay_data WHERE id > ? ORDER BY id LIMIT ?")
-                .bind(last_id)
-                .bind(BATCH)
-                .fetch_all(&self.pool)
-                .await?;
+            let rows = match last_id {
+                None => {
+                    sqlx::query("SELECT id, data FROM replay_data ORDER BY id LIMIT ?")
+                        .bind(BATCH)
+                        .fetch_all(&self.pool)
+                        .await?
+                }
+                Some(cursor) => {
+                    sqlx::query("SELECT id, data FROM replay_data WHERE id > ? ORDER BY id LIMIT ?")
+                        .bind(cursor)
+                        .bind(BATCH)
+                        .fetch_all(&self.pool)
+                        .await?
+                }
+            };
             if rows.is_empty() {
                 break;
             }
-            last_id = rows.last().unwrap().try_get::<i64, _>("id")?;
+            last_id = Some(rows.last().unwrap().try_get::<i64, _>("id")?);
             let blobs: Vec<Vec<u8>> = rows
                 .iter()
                 .map(|r| r.try_get::<Vec<u8>, _>("data").unwrap_or_default())
@@ -721,9 +731,10 @@ impl ReplayCache {
         metrics: &[String],
         max_points: usize,
     ) -> SeriesSlice {
-        let lo = self.epochs.partition_point(|&e| e < from_epoch);
-        let hi = self.epochs.partition_point(|&e| e <= to_epoch);
-        let (lo, hi) = (lo.min(self.epochs.len()), hi.min(self.epochs.len()));
+        let axis_len = self.epochs.len().min(self.timestamps.len());
+        let lo = self.epochs.partition_point(|&e| e < from_epoch).min(axis_len);
+        let hi = self.epochs.partition_point(|&e| e <= to_epoch).min(axis_len);
+        let lo = lo.min(hi);
         let raw_points = hi.saturating_sub(lo);
         let max_points = max_points.max(1);
 
@@ -740,7 +751,9 @@ impl ReplayCache {
                 let mut sum = 0.0;
                 let mut n = 0u32;
                 if let Some(col) = col {
-                    for v in &col[b..end] {
+                    let col_end = end.min(col.len());
+                    let col_b = b.min(col_end);
+                    for v in &col[col_b..col_end] {
                         if v.is_finite() {
                             sum += *v;
                             n += 1;
@@ -876,5 +889,90 @@ mod tests {
         assert!(s.timestamps.len() <= 500);
         assert_eq!(s.series["dml.Queries"].len(), s.timestamps.len());
         assert!(s.raw_points > 500);
+    }
+
+    #[tokio::test]
+    async fn non_positive_ids_and_truncated_columns_do_not_drop_rows_or_panic() {
+        let dir = std::env::temp_dir().join(format!("txui-replay-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("daemon.db");
+
+        let opts = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let rw = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE metadata (
+                schema_version INTEGER,
+                host TEXT,
+                port INTEGER,
+                host_distro TEXT,
+                connection_source TEXT,
+                dolphie_version TEXT,
+                compression_dict BLOB
+            )",
+        )
+        .execute(&rw)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE variable_changes (timestamp TEXT, variable TEXT, old_value TEXT, new_value TEXT)")
+            .execute(&rw)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE replay_data (id INTEGER PRIMARY KEY, timestamp TEXT, data BLOB)")
+            .execute(&rw)
+            .await
+            .unwrap();
+
+        // A valid empty-dict or small raw dictionary works with zstd::bulk::Compressor.
+        let dict = b"metric_managerQueriesThreads_running".to_vec();
+        sqlx::query("INSERT INTO metadata VALUES (1, '127.0.0.1', 3306, 'linux', 'mysql', '1.0', ?)")
+            .bind(&dict)
+            .execute(&rw)
+            .await
+            .unwrap();
+
+        let mut comp = zstd::bulk::Compressor::with_dictionary(1, &dict).unwrap();
+        for (id, ts, val) in [
+            (-2i64, "2026-01-01 00:00:00", 10.0f64),
+            (0i64,  "2026-01-01 00:00:01", 20.0f64),
+            (1i64,  "2026-01-01 00:00:02", 30.0f64),
+        ] {
+            let payload = serde_json::json!({
+                "metric_manager": { "dml": { "Queries": val } }
+            });
+            let compressed = comp.compress(&serde_json::to_vec(&payload).unwrap()).unwrap();
+            sqlx::query("INSERT INTO replay_data (id, timestamp, data) VALUES (?, ?, ?)")
+                .bind(id)
+                .bind(ts)
+                .bind(compressed)
+                .execute(&rw)
+                .await
+                .unwrap();
+        }
+        rw.close().await;
+
+        let cache = open_light(&db_path).await.unwrap();
+        assert_eq!(cache.timestamps.len(), 3);
+        let built = cache.ensure_series(|_, _| {}).await.unwrap();
+        assert_eq!(
+            built.series["dml.Queries"],
+            vec![10.0, 20.0, 30.0],
+            "id <= 0 rows must not be skipped by ensure_series",
+        );
+
+        // Simulate a truncated series shorter than `timestamps` — `slice` must clamp, not panic.
+        let mut short_map = HashMap::new();
+        short_map.insert("dml.Queries".to_string(), vec![10.0]);
+        let truncated = BuiltSeries { series: short_map };
+        let (lo, hi) = cache.epoch_bounds();
+        let sliced = cache.slice(&truncated, lo, hi, &["dml.Queries".to_string()], 10);
+        assert_eq!(sliced.timestamps.len(), 3);
+        assert_eq!(sliced.series["dml.Queries"][0], 10.0);
+        assert!(sliced.series["dml.Queries"][1].is_nan());
+        assert!(sliced.series["dml.Queries"][2].is_nan());
+
+        cache.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
